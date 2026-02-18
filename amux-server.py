@@ -5449,7 +5449,7 @@ PWA_MANIFEST = json.dumps({
 
 # Robust service worker: cache-first with localStorage fallback for multi-day offline
 SERVICE_WORKER = r"""
-const CACHE = 'amux-v0.6.0';
+const CACHE = 'amux-v0.6.1';
 const SHELL_URLS = ['/', '/manifest.json', '/icon-192.png', '/icon-512.png'];
 
 // Install: pre-cache entire app shell
