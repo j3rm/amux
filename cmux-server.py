@@ -321,20 +321,34 @@ def get_daily_token_stats() -> dict:
             except Exception:
                 continue
             try:
+                prev_usage_sig = None
                 with jf.open() as f:
                     for line in f:
                         try:
                             entry = json.loads(line)
                             ts = entry.get("timestamp", "")
                             if not ts or not ts.startswith(today):
+                                msg = entry.get("message", {})
+                                if not msg.get("usage"):
+                                    prev_usage_sig = None
                                 continue
                             msg = entry.get("message", {})
                             usage = msg.get("usage", {})
                             if usage:
+                                # Deduplicate: Claude Code logs thinking + tool_use
+                                # as separate entries with identical usage
+                                sig = (usage.get("input_tokens", 0),
+                                       usage.get("cache_read_input_tokens", 0),
+                                       usage.get("output_tokens", 0))
+                                if sig == prev_usage_sig:
+                                    continue
+                                prev_usage_sig = sig
                                 proj_in += usage.get("input_tokens", 0)
                                 proj_in += usage.get("cache_creation_input_tokens", 0)
                                 proj_in += usage.get("cache_read_input_tokens", 0)
                                 proj_out += usage.get("output_tokens", 0)
+                            else:
+                                prev_usage_sig = None
                         except (json.JSONDecodeError, AttributeError):
                             continue
             except Exception:
