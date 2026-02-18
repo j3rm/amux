@@ -38,6 +38,66 @@ _sse_cache = {
 }
 _SSE_CACHE_TTL = 2  # seconds
 
+# Per-session token cache — refreshed every 30s, keyed by resolved dir
+_token_cache = {"data": {}, "time": 0}
+_TOKEN_CACHE_TTL = 30
+
+def _refresh_token_cache():
+    """Rebuild per-directory token counts from Claude JSONL files."""
+    now = time.time()
+    if now - _token_cache["time"] < _TOKEN_CACHE_TTL:
+        return
+    from datetime import datetime
+    result = {}
+    projects_dir = Path.home() / ".claude" / "projects"
+    if not projects_dir.is_dir():
+        _token_cache["data"] = result
+        _token_cache["time"] = now
+        return
+    for proj_dir in projects_dir.iterdir():
+        if not proj_dir.is_dir():
+            continue
+        # Find most recent JSONL
+        jsonl_files = sorted(proj_dir.glob("*.jsonl"), key=lambda f: f.stat().st_mtime, reverse=True)
+        if not jsonl_files:
+            continue
+        total = 0
+        # Read tail of top 5 most recent JSONL files to cover multiple conversations
+        for jf in jsonl_files[:5]:
+            try:
+                size = jf.stat().st_size
+                with jf.open("rb") as fh:
+                    offset = max(0, size - 200_000)
+                    if offset > 0:
+                        fh.seek(offset)
+                        fh.readline()  # skip partial line
+                    prev_sig = None
+                    for raw_line in fh:
+                        try:
+                            entry = json.loads(raw_line)
+                            usage = entry.get("message", {}).get("usage", {})
+                            if usage:
+                                sig = (usage.get("input_tokens", 0),
+                                       usage.get("cache_read_input_tokens", 0),
+                                       usage.get("output_tokens", 0))
+                                if sig == prev_sig:
+                                    continue
+                                prev_sig = sig
+                                total += usage.get("input_tokens", 0)
+                                total += usage.get("cache_read_input_tokens", 0)
+                                total += usage.get("cache_creation_input_tokens", 0)
+                                total += usage.get("output_tokens", 0)
+                            else:
+                                prev_sig = None
+                        except (json.JSONDecodeError, AttributeError):
+                            continue
+            except Exception:
+                continue
+        if total > 0:
+            result[proj_dir.name] = total
+    _token_cache["data"] = result
+    _token_cache["time"] = now
+
 # ═══════════════════════════════════════════
 # SESSION FILE HELPERS
 # ═══════════════════════════════════════════
@@ -604,6 +664,10 @@ def list_sessions() -> list:
         active_model = detect_active_model(raw_dir)
         # Parse task time from spinner line
         task_time = _parse_task_time(raw) if raw else ""
+        # Token count from background cache
+        _refresh_token_cache()
+        proj_key = resolved_dir.replace("/", "-") if resolved_dir else ""
+        tokens = _token_cache["data"].get(proj_key, 0)
         sessions.append({
             "name": name,
             "dir": resolved_dir,
@@ -620,6 +684,7 @@ def list_sessions() -> list:
             "session_created": session_created,
             "task_time": task_time,
             "task_name": pane_title,
+            "tokens": tokens,
         })
     # Pinned first, then working/waiting, then by last activity (most recent first)
     status_order = {"active": 0, "waiting": 0, "idle": 1, "": 1}
@@ -1237,6 +1302,7 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
   .status-badge.waiting { background: rgba(210,153,34,0.2); color: var(--yellow); }
   .status-badge.idle { background: rgba(139,148,158,0.15); color: var(--dim); }
   .last-active { font-size: 0.7rem; color: var(--dim); flex-shrink: 0; }
+  .token-count { font-size: 0.65rem; color: var(--dim); flex-shrink: 0; font-family: "SF Mono","Fira Code",monospace; opacity: 0.7; }
 
   /* Tags */
   .tag {
@@ -2308,6 +2374,7 @@ function render() {
         ${s.status === 'active' ? '<span class="status-badge active">working</span>' : ''}
         ${s.status === 'waiting' ? '<span class="status-badge waiting">needs input</span>' : ''}
         ${s.status === 'idle' ? '<span class="status-badge idle">idle</span>' : ''}
+        ${s.tokens ? `<span class="token-count">${fmtTokens(s.tokens)}</span>` : ''}
         ${s.last_activity ? `<span class="last-active">${timeAgo(s.last_activity)}</span>` : ''}
         ${!online ? '<span class="cached-badge">cached</span>' : ''}
         <button class="card-menu-btn" onclick="event.stopPropagation();toggleMenu('${s.name}')" title="Options">&#x22EF;</button>
