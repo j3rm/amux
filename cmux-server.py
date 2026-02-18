@@ -878,7 +878,7 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1, user-scalable=no">
+<meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
 <meta name="mobile-web-app-capable" content="yes">
@@ -1249,23 +1249,6 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
   .header-add-menu.open { display: block; }
   .header-add-menu .card-menu-item { padding: 12px 16px; }
 
-  /* Zoom controls */
-  .zoom-controls {
-    display: flex; align-items: center; gap: 2px; flex-shrink: 0;
-    background: rgba(255,255,255,0.04); border-radius: 6px; padding: 2px;
-  }
-  .zoom-btn {
-    width: 28px; height: 28px; border: none; background: none; color: var(--dim);
-    font-size: 0.85rem; font-weight: 700; cursor: pointer; border-radius: 4px;
-    display: flex; align-items: center; justify-content: center;
-    -webkit-tap-highlight-color: transparent; transition: all 0.12s; line-height: 1;
-  }
-  .zoom-btn:active { background: rgba(88,166,255,0.1); color: var(--accent); }
-  .zoom-level {
-    font-size: 0.6rem; color: var(--dim); min-width: 28px; text-align: center;
-    cursor: pointer; -webkit-tap-highlight-color: transparent; user-select: none;
-  }
-  .zoom-level:active { color: var(--accent); }
 
   /* Peek search highlight */
   .peek-highlight { background: rgba(210,153,34,0.4); color: #fff; border-radius: 2px; }
@@ -1753,11 +1736,6 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
       </button>
       <div class="active-dropdown" id="active-dropdown"></div>
     </div>
-    <div class="zoom-controls">
-      <button class="zoom-btn" onclick="zoomOut()" title="Zoom out">&#x2212;</button>
-      <span class="zoom-level" id="zoom-level" onclick="resetZoom()" title="Reset zoom">100%</span>
-      <button class="zoom-btn" onclick="zoomIn()" title="Zoom in">+</button>
-    </div>
     <div class="header-add-wrap">
       <button class="header-add-btn" id="add-btn" onclick="event.stopPropagation();toggleAddMenu()">+</button>
       <div class="header-add-menu" id="add-menu">
@@ -2019,8 +1997,6 @@ const ZOOM_STEPS = [50, 60, 70, 75, 80, 85, 90, 95, 100, 110, 120, 130, 150, 175
 let _zoomLevel = parseInt(localStorage.getItem('cmux_zoom') || '100', 10);
 function _applyZoom() {
   document.documentElement.style.zoom = (_zoomLevel / 100);
-  var el = document.getElementById('zoom-level');
-  if (el) el.textContent = _zoomLevel + '%';
   localStorage.setItem('cmux_zoom', _zoomLevel);
 }
 function zoomIn() {
