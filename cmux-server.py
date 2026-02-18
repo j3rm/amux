@@ -1389,6 +1389,12 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
   .tab-bar button:active { opacity: 0.7; }
 
   /* Board */
+  .board-search-wrap {
+    position: relative; margin-bottom: 4px;
+  }
+  .board-search-wrap .search-input { width: 100%; box-sizing: border-box; }
+  .board-search-wrap .search-clear { display: none; }
+  .board-search-wrap:has(.search-input:not(:placeholder-shown)) .search-clear { display: flex; }
   .board-columns {
     display: flex; gap: 12px; overflow-x: auto;
     -webkit-overflow-scrolling: touch; padding-bottom: 16px; align-items: flex-start;
@@ -1617,6 +1623,10 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
 <div id="cards" class="cards"></div>
 </div>
 <div id="board-view" style="display:none;">
+  <div class="board-search-wrap">
+    <input id="board-search" class="search-input" type="text" placeholder="Search board..." oninput="boardSearchQuery=this.value.toLowerCase();renderBoard()">
+    <button class="search-clear" onclick="document.getElementById('board-search').value='';boardSearchQuery='';renderBoard()">&#x2715;</button>
+  </div>
   <div class="board-filters" id="board-filters"></div>
   <div class="board-columns" id="board-columns"></div>
 </div>
@@ -3545,6 +3555,7 @@ let boardEditStatus = 'todo';
 let lastBoardJSON = '';
 let boardFilterTag = null;
 let boardFilterSession = null;
+let boardSearchQuery = '';
 let _boardDragId = null;
 
 function switchView(view) {
@@ -3653,7 +3664,7 @@ function renderBoardFilters() {
     });
   }
   if (boardFilterTag || boardFilterSession) {
-    html += '<button class="board-filter-chip board-filter-clear" onclick="boardFilterTag=null;boardFilterSession=null;renderBoard()">&#x2715; Clear</button>';
+    html += '<button class="board-filter-chip board-filter-clear" onclick="boardFilterTag=null;boardFilterSession=null;document.getElementById(\'board-search\').value=\'\';boardSearchQuery=\'\';renderBoard()">&#x2715; Clear</button>';
   }
   el.innerHTML = html;
 }
@@ -3715,6 +3726,16 @@ function renderBoard() {
   let visible = boardItems;
   if (boardFilterTag) visible = visible.filter(i => (i.tags || []).includes(boardFilterTag));
   if (boardFilterSession) visible = visible.filter(i => i.session === boardFilterSession);
+  if (boardSearchQuery) {
+    const q = boardSearchQuery;
+    visible = visible.filter(i =>
+      (i.title || '').toLowerCase().includes(q) ||
+      (i.desc || '').toLowerCase().includes(q) ||
+      (i.key || '').toLowerCase().includes(q) ||
+      (i.session || '').toLowerCase().includes(q) ||
+      (i.tags || []).some(t => t.toLowerCase().includes(q))
+    );
+  }
 
   const cols = { todo: [], doing: [], done: [] };
   visible.forEach(item => {
@@ -3866,7 +3887,7 @@ function openBoardDetail(id) {
   const meta = document.getElementById('bd-meta');
   const parts = [];
   const tags = item.tags || [];
-  if (tags.length) parts.push('Tags: ' + tags.map(t => '<span class="board-card-tag">' + esc(t) + '</span>').join(' '));
+  if (tags.length) parts.push('Tags: ' + tags.map(t => '<span class="board-card-tag" onclick="closeBoardDetail();toggleBoardTag(' + JSON.stringify(t).replace(/"/g,'&quot;') + ')">' + esc(t) + '</span>').join(' '));
   if (item.created) parts.push('Created ' + timeAgo(item.created));
   if (item.updated && item.updated !== item.created) parts.push('Updated ' + timeAgo(item.updated));
   meta.innerHTML = parts.map(p => '<div class="board-detail-meta-row">' + p + '</div>').join('');
