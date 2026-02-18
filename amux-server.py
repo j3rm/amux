@@ -28,7 +28,11 @@ for _old_home in [Path.home() / ".cmux", Path.home() / ".cc"]:
 CC_HOME = Path(os.environ.get("CC_HOME", _amux_home))
 CC_SESSIONS = CC_HOME / "sessions"
 CC_LOGS = CC_HOME / "logs"
+CC_MEMORY = CC_HOME / "memory"
+CC_BOARD_DIR = CC_HOME / "board"
 CC_LOGS.mkdir(parents=True, exist_ok=True)
+CC_MEMORY.mkdir(parents=True, exist_ok=True)
+CC_BOARD_DIR.mkdir(parents=True, exist_ok=True)
 CLAUDE_HOME = Path.home() / ".claude"
 MAX_LOG_BYTES = 10 * 1024 * 1024  # 10MB per session
 
@@ -333,7 +337,12 @@ def save_token_baseline(stats: dict):
 # BOARD PERSISTENCE
 # ═══════════════════════════════════════════
 
-_BOARD_FILE = CC_HOME / "board.json"
+_BOARD_FILE = CC_BOARD_DIR / "items.json"
+# Migrate legacy board.json → board/items.json
+_legacy_board = CC_HOME / "board.json"
+if _legacy_board.exists() and not _BOARD_FILE.exists():
+    import shutil as _shutil
+    _shutil.move(str(_legacy_board), str(_BOARD_FILE))
 
 
 def _load_board() -> list:
@@ -726,6 +735,35 @@ def _find_latest_session_id(work_dir: str) -> str:
     return jsonl_files[0].stem  # filename without .jsonl = session UUID
 
 
+def _ensure_memory(name: str, work_dir: str):
+    """Ensure ~/.amux/memory/<name>.md exists and is symlinked into Claude's project memory path."""
+    mem_file = CC_MEMORY / f"{name}.md"
+    if not mem_file.exists():
+        mem_file.write_text("")
+    # Compute Claude's project memory path for this work_dir
+    resolved = str(Path(work_dir).expanduser().resolve())
+    project_name = resolved.replace("/", "-")
+    claude_mem_dir = CLAUDE_HOME / "projects" / project_name / "memory"
+    claude_mem_file = claude_mem_dir / "MEMORY.md"
+    try:
+        claude_mem_dir.mkdir(parents=True, exist_ok=True)
+        # If it's already a symlink pointing to our file, nothing to do
+        if claude_mem_file.is_symlink() and claude_mem_file.resolve() == mem_file.resolve():
+            return
+        # If a real file exists, absorb its content into our memory file before replacing
+        if claude_mem_file.exists() and not claude_mem_file.is_symlink():
+            existing = claude_mem_file.read_text().strip()
+            current = mem_file.read_text().strip()
+            if existing and existing not in current:
+                mem_file.write_text((current + "\n\n" + existing).strip() + "\n")
+            claude_mem_file.unlink()
+        elif claude_mem_file.is_symlink():
+            claude_mem_file.unlink()
+        claude_mem_file.symlink_to(mem_file)
+    except Exception:
+        pass
+
+
 def start_session(name: str, extra_flags: str = "") -> tuple[bool, str]:
     """Start a session headless (no attach). Returns (success, message)."""
     f = CC_SESSIONS / f"{name}.env"
@@ -736,6 +774,7 @@ def start_session(name: str, extra_flags: str = "") -> tuple[bool, str]:
     cfg = parse_env_file(f)
     work_dir = str(Path(cfg.get("CC_DIR", str(Path.home()))).expanduser().resolve())
     flags = cfg.get("CC_FLAGS", "")
+    _ensure_memory(name, work_dir)
 
     # Load defaults
     defaults_file = CC_HOME / "defaults.env"
@@ -5816,6 +5855,8 @@ class CCHandler(BaseHTTPRequestHandler):
                 cfg["CC_CREATOR"] = creator
             cfg["CC_FLAGS"] = ""
             _write_env(env_file, cfg)
+            if dir_path:
+                _ensure_memory(name, dir_path)
             return self._json({"ok": True, "message": f"created {name}"})
 
         # Session-specific routes: /api/sessions/<name>/<action>
