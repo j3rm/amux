@@ -965,13 +965,14 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
   /* Session cards — list mode (default) */
   .cards { display: flex; flex-direction: column; gap: 10px; }
 
-  /* Grid mode (desktop only) */
-  .tile-controls { display: none; }
-  @media (min-width: 900px) { .tile-controls { display: flex; gap: 4px; align-items: center; } }
+  /* Layout view controls */
+  .tile-controls { display: flex; gap: 4px; align-items: center; }
   .tile-btn { width: 28px; height: 28px; border-radius: 6px; border: 1px solid var(--border); background: transparent; color: var(--dim); cursor: pointer; font-size: 0.85rem; display: flex; align-items: center; justify-content: center; }
   .tile-btn:hover { border-color: var(--accent); color: var(--text); }
   .tile-btn.active { background: var(--accent); color: #000; border-color: var(--accent); }
+  .tile-grid-only { display: none; }
   @media (min-width: 900px) {
+    .tile-grid-only { display: flex; align-items: center; justify-content: center; }
     .cards.grid-mode { display: grid; grid-template-columns: repeat(auto-fill, minmax(300px, 1fr)); gap: 12px; align-items: start; }
   }
   /* Sortable drag feedback */
@@ -1121,6 +1122,7 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
     -webkit-overflow-scrolling: touch;
     -webkit-user-select: text; user-select: text;
     -webkit-touch-callout: default; cursor: text;
+    touch-action: pan-y;
   }
   .peek-copy-btn {
     position: absolute; top: 6px; right: 6px; z-index: 10;
@@ -1919,7 +1921,8 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
   </div>
   <div class="tile-controls">
     <button class="tile-btn" id="tile-list-btn" onclick="setLayoutMode('list')" title="List view">&#x2630;</button>
-    <button class="tile-btn" id="tile-grid-btn" onclick="setLayoutMode('grid')" title="Grid view">&#x268F;</button>
+    <button class="tile-btn" id="tile-group-btn" onclick="setLayoutMode('group')" title="Group by tag" style="font-size:0.75rem;font-weight:700;">#</button>
+    <button class="tile-btn tile-grid-only" id="tile-grid-btn" onclick="setLayoutMode('grid')" title="Grid view">&#x268F;</button>
   </div>
 </div>
 <div id="tag-filters" class="tag-filters"></div>
@@ -2750,7 +2753,7 @@ function render() {
     </div>`;
   }
 
-  // Grid mode: flat list sorted by saved card order, no grouping
+  // Grid mode: flat list sorted by saved card order, no grouping (desktop only)
   if (layoutMode === 'grid' && window.innerWidth >= 900) {
     const orderMap = {};
     cardOrder.forEach((name, i) => { orderMap[name] = i; });
@@ -2766,9 +2769,10 @@ function render() {
     return;
   }
 
-  // Group by tag if sessions have tags and no filter is active
-  const anyTagged = filtered.some(s => s.tags && s.tags.length);
-  if (anyTagged && !activeTag && !q) {
+  // Group mode: group by tag when not filtered
+  if (layoutMode === 'group' && !activeTag && !q) {
+    const anyTagged = filtered.some(s => s.tags && s.tags.length);
+    if (anyTagged) {
     const tagGroups = {};
     const untagged = [];
     filtered.forEach(s => {
@@ -2823,8 +2827,12 @@ function render() {
         ${!col ? `<div class="tag-group-body">${untagged.map(_renderSessionCard).join('')}</div>` : ''}
       </div>`;
     }
-    el.innerHTML = draftCards + groupHtml;
+      el.innerHTML = draftCards + groupHtml;
+    } else {
+      el.innerHTML = draftCards + filtered.map(_renderSessionCard).join('');
+    }
   } else {
+    // list mode (flat) or group mode with active filter: flat list
     el.innerHTML = draftCards + filtered.map(_renderSessionCard).join('');
   }
 
@@ -3392,11 +3400,14 @@ function closePeek() {
   if (peekTimer) { clearInterval(peekTimer); peekTimer = null; }
 }
 
-// Swipe right to close peek
+// Swipe right to close peek (but never when touching the terminal body — preserve text selection)
 (function() {
   const el = document.getElementById('peek-overlay');
+  const body = document.getElementById('peek-body');
   let sx = 0, sy = 0, tracking = false;
   el.addEventListener('touchstart', e => {
+    // Let the terminal body handle its own touches (scrolling + text selection)
+    if (body && body.contains(e.target)) { tracking = false; return; }
     const t = e.touches[0];
     sx = t.clientX; sy = t.clientY; tracking = true;
     el.style.transition = 'none';
@@ -4201,7 +4212,7 @@ document.addEventListener('keydown', (e) => {
 });
 
 // ═══════ LAYOUT MODES (list / grid) ═══════
-let layoutMode = localStorage.getItem('amux_layout') || 'list';
+let layoutMode = localStorage.getItem('amux_layout') || 'group';
 let cardOrder = JSON.parse(localStorage.getItem('amux_card_order') || '[]');
 let _sortable = null;
 let _tileJustDragged = false; // keep for toggle() guard
@@ -4210,6 +4221,7 @@ function setLayoutMode(mode) {
   layoutMode = mode;
   localStorage.setItem('amux_layout', mode);
   document.getElementById('tile-list-btn').classList.toggle('active', mode === 'list');
+  document.getElementById('tile-group-btn').classList.toggle('active', mode === 'group');
   document.getElementById('tile-grid-btn').classList.toggle('active', mode === 'grid');
   const cards = document.querySelector('.cards');
   if (cards) cards.classList.toggle('grid-mode', mode === 'grid');
@@ -4254,6 +4266,8 @@ document.addEventListener('DOMContentLoaded', function() {
     if (cards) cards.classList.add('grid-mode');
     document.getElementById('tile-grid-btn').classList.add('active');
     setTimeout(initSortable, 200);
+  } else if (layoutMode === 'group') {
+    document.getElementById('tile-group-btn').classList.add('active');
   } else {
     layoutMode = 'list';
     document.getElementById('tile-list-btn').classList.add('active');
