@@ -675,6 +675,7 @@ def list_sessions() -> list:
             "pinned": cfg.get("CC_PINNED", "") == "1",
             "tags": [t.strip() for t in cfg.get("CC_TAGS", "").split(",") if t.strip()],
             "flags": cfg.get("CC_FLAGS", ""),
+            "creator": cfg.get("CC_CREATOR", ""),
             "running": running,
             "status": status,
             "preview": preview,
@@ -2052,6 +2053,20 @@ function saveQueue() {
   if (typeof _idb !== 'undefined') _idb.set('offline_queue', offlineQueue);
 }
 
+// ═══════ DEVICE NAME ═══════
+function _getDeviceName() {
+  const custom = localStorage.getItem('cmux_device_name');
+  if (custom) return custom;
+  const ua = navigator.userAgent;
+  if (/iPhone/.test(ua)) return 'iPhone';
+  if (/iPad/.test(ua)) return 'iPad';
+  if (/Android/.test(ua)) return 'Android';
+  if (/Windows/.test(ua)) return 'Windows';
+  if (/Mac/.test(ua)) return 'Mac';
+  if (/Linux/.test(ua)) return 'Linux';
+  return 'Unknown';
+}
+
 // ═══════ DRAFTS — offline-created sessions ═══════
 let drafts = JSON.parse(localStorage.getItem('cmux_drafts') || '[]');
 // Draft shape: { name, dir, prompt, created_at, syncing }
@@ -2062,7 +2077,7 @@ function saveDrafts() {
 }
 
 function addDraft(name, dir, prompt) {
-  drafts.push({ name, dir: dir || '', prompt: prompt || '', created_at: Date.now(), syncing: false });
+  drafts.push({ name, dir: dir || '', prompt: prompt || '', creator: _getDeviceName(), created_at: Date.now(), syncing: false });
   saveDrafts();
 }
 
@@ -2423,6 +2438,7 @@ function render() {
         <button class="card-menu-btn" onclick="event.stopPropagation();removeDraft('${esc(d.name)}');render();" title="Remove draft">&#x2716;</button>
       </div>
       ${d.dir ? '<div class="card-dir">' + esc(d.dir) + '</div>' : ''}
+      ${d.creator ? '<div class="card-dir" style="font-size:0.72rem;">' + esc(d.creator) + '</div>' : ''}
       ${d.prompt ? '<div class="draft-prompt">' + esc(d.prompt) + '</div>' : ''}
     </div>`;
   }).join('');
@@ -2486,6 +2502,7 @@ function render() {
         </div>
       </div>
       ${s.dir ? `<div class="card-dir">${esc(s.dir)}</div>` : ''}
+      ${s.creator ? `<div class="card-dir" style="font-size:0.72rem;">${esc(s.creator)}</div>` : ''}
       ${isExp && s.desc ? `<div class="card-desc">${esc(s.desc)}</div>` : ''}
       ${!isExp && s.task_name ? `<div class="card-preview">${esc(s.task_name)}</div>` : ''}
       ${isExp && s.preview ? `<div class="card-preview">${esc(s.preview)}</div>` : ''}
@@ -3604,7 +3621,7 @@ async function submitCreate() {
   // Online: create immediately, optionally queue prompt
   const r = await apiCall(API + '/api/sessions', {
     method: 'POST', headers: {'Content-Type':'application/json'},
-    body: JSON.stringify({ name, dir })
+    body: JSON.stringify({ name, dir, creator: _getDeviceName() })
   });
   if (r && r.ok && prompt) {
     // Start session then send prompt
@@ -3944,6 +3961,7 @@ function _renderBoardCard(item) {
   if (boardViewMode !== 'session' && item.session) h += '<span class="board-card-session" data-session="' + esc(item.session) + '">' + esc(item.session) + '</span>';
   tags.forEach(function(t) { h += '<span class="board-card-tag" data-tag="' + esc(t) + '">' + esc(t) + '</span>'; });
   h += '<span class="board-card-time">' + timeAgo(item.updated || item.created) + '</span>';
+  if (item.creator) h += '<span class="board-card-time">' + esc(item.creator) + '</span>';
   h += '</div></div>';
   return h;
 }
@@ -4182,6 +4200,7 @@ function openBoardDetail(id) {
   const parts = [];
   const tags = item.tags || [];
   if (tags.length) parts.push('Tags: ' + tags.map(t => '<span class="board-card-tag" data-tag="' + esc(t) + '">' + esc(t) + '</span>').join(' '));
+  if (item.creator) parts.push('From ' + esc(item.creator));
   if (item.created) parts.push('Created ' + timeAgo(item.created));
   if (item.updated && item.updated !== item.created) parts.push('Updated ' + timeAgo(item.updated));
   meta.innerHTML = parts.map(p => '<div class="board-detail-meta-row">' + p + '</div>').join('');
@@ -4287,6 +4306,7 @@ async function boardDetailSave() {
     const parts = [];
     const tags = item.tags || [];
     if (tags.length) parts.push('Tags: ' + tags.map(t => '<span class="board-card-tag" data-tag="' + esc(t) + '">' + esc(t) + '</span>').join(' '));
+    if (item.creator) parts.push('From ' + esc(item.creator));
     if (item.created) parts.push('Created ' + timeAgo(item.created));
     if (item.updated && item.updated !== item.created) parts.push('Updated ' + timeAgo(item.updated));
     if (meta) meta.innerHTML = parts.map(p => '<div class="board-detail-meta-row">' + p + '</div>').join('');
@@ -4307,13 +4327,13 @@ function saveBoardCache() {
 async function addBoardItem(title, desc, status, session, tags) {
   const tempId = Math.random().toString(16).slice(2, 8);
   const now = Math.floor(Date.now() / 1000);
-  const tempItem = { id: tempId, title, desc, status, session: session || '', tags: tags || [], created: now, updated: now, _pending: true };
+  const tempItem = { id: tempId, title, desc, status, session: session || '', tags: tags || [], creator: _getDeviceName(), created: now, updated: now, _pending: true };
   boardItems.push(tempItem);
   saveBoardCache();
   renderBoard();
   const r = await apiCall(API + '/api/board', {
     method: 'POST', headers: {'Content-Type': 'application/json'},
-    body: JSON.stringify({ title, desc, status, session: session || '', tags: tags || [] })
+    body: JSON.stringify({ title, desc, status, session: session || '', tags: tags || [], creator: _getDeviceName() })
   });
   if (r) {
     const item = await r.json();
@@ -5076,6 +5096,7 @@ class CCHandler(BaseHTTPRequestHandler):
                     "status": body.get("status", "todo"),
                     "session": session,
                     "tags": body.get("tags", []),
+                    "creator": body.get("creator", ""),
                     "created": int(time.time()),
                     "updated": int(time.time()),
                 }
@@ -5173,6 +5194,9 @@ class CCHandler(BaseHTTPRequestHandler):
             desc = body.get("desc", "").strip()
             if desc:
                 cfg["CC_DESC"] = desc
+            creator = body.get("creator", "").strip()
+            if creator:
+                cfg["CC_CREATOR"] = creator
             cfg["CC_FLAGS"] = ""
             _write_env(env_file, cfg)
             return self._json({"ok": True, "message": f"created {name}"})
