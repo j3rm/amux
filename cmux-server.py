@@ -1450,7 +1450,9 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
   .board-card-tag {
     font-size: 0.62rem; background: rgba(139,148,158,0.1); color: var(--dim);
     border: 1px solid rgba(139,148,158,0.15); border-radius: 4px; padding: 1px 5px; white-space: nowrap;
+    cursor: pointer; -webkit-tap-highlight-color: transparent;
   }
+  .board-card-tag:active { background: rgba(88,166,255,0.15); color: var(--accent); border-color: rgba(88,166,255,0.3); }
   .board-card-time { font-size: 0.62rem; color: var(--dim); margin-left: auto; white-space: nowrap; }
   .board-add-btn {
     width: 100%; padding: 7px 0; font-size: 0.8rem; font-weight: 500;
@@ -1527,40 +1529,6 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
   .board-detail-meta-row { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
   .board-detail-footer { display: flex; justify-content: space-between; align-items: center; padding-top: 10px; flex-shrink: 0; border-top: 1px solid var(--border); }
 
-  /* Board guide modal */
-  .board-guide-box {
-    background: var(--card); border: 1px solid var(--border); border-radius: 12px;
-    width: 100%; max-width: 520px; max-height: 82vh; display: flex; flex-direction: column;
-    overflow: hidden;
-  }
-  .board-edit-overlay .board-guide-box {
-    opacity: 0; transform: scale(0.95) translateY(8px);
-    transition: opacity 0.25s, transform 0.25s cubic-bezier(.4,0,.2,1);
-  }
-  .board-edit-overlay.active .board-guide-box { opacity: 1; transform: none; }
-  .board-guide-header {
-    display: flex; justify-content: space-between; align-items: center;
-    padding: 14px 16px 10px; border-bottom: 1px solid var(--border); flex-shrink: 0;
-  }
-  .board-guide-header strong { font-size: 0.9rem; }
-  .board-guide-body {
-    padding: 14px 16px; overflow-y: auto; display: flex; flex-direction: column; gap: 14px;
-  }
-  .board-guide-body section h4 { font-size: 0.78rem; text-transform: uppercase; letter-spacing: 0.05em; color: var(--dim); margin: 0 0 6px; }
-  .board-guide-body section p { font-size: 0.82rem; color: var(--text); margin: 0 0 5px; line-height: 1.5; }
-  .board-guide-body section ul { margin: 4px 0 0; padding-left: 18px; display: flex; flex-direction: column; gap: 4px; }
-  .board-guide-body section ul li { font-size: 0.82rem; color: var(--text); line-height: 1.45; }
-  .guide-example { font-size: 0.8rem; margin-bottom: 3px; }
-  .guide-example.good { color: #3fb950; }
-  .guide-example.bad { color: var(--dim); }
-  .guide-pre {
-    background: var(--bg); border: 1px solid var(--border); border-radius: 6px;
-    padding: 10px 12px; font-size: 0.78rem; font-family: "SF Mono","Fira Code",monospace;
-    line-height: 1.55; margin: 0; white-space: pre; overflow-x: auto; color: var(--text);
-  }
-  .guide-table { border-collapse: collapse; width: 100%; font-size: 0.8rem; }
-  .guide-table td { padding: 3px 8px 3px 0; vertical-align: top; color: var(--text); }
-  .guide-table td:nth-child(odd) code { color: var(--accent); }
 
   /* Board inline edit */
   .board-edit-overlay {
@@ -1649,66 +1617,8 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
 <div id="cards" class="cards"></div>
 </div>
 <div id="board-view" style="display:none;">
-  <div style="display:flex;align-items:flex-start;gap:8px;">
-    <div class="board-filters" id="board-filters" style="flex:1;"></div>
-    <button class="btn" style="white-space:nowrap;font-size:0.72rem;padding:3px 9px;margin-top:6px;flex-shrink:0;" onclick="openBoardGuide()">? Guide</button>
-  </div>
+  <div class="board-filters" id="board-filters"></div>
   <div class="board-columns" id="board-columns"></div>
-</div>
-<!-- Board issue guide modal -->
-<div id="board-guide-overlay" class="board-edit-overlay" onclick="if(event.target===this)closeBoardGuide()">
-  <div class="board-guide-box">
-    <div class="board-guide-header">
-      <strong>Issue Guide</strong>
-      <button onclick="closeBoardGuide()" style="background:none;border:none;color:var(--dim);font-size:1.1rem;cursor:pointer;padding:0;line-height:1;">&#x2715;</button>
-    </div>
-    <div class="board-guide-body">
-      <section>
-        <h4>Title</h4>
-        <p>Imperative, one line. State what changed or what needs to happen.</p>
-        <div class="guide-example good">&#x2713; <code>Add rate limiting to API endpoints</code></div>
-        <div class="guide-example bad">&#x2717; <code>rate limit</code> &nbsp; &#x2717; <code>fixed stuff</code></div>
-      </section>
-      <section>
-        <h4>Status</h4>
-        <p><strong>To Do</strong> — planned &nbsp;·&nbsp; <strong>In Progress</strong> — active &nbsp;·&nbsp; <strong>Done</strong> — complete</p>
-      </section>
-      <section>
-        <h4>Description template</h4>
-        <pre class="guide-pre">## What
-One paragraph: what changed or needs to change.
-
-## Why
-Context, motivation, or link to the original request.
-
-## Acceptance criteria
-- [ ] Specific, verifiable outcome
-- [ ] Edge cases handled</pre>
-      </section>
-      <section>
-        <h4>Markdown quick ref</h4>
-        <table class="guide-table">
-          <tr><td><code>**bold**</code></td><td><strong>bold</strong></td><td><code>*italic*</code></td><td><em>italic</em></td></tr>
-          <tr><td><code>`code`</code></td><td><code>code</code></td><td><code>## Heading</code></td><td><strong style="font-size:0.95em">Heading</strong></td></tr>
-          <tr><td><code>- item</code></td><td>bullet list</td><td><code>1. item</code></td><td>numbered list</td></tr>
-          <tr><td colspan="4"><code>```python<br>code block<br>```</code></td></tr>
-        </table>
-      </section>
-      <section>
-        <h4>Issue keys</h4>
-        <p>Auto-generated from session name initials — <code>infra</code> → <code>INFRA-1</code>, <code>my-project</code> → <code>MP-2</code>. Use the key to cross-reference issues in descriptions or commit messages.</p>
-      </section>
-      <section>
-        <h4>Tips for AI sessions</h4>
-        <ul>
-          <li>File one issue per distinct concern — don't bundle unrelated work.</li>
-          <li>Link related issues by key in the description (<code>see INFRA-3</code>).</li>
-          <li>Use <strong>Done</strong> only when a human can independently verify the outcome.</li>
-          <li>If a task is blocked or needs a decision, note it in <em>Why</em> and leave it <strong>To Do</strong>.</li>
-        </ul>
-      </section>
-    </div>
-  </div>
 </div>
 <!-- Board card "add" small modal -->
 <div id="board-edit-overlay" class="board-edit-overlay" onclick="if(event.target===this)closeBoardEdit()">
@@ -2372,7 +2282,8 @@ function render() {
       </div>
       ${s.dir ? `<div class="card-dir">${esc(s.dir)}</div>` : ''}
       ${isExp && s.desc ? `<div class="card-desc">${esc(s.desc)}</div>` : ''}
-      ${s.preview ? `<div class="card-preview">${esc(s.preview)}</div>` : ''}
+      ${!isExp && s.task_name ? `<div class="card-preview">${esc(s.task_name)}</div>` : ''}
+      ${isExp && s.preview ? `<div class="card-preview">${esc(s.preview)}</div>` : ''}
       ${(isYolo || model || s.tags.length) ? `<div class="badges">
         ${isYolo ? '<span class="badge yolo">YOLO</span>' : ''}
         ${model ? `<span class="badge model">${esc(model)}</span>` : ''}
@@ -3565,10 +3476,6 @@ document.addEventListener('touchend', () => { peekCheckSelection(); });
 
 // Handle Ctrl+C as copy and Ctrl+V as paste in peek (Mac users may use Ctrl instead of Cmd)
 document.addEventListener('keydown', (e) => {
-  if (document.getElementById('board-guide-overlay').classList.contains('active')) {
-    if (e.key === 'Escape') { e.preventDefault(); closeBoardGuide(); }
-    return;
-  }
   if (document.getElementById('board-detail-overlay').classList.contains('active')) {
     if (e.key === 'Escape') { e.preventDefault(); closeBoardDetail(); return; }
     if ((e.metaKey || e.ctrlKey) && e.key === 's') { e.preventDefault(); boardDetailSave(); return; }
@@ -3733,6 +3640,7 @@ function toggleBoardSession(session) {
 function boardDragStart(e, id) {
   _boardDragId = id;
   e.dataTransfer.effectAllowed = 'move';
+  e.dataTransfer.setData('text/plain', id);
   setTimeout(() => {
     const el = document.querySelector('.board-card[data-id="' + id + '"]');
     if (el) el.classList.add('dragging');
@@ -3814,7 +3722,7 @@ function renderBoard() {
       if (firstLine) html += '<div class="board-card-desc">' + esc(firstLine) + ((item.desc || '').length > 80 ? '…' : '') + '</div>';
       html += '<div class="board-card-footer">';
       if (item.session) html += '<span class="board-card-session">' + esc(item.session) + '</span>';
-      tags.forEach(t => { html += '<span class="board-card-tag">' + esc(t) + '</span>'; });
+      tags.forEach(t => { html += '<span class="board-card-tag" onclick="event.stopPropagation();toggleBoardTag(' + JSON.stringify(t) + ')">' + esc(t) + '</span>'; });
       html += '<span class="board-card-time">' + timeAgo(item.updated || item.created) + '</span>';
       html += '</div></div>';
     });
@@ -3973,6 +3881,37 @@ function closeBoardDetail() {
   boardDetailId = null;
 }
 
+// Swipe right to close board detail
+(function() {
+  const el = document.getElementById('board-detail-overlay');
+  let sx = 0, sy = 0, tracking = false;
+  el.addEventListener('touchstart', e => {
+    const t = e.touches[0];
+    sx = t.clientX; sy = t.clientY; tracking = true;
+    el.style.transition = 'none';
+  }, {passive: true});
+  el.addEventListener('touchmove', e => {
+    if (!tracking) return;
+    const dx = e.touches[0].clientX - sx;
+    const dy = Math.abs(e.touches[0].clientY - sy);
+    if (dy > 30 && dx < 30) { tracking = false; el.style.transform = ''; el.style.transition = ''; return; }
+    if (dx > 10) el.style.transform = 'translateX(' + dx + 'px)';
+  }, {passive: true});
+  el.addEventListener('touchend', e => {
+    if (!tracking) { el.style.transition = ''; return; }
+    tracking = false;
+    const dx = e.changedTouches[0].clientX - sx;
+    el.style.transition = 'transform 0.25s cubic-bezier(.4,0,.2,1), opacity 0.25s, pointer-events 0s';
+    if (dx > 80) {
+      el.style.transform = 'translateX(100%)';
+      setTimeout(() => { closeBoardDetail(); el.style.transform = ''; el.style.transition = ''; }, 260);
+    } else {
+      el.style.transform = '';
+      setTimeout(() => { el.style.transition = ''; }, 260);
+    }
+  }, {passive: true});
+})();
+
 async function boardDetailSave() {
   if (!boardDetailId) return;
   const title = document.getElementById('bd-title').value.trim();
@@ -4075,12 +4014,6 @@ async function clearDone() {
   await apiCall(API + '/api/board/clear-done', { method: 'POST' });
 }
 
-function openBoardGuide() {
-  document.getElementById('board-guide-overlay').classList.add('active');
-}
-function closeBoardGuide() {
-  document.getElementById('board-guide-overlay').classList.remove('active');
-}
 
 // ═══════ INIT ═══════
 // Load cached sessions immediately so offline startup renders content
