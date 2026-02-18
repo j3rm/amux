@@ -3778,7 +3778,7 @@ function renderBoard() {
       if (firstLine) html += '<div class="board-card-desc">' + esc(firstLine) + ((item.desc || '').length > 80 ? '…' : '') + '</div>';
       html += '<div class="board-card-footer">';
       if (item.session) html += '<span class="board-card-session">' + esc(item.session) + '</span>';
-      tags.forEach(t => { html += '<span class="board-card-tag" onclick="event.stopPropagation();toggleBoardTag(\'' + esc(t).replace(/'/g, "\\'") + '\')">' + esc(t) + '</span>'; });
+      tags.forEach(t => { html += '<span class="board-card-tag" data-tag="' + esc(t) + '">' + esc(t) + '</span>'; });
       html += '<span class="board-card-time">' + timeAgo(item.updated || item.created) + '</span>';
       html += '</div></div>';
     });
@@ -3827,6 +3827,16 @@ function renderBoard() {
   });
   statuses.forEach(st => { _prevCardRects[st] = cols[st].length; });
 }
+
+// Event delegation for board tag clicks
+document.getElementById('board-columns').addEventListener('click', function(e) {
+  const tag = e.target.closest('.board-card-tag[data-tag]');
+  if (tag) {
+    e.stopPropagation();
+    e.preventDefault();
+    toggleBoardTag(tag.dataset.tag);
+  }
+});
 
 function _populateSessionSelect(selectId, current) {
   const sel = document.getElementById(selectId);
