@@ -742,9 +742,11 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
     pointer-events: none; white-space: nowrap;
   }
   @media (max-width: 480px) {
-    .search-input { width: 80px; flex-shrink: 1; }
-    .search-input:focus { width: 120px; }
-    .header-row { gap: 6px; flex-wrap: nowrap; }
+    .search-input { width: 70px; flex-shrink: 1; min-width: 0; }
+    .search-input:focus { width: 110px; }
+    .header-row { gap: 4px; flex-wrap: nowrap; overflow: hidden; }
+    .header-row h1 { font-size: 1.1rem; flex-shrink: 0; }
+    .header-row > div { gap: 6px !important; flex-shrink: 1; min-width: 0; }
   }
 
   /* Header + dropdown */
@@ -856,14 +858,14 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
   }
   .toast.visible { opacity: 1; transform: translateY(0); pointer-events: auto; }
 
-  /* Connection status indicator */
+  /* Connection status indicator — dot only */
   .conn-status {
-    font-size: 0.75rem; padding: 4px 10px; border-radius: 12px;
+    font-size: 0.6rem; width: 10px; height: 10px; border-radius: 50%;
     cursor: pointer; -webkit-tap-highlight-color: transparent;
-    white-space: nowrap; font-weight: 500; transition: all 0.2s;
+    flex-shrink: 0; transition: background 0.2s;
   }
-  .conn-status.online { color: #4ade80; background: rgba(74,222,128,0.1); }
-  .conn-status.offline { color: #f87171; background: rgba(248,113,113,0.1); }
+  .conn-status.online { background: #4ade80; }
+  .conn-status.offline { background: #f87171; }
 
   /* Queue modal */
   .queue-overlay {
@@ -927,7 +929,7 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
 <div class="header-row">
   <h1>cmux</h1>
   <div style="display:flex;gap:8px;align-items:center;">
-    <span id="conn-status" class="conn-status online" onclick="showQueueModal()">&#x25CF; Connected</span>
+    <span id="conn-status" class="conn-status online" onclick="showQueueModal()" title="Connected"></span>
     <div class="search-wrap" id="search-wrap">
       <input class="search-input" id="search-input" type="text" placeholder="Search..." autocomplete="off" autocorrect="off"
         oninput="searchQuery=this.value;document.getElementById('search-wrap').classList.toggle('has-value',!!this.value);render()">
@@ -1155,11 +1157,10 @@ function updateConnectionStatus() {
   if (!el) return;
   if (online) {
     el.className = 'conn-status online';
-    el.innerHTML = '&#x25CF; Connected';
+    el.title = 'Connected';
   } else {
-    const n = offlineQueue.length;
     el.className = 'conn-status offline';
-    el.innerHTML = '&#x25CF; Offline' + (n ? ' (' + n + ' queued)' : '');
+    el.title = 'Offline' + (offlineQueue.length ? ' (' + offlineQueue.length + ' queued)' : '');
   }
   // Update offline banner
   const banner = document.getElementById('offline-banner');
