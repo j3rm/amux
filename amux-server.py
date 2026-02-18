@@ -1031,13 +1031,24 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
     padding: 20px; width: 100%; max-width: 380px;
   }
   .edit-box h3 { font-size: 1rem; margin-bottom: 14px; }
-  .edit-box input, .edit-box select {
-    width: 100%; font-size: 1rem; padding: 10px 12px; border-radius: 8px;
+  .edit-box input, .edit-box select, .edit-box textarea {
+    width: 100%; font-size: 0.95rem; padding: 10px 12px; border-radius: 8px;
     border: 1px solid var(--border); background: var(--bg); color: var(--text);
-    outline: none; margin-bottom: 14px;
+    outline: none; margin-bottom: 14px; font-family: inherit; box-sizing: border-box;
   }
-  .edit-box input:focus, .edit-box select:focus { border-color: var(--accent); }
-  .edit-box .edit-actions { display: flex; gap: 8px; justify-content: flex-end; }
+  .edit-box textarea { resize: vertical; min-height: 72px; }
+  .edit-box select { -webkit-appearance: menulist; }
+  .edit-box input:focus, .edit-box select:focus, .edit-box textarea:focus {
+    border-color: var(--accent); box-shadow: 0 0 0 3px rgba(88,166,255,0.12);
+  }
+  .edit-box .edit-actions { display: flex; gap: 8px; justify-content: flex-end; margin-top: 4px; }
+  /* Labeled field groups */
+  .field-group { margin-bottom: 14px; }
+  .field-group > input, .field-group > textarea, .field-group > select,
+  .field-group > .ac-wrap, .field-group > .ac-wrap > input { margin-bottom: 0; }
+  .field-label { display: block; font-size: 0.72rem; color: var(--dim); font-weight: 600;
+    text-transform: uppercase; letter-spacing: 0.04em; margin-bottom: 6px; }
+  .field-optional { font-weight: 400; text-transform: none; letter-spacing: 0; font-size: 0.68rem; }
   .dot {
     width: 10px; height: 10px; border-radius: 50%; flex-shrink: 0;
   }
@@ -1093,7 +1104,7 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
     resize: none; overflow-y: auto; line-height: 1.4;
     font-family: inherit; field-sizing: content;
   }
-  .send-input:focus { border-color: var(--accent); }
+  .send-input:focus { border-color: var(--accent); box-shadow: 0 0 0 3px rgba(88,166,255,0.12); }
 
   /* Peek overlay */
   .overlay {
@@ -1291,7 +1302,7 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
     -webkit-tap-highlight-color: transparent;
   }
   .search-input::placeholder { color: var(--dim); }
-  .search-input:focus { border-color: var(--accent); }
+  .search-input:focus { border-color: var(--accent); box-shadow: 0 0 0 3px rgba(88,166,255,0.12); }
   .search-clear {
     position: absolute; right: 6px; top: 50%; transform: translateY(-50%);
     width: 20px; height: 20px; border-radius: 50%; border: none;
@@ -1357,7 +1368,7 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
     border: 1px solid var(--border); background: var(--bg); color: var(--text);
     outline: none; box-sizing: border-box; min-width: 0;
   }
-  .settings-row input:focus { border-color: var(--accent); }
+  .settings-row input:focus { border-color: var(--accent); box-shadow: 0 0 0 3px rgba(88,166,255,0.12); }
   .settings-row input::placeholder { color: var(--dim); }
   .settings-sep { height: 1px; background: var(--border); margin: 6px 0; }
   .settings-server-item {
@@ -1826,17 +1837,19 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
     background: var(--card); border: 1px solid var(--border);
     border-radius: 12px; padding: 16px; width: 100%; max-width: 400px;
   }
-  .board-edit-box input, .board-edit-box textarea {
+  .board-edit-box input, .board-edit-box textarea, .board-edit-box select {
     width: 100%; padding: 8px 10px; border-radius: 8px;
     border: 1px solid var(--border); background: var(--bg); color: var(--text);
     font-size: 0.85rem; font-family: inherit; margin-bottom: 8px;
+    outline: none; box-sizing: border-box;
   }
   .board-edit-box textarea { resize: vertical; min-height: 60px; }
-  .board-edit-box select {
-    width: 100%; padding: 8px 10px; border-radius: 8px;
-    border: 1px solid var(--border); background: var(--bg); color: var(--text);
-    font-size: 0.85rem; margin-bottom: 8px;
+  .board-edit-box input:focus, .board-edit-box textarea:focus, .board-edit-box select:focus {
+    border-color: var(--accent); box-shadow: 0 0 0 3px rgba(88,166,255,0.12);
   }
+  .board-edit-box .field-group { margin-bottom: 8px; }
+  .board-edit-box .field-group > input, .board-edit-box .field-group > textarea,
+  .board-edit-box .field-group > select { margin-bottom: 0; }
   .board-edit-actions {
     display: flex; gap: 8px; margin-top: 4px;
   }
@@ -1952,11 +1965,23 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
 <!-- Board card "add" small modal -->
 <div id="board-edit-overlay" class="board-edit-overlay" onclick="if(event.target===this)closeBoardEdit()">
   <div class="board-edit-box">
-    <input id="be-title" type="text" placeholder="Title" autocomplete="off"
-      onkeydown="if(event.key==='Enter'){event.preventDefault();document.getElementById('be-desc').focus();}">
-    <textarea id="be-desc" placeholder="Description (optional)"></textarea>
-    <select id="be-session-add" style="width:100%;padding:8px 10px;border:1px solid var(--border);border-radius:6px;background:var(--card);color:var(--text);font-size:0.85rem;font-family:inherit;margin-bottom:0;"></select>
-    <select id="be-status"><option value="todo">To Do</option><option value="doing">In Progress</option><option value="done">Done</option></select>
+    <div class="field-group">
+      <label class="field-label">Title</label>
+      <input id="be-title" type="text" placeholder="What needs to be done?" autocomplete="off"
+        onkeydown="if(event.key==='Enter'){event.preventDefault();document.getElementById('be-desc').focus();}">
+    </div>
+    <div class="field-group">
+      <label class="field-label">Notes <span class="field-optional">(optional)</span></label>
+      <textarea id="be-desc" placeholder="Add details or context..."></textarea>
+    </div>
+    <div class="field-group">
+      <label class="field-label">Session</label>
+      <select id="be-session-add"></select>
+    </div>
+    <div class="field-group">
+      <label class="field-label">Status</label>
+      <select id="be-status"><option value="todo">To Do</option><option value="doing">In Progress</option><option value="done">Done</option></select>
+    </div>
     <div class="board-edit-actions">
       <button class="be-cancel" onclick="closeBoardEdit()">Cancel</button>
       <button class="be-save" onclick="saveBoardEdit()">Save</button>
@@ -1998,16 +2023,24 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
 <div id="create-overlay" class="edit-overlay" onclick="if(event.target===this)closeCreate()">
   <div class="edit-box">
     <h3>New session</h3>
-    <input id="create-name" type="text" placeholder="Session name" autocomplete="off" autocorrect="off"
-      onkeydown="if(event.key==='Enter'){event.preventDefault();document.getElementById('create-dir').focus({preventScroll:true});}">
-    <div class="ac-wrap">
-      <input id="create-dir" type="text" placeholder="/path/to/project" autocomplete="off" autocorrect="off"
-        oninput="acFetch(this.value)" onfocus="acFetch(this.value)"
-        onkeydown="acKeydown(event)">
-      <div id="ac-list" class="ac-list"></div>
+    <div class="field-group">
+      <label class="field-label">Name</label>
+      <input id="create-name" type="text" placeholder="my-project" autocomplete="off" autocorrect="off"
+        onkeydown="if(event.key==='Enter'){event.preventDefault();document.getElementById('create-dir').focus({preventScroll:true});}">
     </div>
-    <textarea id="create-prompt" rows="3" placeholder="Initial prompt (optional — sent on start)"
-      style="width:100%;font-size:0.85rem;padding:10px;border-radius:8px;border:1px solid var(--border);background:var(--card);color:var(--text);resize:vertical;font-family:inherit;"></textarea>
+    <div class="field-group">
+      <label class="field-label">Working directory</label>
+      <div class="ac-wrap">
+        <input id="create-dir" type="text" placeholder="/path/to/project" autocomplete="off" autocorrect="off"
+          oninput="acFetch(this.value)" onfocus="acFetch(this.value)"
+          onkeydown="acKeydown(event)">
+        <div id="ac-list" class="ac-list"></div>
+      </div>
+    </div>
+    <div class="field-group">
+      <label class="field-label">Initial prompt <span class="field-optional">(optional)</span></label>
+      <textarea id="create-prompt" rows="3" placeholder="What should Claude work on first?"></textarea>
+    </div>
     <div class="edit-actions">
       <button class="btn" onclick="closeCreate()">Cancel</button>
       <button class="btn primary" onclick="submitCreate()">Create</button>
@@ -2086,7 +2119,7 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
         onkeydown="editAcKeydown(event)">
       <div id="edit-ac-list" class="ac-list"></div>
     </div>
-    <select id="edit-select" style="display:none;width:100%;padding:8px 10px;border:1px solid var(--border);border-radius:6px;background:var(--card);color:var(--text);font-size:0.9rem;-webkit-appearance:menulist;" onchange="submitEdit()">
+    <select id="edit-select" style="display:none;" onchange="submitEdit()">
       <option value="">Default (sonnet)</option>
       <option value="opus">opus</option>
       <option value="sonnet">sonnet</option>
