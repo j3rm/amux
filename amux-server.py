@@ -7301,6 +7301,7 @@ class CCHandler(BaseHTTPRequestHandler):
                     stop_session(name)
                 env_file.unlink(missing_ok=True)
                 (CC_MEMORY / f"{name}.md").unlink(missing_ok=True)
+                _meta_path(name).unlink(missing_ok=True)
                 return self._json({"ok": True, "message": "deleted"})
             return self._json({"error": "not found"}, 404)
 
