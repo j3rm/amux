@@ -1023,7 +1023,7 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
 <meta name="theme-color" content="#0d1117">
 <link rel="manifest" href="/manifest.json">
 <title>amux</title>
-<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><rect width='100' height='100' rx='20' fill='%230d1117'/><text x='50' y='68' font-family='system-ui' font-size='40' font-weight='700' fill='%2358a6ff' text-anchor='middle'>amux</text></svg>">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><rect width='100' height='100' rx='18' fill='%230d1117'/><rect x='4' y='4' width='44' height='44' rx='5' fill='%23161b22'/><rect x='52' y='4' width='44' height='44' rx='5' fill='%23161b22'/><rect x='4' y='52' width='44' height='44' rx='5' fill='%23161b22'/><rect x='52' y='52' width='44' height='44' rx='5' fill='%23161b22'/><polyline points='7,17 12,23 7,30' fill='none' stroke='%2358a6ff' stroke-width='2.5' stroke-linecap='round' stroke-linejoin='round'/><polyline points='56,17 61,23 56,30' fill='none' stroke='%2358a6ff' stroke-width='2.5' stroke-linecap='round' stroke-linejoin='round'/><polyline points='7,65 12,71 7,78' fill='none' stroke='%2358a6ff' stroke-width='2.5' stroke-linecap='round' stroke-linejoin='round'/><polyline points='56,65 61,71 56,78' fill='none' stroke='%2358a6ff' stroke-width='2.5' stroke-linecap='round' stroke-linejoin='round'/><rect x='14' y='21' width='22' height='2.5' rx='1.2' fill='%2358a6ff' opacity='0.55'/><rect x='63' y='21' width='21' height='2.5' rx='1.2' fill='%2358a6ff' opacity='0.55'/><rect x='14' y='69' width='22' height='2.5' rx='1.2' fill='%2358a6ff' opacity='0.55'/><rect x='63' y='69' width='21' height='2.5' rx='1.2' fill='%2358a6ff' opacity='0.55'/><rect x='7' y='33' width='33' height='2' rx='1' fill='%233d4f6e' opacity='0.75'/><rect x='56' y='33' width='30' height='2' rx='1' fill='%233d4f6e' opacity='0.75'/><rect x='7' y='81' width='33' height='2' rx='1' fill='%233d4f6e' opacity='0.75'/><rect x='56' y='81' width='30' height='2' rx='1' fill='%233d4f6e' opacity='0.75'/></svg>">
 <link rel="apple-touch-icon" href="/icon-192.png">
 <style>
   * { box-sizing: border-box; margin: 0; padding: 0; }
@@ -6023,39 +6023,115 @@ self.addEventListener('sync', e => {
 
 
 def _generate_icon_png(size):
-    """Generate a simple PNG icon for amux. Returns raw PNG bytes."""
-    import struct, zlib
-    w = h = size
+    """Generate amux icon: 4-pane terminal grid. Returns raw PNG bytes."""
+    import struct, zlib, math
+    sz = size
+
+    C_BG   = (13, 17, 23)    # #0d1117 outer background
+    C_PANE = (22, 27, 34)    # #161b22 pane background
+    C_BLUE = (88, 166, 255)  # #58a6ff accent/prompt
+    C_DIM  = (61, 79, 110)   # dim output lines
+
+    # RGBA pixel buffer initialised to C_BG
+    img = bytearray(bytes((*C_BG, 255)) * sz * sz)
+
+    def put(x, y, rgb, a=255):
+        if 0 <= x < sz and 0 <= y < sz:
+            i = (y * sz + x) * 4
+            if a >= 255:
+                img[i], img[i+1], img[i+2], img[i+3] = rgb[0], rgb[1], rgb[2], 255
+            else:
+                f = a / 255
+                img[i]   = int(img[i]   + (rgb[0] - img[i])   * f)
+                img[i+1] = int(img[i+1] + (rgb[1] - img[i+1]) * f)
+                img[i+2] = int(img[i+2] + (rgb[2] - img[i+2]) * f)
+                img[i+3] = 255
+
+    def fill_rrect(x0, y0, x1, y1, r, rgb, a=255):
+        for y in range(max(0, y0), min(sz, y1)):
+            for x in range(max(0, x0), min(sz, x1)):
+                xl, xr = x < x0 + r, x >= x1 - r
+                yt, yb = y < y0 + r, y >= y1 - r
+                if (xl or xr) and (yt or yb):
+                    cx = x0 + r if xl else x1 - r
+                    cy = y0 + r if yt else y1 - r
+                    if (x - cx) ** 2 + (y - cy) ** 2 > r * r:
+                        continue
+                put(x, y, rgb, a)
+
+    def fill_rect(x0, y0, x1, y1, rgb, a=255):
+        for y in range(max(0, y0), min(sz, y1)):
+            for x in range(max(0, x0), min(sz, x1)):
+                put(x, y, rgb, a)
+
+    def draw_chevron(x0, ytop, ybot, hw, thick, rgb):
+        """Draw > chevron: apex at (x0+hw, mid), arms to (x0, ytop/ybot)."""
+        ax, ay = x0 + hw, (ytop + ybot) / 2.0
+        dxu, dyu = ax - x0, ay - ytop
+        dxd, dyd = x0 - ax, ybot - ay
+        lu2 = dxu * dxu + dyu * dyu
+        ld2 = dxd * dxd + dyd * dyd
+        if lu2 == 0 or ld2 == 0:
+            return
+        bb_x0 = max(0, int(x0 - 1))
+        bb_x1 = min(sz, int(ax + thick + 2))
+        bb_y0 = max(0, int(ytop - thick - 1))
+        bb_y1 = min(sz, int(ybot + thick + 2))
+        for y in range(bb_y0, bb_y1):
+            for x in range(bb_x0, bb_x1):
+                tu = max(0.0, min(1.0, ((x - x0) * dxu + (y - ytop) * dyu) / lu2))
+                du = math.sqrt((x - x0 - tu * dxu) ** 2 + (y - ytop - tu * dyu) ** 2)
+                td = max(0.0, min(1.0, ((x - ax) * dxd + (y - ay) * dyd) / ld2))
+                dd = math.sqrt((x - ax - td * dxd) ** 2 + (y - ay - td * dyd) ** 2)
+                d = min(du, dd)
+                if d <= thick:
+                    put(x, y, rgb)
+                elif d <= thick + 1.0:
+                    put(x, y, rgb, int((thick + 1.0 - d) * 255))
+
+    gap    = max(2, int(sz * 0.04))
+    pane_w = (sz - 3 * gap) // 2
+    pane_h = pane_w
+    pane_r = max(2, int(sz * 0.05))
+    thick  = max(1.5, sz * 0.014)
+
+    for pi in range(4):
+        col, row = pi % 2, pi // 2
+        px = gap + col * (pane_w + gap)
+        py = gap + row * (pane_h + gap)
+
+        fill_rrect(px, py, px + pane_w, py + pane_h, pane_r, C_PANE)
+
+        chev_x   = px + int(pane_w * 0.08)
+        chev_top = py + int(pane_h * 0.30)
+        chev_bot = py + int(pane_h * 0.58)
+        chev_hw  = int(pane_w * 0.12)
+        draw_chevron(chev_x, chev_top, chev_bot, chev_hw, thick, C_BLUE)
+
+        cur_x0 = chev_x + chev_hw + max(1, int(pane_w * 0.03))
+        cur_y  = int((chev_top + chev_bot) / 2) - max(1, int(sz * 0.008))
+        cur_x1 = cur_x0 + int(pane_w * 0.35)
+        cur_h  = max(1, int(sz * 0.018))
+        fill_rect(cur_x0, cur_y, cur_x1, cur_y + cur_h, C_BLUE, 140)
+
+        line_x0 = px + int(pane_w * 0.08)
+        line_y0 = chev_bot + int(pane_h * 0.07)
+        line_h  = max(1, int(sz * 0.012))
+        for li in range(2):
+            lx1 = line_x0 + int(pane_w * (0.75 - li * 0.2))
+            ly  = line_y0 + li * int(pane_h * 0.10)
+            fill_rect(line_x0, ly, lx1, ly + line_h, C_DIM, 120)
+
     rows = []
-    bg = (13, 17, 23, 255)       # #0d1117
-    fg = (88, 166, 255, 255)     # #58a6ff
-    for y in range(h):
-        row = bytearray([0])  # filter byte
-        for x in range(w):
-            cx, cy = x / w, y / h
-            # Draw 4 vertical bars (multiplexer symbol) with a > connector
-            in_letter = False
-            # Four bars at different x positions
-            for bx in (0.25, 0.40, 0.55, 0.70):
-                if abs(cx - bx) < 0.035 and 0.25 < cy < 0.75:
-                    in_letter = True
-            # Chevron > on the right side
-            mid_y = 0.5
-            chev_x = 0.82
-            dy = abs(cy - mid_y)
-            if 0.15 < dy < 0.25:
-                expected_x = chev_x + (0.25 - dy) * 0.4
-                if abs(cx - expected_x) < 0.025:
-                    in_letter = True
-            px = fg if in_letter else bg
-            row.extend(px)
-        rows.append(bytes(row))
+    for y in range(sz):
+        rows.append(b'\x00' + bytes(img[y * sz * 4:(y + 1) * sz * 4]))
     raw = b''.join(rows)
-    # Build PNG
-    def chunk(ctype, data):
-        c = ctype + data
+
+    def chunk(tag, data):
+        c = tag + data
         return struct.pack('>I', len(data)) + c + struct.pack('>I', zlib.crc32(c) & 0xffffffff)
-    ihdr = struct.pack('>IIBBBBB', w, h, 8, 6, 0, 0, 0)
+
+    ihdr = struct.pack('>IIBBBBB', sz, sz, 8, 6, 0, 0, 0)
     return (b'\x89PNG\r\n\x1a\n' +
             chunk(b'IHDR', ihdr) +
             chunk(b'IDAT', zlib.compress(raw)) +
