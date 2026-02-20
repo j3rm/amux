@@ -6132,6 +6132,63 @@ if (_cachedBoard) {
 if (sessions.length || drafts.length) render();
 updateConnectionStatus();
 
+// IndexedDB — v2: kv store + full issues/statuses mirror for offline sync
+// Declared here (before first use) to avoid TDZ errors
+const _idb = (() => {
+  let db = null;
+  const open = () => new Promise((resolve, reject) => {
+    if (db) return resolve(db);
+    const req = indexedDB.open('amux', 2);
+    req.onupgradeneeded = () => {
+      const d = req.result;
+      if (!d.objectStoreNames.contains('kv')) d.createObjectStore('kv');
+      if (!d.objectStoreNames.contains('issues')) {
+        const s = d.createObjectStore('issues', { keyPath: 'id' });
+        s.createIndex('by_updated', 'updated');
+        s.createIndex('by_session', 'session');
+        s.createIndex('by_status', 'status');
+      }
+      if (!d.objectStoreNames.contains('statuses')) {
+        d.createObjectStore('statuses', { keyPath: 'id' });
+      }
+    };
+    req.onsuccess = () => { db = req.result; resolve(db); };
+    req.onerror = () => reject(req.error);
+  });
+  const _txw = (store, fn) => open().then(d => new Promise((resolve, reject) => {
+    const tx = d.transaction(store, 'readwrite');
+    tx.oncomplete = resolve; tx.onerror = () => reject(tx.error);
+    fn(tx.objectStore(store));
+  })).catch(() => {});
+  return {
+    set: (key, val) => open().then(d => {
+      const tx = d.transaction('kv', 'readwrite');
+      tx.objectStore('kv').put(val, key);
+    }).catch(() => {}),
+    get: (key) => open().then(d => new Promise((resolve) => {
+      const tx = d.transaction('kv', 'readonly');
+      const req = tx.objectStore('kv').get(key);
+      req.onsuccess = () => resolve(req.result);
+      req.onerror = () => resolve(null);
+    })).catch(() => null),
+    // Apply delta: upsert live items, remove soft-deleted ones from local mirror
+    applyIssueDelta: (issues) => _txw('issues', os => {
+      issues.forEach(item => { if (item.deleted) os.delete(item.id); else os.put(item); });
+    }),
+    // Replace all statuses in local mirror
+    putStatuses: (statuses) => _txw('statuses', os => {
+      os.clear(); statuses.forEach(s => os.put(s));
+    }),
+    // Read all items from a store
+    getAll: (store) => open().then(d => new Promise((resolve) => {
+      const tx = d.transaction(store, 'readonly');
+      const req = tx.objectStore(store).getAll();
+      req.onsuccess = () => resolve(req.result || []);
+      req.onerror = () => resolve([]);
+    })).catch(() => []),
+  };
+})();
+
 // IDB fallback: if localStorage was purged (iOS), restore from IndexedDB
 if (!boardItems.length) {
   _idb.getAll('issues').then(items => {
@@ -6300,62 +6357,6 @@ if ('serviceWorker' in navigator) {
   });
   }).catch(() => {});
 }
-
-// IndexedDB — v2: kv store + full issues/statuses mirror for offline sync
-const _idb = (() => {
-  let db = null;
-  const open = () => new Promise((resolve, reject) => {
-    if (db) return resolve(db);
-    const req = indexedDB.open('amux', 2);
-    req.onupgradeneeded = () => {
-      const d = req.result;
-      if (!d.objectStoreNames.contains('kv')) d.createObjectStore('kv');
-      if (!d.objectStoreNames.contains('issues')) {
-        const s = d.createObjectStore('issues', { keyPath: 'id' });
-        s.createIndex('by_updated', 'updated');
-        s.createIndex('by_session', 'session');
-        s.createIndex('by_status', 'status');
-      }
-      if (!d.objectStoreNames.contains('statuses')) {
-        d.createObjectStore('statuses', { keyPath: 'id' });
-      }
-    };
-    req.onsuccess = () => { db = req.result; resolve(db); };
-    req.onerror = () => reject(req.error);
-  });
-  const _txw = (store, fn) => open().then(d => new Promise((resolve, reject) => {
-    const tx = d.transaction(store, 'readwrite');
-    tx.oncomplete = resolve; tx.onerror = () => reject(tx.error);
-    fn(tx.objectStore(store));
-  })).catch(() => {});
-  return {
-    set: (key, val) => open().then(d => {
-      const tx = d.transaction('kv', 'readwrite');
-      tx.objectStore('kv').put(val, key);
-    }).catch(() => {}),
-    get: (key) => open().then(d => new Promise((resolve) => {
-      const tx = d.transaction('kv', 'readonly');
-      const req = tx.objectStore('kv').get(key);
-      req.onsuccess = () => resolve(req.result);
-      req.onerror = () => resolve(null);
-    })).catch(() => null),
-    // Apply delta: upsert live items, remove soft-deleted ones from local mirror
-    applyIssueDelta: (issues) => _txw('issues', os => {
-      issues.forEach(item => { if (item.deleted) os.delete(item.id); else os.put(item); });
-    }),
-    // Replace all statuses in local mirror
-    putStatuses: (statuses) => _txw('statuses', os => {
-      os.clear(); statuses.forEach(s => os.put(s));
-    }),
-    // Read all items from a store
-    getAll: (store) => open().then(d => new Promise((resolve) => {
-      const tx = d.transaction(store, 'readonly');
-      const req = tx.objectStore(store).getAll();
-      req.onsuccess = () => resolve(req.result || []);
-      req.onerror = () => resolve([]);
-    })).catch(() => []),
-  };
-})();
 
 // Dual-write drafts and queue to both localStorage and IndexedDB
 function persistOfflineData() {
