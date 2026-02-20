@@ -74,19 +74,21 @@ _sse_cache = {
 _SSE_CACHE_TTL = 2  # seconds
 
 # Per-session token cache — refreshed every 30s, keyed by resolved dir
-_token_cache = {"data": {}, "time": 0}
+_token_cache = {"data": {}, "timestamps": {}, "time": 0}
 _TOKEN_CACHE_TTL = 30
 
 def _refresh_token_cache():
-    """Rebuild per-directory token counts from Claude JSONL files."""
+    """Rebuild per-directory token counts and last-activity timestamps from Claude JSONL files."""
     now = time.time()
     if now - _token_cache["time"] < _TOKEN_CACHE_TTL:
         return
-    from datetime import datetime
+    from datetime import datetime, timezone
     result = {}
+    ts_result = {}
     projects_dir = Path.home() / ".claude" / "projects"
     if not projects_dir.is_dir():
         _token_cache["data"] = result
+        _token_cache["timestamps"] = ts_result
         _token_cache["time"] = now
         return
     for proj_dir in projects_dir.iterdir():
@@ -97,6 +99,7 @@ def _refresh_token_cache():
         if not jsonl_files:
             continue
         total = 0
+        last_ts = 0
         # Read tail of top 5 most recent JSONL files to cover multiple conversations
         for jf in jsonl_files[:5]:
             try:
@@ -110,6 +113,17 @@ def _refresh_token_cache():
                     for raw_line in fh:
                         try:
                             entry = json.loads(raw_line)
+                            # Track last Claude API call timestamp
+                            ts_str = entry.get("timestamp", "")
+                            if ts_str:
+                                try:
+                                    ts_unix = int(datetime.fromisoformat(
+                                        ts_str.replace("Z", "+00:00")
+                                    ).timestamp())
+                                    if ts_unix > last_ts:
+                                        last_ts = ts_unix
+                                except Exception:
+                                    pass
                             usage = entry.get("message", {}).get("usage", {})
                             if usage:
                                 sig = (usage.get("input_tokens", 0),
@@ -130,7 +144,10 @@ def _refresh_token_cache():
                 continue
         if total > 0:
             result[proj_dir.name] = total
+        if last_ts > 0:
+            ts_result[proj_dir.name] = last_ts
     _token_cache["data"] = result
+    _token_cache["timestamps"] = ts_result
     _token_cache["time"] = now
 
 # ═══════════════════════════════════════════
@@ -931,10 +948,15 @@ def list_sessions() -> list:
         active_model = detect_active_model(raw_dir)
         # Parse task time from spinner line
         task_time = _parse_task_time(raw) if raw else ""
-        # Token count from background cache
+        # Token count + last-activity timestamp from JSONL cache
         _refresh_token_cache()
         proj_key = resolved_dir.replace("/", "-") if resolved_dir else ""
         tokens = _token_cache["data"].get(proj_key, 0)
+        # Use JSONL timestamp as last_activity when available — it reflects the actual
+        # last Claude API call, not tmux window_activity which is refreshed by UI redraws
+        claude_ts = _token_cache["timestamps"].get(proj_key, 0)
+        if claude_ts:
+            last_activity = claude_ts
         sessions.append({
             "name": name,
             "dir": resolved_dir,
@@ -7020,6 +7042,21 @@ _icon_cache = {}
 # HTTP REQUEST HANDLER
 # ═══════════════════════════════════════════
 
+class ResilientHTTPSServer(ThreadingHTTPServer):
+    """ThreadingHTTPServer with SSL handshake timeout and daemon threads."""
+    daemon_threads = True  # Don't let long-lived SSE threads block shutdown
+
+    def get_request(self):
+        """Accept with a timeout so stalled TLS handshakes can't freeze the server."""
+        self.socket.settimeout(10)
+        try:
+            conn, addr = self.socket.accept()
+            conn.settimeout(None)  # No timeout for normal request handling
+            return conn, addr
+        finally:
+            self.socket.settimeout(None)
+
+
 class CCHandler(BaseHTTPRequestHandler):
     def log_message(self, fmt, *args):
         ip = self.client_address[0]
@@ -8055,7 +8092,10 @@ def _watch_self(server):
             new_mtime = script.stat().st_mtime
             if new_mtime != mtime:
                 print(f"\n\033[33m↻ {script.name} changed — restarting...\033[0m")
-                server.shutdown()
+                # Shutdown with timeout — don't let stuck threads block restart
+                t = threading.Thread(target=server.shutdown, daemon=True)
+                t.start()
+                t.join(timeout=3)
                 os.execv(sys.executable, [sys.executable] + sys.argv)
         except Exception:
             pass
@@ -8143,7 +8183,7 @@ def main():
     _init_db()
     _migrate_flat_to_sqlite()
 
-    server = ThreadingHTTPServer(("0.0.0.0", port), CCHandler)
+    server = ResilientHTTPSServer(("0.0.0.0", port), CCHandler)
 
     scheme = "http"
     ts_hostname = ""
