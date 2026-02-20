@@ -7235,18 +7235,35 @@ _icon_cache = {}
 # ═══════════════════════════════════════════
 
 class ResilientHTTPSServer(ThreadingHTTPServer):
-    """ThreadingHTTPServer with SSL handshake timeout and daemon threads."""
-    daemon_threads = True  # Don't let long-lived SSE threads block shutdown
+    """ThreadingHTTPServer with per-connection TLS handshake in worker threads.
 
-    def get_request(self):
-        """Accept with a timeout so stalled TLS handshakes can't freeze the server."""
-        self.socket.settimeout(10)
+    The listening socket stays plain TCP so accept() never blocks on a TLS
+    handshake.  Each accepted connection is TLS-wrapped in its own daemon
+    thread with a 10-second timeout, so a stalled handshake can never freeze
+    the server's accept loop.
+    """
+    daemon_threads = True
+    ssl_ctx = None  # Set after creation; None = plain HTTP
+
+    def process_request_thread(self, request, client_address):
+        """Wrap the raw TCP socket with TLS before handing to the handler."""
+        if self.ssl_ctx:
+            request.settimeout(10)
+            try:
+                request = self.ssl_ctx.wrap_socket(request, server_side=True)
+            except (ssl.SSLError, OSError):
+                try:
+                    request.close()
+                except OSError:
+                    pass
+                return
+            request.settimeout(None)
         try:
-            conn, addr = self.socket.accept()
-            conn.settimeout(None)  # No timeout for normal request handling
-            return conn, addr
+            self.finish_request(request, client_address)
+        except Exception:
+            self.handle_error(request, client_address)
         finally:
-            self.socket.settimeout(None)
+            self.shutdown_request(request)
 
 
 class CCHandler(BaseHTTPRequestHandler):
@@ -8429,7 +8446,7 @@ def main():
             cert, key, ts_hostname = _ensure_tls(lan_ip)
             ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
             ctx.load_cert_chain(cert, key)
-            server.socket = ctx.wrap_socket(server.socket, server_side=True)
+            server.ssl_ctx = ctx  # per-connection TLS in get_request()
             scheme = "https"
         except Exception as e:
             print(f"\033[33m  TLS setup failed ({e}), falling back to HTTP\033[0m")
