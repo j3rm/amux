@@ -123,7 +123,11 @@ async function waitForCount(page, selector, count = 1, timeout = 7000) {
 
 async function runDesktop(browser) {
   console.log('\n── Desktop (1280×800) ──');
-  const ctx = await browser.newContext({ ignoreHTTPSErrors: true, viewport: { width: 1280, height: 800 } });
+  const ctx = await browser.newContext({
+    ignoreHTTPSErrors: true,
+    viewport: { width: 1280, height: 800 },
+    permissions: ['clipboard-read', 'clipboard-write'],
+  });
   const page = await ctx.newPage();
 
   // ── Page load ──────────────────────────────────────────────────────────────
@@ -375,8 +379,8 @@ async function runDesktop(browser) {
   const calTitle3 = await page.$eval('#cal-title', el => el.textContent.trim());
   log('Calendar Today button returns to current month', calTitle3 === calTitle, calTitle3);
 
-  const icalLink = await page.$('a[href="/api/calendar.ics"]');
-  log('iCal subscribe link present', !!icalLink);
+  const icalBtn = await page.$('button[onclick="showIcalInfo()"]');
+  log('iCal subscribe button present', !!icalBtn);
 
   // ── Back to sessions ───────────────────────────────────────────────────────
   await page.click('#tab-sessions');
@@ -431,11 +435,97 @@ async function runDesktop(browser) {
     const globalVisible = await globalTextarea?.evaluate(el => getComputedStyle(el).display !== 'none');
     log('Global memory textarea visible on Global tab', !!globalVisible);
 
-    // Close peek via close button (button with onclick="closePeek()")
+    // ── Ctrl+V paste into send input ──────────────────────────────────────────
+    // Switch back to terminal tab so send input is visible
+    await page.$eval('#peek-tab-terminal', el => el.click());
+    await wait(200);
+    await page.focus('#peek-cmd-input');
+    // Verify keydown handler does NOT call preventDefault for Ctrl+V in a textarea
+    // (if it did, native paste would be blocked)
+    const ctrlVPrevented = await page.evaluate(() => new Promise(resolve => {
+      const el = document.getElementById('peek-cmd-input');
+      el.focus();
+      document.addEventListener('keydown', function check(e) {
+        if (e.ctrlKey && e.key === 'v') {
+          document.removeEventListener('keydown', check);
+          setTimeout(() => resolve(e.defaultPrevented), 0);
+        }
+      }, { capture: true, once: true });
+      el.dispatchEvent(new KeyboardEvent('keydown', { key: 'v', ctrlKey: true, bubbles: true, cancelable: true }));
+    }));
+    log('Ctrl+V keydown NOT prevented in focused textarea (paste allowed)', !ctrlVPrevented);
+    // Also verify paste event (text) is not blocked by handlePeekPaste
+    const pasteBlocked = await page.evaluate(() => new Promise(resolve => {
+      const el = document.getElementById('peek-cmd-input');
+      el.focus();
+      el.addEventListener('paste', e => { resolve(e.defaultPrevented); }, { once: true });
+      const dt = new DataTransfer(); dt.setData('text/plain', 'hello');
+      el.dispatchEvent(new ClipboardEvent('paste', { clipboardData: dt, bubbles: true, cancelable: true }));
+    }));
+    log('Text paste event NOT blocked by handlePeekPaste', !pasteBlocked);
+    // Clear the input
+    await page.$eval('#peek-cmd-input', el => { el.value = ''; el.dispatchEvent(new Event('input')); });
+
+    // ── Tasks tab ──────────────────────────────────────────────────────────────
+    await page.$eval('#peek-tab-tasks', el => el.click());
+    await wait(400);
+    const tasksPanel = await page.$('#peek-tasks-panel');
+    log('Tasks panel opens on Tasks tab click', !!(await tasksPanel?.isVisible()));
+    const taskInput = await page.$('#peek-task-input');
+    log('Task input present', !!taskInput);
+    // Clean up pre-existing tasks for this session before testing
+    const peekSessName = await page.$eval('#peek-title', el => el.textContent.trim()).catch(() => '');
+    if (peekSessName) {
+      const tasksBase = `${BASE}/api/sessions/${encodeURIComponent(peekSessName)}/tasks`;
+      const existingResp = await ctx.request.get(tasksBase).catch(() => null);
+      const existing = existingResp ? await existingResp.json().catch(() => []) : [];
+      if (Array.isArray(existing)) {
+        for (const t of existing) {
+          await ctx.request.delete(`${tasksBase}/${t.id}`).catch(() => {});
+        }
+      }
+      await wait(200);
+      await page.evaluate(() => typeof renderPeekTasks === 'function' && renderPeekTasks());
+      await wait(300);
+    }
+    // Add a task
+    await page.fill('#peek-task-input', 'e2e test task');
+    await page.keyboard.press('Enter');
+    await wait(500);
+    const taskItems = await page.$$('.peek-task-item');
+    log('Task appears after adding', taskItems.length === 1, `${taskItems.length} tasks`);
+    // Check done via checkbox
+    if (taskItems.length > 0) {
+      await page.$eval('.peek-task-cb', el => el.click());
+      await wait(300);
+      const doneClass = await page.$eval('.peek-task-text', el => el.classList.contains('done'));
+      log('Task toggles done state', !!doneClass);
+      // Clear done
+      await page.$eval('button[onclick="clearDonePeekTasks()"]', el => el.click());
+      await wait(300);
+      const remaining = await page.$$('.peek-task-item');
+      log('Clear done removes completed tasks', remaining.length === 0, `${remaining.length} remaining`);
+    }
+
+    // ── Esc closes peek ────────────────────────────────────────────────────────
+    await page.keyboard.press('Escape');
+    await wait(300);
+    const peekClosedByEsc = await peekOverlay?.evaluate(el => !el.classList.contains('active'));
+    log('Esc key closes peek overlay', !!peekClosedByEsc);
+
+    // Close peek via close button (button with onclick="closePeek()") — reopen first if Esc worked
+    if (peekClosedByEsc) {
+      // Reopen to test close button
+      await page.evaluate(() => {
+        const s = window.sessions;
+        if (s && s.length) openPeek(s[0].name);
+      });
+      await wait(400);
+    }
     await page.$eval('button[onclick="closePeek()"]', el => el.click());
     await wait(300);
     const peekClosed = await peekOverlay?.evaluate(el => !el.classList.contains('active'));
-    log('Peek drawer closes', !!peekClosed);
+    log('Peek drawer closes via close button', !!peekClosed);
 
     const bodyOverflow = await page.evaluate(() => document.body.style.overflow);
     log('Body overflow restored after peek close', bodyOverflow === '', `"${bodyOverflow}"`);
@@ -528,8 +618,8 @@ async function runMobile(browser) {
   log('Calendar cell height ≥ 40px on mobile (mobile-optimized)',
     mCellHeight >= 40, `height: ${Math.round(mCellHeight ?? 0)}px`);
 
-  const mChips = await page.$$('.cal-chip');
-  log('Calendar chips visible on mobile', mChips.length > 0, `${mChips.length} chips`);
+  const mDots = await page.$$('.cal-dot');
+  log('Calendar event dots visible on mobile', mDots.length > 0, `${mDots.length} dots`);
 
   const mToolbar = await page.$('.cal-toolbar');
   const mToolbarWidth = await mToolbar?.evaluate(el => el.scrollWidth);

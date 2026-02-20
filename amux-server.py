@@ -5349,6 +5349,7 @@ document.addEventListener('keydown', (e) => {
     return;
   }
   if (!document.getElementById('peek-overlay').classList.contains('active')) return;
+  if (e.key === 'Escape') { e.preventDefault(); closePeek(); return; }
   if ((e.ctrlKey || e.metaKey) && !e.altKey && !e.shiftKey && (e.key === 'c' || e.key === 'v')) {
     const active = document.activeElement;
     const isEditable = active && (active.tagName === 'INPUT' || active.tagName === 'TEXTAREA' || active.isContentEditable);
