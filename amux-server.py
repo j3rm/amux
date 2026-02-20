@@ -1408,6 +1408,13 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
   .explore-size { font-size: 0.72rem; color: var(--dim); flex-shrink: 0; }
 
   /* Connect session list */
+  .skill-card {
+    background: var(--card); border: 1px solid var(--border); border-radius: 8px;
+    padding: 12px 14px; display: flex; flex-direction: column; gap: 4px;
+  }
+  .skill-card-name { font-family: "SF Mono","Fira Code",monospace; font-size: 0.88rem; font-weight: 600; color: var(--accent); }
+  .skill-card-desc { font-size: 0.85rem; color: var(--text); }
+  .skill-card-hint { font-size: 0.75rem; color: var(--dim); font-family: "SF Mono","Fira Code",monospace; }
   .connect-item {
     display: flex; align-items: center; justify-content: space-between;
     padding: 10px 12px; border: 1px solid var(--border); border-radius: 8px;
@@ -2207,7 +2214,8 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
           <div id="settings-server-list" style="margin-top:6px;"></div>
         </div>
         <div class="settings-sep"></div>
-        <div class="settings-section" style="text-align:center;">
+        <div class="settings-section" style="text-align:center;display:flex;flex-direction:column;gap:8px;">
+          <span style="font-size:0.7rem;color:var(--dim);cursor:pointer;" onclick="openSkills();closeSettings()">&#x26A1; Skills &amp; commands</span>
           <span style="font-size:0.7rem;color:var(--dim);cursor:pointer;" onclick="openAbout();closeSettings()">About amux &amp; token stats</span>
         </div>
       </div>
@@ -2539,6 +2547,18 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
   <div class="modal-box">
     <div id="modal-msg" class="modal-msg"></div>
     <div class="modal-btns" id="modal-btns"></div>
+  </div>
+</div>
+
+<!-- Skills modal -->
+<div id="skills-modal" class="overlay" style="z-index:200;" onclick="if(event.target===this)closeSkills()">
+  <div style="display:flex;flex-direction:column;height:100%;max-width:560px;margin:0 auto;width:100%;">
+    <div class="overlay-header">
+      <h2>&#x26A1; Skills &amp; commands</h2>
+      <button class="btn" onclick="closeSkills()">&#x2715;</button>
+    </div>
+    <p style="font-size:0.8rem;color:var(--dim);margin:0 0 14px;">Use these with <code style="background:var(--card);padding:1px 5px;border-radius:4px;font-size:0.78rem;">/command</code> in any Claude Code session.</p>
+    <div id="skills-list" style="flex:1;overflow-y:auto;display:flex;flex-direction:column;gap:8px;"></div>
   </div>
 </div>
 
@@ -6034,6 +6054,39 @@ async function pingServer() {
   renderDebugInfo();
 }
 
+async function openSkills() {
+  const modal = document.getElementById('skills-modal');
+  const list = document.getElementById('skills-list');
+  modal.classList.add('active');
+  document.body.style.overflow = 'hidden';
+  list.innerHTML = '<div style="color:var(--dim);font-size:0.85rem;text-align:center;padding:20px;">Loading...</div>';
+  try {
+    const skills = await fetch(API + '/api/skills').then(r => r.json());
+    if (!skills.length) {
+      list.innerHTML = '<div style="color:var(--dim);font-size:0.85rem;text-align:center;padding:20px;">No skills found in ~/.claude/commands/</div>';
+      return;
+    }
+    list.innerHTML = skills.map(s => {
+      const cmd = '/' + esc(s.name);
+      const hint = s.hint ? '<div class="skill-card-hint">' + esc(s.hint) + '</div>' : '';
+      return '<div class="skill-card">' +
+        '<div style="display:flex;align-items:center;justify-content:space-between;">' +
+          '<span class="skill-card-name">' + cmd + '</span>' +
+          '<button class="btn" style="font-size:0.65rem;padding:2px 8px;" onclick="navigator.clipboard.writeText(\'' + esc(s.name) + '\');showToast(\'Copied!\')">Copy</button>' +
+        '</div>' +
+        (s.description ? '<div class="skill-card-desc">' + esc(s.description) + '</div>' : '') +
+        hint +
+      '</div>';
+    }).join('');
+  } catch(e) {
+    list.innerHTML = '<div style="color:var(--red);font-size:0.85rem;text-align:center;padding:20px;">Failed to load skills</div>';
+  }
+}
+function closeSkills() {
+  document.getElementById('skills-modal').classList.remove('active');
+  document.body.style.overflow = '';
+}
+
 function openAbout() {
   document.getElementById('about-overlay').classList.add('active');
   document.getElementById('add-server-form').style.display = 'none';
@@ -6764,6 +6817,29 @@ class CCHandler(BaseHTTPRequestHandler):
                         if wd:
                             _write_claude_memory(sname, wd)
                 return self._json({"ok": True})
+
+        # GET /api/skills — list Claude Code commands from ~/.claude/commands/
+        if method == "GET" and path == "/api/skills":
+            skills = []
+            cmd_dir = CLAUDE_HOME / "commands"
+            if cmd_dir.is_dir():
+                for f in sorted(cmd_dir.glob("*.md")):
+                    try:
+                        text = f.read_text(errors="replace")
+                        desc, hint = "", ""
+                        if text.startswith("---"):
+                            fm_end = text.find("---", 3)
+                            if fm_end > 0:
+                                fm = text[3:fm_end]
+                                for line in fm.splitlines():
+                                    if line.startswith("description:"):
+                                        desc = line.split(":", 1)[1].strip()
+                                    elif line.startswith("argument-hint:"):
+                                        hint = line.split(":", 1)[1].strip()
+                        skills.append({"name": f.stem, "description": desc, "hint": hint})
+                    except Exception:
+                        pass
+            return self._json(skills)
 
         # GET /api/stats/daily
         if method == "GET" and path == "/api/stats/daily":
