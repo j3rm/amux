@@ -402,9 +402,11 @@ CREATE TABLE IF NOT EXISTS statuses (
     is_builtin  INTEGER NOT NULL DEFAULT 0
 );
 INSERT OR IGNORE INTO statuses (id, label, position, is_builtin) VALUES
-    ('todo',  'To Do',       0, 1),
-    ('doing', 'In Progress', 1, 1),
-    ('done',  'Done',        2, 1);
+    ('backlog',   'Backlog',      0, 1),
+    ('todo',      'To Do',        1, 1),
+    ('doing',     'In Progress',  2, 1),
+    ('done',      'Done',         3, 1),
+    ('discarded', 'Discarded',    4, 1);
 CREATE TABLE IF NOT EXISTS issues (
     id          TEXT PRIMARY KEY,
     title       TEXT NOT NULL,
@@ -462,6 +464,19 @@ def _init_db():
     """Create SQLite tables if they don't exist."""
     db = get_db()
     db.executescript(_DB_SCHEMA)
+    # Ensure built-in statuses have correct positions (idempotent for existing DBs)
+    for pos, (sid, label) in enumerate([
+        ("backlog",   "Backlog"),
+        ("todo",      "To Do"),
+        ("doing",     "In Progress"),
+        ("done",      "Done"),
+        ("discarded", "Discarded"),
+    ]):
+        db.execute(
+            "INSERT INTO statuses (id, label, position, is_builtin) VALUES (?, ?, ?, 1)"
+            " ON CONFLICT(id) DO UPDATE SET position = ?, is_builtin = 1",
+            (sid, label, pos, pos),
+        )
     db.commit()
 
 
@@ -486,7 +501,7 @@ def _migrate_flat_to_sqlite():
         return  # nothing to migrate
     # Import statuses
     statuses = raw.get("statuses", list(_DEFAULT_STATUSES))
-    builtin_ids = {"todo", "doing", "done"}
+    builtin_ids = {"backlog", "todo", "doing", "done", "discarded"}
     existing_ids = {s["id"] for s in statuses}
     for s in _DEFAULT_STATUSES:
         if s["id"] not in existing_ids:
@@ -567,9 +582,11 @@ def _update_meta(name: str, **kwargs):
 
 
 _DEFAULT_STATUSES = [
-    {"id": "todo", "label": "To Do"},
-    {"id": "doing", "label": "In Progress"},
-    {"id": "done", "label": "Done"},
+    {"id": "backlog",   "label": "Backlog"},
+    {"id": "todo",      "label": "To Do"},
+    {"id": "doing",     "label": "In Progress"},
+    {"id": "done",      "label": "Done"},
+    {"id": "discarded", "label": "Discarded"},
 ]
 
 
@@ -2350,9 +2367,11 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
   .board-session-items .board-card .board-status-dot {
     display: inline-block; width: 7px; height: 7px; border-radius: 50%; margin-right: 6px; flex-shrink: 0;
   }
+  .board-status-dot.backlog { background: var(--accent); }
   .board-status-dot.todo { background: var(--dim); }
   .board-status-dot.doing { background: var(--yellow); }
   .board-status-dot.done { background: var(--green); }
+  .board-status-dot.discarded { background: rgba(139,148,158,0.4); }
   .board-session-empty { color: rgba(139,148,158,0.4); font-size: 0.75rem; padding: 10px 0; text-align: center; }
   .board-columns-list { display: block; padding-bottom: 16px; min-height: 200px; }
   /* Board card detail */
@@ -2372,9 +2391,11 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
     border: 1px solid var(--border); background: none; color: var(--dim);
     cursor: pointer; transition: all 0.15s; -webkit-tap-highlight-color: transparent;
   }
+  .board-detail-status-btn.active-backlog { background: rgba(88,166,255,0.15); color: var(--accent); border-color: var(--accent); }
   .board-detail-status-btn.active-todo { background: rgba(139,148,158,0.15); color: var(--text); border-color: var(--dim); }
   .board-detail-status-btn.active-doing { background: rgba(210,153,34,0.15); color: var(--yellow); border-color: var(--yellow); }
   .board-detail-status-btn.active-done { background: rgba(63,185,80,0.15); color: var(--green); border-color: var(--green); }
+  .board-detail-status-btn.active-discarded { background: rgba(139,148,158,0.08); color: rgba(139,148,158,0.5); border-color: rgba(139,148,158,0.2); }
   .board-detail-session-select {
     padding: 4px 8px; border-radius: 6px; font-size: 0.8rem;
     border: 1px solid var(--border); background: var(--card); color: var(--text);
@@ -2585,7 +2606,7 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
     </div>
     <div class="field-group">
       <label class="field-label">Status</label>
-      <select id="be-status"><option value="todo">To Do</option><option value="doing">In Progress</option><option value="done">Done</option></select>
+      <select id="be-status"><option value="backlog">Backlog</option><option value="todo">To Do</option><option value="doing">In Progress</option><option value="done">Done</option><option value="discarded">Discarded</option></select>
     </div>
     <div class="field-group">
       <label class="field-label">Due date <span class="field-optional">(optional)</span></label>
@@ -2747,7 +2768,7 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
   <div id="peek-issues-panel" class="peek-tasks-panel">
     <div class="peek-tasks-add" style="gap:10px;">
       <span id="peek-issues-count" style="flex:1;font-size:0.82rem;color:var(--dim);align-self:center;"></span>
-      <button class="btn primary" style="font-size:0.8rem;padding:5px 12px;" onclick="openBoardAdd('todo')">+ New issue</button>
+      <button class="btn primary" style="font-size:0.8rem;padding:5px 12px;" onclick="openBoardAdd('backlog')">+ New issue</button>
     </div>
     <div class="peek-tasks-list" id="peek-issues-list"></div>
   </div>
@@ -5478,7 +5499,7 @@ document.addEventListener('DOMContentLoaded', function() {
 // ═══════ BOARD ═══════
 let activeView = 'sessions';
 let boardItems = [];
-let boardStatuses = [{id:'todo',label:'To Do'},{id:'doing',label:'In Progress'},{id:'done',label:'Done'}];
+let boardStatuses = [{id:'backlog',label:'Backlog'},{id:'todo',label:'To Do'},{id:'doing',label:'In Progress'},{id:'done',label:'Done'},{id:'discarded',label:'Discarded'}];
 let _boardSortables = [];
 let boardTimer = null;
 let boardEditId = null;
@@ -5494,9 +5515,11 @@ let _sessionGroupCollapsed = JSON.parse(localStorage.getItem('amux_board_collaps
 let _tagGroupCollapsed = JSON.parse(localStorage.getItem('amux_tag_collapsed') || '{}');
 
 const _BUILT_IN_STATUS_STYLE = {
-  'todo':  {bg:'rgba(139,148,158,0.12)',color:'var(--dim)',border:'rgba(139,148,158,0.3)',dot:'var(--dim)'},
-  'doing': {bg:'rgba(210,153,34,0.15)',color:'var(--yellow)',border:'rgba(210,153,34,0.4)',dot:'var(--yellow)'},
-  'done':  {bg:'rgba(63,185,80,0.15)',color:'var(--green)',border:'rgba(63,185,80,0.4)',dot:'var(--green)'},
+  'backlog':   {bg:'rgba(88,166,255,0.12)',color:'var(--accent)',border:'rgba(88,166,255,0.3)',dot:'var(--accent)'},
+  'todo':      {bg:'rgba(139,148,158,0.12)',color:'var(--dim)',border:'rgba(139,148,158,0.3)',dot:'var(--dim)'},
+  'doing':     {bg:'rgba(210,153,34,0.15)',color:'var(--yellow)',border:'rgba(210,153,34,0.4)',dot:'var(--yellow)'},
+  'done':      {bg:'rgba(63,185,80,0.15)',color:'var(--green)',border:'rgba(63,185,80,0.4)',dot:'var(--green)'},
+  'discarded': {bg:'rgba(139,148,158,0.08)',color:'rgba(139,148,158,0.5)',border:'rgba(139,148,158,0.2)',dot:'rgba(139,148,158,0.4)'},
 };
 const _CUSTOM_STATUS_PALETTE = [
   {bg:'rgba(88,166,255,0.15)',color:'var(--accent)',border:'rgba(88,166,255,0.4)',dot:'var(--accent)'},
@@ -5826,7 +5849,7 @@ function renderBoard() {
     oldRects[id] = { top: r.top, left: r.left };
   });
 
-  const builtIn = new Set(['todo','doing','done']);
+  const builtIn = new Set(['backlog','todo','doing','done','discarded']);
   let html = '';
   boardStatuses.forEach(stObj => {
     const st = stObj.id;
@@ -5945,8 +5968,8 @@ function _populateSessionSelect(selectId, current) {
 }
 
 function openBoardAdd(statusOrDate, prefillDate) {
-  // statusOrDate: can be a status string ('todo','doing','done') or a YYYY-MM-DD date (from calendar cell click)
-  let status = 'todo', dueDate = prefillDate || '';
+  // statusOrDate: can be a status string or a YYYY-MM-DD date (from calendar cell click)
+  let status = 'backlog', dueDate = prefillDate || '';
   if (statusOrDate && /^\d{4}-\d{2}-\d{2}$/.test(statusOrDate)) {
     dueDate = statusOrDate;
   } else if (statusOrDate) {
@@ -7728,7 +7751,7 @@ class CCHandler(BaseHTTPRequestHandler):
             if status_m:
                 sid = status_m.group(1)
                 if method == "DELETE":
-                    if sid in ("todo", "doing", "done"):
+                    if sid in ("backlog", "todo", "doing", "done", "discarded"):
                         return self._json({"error": "cannot delete built-in status"}, 400)
                     db.execute("DELETE FROM statuses WHERE id = ? AND is_builtin = 0", (sid,))
                     db.execute(
