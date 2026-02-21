@@ -1468,7 +1468,7 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
     user-select: text; -webkit-user-select: text;
   }
   .card:active { border-color: var(--accent); }
-  .card-header { display: flex; flex-direction: column; gap: 4px; position: relative; min-width: 0; cursor: grab; }
+  .card-header { display: flex; flex-direction: column; gap: 4px; position: relative; min-width: 0; cursor: grab; user-select: none; -webkit-user-select: none; }
   .card-header:active { cursor: grabbing; }
   .card-header-top { display: flex; align-items: center; gap: 10px; width: 100%; }
   .card-header-meta { display: flex; align-items: center; gap: 6px; margin-left: 20px; min-width: 0; }
@@ -5774,8 +5774,11 @@ function initSortable() {
     ghostClass: 'sortable-ghost',
     chosenClass: 'sortable-chosen',
     dragClass: 'sortable-drag',
-    delay: 80,
-    delayOnTouchOnly: true,
+    forceFallback: true,
+    fallbackClass: 'sortable-drag',
+    delay: 150,
+    delayOnTouchOnly: false,
+    touchStartThreshold: 4,
     onStart: function() { _tileJustDragged = false; },
     onEnd: function(evt) {
       _tileJustDragged = evt.oldIndex !== evt.newIndex;
