@@ -7939,7 +7939,6 @@ class CCHandler(BaseHTTPRequestHandler):
             if not p.is_file():
                 return self._json({"error": "file not found"}, 404)
             try:
-                import base64
                 ext = p.suffix.lower()
                 IMAGE_MIMES = {
                     ".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg",
