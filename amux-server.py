@@ -3782,14 +3782,31 @@ function render() {
       }
     });
     const sortedTags = Object.keys(tagGroups).sort((a, b) => tagGroups[b].length - tagGroups[a].length);
-    // Default: largest group open, rest closed
-    const largestTag = sortedTags[0];
+    // Default: tag groups collapsed, untagged sessions open
     sortedTags.forEach(t => {
-      if (_tagGroupCollapsed[t] === undefined) _tagGroupCollapsed[t] = (t !== largestTag);
+      if (_tagGroupCollapsed[t] === undefined) _tagGroupCollapsed[t] = true;
     });
-    if (untagged.length && _tagGroupCollapsed['__untagged__'] === undefined) _tagGroupCollapsed['__untagged__'] = true;
+    if (untagged.length && _tagGroupCollapsed['__untagged__'] === undefined) _tagGroupCollapsed['__untagged__'] = false;
 
     let groupHtml = '';
+    // Untagged sessions first (at the top), open by default
+    if (untagged.length) {
+      const col = _tagGroupCollapsed['__untagged__'];
+      const runC = untagged.filter(s => s.running).length;
+      const stopC = untagged.length - runC;
+      groupHtml += `<div class="board-session-group">
+        <div class="board-session-header" onclick="toggleTagGroup('__untagged__')">
+          <span class="board-session-chevron${col ? '' : ' open'}">&#x25B6;</span>
+          <span class="board-session-name">Sessions</span>
+          <div class="board-session-counts">
+            ${runC ? `<span class="board-session-count doing">${runC} running</span>` : ''}
+            ${stopC ? `<span class="board-session-count todo">${stopC} stopped</span>` : ''}
+          </div>
+        </div>
+        ${!col ? `<div class="tag-group-body">${untagged.map(_renderSessionCard).join('')}</div>` : ''}
+      </div>`;
+    }
+    // Tag groups below, collapsed by default
     sortedTags.forEach(tag => {
       const items = tagGroups[tag];
       const col = _tagGroupCollapsed[tag];
@@ -3807,22 +3824,6 @@ function render() {
         ${!col ? `<div class="tag-group-body">${items.map(_renderSessionCard).join('')}</div>` : ''}
       </div>`;
     });
-    if (untagged.length) {
-      const col = _tagGroupCollapsed['__untagged__'];
-      const runC = untagged.filter(s => s.running).length;
-      const stopC = untagged.length - runC;
-      groupHtml += `<div class="board-session-group">
-        <div class="board-session-header" onclick="toggleTagGroup('__untagged__')">
-          <span class="board-session-chevron${col ? '' : ' open'}">&#x25B6;</span>
-          <span class="board-session-name" style="color:var(--dim)">Untagged</span>
-          <div class="board-session-counts">
-            ${runC ? `<span class="board-session-count doing">${runC} running</span>` : ''}
-            ${stopC ? `<span class="board-session-count todo">${stopC} stopped</span>` : ''}
-          </div>
-        </div>
-        ${!col ? `<div class="tag-group-body">${untagged.map(_renderSessionCard).join('')}</div>` : ''}
-      </div>`;
-    }
       el.innerHTML = draftCards + groupHtml;
     } else {
       el.innerHTML = draftCards + filtered.map(_renderSessionCard).join('');
@@ -5091,7 +5092,7 @@ function toggleTagFilter(tag) {
 }
 function toggleTagGroup(tag) {
   _tagGroupCollapsed[tag] = !_tagGroupCollapsed[tag];
-  localStorage.setItem('amux_tag_collapsed', JSON.stringify(_tagGroupCollapsed));
+  localStorage.setItem('amux_tag_collapsed_v2', JSON.stringify(_tagGroupCollapsed));
   render();
 }
 function clearSearch() {
@@ -5766,7 +5767,7 @@ let boardSearchQuery = '';
 let _boardDragId = null;
 let boardViewMode = localStorage.getItem('amux_board_view') || 'session';
 let _sessionGroupCollapsed = JSON.parse(localStorage.getItem('amux_board_collapsed') || '{}');
-let _tagGroupCollapsed = JSON.parse(localStorage.getItem('amux_tag_collapsed') || '{}');
+let _tagGroupCollapsed = JSON.parse(localStorage.getItem('amux_tag_collapsed_v2') || '{}');
 let _collapsedCols = new Set(JSON.parse(localStorage.getItem('amux_col_collapsed') || '[]'));
 
 const _BUILT_IN_STATUS_STYLE = {
