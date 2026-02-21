@@ -2591,6 +2591,21 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
   }
   #gridstack-container .ui-resizable-handle { opacity: 0.3; }
   #gridstack-container .ui-resizable-handle:hover { opacity: 0.8; }
+  .gp-send {
+    display: flex; gap: 4px; padding: 4px 6px;
+    border-top: 1px solid var(--border); flex-shrink: 0;
+    background: #161b22;
+  }
+  .gp-send-input {
+    flex: 1; background: var(--bg); border: 1px solid var(--border); border-radius: 4px;
+    color: var(--text); font-size: 0.73rem; padding: 4px 8px; min-width: 0; outline: none;
+  }
+  .gp-send-input:focus { border-color: var(--accent); }
+  .gp-send-btn {
+    background: var(--accent); border: none; color: #fff; border-radius: 4px;
+    font-size: 0.73rem; padding: 4px 8px; cursor: pointer; flex-shrink: 0;
+  }
+  .gp-send-btn:hover { opacity: 0.85; }
   #tab-grid { display: none; }
   @media (min-width: 769px) { #tab-grid { display: block; } }
 </style>
@@ -6771,7 +6786,7 @@ function enterGridMode() {
 function exitGridMode() {
   Object.values(_gridPanes).forEach(p => { if (p.timer) clearInterval(p.timer); });
   _gridPanes = {};
-  if (_grid) { try { _grid.destroy(false); } catch(e) {} _grid = null; }
+  if (_grid) { try { _grid.destroy(true); } catch(e) {} _grid = null; }
   document.getElementById('grid-view').classList.remove('active');
   document.getElementById('tab-grid').classList.remove('active');
   document.getElementById('tab-' + (activeView || 'sessions')).classList.add('active');
@@ -6801,7 +6816,12 @@ function addGridPane(name, x, y, w, h) {
       '<span class="gp-title">' + esc(name) + '</span>' +
       '<button class="gp-close" onclick="removeGridPane(\'' + safeName + '\')">&#x2715;</button>' +
     '</div>' +
-    '<div class="gp-body" id="' + sid + '-body">Loading\u2026</div>';
+    '<div class="gp-body" id="' + sid + '-body">Loading\u2026</div>' +
+    '<div class="gp-send">' +
+      '<input class="gp-send-input" id="' + sid + '-input" placeholder="Send\u2026" ' +
+        'onkeydown="if(event.key===\'Enter\'&&!event.shiftKey){sendGridCmd(\'' + safeName + '\');event.preventDefault();}">' +
+      '<button class="gp-send-btn" onclick="sendGridCmd(\'' + safeName + '\')">&#x21B5;</button>' +
+    '</div>';
   const widget = _grid.addWidget({ id: name, x, y, w: w || 6, h: h || 7, content });
   _gridPanes[name] = { widget, timer: setInterval(() => _updateGridPane(name), 2000) };
   _updateGridPane(name);
@@ -6851,6 +6871,19 @@ function _gridRestoreLayout() {
         addGridPane(item.id, item.x, item.y, item.w, item.h);
     });
   } catch(e) {}
+}
+
+async function sendGridCmd(name) {
+  const sid = _gpSafeId(name);
+  const inp = document.getElementById(sid + '-input');
+  if (!inp) return;
+  const text = inp.value.trim();
+  if (!text) return;
+  inp.value = '';
+  await doSend(name, text);
+  inp.style.borderColor = 'var(--green)';
+  setTimeout(() => { inp.style.borderColor = ''; }, 400);
+  setTimeout(() => _updateGridPane(name), 500);
 }
 
 // ═══════ INIT ═══════
