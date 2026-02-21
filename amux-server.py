@@ -1945,6 +1945,83 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
   .header-add-menu .card-menu-item { padding: 12px 16px; }
 
   /* Settings dropdown */
+  /* ── DevTools Panel ── */
+  #devtools-panel {
+    position: fixed; bottom: 0; left: 0; right: 0; height: 340px;
+    background: #0d1117; border-top: 2px solid #30363d; z-index: 10000;
+    display: none; flex-direction: column; font-family: "SF Mono","Fira Code","Cascadia Code",monospace;
+    font-size: 12px; color: #c9d1d9; box-shadow: 0 -4px 20px rgba(0,0,0,0.5);
+  }
+  #devtools-panel.open { display: flex; }
+  .dt-resize-handle {
+    height: 4px; cursor: ns-resize; background: transparent; flex-shrink: 0;
+    border-bottom: 1px solid #30363d;
+  }
+  .dt-resize-handle:hover { background: var(--accent); }
+  .dt-header {
+    display: flex; align-items: center; gap: 0; padding: 0 8px;
+    border-bottom: 1px solid #30363d; flex-shrink: 0; height: 32px;
+  }
+  .dt-tabs { display: flex; gap: 0; }
+  .dt-tab {
+    background: none; border: none; color: #8b949e; font-size: 11px; font-weight: 500;
+    padding: 0 12px; height: 32px; cursor: pointer; border-bottom: 2px solid transparent;
+    transition: color 0.15s; white-space: nowrap;
+  }
+  .dt-tab:hover { color: #c9d1d9; }
+  .dt-tab.active { color: #58a6ff; border-bottom-color: #58a6ff; }
+  .dt-toolbar { margin-left: auto; display: flex; gap: 4px; align-items: center; }
+  .dt-toolbar-btn {
+    background: none; border: none; color: #8b949e; font-size: 13px; padding: 3px 6px;
+    cursor: pointer; border-radius: 4px; line-height: 1;
+  }
+  .dt-toolbar-btn:hover { background: #21262d; color: #c9d1d9; }
+  .dt-panel { flex: 1; min-height: 0; display: none; flex-direction: column; }
+  .dt-panel.active { display: flex; }
+  .dt-log-area {
+    flex: 1; overflow-y: auto; padding: 4px 0;
+    scrollbar-width: thin; scrollbar-color: #30363d transparent;
+  }
+  .dt-log-area::-webkit-scrollbar { width: 6px; }
+  .dt-log-area::-webkit-scrollbar-thumb { background: #30363d; border-radius: 3px; }
+  .dt-entry {
+    padding: 2px 10px; border-bottom: 1px solid rgba(48,54,61,0.3);
+    white-space: pre-wrap; word-break: break-all; line-height: 1.5;
+    display: flex; gap: 8px;
+  }
+  .dt-entry:hover { background: #161b22; }
+  .dt-entry.error { color: #f85149; background: rgba(248,81,73,0.06); }
+  .dt-entry.warn  { color: #d29922; background: rgba(210,153,34,0.06); }
+  .dt-entry.info  { color: #58a6ff; }
+  .dt-entry.debug { color: #6e7681; }
+  .dt-ts { color: #6e7681; flex-shrink: 0; font-size: 10px; margin-top: 2px; }
+  .dt-msg { flex: 1; min-width: 0; }
+  .dt-repl-row {
+    display: flex; align-items: center; gap: 6px; padding: 5px 8px;
+    border-top: 1px solid #30363d; flex-shrink: 0; background: #0d1117;
+  }
+  .dt-prompt { color: #3fb950; font-weight: 700; flex-shrink: 0; }
+  .dt-repl-input {
+    flex: 1; background: none; border: none; color: #c9d1d9; font-family: inherit;
+    font-size: 12px; outline: none; min-width: 0;
+  }
+  .dt-repl-input::placeholder { color: #484f58; }
+  .dt-net-entry {
+    padding: 3px 10px; border-bottom: 1px solid rgba(48,54,61,0.3);
+    display: flex; gap: 10px; align-items: center; white-space: nowrap; overflow: hidden;
+  }
+  .dt-net-entry:hover { background: #161b22; }
+  .dt-net-method { font-weight: 700; min-width: 42px; color: #58a6ff; }
+  .dt-net-status { min-width: 36px; }
+  .dt-net-status.ok { color: #3fb950; }
+  .dt-net-status.error { color: #f85149; }
+  .dt-net-status.err { color: #f85149; }
+  .dt-net-status.pending { color: #6e7681; }
+  .dt-net-ms { color: #6e7681; min-width: 52px; }
+  .dt-net-url { overflow: hidden; text-overflow: ellipsis; color: #c9d1d9; }
+  .dt-info-row { padding: 4px 10px; display: flex; gap: 8px; border-bottom: 1px solid rgba(48,54,61,0.3); }
+  .dt-info-key { color: #58a6ff; min-width: 160px; flex-shrink: 0; }
+  .dt-info-val { color: #c9d1d9; word-break: break-all; }
   .settings-wrap { position: relative; }
   .settings-btn {
     font-size: 1.1rem; width: 40px; height: 40px; border-radius: 8px;
@@ -2722,6 +2799,7 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
         <div class="settings-section" style="text-align:center;display:flex;flex-direction:column;gap:8px;">
           <span style="font-size:0.7rem;color:var(--dim);cursor:pointer;" onclick="openSkills();closeSettings()">&#x26A1; Skills &amp; commands</span>
           <span style="font-size:0.7rem;color:var(--dim);cursor:pointer;" onclick="openAbout();closeSettings()">About amux &amp; token stats</span>
+          <span style="font-size:0.7rem;color:var(--dim);cursor:pointer;" onclick="openDevtools();closeSettings()">&#x1F6E0; Developer tools</span>
         </div>
       </div>
     </div>
@@ -7730,6 +7808,222 @@ function forceUpdate() {
     });
   });
 }
+
+// ── DevTools Panel ──────────────────────────────────────────────
+(function() {
+  const MAX_LOG = 500;
+  const MAX_NET = 200;
+  let _dtLogs = [];
+  let _dtNet  = [];
+  let _dtOpen = false;
+  let _dtTab  = 'console';
+  let _dtReplHist = [];
+  let _dtReplIdx  = -1;
+
+  // ── Console override ──
+  const _origConsole = {};
+  ['log','info','warn','error','debug'].forEach(level => {
+    _origConsole[level] = console[level].bind(console);
+    console[level] = function(...args) {
+      _origConsole[level](...args);
+      const text = args.map(a => {
+        try { return (typeof a === 'object' && a !== null) ? JSON.stringify(a, null, 2) : String(a); }
+        catch(e) { return String(a); }
+      }).join(' ');
+      _dtLogPush(level === 'debug' ? 'log' : level, text);
+    };
+  });
+
+  // ── Fetch interception ──
+  const _origFetch = window.fetch.bind(window);
+  window.fetch = async function(input, init) {
+    const method = (init && init.method) ? init.method.toUpperCase() : 'GET';
+    const url = typeof input === 'string' ? input : (input.url || String(input));
+    const t0 = Date.now();
+    let entry = { method, url, status: '…', ms: null, t: new Date().toLocaleTimeString() };
+    _dtNet.push(entry);
+    if (_dtNet.length > MAX_NET) _dtNet = _dtNet.slice(-MAX_NET);
+    if (_dtOpen && _dtTab === 'network') _renderDevNetwork();
+    try {
+      const res = await _origFetch(input, init);
+      entry.status = res.status;
+      entry.ms = Date.now() - t0;
+      if (_dtOpen && _dtTab === 'network') _renderDevNetwork();
+      return res;
+    } catch(e) {
+      entry.status = 'ERR';
+      entry.ms = Date.now() - t0;
+      if (_dtOpen && _dtTab === 'network') _renderDevNetwork();
+      throw e;
+    }
+  };
+
+  // ── Clipboard event debug ──
+  ['copy','cut','paste'].forEach(evtName => {
+    document.addEventListener(evtName, e => {
+      _dtLogPush('info', `[clipboard] ${evtName} — defaultPrevented=${e.defaultPrevented} target=${e.target && e.target.tagName}`);
+    }, true); // capture phase
+  });
+
+  // ── Keyboard debug (Cmd+C/V/X) — capture AND bubble phase ──
+  const _watchKeys = new Set(['c','v','x','z']);
+  document.addEventListener('keydown', e => {
+    if ((e.metaKey || e.ctrlKey) && _watchKeys.has(e.key.toLowerCase())) {
+      _dtLogPush('log', `[key:capture] ${e.metaKey?'Cmd':'Ctrl'}+${e.key} defaultPrevented=${e.defaultPrevented}`);
+      // schedule a microtask to log after handlers run
+      Promise.resolve().then(() => {
+        _dtLogPush('log', `[key:after] ${e.metaKey?'Cmd':'Ctrl'}+${e.key} defaultPrevented=${e.defaultPrevented}`);
+      });
+    }
+  }, true);
+
+  // ── Internal log push ──
+  function _dtLogPush(level, text) {
+    _dtLogs.push({ level, text, t: new Date().toLocaleTimeString() });
+    if (_dtLogs.length > MAX_LOG) _dtLogs = _dtLogs.slice(-MAX_LOG);
+    if (_dtOpen && _dtTab === 'console') _renderDevLogs();
+  }
+
+  // ── Render helpers ──
+  function _renderDevLogs() {
+    const el = document.getElementById('dt-log-area');
+    if (!el) return;
+    const atBottom = el.scrollTop + el.clientHeight >= el.scrollHeight - 10;
+    el.innerHTML = _dtLogs.map(e => {
+      const cls = e.level === 'error' ? 'error' : e.level === 'warn' ? 'warn' : e.level === 'info' ? 'info' : '';
+      const escaped = e.text.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+      return `<div class="dt-entry ${cls}"><span class="dt-ts">${e.t}</span> ${escaped}</div>`;
+    }).join('');
+    if (atBottom) el.scrollTop = el.scrollHeight;
+  }
+
+  function _renderDevNetwork() {
+    const el = document.getElementById('dt-net-area');
+    if (!el) return;
+    const atBottom = el.scrollTop + el.clientHeight >= el.scrollHeight - 10;
+    el.innerHTML = _dtNet.slice().reverse().map(e => {
+      const statusCls = (e.status >= 400 || e.status === 'ERR') ? 'error' : (e.status === '…') ? 'pending' : 'ok';
+      const shortUrl = e.url.replace(/^https?:\/\/[^/]+/, '');
+      return `<div class="dt-net-entry">` +
+        `<span class="dt-net-method">${e.method}</span>` +
+        `<span class="dt-net-status ${statusCls}">${e.status}</span>` +
+        `<span class="dt-net-url" title="${e.url}">${shortUrl}</span>` +
+        `<span class="dt-net-ms">${e.ms !== null ? e.ms+'ms' : ''}</span>` +
+        `<span class="dt-ts">${e.t}</span>` +
+      `</div>`;
+    }).join('');
+    if (atBottom) el.scrollTop = el.scrollHeight;
+  }
+
+  function _renderDevInfo() {
+    const el = document.getElementById('dt-info-area');
+    if (!el) return;
+    const sw = navigator.serviceWorker;
+    const rows = [
+      ['Standalone (PWA)', navigator.standalone !== undefined ? String(navigator.standalone) : (window.matchMedia('(display-mode: standalone)').matches ? 'true (display-mode)' : 'false')],
+      ['User Agent', navigator.userAgent],
+      ['Platform', navigator.platform || navigator.userAgentData?.platform || '?'],
+      ['Viewport', `${window.innerWidth}×${window.innerHeight} (dpr=${devicePixelRatio})`],
+      ['Online', String(navigator.onLine)],
+      ['SW supported', String('serviceWorker' in navigator)],
+      ['SW controller', sw && sw.controller ? sw.controller.scriptURL : 'none'],
+      ['SW state', sw && sw.controller ? sw.controller.state : 'n/a'],
+      ['IndexedDB', String('indexedDB' in window)],
+      ['Clipboard API', String('clipboard' in navigator)],
+      ['clipboard.read', String(!!(navigator.clipboard && navigator.clipboard.read))],
+      ['clipboard.write', String(!!(navigator.clipboard && navigator.clipboard.write))],
+      ['Permissions API', String('permissions' in navigator)],
+      ['amux version', (document.querySelector('meta[name="amux-version"]') || {content:'?'}).content],
+    ];
+    el.innerHTML = rows.map(([k,v]) =>
+      `<div class="dt-info-row"><span class="dt-info-key">${k}</span><span class="dt-info-val">${v}</span></div>`
+    ).join('');
+  }
+
+  // ── REPL history ──
+  window.dtReplHistUp = function(inp) {
+    if (!_dtReplHist.length) return;
+    if (_dtReplIdx === -1) _dtReplIdx = _dtReplHist.length - 1;
+    else if (_dtReplIdx > 0) _dtReplIdx--;
+    inp.value = _dtReplHist[_dtReplIdx];
+  };
+  window.dtReplHistDown = function(inp) {
+    if (_dtReplIdx === -1) return;
+    if (_dtReplIdx < _dtReplHist.length - 1) { _dtReplIdx++; inp.value = _dtReplHist[_dtReplIdx]; }
+    else { _dtReplIdx = -1; inp.value = ''; }
+  };
+
+  // ── Public API ──
+  window.openDevtools = function() {
+    _dtOpen = true;
+    const panel = document.getElementById('devtools-panel');
+    if (panel) panel.classList.add('open');
+    dtSwitchTab(_dtTab);
+  };
+
+  window.closeDevtools = function() {
+    _dtOpen = false;
+    const panel = document.getElementById('devtools-panel');
+    if (panel) panel.classList.remove('open');
+  };
+
+  window.dtSwitchTab = function(tab) {
+    _dtTab = tab;
+    document.querySelectorAll('.dt-tab').forEach(b => b.classList.toggle('active', b.textContent.toLowerCase() === tab));
+    document.querySelectorAll('.dt-panel').forEach(p => p.classList.toggle('active', p.id === 'dt-panel-' + tab));
+    if (tab === 'console') _renderDevLogs();
+    else if (tab === 'network') _renderDevNetwork();
+    else if (tab === 'info') _renderDevInfo();
+  };
+
+  window.dtClearConsole = function() {
+    _dtLogs = [];
+    _renderDevLogs();
+  };
+
+  window.dtEval = function(code) {
+    if (!code.trim()) return;
+    _dtReplHist.push(code);
+    _dtReplIdx = -1;
+    _dtLogPush('log', '> ' + code);
+    try {
+      // eslint-disable-next-line no-eval
+      const result = (0, eval)(code);
+      const out = (result === undefined) ? 'undefined' :
+                  (typeof result === 'object' && result !== null) ? JSON.stringify(result, null, 2) : String(result);
+      _dtLogPush('info', '← ' + out);
+    } catch(e) {
+      _dtLogPush('error', '✗ ' + e.message);
+    }
+  };
+
+  // ── Resize handle ──
+  document.addEventListener('DOMContentLoaded', () => {
+    const handle = document.getElementById('dt-resize-handle');
+    const panel  = document.getElementById('devtools-panel');
+    if (!handle || !panel) return;
+    let dragging = false, startY = 0, startH = 0;
+    handle.addEventListener('mousedown', e => {
+      dragging = true;
+      startY = e.clientY;
+      startH = panel.offsetHeight;
+      document.body.style.userSelect = 'none';
+      e.preventDefault();
+    });
+    document.addEventListener('mousemove', e => {
+      if (!dragging) return;
+      const delta = startY - e.clientY;
+      const newH = Math.max(120, Math.min(window.innerHeight * 0.8, startH + delta));
+      panel.style.height = newH + 'px';
+    });
+    document.addEventListener('mouseup', () => {
+      if (dragging) { dragging = false; document.body.style.userSelect = ''; }
+    });
+  });
+
+  // log startup
+  _dtLogPush('info', '[devtools] Panel initialised — ' + new Date().toLocaleString());
+})();
 </script>
 <script src="https://cdn.jsdelivr.net/npm/sortablejs@1.15.6/Sortable.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/gridstack@7/dist/gridstack-all.js"></script>
@@ -7741,6 +8035,37 @@ function forceUpdate() {
   </div>
   <div id="gridstack-container">
     <div class="grid-stack" id="gridstack"></div>
+  </div>
+</div>
+<!-- DevTools Panel -->
+<div id="devtools-panel">
+  <div class="dt-resize-handle" id="dt-resize-handle"></div>
+  <div class="dt-header">
+    <div class="dt-tabs">
+      <button class="dt-tab active" onclick="dtSwitchTab('console')">Console</button>
+      <button class="dt-tab" onclick="dtSwitchTab('network')">Network</button>
+      <button class="dt-tab" onclick="dtSwitchTab('info')">Info</button>
+    </div>
+    <div class="dt-toolbar">
+      <button class="dt-toolbar-btn" onclick="dtClearConsole()" title="Clear console">&#x2298;</button>
+      <button class="dt-toolbar-btn" onclick="closeDevtools()" title="Close">&#x2715;</button>
+    </div>
+  </div>
+  <div class="dt-panel active" id="dt-panel-console">
+    <div class="dt-log-area" id="dt-log-area"></div>
+    <div class="dt-repl-row">
+      <span class="dt-prompt">&gt;</span>
+      <input class="dt-repl-input" id="dt-repl-input" placeholder="JavaScript expression... (Enter to evaluate)"
+        onkeydown="if(event.key==='Enter'){dtEval(this.value);this.value='';event.preventDefault();}
+                   if(event.key==='ArrowUp'){dtReplHistUp(this);event.preventDefault();}
+                   if(event.key==='ArrowDown'){dtReplHistDown(this);event.preventDefault();}">
+    </div>
+  </div>
+  <div class="dt-panel" id="dt-panel-network">
+    <div class="dt-log-area" id="dt-net-area"></div>
+  </div>
+  <div class="dt-panel" id="dt-panel-info">
+    <div class="dt-log-area" id="dt-info-area"></div>
   </div>
 </div>
 </body>
