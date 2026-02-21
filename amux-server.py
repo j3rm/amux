@@ -2886,7 +2886,7 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
         </div>
         <input type="file" id="peek-file-input" multiple accept="image/*,.pdf,.txt,.md,.csv,.json,.log"
           style="display:none" onchange="handlePeekFileInput(event)">
-        <button class="peek-attach-btn" onclick="document.getElementById('peek-file-input').click()" title="Attach file">&#128206;</button>
+        <label for="peek-file-input" class="peek-attach-btn" title="Attach file">&#128206;</label>
         <button class="btn primary" onclick="sendPeekCmd()">Send</button>
       </div>
       <!-- Drag-over hint (shown by CSS when drag-over class is on peek-overlay) -->
