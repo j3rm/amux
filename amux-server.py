@@ -1468,9 +1468,17 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
     user-select: text; -webkit-user-select: text;
   }
   .card:active { border-color: var(--accent); }
-  .card-header { display: flex; flex-direction: column; gap: 4px; position: relative; min-width: 0; cursor: grab; user-select: none; -webkit-user-select: none; }
-  .card-header:active { cursor: grabbing; }
+  .card-header { display: flex; flex-direction: column; gap: 4px; position: relative; min-width: 0; cursor: default; }
   .card-header-top { display: flex; align-items: center; gap: 10px; width: 100%; }
+  .card-drag-handle {
+    flex-shrink: 0; width: 16px; height: 20px; display: flex; align-items: center; justify-content: center;
+    cursor: grab; color: var(--dim); opacity: 0; transition: opacity 0.15s; border-radius: 3px;
+    user-select: none; -webkit-user-select: none; touch-action: none;
+  }
+  .card-drag-handle:active { cursor: grabbing; }
+  .card:hover .card-drag-handle { opacity: 0.45; }
+  .card-drag-handle:hover { opacity: 1 !important; color: var(--fg); background: rgba(139,148,158,0.1); }
+  @media (hover: none) { .card-drag-handle { opacity: 0.35; } }
   .card-header-meta { display: flex; align-items: center; gap: 6px; margin-left: 20px; min-width: 0; }
   .card-menu-btn {
     width: 28px; height: 28px; border-radius: 6px; border: 1px solid var(--border);
@@ -3817,6 +3825,7 @@ function render() {
     <div class="card ${isExp ? 'expanded' : ''}" data-session="${esc(s.name)}" onclick="event.stopPropagation();toggle('${s.name}')">
       <div class="card-header" onclick="headerTap('${s.name}', event)" onmousedown="tileMouseDown(event,'${s.name}')">
         <div class="card-header-top">
+          <div class="card-drag-handle" title="Drag to reorder"><svg width="10" height="16" viewBox="0 0 10 16" fill="currentColor"><circle cx="3" cy="3" r="1.3"/><circle cx="7" cy="3" r="1.3"/><circle cx="3" cy="8" r="1.3"/><circle cx="7" cy="8" r="1.3"/><circle cx="3" cy="13" r="1.3"/><circle cx="7" cy="13" r="1.3"/></svg></div>
           <div class="dot ${s.running ? 'running' : 'stopped'}"></div>
           <div class="card-name">${s.pinned ? '<span class="pin-icon">&#x1F4CC;</span> ' : ''}${esc(s.name)}</div>
           <button class="card-menu-btn" onclick="event.stopPropagation();toggleMenu('${s.name}')" title="Options">&#x22EF;</button>
@@ -5959,16 +5968,11 @@ function initSortable() {
   const cards = document.querySelector('.cards');
   if (!cards) return;
   _sortable = Sortable.create(cards, {
-    handle: '.card-header',
+    handle: '.card-drag-handle',
     animation: 150,
     ghostClass: 'sortable-ghost',
     chosenClass: 'sortable-chosen',
     dragClass: 'sortable-drag',
-    forceFallback: true,
-    fallbackClass: 'sortable-drag',
-    delay: 150,
-    delayOnTouchOnly: false,
-    touchStartThreshold: 4,
     onStart: function(evt) {
       _tileJustDragged = false;
       console.log('[amux:drag] onStart', { session: evt.item?.dataset?.session, oldIndex: evt.oldIndex });
