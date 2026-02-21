@@ -2842,7 +2842,7 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
   </div>
   <div class="tile-controls">
     <button class="tile-btn" id="tile-list-btn" onclick="setLayoutMode('list')" title="List view">&#x2630;</button>
-    <button class="tile-btn" id="tile-group-btn" onclick="setLayoutMode('group')" title="Group by tag" style="font-size:0.75rem;font-weight:700;">#</button>
+    <button class="tile-btn" id="tile-group-btn" onclick="setLayoutMode('group')" title="Group by status" style="font-size:0.75rem;font-weight:700;">#</button>
     <button class="tile-btn tile-grid-only" id="tile-grid-btn" onclick="setLayoutMode('grid')" title="Grid view">&#x268F;</button>
   </div>
 </div>
@@ -3914,65 +3914,41 @@ function render() {
     return;
   }
 
-  // Group mode: group by tag when not filtered
+  // Group mode: group by session status
   if (layoutMode === 'group' && !activeTag && !q) {
-    const anyTagged = filtered.some(s => s.tags && s.tags.length);
-    if (anyTagged) {
-    const tagGroups = {};
-    const untagged = [];
+    const STATUS_GROUPS = [
+      { key: 'active',  label: 'Working',     defaultOpen: true  },
+      { key: 'waiting', label: 'Needs Input', defaultOpen: true  },
+      { key: 'idle',    label: 'Idle',        defaultOpen: true  },
+      { key: 'stopped', label: 'Stopped',     defaultOpen: false },
+    ];
+    const buckets = { active: [], waiting: [], idle: [], stopped: [] };
     filtered.forEach(s => {
-      if (s.tags && s.tags.length) {
-        s.tags.forEach(t => {
-          if (!tagGroups[t]) tagGroups[t] = [];
-          tagGroups[t].push(s);
-        });
-      } else {
-        untagged.push(s);
-      }
+      if (!s.running)              buckets.stopped.push(s);
+      else if (s.status === 'active')  buckets.active.push(s);
+      else if (s.status === 'waiting') buckets.waiting.push(s);
+      else                             buckets.idle.push(s);
     });
-    const sortedTags = Object.keys(tagGroups).sort((a, b) => tagGroups[b].length - tagGroups[a].length);
-    // Default: tag groups collapsed, untagged sessions open
-    sortedTags.forEach(t => {
-      if (_tagGroupCollapsed[t] === undefined) _tagGroupCollapsed[t] = true;
+    STATUS_GROUPS.forEach(g => {
+      if (_tagGroupCollapsed[g.key] === undefined) _tagGroupCollapsed[g.key] = !g.defaultOpen;
     });
-    if (untagged.length && _tagGroupCollapsed['__untagged__'] === undefined) _tagGroupCollapsed['__untagged__'] = false;
-
-    let groupHtml = '';
-    // Untagged sessions first (at the top), open by default
-    if (untagged.length) {
-      const col = _tagGroupCollapsed['__untagged__'];
-      const runC = untagged.filter(s => s.running).length;
-      const stopC = untagged.length - runC;
-      groupHtml += `<div class="board-session-group">
-        <div class="board-session-header" onclick="toggleTagGroup('__untagged__')">
-          <span class="board-session-chevron${col ? '' : ' open'}">&#x25B6;</span>
-          <span class="board-session-name">Sessions</span>
-          <div class="board-session-counts">
-            ${runC ? `<span class="board-session-count doing">${runC} running</span>` : ''}
-            ${stopC ? `<span class="board-session-count todo">${stopC} stopped</span>` : ''}
+    const nonEmpty = STATUS_GROUPS.filter(g => buckets[g.key].length);
+    if (nonEmpty.length > 1) {
+      let groupHtml = '';
+      nonEmpty.forEach(g => {
+        const items = buckets[g.key];
+        const col = _tagGroupCollapsed[g.key];
+        groupHtml += `<div class="board-session-group">
+          <div class="board-session-header" onclick="toggleTagGroup('${g.key}')">
+            <span class="board-session-chevron${col ? '' : ' open'}">&#x25B6;</span>
+            <span class="board-session-name">${g.label}</span>
+            <div class="board-session-counts">
+              <span class="board-session-count">${items.length}</span>
+            </div>
           </div>
-        </div>
-        ${!col ? `<div class="tag-group-body">${untagged.map(_renderSessionCard).join('')}</div>` : ''}
-      </div>`;
-    }
-    // Tag groups below, collapsed by default
-    sortedTags.forEach(tag => {
-      const items = tagGroups[tag];
-      const col = _tagGroupCollapsed[tag];
-      const runC = items.filter(s => s.running).length;
-      const stopC = items.length - runC;
-      groupHtml += `<div class="board-session-group">
-        <div class="board-session-header" onclick="toggleTagGroup('${esc(tag)}')">
-          <span class="board-session-chevron${col ? '' : ' open'}">&#x25B6;</span>
-          <span class="board-session-name">${esc(tag)}</span>
-          <div class="board-session-counts">
-            ${runC ? `<span class="board-session-count doing">${runC} running</span>` : ''}
-            ${stopC ? `<span class="board-session-count todo">${stopC} stopped</span>` : ''}
-          </div>
-        </div>
-        ${!col ? `<div class="tag-group-body">${items.map(_renderSessionCard).join('')}</div>` : ''}
-      </div>`;
-    });
+          ${!col ? `<div class="tag-group-body">${items.map(_renderSessionCard).join('')}</div>` : ''}
+        </div>`;
+      });
       el.innerHTML = draftCards + groupHtml;
     } else {
       el.innerHTML = draftCards + filtered.map(_renderSessionCard).join('');
