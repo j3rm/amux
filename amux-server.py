@@ -1363,6 +1363,58 @@ def _session_actual_cwd(name: str) -> str | None:
 _GLOBAL_MEM_FILE = CC_MEMORY / "_global.md"
 _MEM_MARKER = "<!-- amux:session-memory -->"
 
+GLOBAL_MEMORY_DEFAULT = """\
+# Shared Context
+
+<!-- Add shared context for all sessions here -->
+
+## amux inter-session API
+
+You are session **$AMUX_SESSION** (env var). API base: **$AMUX_URL** (self-signed, use `curl -sk`).
+
+### Discover sessions
+```bash
+curl -sk $AMUX_URL/api/sessions | python3 -c "import json,sys; [print(s['name'], s.get('status',''), '-', s.get('desc','')) for s in json.load(sys.stdin)]"
+```
+
+### Peek at another session's output
+```bash
+curl -sk "$AMUX_URL/api/sessions/OTHER/peek?lines=100" | python3 -c "import json,sys; print(json.load(sys.stdin).get('output',''))"
+```
+
+### Send a message to another session
+```bash
+curl -sk -X POST -H 'Content-Type: application/json' \\
+  -d '{"text":"<your message>"}' \\
+  $AMUX_URL/api/sessions/OTHER/send
+```
+
+### Task delegation via board (recommended for orchestration)
+```bash
+# Post task for a specific session
+curl -sk -X POST -H 'Content-Type: application/json' \\
+  -d '{"title":"Do X","session":"worker-1","owner_type":"agent","status":"todo"}' \\
+  $AMUX_URL/api/board
+
+# Check tasks assigned to this session
+curl -sk $AMUX_URL/api/board | python3 -c "
+import json,sys,os
+s=os.getenv('AMUX_SESSION','')
+[print(i['id'],i['title']) for i in json.load(sys.stdin) if i.get('session')==s and i['status'] in ('todo','doing')]
+"
+
+# Claim a task atomically (prevents two sessions taking same task)
+curl -sk -X POST -H 'Content-Type: application/json' \\
+  -d '{"session":"'"$AMUX_SESSION"'"}' \\
+  $AMUX_URL/api/board/TASK-ID/claim
+
+# Mark task done
+curl -sk -X PATCH -H 'Content-Type: application/json' \\
+  -d '{"status":"done","desc":"Result: ..."}' \\
+  $AMUX_URL/api/board/TASK-ID
+```
+"""
+
 
 def _session_mem_file(name: str) -> Path:
     """Return the per-session MEMORY.md file stored in ~/.amux/memory/.
@@ -1571,7 +1623,10 @@ def start_session(name: str, extra_flags: str = "", _skip_conv_id: bool = False)
             shell_rc += f"cd {shlex.quote(work_dir)}; "
         subprocess.run(
             ["tmux", "new-session", "-d", "-s", tmux_sess, "-n", name, "-c", work_dir,
-             "-e", "TMUX_SESSION_NAME=" + name, shell_rc + cmd],
+             "-e", "TMUX_SESSION_NAME=" + name,
+             "-e", "AMUX_SESSION=" + name,
+             "-e", "AMUX_URL=https://localhost:8822",
+             shell_rc + cmd],
             check=True, capture_output=True, timeout=10,
         )
         # Lock the window name immediately (before Claude output can rename it)
@@ -9329,6 +9384,8 @@ class CCHandler(BaseHTTPRequestHandler):
         if path == "/api/memory/global":
             if method == "GET":
                 content = _GLOBAL_MEM_FILE.read_text(errors="replace") if _GLOBAL_MEM_FILE.exists() else ""
+                if len(content.strip()) < 50:
+                    content = GLOBAL_MEMORY_DEFAULT
                 return self._json({"content": content, "path": str(_GLOBAL_MEM_FILE)})
             if method == "POST":
                 body = self._read_body()
@@ -9986,6 +10043,17 @@ class CCHandler(BaseHTTPRequestHandler):
             if dir_path:
                 _ensure_memory(name, dir_path)
             return self._json({"ok": True, "message": f"created {name}"})
+
+        # GET /api/sessions/self?session=<name> — convenience for a session to look itself up
+        if method == "GET" and path == "/api/sessions/self":
+            sname = qs.get("session", [None])[0] or self.headers.get("X-Amux-Session", "")
+            if not sname:
+                return self._json({"error": "session param required"}, 400)
+            sessions = list_sessions()
+            match = next((s for s in sessions if s["name"] == sname), None)
+            if not match:
+                return self._json({"error": f"session '{sname}' not found"}, 404)
+            return self._json(match)
 
         # Session-specific routes: /api/sessions/<name>/<action>[/<subid>]
         m = re.match(r"^/api/sessions/([^/]+)(/([^/]+)(/([^/]+))?)?$", path)
