@@ -572,6 +572,7 @@ def _init_db():
     # Migrations: add columns that may not exist on older DBs
     for migration in [
         "ALTER TABLE issues ADD COLUMN owner_type TEXT NOT NULL DEFAULT 'human'",
+        "ALTER TABLE issues ADD COLUMN due_time TEXT",
     ]:
         try:
             db.execute(migration)
@@ -695,7 +696,7 @@ def _load_board() -> list:
     db = get_db()
     rows = db.execute(
         """SELECT i.id, i.title, i.desc, i.status, i.session, i.creator,
-                  i.due, i.created, i.updated, i.owner_type,
+                  i.due, i.due_time, i.created, i.updated, i.owner_type,
                   GROUP_CONCAT(t.tag) AS tags_csv
            FROM issues i
            LEFT JOIN issue_tags t ON t.issue_id = i.id
@@ -724,7 +725,7 @@ def _item_by_id(bid: str) -> dict | None:
     db = get_db()
     row = db.execute(
         """SELECT i.id, i.title, i.desc, i.status, i.session, i.creator,
-                  i.due, i.created, i.updated, i.owner_type,
+                  i.due, i.due_time, i.created, i.updated, i.owner_type,
                   GROUP_CONCAT(t.tag) AS tags_csv
            FROM issues i
            LEFT JOIN issue_tags t ON t.issue_id = i.id
@@ -781,21 +782,37 @@ def _generate_ical() -> str:
     status_map = {"todo": "NEEDS-ACTION", "doing": "IN-PROCESS", "done": "COMPLETED"}
     for item in items:
         due = item["due"]
+        due_time = (item.get("due_time") or "").strip()
         date_val = due.replace("-", "")
         uid = item["id"] + "@amux"
         summary = item.get("title", "").replace(",", "\\,").replace(";", "\\;").replace("\n", "\\n")
-        desc = item.get("desc", "").replace(",", "\\,").replace(";", "\\;").replace("\n", "\\n")
+        idesc = item.get("desc", "").replace(",", "\\,").replace(";", "\\;").replace("\n", "\\n")
         vstatus = status_map.get(item.get("status", "todo"), "NEEDS-ACTION")
-        lines += [
-            "BEGIN:VEVENT",
-            f"UID:{uid}",
-            f"DTSTART;VALUE=DATE:{date_val}",
-            f"DTEND;VALUE=DATE:{date_val}",
-            f"SUMMARY:{summary}",
-            f"DESCRIPTION:{desc}",
-            f"STATUS:{vstatus}",
-            "END:VEVENT",
-        ]
+        if due_time and re.match(r"^\d{2}:\d{2}$", due_time):
+            hh, mm = due_time.split(":")
+            dt_start = f"{date_val}T{hh}{mm}00"
+            ev_lines = [
+                "BEGIN:VEVENT",
+                f"UID:{uid}",
+                f"DTSTART:{dt_start}",
+                "DURATION:PT1H",
+                f"SUMMARY:{summary}",
+                f"DESCRIPTION:{idesc}",
+                f"STATUS:{vstatus}",
+                "END:VEVENT",
+            ]
+        else:
+            ev_lines = [
+                "BEGIN:VEVENT",
+                f"UID:{uid}",
+                f"DTSTART;VALUE=DATE:{date_val}",
+                f"DTEND;VALUE=DATE:{date_val}",
+                f"SUMMARY:{summary}",
+                f"DESCRIPTION:{idesc}",
+                f"STATUS:{vstatus}",
+                "END:VEVENT",
+            ]
+        lines += ev_lines
     lines.append("END:VCALENDAR")
     return "\r\n".join(lines) + "\r\n"
 
@@ -3245,7 +3262,10 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
     </div>
     <div class="field-group">
       <label class="field-label">Due date <span class="field-optional">(optional)</span></label>
-      <input id="be-due" type="date">
+      <div style="display:flex;gap:0.5rem;">
+        <input id="be-due" type="date" style="flex:1;">
+        <input id="be-due-time" type="time" style="width:110px;" title="Time (optional — leave blank for all-day)">
+      </div>
     </div>
     <div class="board-edit-actions">
       <button class="be-cancel" onclick="closeBoardEdit()">Cancel</button>
@@ -3273,6 +3293,7 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
     <div class="board-detail-row">
       <span style="font-size:0.78rem;color:var(--dim);">Due:</span>
       <input type="date" id="bd-due" class="board-detail-session-select" style="flex:1;cursor:pointer;">
+      <input type="time" id="bd-due-time" class="board-detail-session-select" style="width:110px;cursor:pointer;" title="Time (optional — leave blank for all-day)">
     </div>
     <div class="board-detail-tabs">
       <button class="board-detail-tab active" id="bd-tab-edit" onclick="boardDetailTab('edit')">Edit</button>
@@ -7065,6 +7086,8 @@ function openBoardAdd(statusOrDate, prefillDate) {
   document.getElementById('be-desc').value = '';
   const dueEl = document.getElementById('be-due');
   if (dueEl) dueEl.value = dueDate;
+  const dueTimeEl2 = document.getElementById('be-due-time');
+  if (dueTimeEl2) dueTimeEl2.value = '';
   const sel = document.getElementById('be-status');
   sel.innerHTML = boardStatuses.map(s => '<option value="' + s.id + '">' + esc(s.label) + '</option>').join('');
   sel.value = status;
@@ -7089,8 +7112,10 @@ async function saveBoardEdit() {
   const tags = sess ? (sess.tags || []) : [];
   const dueEl = document.getElementById('be-due');
   const due = dueEl ? dueEl.value : '';
+  const dueTimeEl = document.getElementById('be-due-time');
+  const dueTime = dueTimeEl ? dueTimeEl.value : '';
   closeBoardEdit();
-  await addBoardItem(title, desc, status, session, tags, due);
+  await addBoardItem(title, desc, status, session, tags, due, undefined, dueTime);
   if (_peekTab === 'issues') renderPeekIssues();
 }
 
@@ -7117,6 +7142,8 @@ function openBoardDetail(id) {
   _populateSessionSelect('bd-session', draft ? draft.session : (item.session || ''));
   const dueEl = document.getElementById('bd-due');
   if (dueEl) dueEl.value = draft ? (draft.due || '') : (item.due || '');
+  const dueTimeEl = document.getElementById('bd-due-time');
+  if (dueTimeEl) dueTimeEl.value = draft ? (draft.due_time || '') : (item.due_time || '');
   boardDetailTab('edit');
   const meta = document.getElementById('bd-meta');
   const parts = [];
@@ -7177,9 +7204,11 @@ function closeBoardDetail() {
       const st = boardDetailStatus;
       const dueEl = document.getElementById('bd-due');
       const due = dueEl ? dueEl.value : (item.due || '');
+      const dueTimeEl2 = document.getElementById('bd-due-time');
+      const due_time = dueTimeEl2 ? dueTimeEl2.value : (item.due_time || '');
       // Only save draft if something actually differs from saved state
-      if (t !== (item.title || '') || d !== (item.desc || '') || s !== (item.session || '') || st !== (item.status || 'todo') || due !== (item.due || '')) {
-        _boardDrafts[boardDetailId] = { title: t, desc: d, session: s, status: st, due };
+      if (t !== (item.title || '') || d !== (item.desc || '') || s !== (item.session || '') || st !== (item.status || 'todo') || due !== (item.due || '') || due_time !== (item.due_time || '')) {
+        _boardDrafts[boardDetailId] = { title: t, desc: d, session: s, status: st, due, due_time };
       } else {
         delete _boardDrafts[boardDetailId];
       }
@@ -7233,7 +7262,8 @@ async function boardDetailSave() {
   const session = sel ? sel.value : undefined;
   document.getElementById('bd-save-status').textContent = 'Saving...';
   const dueInput = document.getElementById('bd-due');
-  const changes = { title, desc, status: boardDetailStatus, due: dueInput ? dueInput.value : '' };
+  const dueTimeInput = document.getElementById('bd-due-time');
+  const changes = { title, desc, status: boardDetailStatus, due: dueInput ? dueInput.value : '', due_time: dueTimeInput ? dueTimeInput.value : '' };
   if (session !== undefined) {
     changes.session = session;
     const item = boardItems.find(i => i.id === boardDetailId);
@@ -7274,17 +7304,17 @@ function saveBoardCache() {
   localStorage.setItem('amux_board_cache', lastBoardJSON);
 }
 
-async function addBoardItem(title, desc, status, session, tags, due, ownerType) {
+async function addBoardItem(title, desc, status, session, tags, due, ownerType, dueTime) {
   ownerType = ownerType || 'human';
   const tempId = Math.random().toString(16).slice(2, 8);
   const now = Math.floor(Date.now() / 1000);
-  const tempItem = { id: tempId, title, desc, status, session: session || '', tags: tags || [], due: due || '', creator: _getDeviceName(), owner_type: ownerType, created: now, updated: now, _pending: true };
+  const tempItem = { id: tempId, title, desc, status, session: session || '', tags: tags || [], due: due || '', due_time: dueTime || '', creator: _getDeviceName(), owner_type: ownerType, created: now, updated: now, _pending: true };
   boardItems.push(tempItem);
   saveBoardCache();
   renderBoard();
   const r = await apiCall(API + '/api/board', {
     method: 'POST', headers: {'Content-Type': 'application/json'},
-    body: JSON.stringify({ title, desc, status, session: session || '', tags: tags || [], due: due || '', creator: _getDeviceName(), owner_type: ownerType })
+    body: JSON.stringify({ title, desc, status, session: session || '', tags: tags || [], due: due || '', due_time: dueTime || '', creator: _getDeviceName(), owner_type: ownerType })
   });
   if (r) {
     const item = await r.json();
@@ -9536,6 +9566,7 @@ class CCHandler(BaseHTTPRequestHandler):
                 now = int(time.time())
                 status = body.get("status", "todo")
                 due = body.get("due", "").strip() or None
+                due_time = body.get("due_time", "").strip() or None
                 creator = body.get("creator", "")
                 desc = body.get("desc", "").strip()
                 tags = [t for t in body.get("tags", []) if t]
@@ -9543,9 +9574,9 @@ class CCHandler(BaseHTTPRequestHandler):
                 if owner_type not in ("human", "agent"):
                     owner_type = "human"
                 db.execute(
-                    """INSERT INTO issues (id, title, desc, status, session, creator, due, created, updated, owner_type)
-                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-                    (item_id, title, desc, status, session or None, creator, due, now, now, owner_type),
+                    """INSERT INTO issues (id, title, desc, status, session, creator, due, due_time, created, updated, owner_type)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    (item_id, title, desc, status, session or None, creator, due, due_time, now, now, owner_type),
                 )
                 for tag in tags:
                     db.execute(
@@ -9669,11 +9700,11 @@ class CCHandler(BaseHTTPRequestHandler):
                     body = self._read_body()
                     now = int(time.time())
                     set_clauses, params = [], []
-                    for k in ("title", "desc", "status", "session", "due", "owner_type"):
+                    for k in ("title", "desc", "status", "session", "due", "due_time", "owner_type"):
                         if k in body:
                             set_clauses.append(f"{k} = ?")
                             v = body[k]
-                            params.append(None if v == "" and k in ("session", "due") else v)
+                            params.append(None if v == "" and k in ("session", "due", "due_time") else v)
                     if "creator" in body:
                         set_clauses.append("creator = ?")
                         params.append(body["creator"])
@@ -9844,7 +9875,7 @@ class CCHandler(BaseHTTPRequestHandler):
             db = get_db()
             rows = db.execute(
                 """SELECT i.id, i.title, i.desc, i.status, i.session, i.creator,
-                          i.due, i.created, i.updated, i.deleted,
+                          i.due, i.due_time, i.created, i.updated, i.deleted,
                           GROUP_CONCAT(t.tag) AS tags_csv
                    FROM issues i
                    LEFT JOIN issue_tags t ON t.issue_id = i.id
