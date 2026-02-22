@@ -1981,6 +1981,13 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
     font-size: 0.65rem; color: var(--yellow); font-weight: 600;
     pointer-events: none; white-space: nowrap;
   }
+  .card-log-hit {
+    font-size: 0.72rem; padding: 2px 0; cursor: pointer; line-height: 1.4;
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  }
+  .card-log-hit:hover { opacity: 0.8; }
+  .log-hit-loc { color: var(--accent); font-weight: 600; font-family: monospace; flex-shrink: 0; margin-right: 6px; }
+  .log-hit-text { color: var(--dim); }
   .log-search-btn { width: auto; padding: 0 8px; gap: 4px; font-size: 0.75rem; white-space: nowrap; }
   .log-search-btn .log-search-icon { flex-shrink: 0; }
   .log-search-btn .log-search-label { display: inline; }
@@ -3898,7 +3905,12 @@ function render() {
       ${isExp && s.desc ? `<div class="card-desc">${esc(s.desc)}</div>` : ''}
       ${!isExp && s.task_name ? `<div class="card-preview">${esc(s.task_name)}</div>` : ''}
       ${isExp && s.preview ? `<div class="card-preview">${esc(s.preview)}</div>` : ''}
-      ${logSearchMode && _logMatches[s.name] ? `<div class="card-preview" style="color:var(--accent);opacity:0.8;" onclick="event.stopPropagation();openPeek('${s.name}')">&#x1F50D; ${esc(_logMatches[s.name])}</div>` : ''}
+      ${logSearchMode && _logMatches[s.name] ? (() => {
+        const hits = _logMatches[s.name];
+        return hits.slice(0, 2).map(h =>
+          `<div class="card-log-hit" onclick="event.stopPropagation();openPeek('${s.name}')"><span class="log-hit-loc">${esc(s.name)}:${h.line}</span> <span class="log-hit-text">${esc(h.text.slice(0, 80))}</span></div>`
+        ).join('') + (hits.length > 2 ? `<div class="card-log-hit" style="color:var(--dim);font-style:italic;" onclick="event.stopPropagation();openPeek('${s.name}')">+${hits.length - 2} more matches</div>` : '');
+      })() : ''}
       ${(isYolo || model || s.tags.length) ? `<div class="badges">
         ${isYolo ? '<span class="badge yolo">YOLO</span>' : ''}
         ${model ? `<span class="badge model">${esc(model)}</span>` : ''}
@@ -5351,24 +5363,25 @@ async function _runLogSearch() {
   if (_logSearchAbort) _logSearchAbort.abort();
   _logSearchAbort = new AbortController();
   const sig = _logSearchAbort.signal;
-  const sessions = allSessions || [];
+  const sessionList = sessions || [];
   const results = await Promise.allSettled(
-    sessions.map(s =>
+    sessionList.map(s =>
       fetch(API + '/api/sessions/' + encodeURIComponent(s.name) + '/peek?lines=500', { signal: sig })
         .then(r => r.json())
         .then(data => {
           const output = data.output || '';
           const lines = output.split('\n');
-          const hit = lines.find(l => l.toLowerCase().includes(q));
-          if (hit) return { name: s.name, snippet: hit.replace(/\x1b\[[0-9;]*m/g, '').trim().slice(0, 80) };
-          return null;
+          const hits = [];
+          lines.forEach((l, i) => { if (l.toLowerCase().includes(q)) hits.push({ line: i + 1, text: l.replace(/\x1b\[[0-9;]*m/g, '').trim() }); });
+          if (!hits.length) return null;
+          return { name: s.name, hits };
         })
         .catch(() => null)
     )
   );
   if (sig.aborted) return;
   _logMatches = {};
-  results.forEach(r => { if (r.status === 'fulfilled' && r.value) _logMatches[r.value.name] = r.value.snippet; });
+  results.forEach(r => { if (r.status === 'fulfilled' && r.value) _logMatches[r.value.name] = r.value.hits; });
   render();
 }
 function clearPeekSearch() {
