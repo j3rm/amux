@@ -6471,7 +6471,7 @@ function resetCardOrder() {
 
 function _updateResetBtn() {
   const btn = document.getElementById('tile-reset-btn');
-  if (btn) btn.style.display = ((layoutMode === 'list' || layoutMode === 'grid') && cardOrder.length > 0) ? '' : 'none';
+  if (btn) btn.style.display = cardOrder.length > 0 ? '' : 'none';
 }
 
 function setLayoutMode(mode) {
