@@ -7859,6 +7859,34 @@ function _getSavedServers() {
 }
 function _saveServers(list) { localStorage.setItem('amux_servers', JSON.stringify(list)); }
 
+// Bootstrap: on page load, read ?_sync= param and merge server list + prefs into localStorage
+(function _bootstrapFromUrl() {
+  const params = new URLSearchParams(location.search);
+  const raw = params.get('_sync');
+  if (!raw) return;
+  try {
+    const data = JSON.parse(atob(raw));
+    // Merge server list (dedupe by URL)
+    if (Array.isArray(data.servers)) {
+      const existing = _getSavedServers();
+      data.servers.forEach(s => {
+        if (s && s.url && !existing.some(e => e.url.replace(/\/+$/, '') === s.url.replace(/\/+$/, ''))) {
+          existing.push(s);
+        }
+      });
+      _saveServers(existing);
+    }
+    // Restore device name only if not locally set
+    if (data.deviceName && !localStorage.getItem('amux_device_name')) {
+      localStorage.setItem('amux_device_name', data.deviceName);
+    }
+  } catch(e) {}
+  // Clean the URL without reloading
+  params.delete('_sync');
+  const clean = location.pathname + (params.toString() ? '?' + params.toString() : '') + location.hash;
+  history.replaceState({}, '', clean);
+})();
+
 function renderServerList() {
   const list = document.getElementById('server-list');
   const servers = _getSavedServers();
@@ -7898,19 +7926,24 @@ function toggleAddServer() {
   }
 }
 
+function _normalizeServerUrl(url) {
+  if (!/^https?:\/\//.test(url)) url = 'https://' + url;
+  return url.replace(/\/+$/, '');
+}
+function _ensureCurrentServerSaved(servers) {
+  // Auto-register the current server so the destination can switch back
+  const cur = location.origin;
+  if (!servers.some(s => s.url.replace(/\/+$/, '') === cur)) {
+    servers.push({ name: location.host, url: cur });
+  }
+}
 function saveNewServer() {
   const name = document.getElementById('add-server-name').value.trim();
-  let url = document.getElementById('add-server-url').value.trim();
+  let url = _normalizeServerUrl(document.getElementById('add-server-url').value.trim());
   if (!url) { showToast('URL is required'); return; }
-  // Normalize: ensure protocol, strip trailing slash
-  if (!/^https?:\/\//.test(url)) url = 'https://' + url;
-  url = url.replace(/\/+$/, '');
   const servers = _getSavedServers();
-  // Dedupe by URL
-  if (servers.some(s => s.url.replace(/\/+$/, '') === url)) {
-    showToast('Server already saved');
-    return;
-  }
+  if (servers.some(s => s.url.replace(/\/+$/, '') === url)) { showToast('Server already saved'); return; }
+  _ensureCurrentServerSaved(servers);
   servers.push({ name: name || '', url });
   _saveServers(servers);
   document.getElementById('add-server-form').style.display = 'none';
@@ -7923,12 +7956,24 @@ function removeServer(idx) {
   servers.splice(idx, 1);
   _saveServers(servers);
   renderServerList();
+  if (typeof renderSettingsServerList === 'function') renderSettingsServerList();
 }
 
 function switchServer(idx) {
   const servers = _getSavedServers();
   const s = servers[idx];
-  if (s) location.href = s.url;
+  if (!s) return;
+  // Ensure current server is in the list we pass so the destination can switch back
+  const currentOrigin = location.origin;
+  const allServers = [...servers];
+  if (!allServers.some(srv => srv.url.replace(/\/+$/, '') === currentOrigin)) {
+    allServers.push({ name: location.host, url: currentOrigin });
+  }
+  const payload = btoa(JSON.stringify({
+    servers: allServers,
+    deviceName: localStorage.getItem('amux_device_name') || ''
+  }));
+  location.href = s.url + '/?_sync=' + encodeURIComponent(payload);
 }
 
 // ═══════ SETTINGS DROPDOWN ═══════
@@ -8016,15 +8061,14 @@ function toggleSettingsAddServer() {
 
 function saveSettingsNewServer() {
   const name = document.getElementById('settings-new-server-name').value.trim();
-  let url = document.getElementById('settings-new-server-url').value.trim();
+  let url = _normalizeServerUrl(document.getElementById('settings-new-server-url').value.trim());
   if (!url) { showToast('URL is required'); return; }
-  if (!/^https?:\/\//.test(url)) url = 'https://' + url;
-  url = url.replace(/\/+$/, '');
   const servers = _getSavedServers();
   if (servers.some(s => s.url.replace(/\/+$/, '') === url)) {
     showToast('Server already saved');
     return;
   }
+  _ensureCurrentServerSaved(servers);
   servers.push({ name: name || '', url });
   _saveServers(servers);
   document.getElementById('settings-add-server').style.display = 'none';
