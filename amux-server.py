@@ -1954,9 +1954,9 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
   .branch-badge.on-branch { color: var(--green); }
   .branch-badge.conflict { color: var(--red) !important; }
   .branch-popover {
-    position: absolute; z-index: 200; left: 12px; right: 12px;
+    position: fixed; z-index: 9999; width: 240px;
     background: var(--surface); border: 1px solid var(--border); border-radius: 8px;
-    padding: 12px; box-shadow: 0 8px 24px rgba(0,0,0,0.5); margin-top: 4px;
+    padding: 12px; box-shadow: 0 8px 24px rgba(0,0,0,0.5);
   }
   .branch-popover input { width: 100%; box-sizing: border-box; margin-bottom: 8px; }
   .branch-popover-actions { display: flex; gap: 6px; }
@@ -4583,16 +4583,13 @@ function showBranchPopover(name, e) {
   const gi = gitInfo[name] || {};
   const isMain = _isBranchMain(gi.branch);
   const suggested = 'session/' + name;
-  const card = e.target.closest('.card');
-  if (!card) return;
-  card.style.position = 'relative';
   const pop = document.createElement('div');
   pop.className = 'branch-popover';
   pop.onclick = ev => ev.stopPropagation();
   if (isMain) {
     pop.innerHTML = `
       <div style="font-size:0.75rem;color:var(--dim);margin-bottom:8px;font-weight:600;">⎇ Create session branch</div>
-      <div style="font-size:0.78rem;color:var(--dim);margin-bottom:8px;">Isolate this session's changes from other sessions on <strong>${esc(gi.branch || 'main')}</strong></div>
+      <div style="font-size:0.78rem;color:var(--dim);margin-bottom:8px;">Isolate changes from other sessions on <strong>${esc(gi.branch || 'main')}</strong></div>
       <input class="search-input" id="bp-input-${name}" value="${esc(suggested)}" style="font-size:0.82rem;margin-bottom:8px;">
       <div class="branch-popover-actions">
         <button class="btn primary" style="flex:1;" onclick="doCreateBranch('${name}')">Create &amp; checkout</button>
@@ -4604,7 +4601,14 @@ function showBranchPopover(name, e) {
       ${gi._conflict ? '<div style="font-size:0.78rem;color:var(--red);margin-bottom:6px;">⚠ Another session shares this branch — conflicts possible</div>' : '<div style="font-size:0.78rem;color:var(--green);margin-bottom:6px;">✓ Isolated on feature branch</div>'}
       <button class="btn" style="width:100%;" onclick="document.querySelectorAll('.branch-popover').forEach(p=>p.remove())">Close</button>`;
   }
-  card.appendChild(pop);
+  // Append to body to escape card's overflow:hidden
+  document.body.appendChild(pop);
+  const rect = e.target.getBoundingClientRect();
+  const vw = window.innerWidth;
+  let left = rect.left;
+  if (left + 240 > vw - 8) left = vw - 248;
+  pop.style.top = (rect.bottom + 6) + 'px';
+  pop.style.left = Math.max(8, left) + 'px';
   setTimeout(() => {
     document.addEventListener('click', function closer() {
       document.querySelectorAll('.branch-popover').forEach(p => p.remove());
