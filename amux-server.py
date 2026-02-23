@@ -2444,7 +2444,7 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
   .peek-cmd-row {
     display: none; gap: 8px; padding-top: 6px;
   }
-  .peek-cmd-row.open { display: flex; min-width: 0; overflow: hidden; }
+  .peek-cmd-row.open { display: flex; min-width: 0; overflow: visible; position: relative; }
   .peek-cmd-row .send-input { font-size: 0.85rem; padding: 8px 12px; min-height: 36px; min-width: 0; }
   .peek-cmd-row .btn { min-height: 36px; padding: 6px 12px; font-size: 0.82rem; }
   /* File attachment bar */
@@ -3470,7 +3470,7 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
         <!-- Attachment chips -->
         <div class="peek-attach-bar" id="peek-attach-bar"></div>
         <!-- Input row -->
-        <div class="ac-wrap" style="flex:1;min-width:0;overflow:hidden;">
+        <div class="ac-wrap" style="flex:1;min-width:0;position:relative;">
           <textarea class="send-input" id="peek-cmd-input" rows="1" placeholder="Type a message or drop a file..."
             autocomplete="off" autocorrect="on" autocapitalize="sentences" spellcheck="true"
             enterkeyhint="enter" style="width:100%;"
