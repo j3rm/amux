@@ -341,7 +341,7 @@
     <p class="hero-tag">Agent Multiplexer</p>
 
     <p class="hero-desc">
-      Run <strong>dozens of Claude Code agents in parallel</strong> — monitored, controlled, and coordinated from a single dashboard. Access everything from your browser, phone, or terminal.
+      Run <strong>dozens of Claude Code agents in parallel</strong> — monitored, self-healing, and coordinated from a single dashboard. Access everything from your browser, phone, or terminal.
     </p>
 
     <div class="ctas">
@@ -415,101 +415,122 @@
 
     <li>
       <svg class="feat-icon" viewBox="0 0 20 20" fill="currentColor" aria-hidden="true">
-        <rect x="2" y="2" width="6" height="6" rx="1"/><rect x="12" y="2" width="6" height="6" rx="1"/>
-        <rect x="2" y="12" width="6" height="6" rx="1"/><rect x="12" y="12" width="6" height="6" rx="1"/>
+        <path fill-rule="evenodd" d="M12.316 3.051a1 1 0 01.633 1.265l-4 12a1 1 0 11-1.898-.632l4-12a1 1 0 011.265-.633zM5.707 6.293a1 1 0 010 1.414L3.414 10l2.293 2.293a1 1 0 11-1.414 1.414l-3-3a1 1 0 010-1.414l3-3a1 1 0 011.414 0zm8.586 0a1 1 0 011.414 0l3 3a1 1 0 010 1.414l-3 3a1 1 0 11-1.414-1.414L16.586 10l-2.293-2.293a1 1 0 010-1.414z" clip-rule="evenodd"/>
       </svg>
-      <div><strong>Parallel agents</strong> <span>— run any number of Claude Code sessions simultaneously, each isolated in its own tmux pane with its own conversation history. Start, stop, and send commands to any agent without switching terminals.</span></div>
+      <div><strong>Status from terminal output, not an API</strong> <span>— amux parses Claude Code's actual tmux output to determine state: Unicode dingbat spinners (U+2700–27BF) + ellipsis = working; "Enter to select" / "❯ 1. Yes" = waiting; completed spinner + "for Xm Ys" = idle. No hooks, no patches, no modifications to Claude Code.</span></div>
     </li>
 
     <li>
       <svg class="feat-icon" viewBox="0 0 20 20" fill="currentColor" aria-hidden="true">
-        <path fill-rule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zm1-12a1 1 0 10-2 0v4a1 1 0 00.293.707l2.828 2.829a1 1 0 101.415-1.415L11 9.586V6z" clip-rule="evenodd"/>
+        <path fill-rule="evenodd" d="M11.49 3.17c-.38-1.56-2.6-1.56-2.98 0a1.532 1.532 0 01-2.286.948c-1.372-.836-2.942.734-2.106 2.106.54.886.061 2.042-.947 2.287-1.561.379-1.561 2.6 0 2.978a1.532 1.532 0 01.947 2.287c-.836 1.372.734 2.942 2.106 2.106a1.532 1.532 0 012.287.947c.379 1.561 2.6 1.561 2.978 0a1.533 1.533 0 012.287-.947c1.372.836 2.942-.734 2.106-2.106a1.533 1.533 0 01.947-2.287c1.561-.379 1.561-2.6 0-2.978a1.532 1.532 0 01-.947-2.287c.836-1.372-.734-2.942-2.106-2.106a1.532 1.532 0 01-2.287-.947zM10 13a3 3 0 100-6 3 3 0 000 6z" clip-rule="evenodd"/>
       </svg>
-      <div><strong>Live status detection</strong> <span>— every session card shows whether an agent is <em>working</em>, <em>needs input</em>, or <em>idle</em>, updated in real time via Server-Sent Events. Know at a glance which agents need your attention without reading their output.</span></div>
-    </li>
-
-    <li>
-      <svg class="feat-icon" viewBox="0 0 20 20" fill="currentColor" aria-hidden="true">
-        <path d="M3 4a1 1 0 011-1h12a1 1 0 011 1v2a1 1 0 01-1 1H4a1 1 0 01-1-1V4zm0 6a1 1 0 011-1h12a1 1 0 011 1v2a1 1 0 01-1 1H4a1 1 0 01-1-1v-2zm0 6a1 1 0 011-1h12a1 1 0 011 1v2a1 1 0 01-1 1H4a1 1 0 01-1-1v-2z"/>
-      </svg>
-      <div><strong>Web dashboard + PWA</strong> <span>— full-featured HTTPS dashboard installable as a home screen app on iOS and Android. Monitor agents, send commands, and browse output from your phone. Offline-capable with queued command replay on reconnect.</span></div>
-    </li>
-
-    <li>
-      <svg class="feat-icon" viewBox="0 0 20 20" fill="currentColor" aria-hidden="true">
-        <path fill-rule="evenodd" d="M3 3a1 1 0 000 2v8a2 2 0 002 2h2.586l-1.293 1.293a1 1 0 101.414 1.414L10 15.414l2.293 2.293a1 1 0 001.414-1.414L12.414 15H15a2 2 0 002-2V5a1 1 0 100-2H3zm11 4a1 1 0 10-2 0v4a1 1 0 102 0V7zm-3 1a1 1 0 10-2 0v3a1 1 0 102 0V8zM8 9a1 1 0 00-2 0v2a1 1 0 102 0V9z" clip-rule="evenodd"/>
-      </svg>
-      <div><strong>Multi-pane grid view</strong> <span>— switch to a full-screen tiled layout to watch multiple agents' live output side by side. Each pane has its own send bar. Drag to rearrange, and positions are saved across sessions.</span></div>
-    </li>
-
-    <li>
-      <svg class="feat-icon" viewBox="0 0 20 20" fill="currentColor" aria-hidden="true">
-        <path fill-rule="evenodd" d="M4 2a2 2 0 00-2 2v11a3 3 0 106 0V4a2 2 0 00-2-2H4zm1 14a1 1 0 100-2 1 1 0 000 2zm5-1.757l4.9-4.9a2 2 0 000-2.828L13.485 5.1a2 2 0 00-2.828 0L10 5.757v8.486zM16 18H9.071l6-6H16a2 2 0 012 2v2a2 2 0 01-2 2z" clip-rule="evenodd"/>
-      </svg>
-      <div><strong>Live peek &amp; control</strong> <span>— scroll through any agent's full scrollback (including stopped sessions, which are snapshotted to disk), search output, send commands, and use quick-action chips (Ctrl-C, /compact, /clear) — all without attaching to the terminal.</span></div>
-    </li>
-
-    <li>
-      <svg class="feat-icon" viewBox="0 0 20 20" fill="currentColor" aria-hidden="true">
-        <path fill-rule="evenodd" d="M8 4a3 3 0 00-3 3v4a5 5 0 0010 0V7a1 1 0 112 0v4a7 7 0 11-14 0V7a5 5 0 0110 0v4a3 3 0 11-6 0V7a1 1 0 012 0v4a1 1 0 102 0V7a3 3 0 00-3-3z" clip-rule="evenodd"/>
-      </svg>
-      <div><strong>File attachments</strong> <span>— send files directly to any agent. Paste an image with Ctrl-V, drag and drop onto the send bar, or click the 📎 button. Supports images, PDFs, text, CSV, JSON, and more.</span></div>
-    </li>
-
-    <li>
-      <svg class="feat-icon" viewBox="0 0 20 20" fill="currentColor" aria-hidden="true">
-        <path d="M13 6a3 3 0 11-6 0 3 3 0 016 0zM18 8a2 2 0 11-4 0 2 2 0 014 0zM14 15a4 4 0 00-8 0v3h8v-3zM6 8a2 2 0 11-4 0 2 2 0 014 0zM16 18v-3a5.972 5.972 0 00-.75-2.906A3.005 3.005 0 0119 15v3h-3zM4.75 12.094A5.973 5.973 0 004 15v3H1v-3a3 3 0 013.75-2.906z"/>
-      </svg>
-      <div><strong>Session management</strong> <span>— rename, duplicate, clone &amp; continue (fork a conversation into a new session), switch models mid-session, toggle YOLO mode, pin sessions to the top, and adopt existing tmux sessions not created by amux.</span></div>
-    </li>
-
-    <li>
-      <svg class="feat-icon" viewBox="0 0 20 20" fill="currentColor" aria-hidden="true">
-        <path d="M2 4a1 1 0 011-1h14a1 1 0 011 1v2a1 1 0 01-1 1H3a1 1 0 01-1-1V4zm0 6a1 1 0 011-1h5a1 1 0 011 1v6a1 1 0 01-1 1H3a1 1 0 01-1-1v-6zm9-1a1 1 0 00-1 1v6a1 1 0 001 1h5a1 1 0 001-1v-6a1 1 0 00-1-1h-5z"/>
-      </svg>
-      <div><strong>Built-in kanban board</strong> <span>— track work across all agents in one place. Auto-generated issue keys (PROJ-1), tags, due dates, drag-and-drop columns, calendar view, and an iCal feed for Google Calendar. Backed by REST API.</span></div>
+      <div><strong>Self-healing sessions</strong> <span>— a background thread watches every agent's output every 60s. If context drops below 20%, it fires <code style="font-family:'Geist Mono',monospace;font-size:0.8em;">/compact</code> automatically. If thinking-block corruption is detected, it restarts the session and replays the last user message. If a session gets stuck waiting for input, <code style="font-family:'Geist Mono',monospace;font-size:0.8em;">CC_AUTO_CONTINUE=1</code> unblocks it automatically.</span></div>
     </li>
 
     <li>
       <svg class="feat-icon" viewBox="0 0 20 20" fill="currentColor" aria-hidden="true">
         <path fill-rule="evenodd" d="M5 9V7a5 5 0 0110 0v2a2 2 0 012 2v5a2 2 0 01-2 2H5a2 2 0 01-2-2v-5a2 2 0 012-2zm8-2v2H7V7a3 3 0 016 0z" clip-rule="evenodd"/>
       </svg>
-      <div><strong>Tailscale &amp; remote access</strong> <span>— the server auto-provisions TLS certificates (via Tailscale, mkcert, or self-signed fallback). Access your agents securely from your phone over Tailscale — no VPN config, no open ports.</span></div>
-    </li>
-
-    <li>
-      <svg class="feat-icon" viewBox="0 0 20 20" fill="currentColor" aria-hidden="true">
-        <path fill-rule="evenodd" d="M12.316 3.051a1 1 0 01.633 1.265l-4 12a1 1 0 11-1.898-.632l4-12a1 1 0 011.265-.633zM5.707 6.293a1 1 0 010 1.414L3.414 10l2.293 2.293a1 1 0 11-1.414 1.414l-3-3a1 1 0 010-1.414l3-3a1 1 0 011.414 0zm8.586 0a1 1 0 011.414 0l3 3a1 1 0 010 1.414l-3 3a1 1 0 11-1.414-1.414L16.586 10l-2.293-2.293a1 1 0 010-1.414z" clip-rule="evenodd"/>
-      </svg>
-      <div><strong>REST API</strong> <span>— every action is an endpoint. Automate orchestration with <code style="font-family:'Geist Mono',monospace;font-size:0.8em;">curl</code> or any HTTP client. Register, start, stop, send, query status, and manage board items programmatically.</span></div>
-    </li>
-
-    <li>
-      <svg class="feat-icon" viewBox="0 0 20 20" fill="currentColor" aria-hidden="true">
-        <path d="M5 3a2 2 0 00-2 2v2a2 2 0 002 2h2a2 2 0 002-2V5a2 2 0 00-2-2H5zm0 8a2 2 0 00-2 2v2a2 2 0 002 2h2a2 2 0 002-2v-2a2 2 0 00-2-2H5zm6-6a2 2 0 012-2h2a2 2 0 012 2v2a2 2 0 01-2 2h-2a2 2 0 01-2-2V5zm0 8a2 2 0 012-2h2a2 2 0 012 2v2a2 2 0 01-2 2h-2a2 2 0 01-2-2v-2z"/>
-      </svg>
-      <div><strong>Session &amp; global memory</strong> <span>— each agent gets its own persistent memory file, plus a shared global memory. Edit directly in the dashboard and inject context into any session.</span></div>
+      <div><strong>Atomic multi-agent task claiming</strong> <span>— <code style="font-family:'Geist Mono',monospace;font-size:0.8em;">POST /api/board/:id/claim</code> uses SQLite 3.35+ <code style="font-family:'Geist Mono',monospace;font-size:0.8em;">UPDATE … RETURNING</code> to atomically move a task from todo → doing only if unclaimed. Ten agents can race for the same task queue with no lock broker and no duplicated work.</span></div>
     </li>
 
     <li>
       <svg class="feat-icon" viewBox="0 0 20 20" fill="currentColor" aria-hidden="true">
         <path fill-rule="evenodd" d="M11.3 1.046A1 1 0 0112 2v5h4a1 1 0 01.82 1.573l-7 10A1 1 0 018 18v-5H4a1 1 0 01-.82-1.573l7-10a1 1 0 011.12-.38z" clip-rule="evenodd"/>
       </svg>
-      <div><strong>Agent-to-agent orchestration</strong> <span>— sessions discover each other and coordinate via the HTTP API. Every session gets <code style="font-family:'Geist Mono',monospace;font-size:0.8em;">$AMUX_SESSION</code> and <code style="font-family:'Geist Mono',monospace;font-size:0.8em;">$AMUX_URL</code> injected at startup. Tell an orchestrator agent in plain English to delegate work and monitor progress — it knows the API.</span></div>
+      <div><strong>Agent-to-agent orchestration</strong> <span>— every session gets <code style="font-family:'Geist Mono',monospace;font-size:0.8em;">$AMUX_SESSION</code> and <code style="font-family:'Geist Mono',monospace;font-size:0.8em;">$AMUX_URL</code> injected at startup. The global memory file — shared across all sessions — contains the full REST API reference, so any agent can discover peers, delegate tasks, claim board items, and peek output without being explicitly told how.</span></div>
+    </li>
+
+    <li>
+      <svg class="feat-icon" viewBox="0 0 20 20" fill="currentColor" aria-hidden="true">
+        <path d="M10 2a6 6 0 00-6 6v3.586l-.707.707A1 1 0 004 14h12a1 1 0 00.707-1.707L16 11.586V8a6 6 0 00-6-6zM10 18a3 3 0 01-3-3h6a3 3 0 01-3 3z"/>
+      </svg>
+      <div><strong>YOLO auto-responder</strong> <span>— when running with <code style="font-family:'Geist Mono',monospace;font-size:0.8em;">--dangerously-skip-permissions</code>, Claude Code still shows some blocking safety prompts. amux pattern-matches the terminal output for the "Esc to cancel" UI chrome (never present on model-level questions) and auto-answers them, keeping fully autonomous sessions actually autonomous.</span></div>
+    </li>
+
+    <li>
+      <svg class="feat-icon" viewBox="0 0 20 20" fill="currentColor" aria-hidden="true">
+        <path d="M7 3a1 1 0 000 2h6a1 1 0 100-2H7zM4 7a1 1 0 011-1h10a1 1 0 110 2H5a1 1 0 01-1-1zM2 11a2 2 0 012-2h12a2 2 0 012 2v4a2 2 0 01-2 2H4a2 2 0 01-2-2v-4z"/>
+      </svg>
+      <div><strong>Conversation fork</strong> <span>— clone any running session's full Claude Code JSONL history into a new session. Branch an exploration without losing the original thread. When JSONL history isn't available, falls back to tmux scrollback capture as context seed.</span></div>
+    </li>
+
+    <li>
+      <svg class="feat-icon" viewBox="0 0 20 20" fill="currentColor" aria-hidden="true">
+        <rect x="2" y="2" width="6" height="6" rx="1"/><rect x="12" y="2" width="6" height="6" rx="1"/>
+        <rect x="2" y="12" width="6" height="6" rx="1"/><rect x="12" y="12" width="6" height="6" rx="1"/>
+      </svg>
+      <div><strong>Parallel agents, zero friction</strong> <span>— any number of Claude Code sessions running simultaneously, each isolated in its own tmux pane with a permanent conversation ID that survives stop/start. Start, stop, and message any agent via REST or dashboard without touching a terminal.</span></div>
+    </li>
+
+    <li>
+      <svg class="feat-icon" viewBox="0 0 20 20" fill="currentColor" aria-hidden="true">
+        <path fill-rule="evenodd" d="M3 3a1 1 0 000 2v8a2 2 0 002 2h2.586l-1.293 1.293a1 1 0 101.414 1.414L10 15.414l2.293 2.293a1 1 0 001.414-1.414L12.414 15H15a2 2 0 002-2V5a1 1 0 100-2H3zm11 4a1 1 0 10-2 0v4a1 1 0 102 0V7zm-3 1a1 1 0 10-2 0v3a1 1 0 102 0V8zM8 9a1 1 0 00-2 0v2a1 1 0 102 0V9z" clip-rule="evenodd"/>
+      </svg>
+      <div><strong>Multi-pane workspace</strong> <span>— full-screen tiled layout: watch multiple agents' live output side by side, each with its own send bar. Drag to rearrange panes; layout persists across reloads. Save and restore named workspace profiles.</span></div>
+    </li>
+
+    <li>
+      <svg class="feat-icon" viewBox="0 0 20 20" fill="currentColor" aria-hidden="true">
+        <path d="M10 12a2 2 0 100-4 2 2 0 000 4z"/><path fill-rule="evenodd" d="M.458 10C1.732 5.943 5.522 3 10 3s8.268 2.943 9.542 7c-1.274 4.057-5.064 7-9.542 7S1.732 14.057.458 10zM14 10a4 4 0 11-8 0 4 4 0 018 0z" clip-rule="evenodd"/>
+      </svg>
+      <div><strong>Live peek — including stopped sessions</strong> <span>— scroll any agent's full scrollback, search output, and fire quick-actions without attaching to the terminal. Sessions are snapshotted to disk every 60s (up to 10MB) so you can review output after they've stopped or the server has restarted.</span></div>
+    </li>
+
+    <li>
+      <svg class="feat-icon" viewBox="0 0 20 20" fill="currentColor" aria-hidden="true">
+        <path d="M2 4a1 1 0 011-1h14a1 1 0 011 1v2a1 1 0 01-1 1H3a1 1 0 01-1-1V4zm0 6a1 1 0 011-1h5a1 1 0 011 1v6a1 1 0 01-1 1H3a1 1 0 01-1-1v-6zm9-1a1 1 0 00-1 1v6a1 1 0 001 1h5a1 1 0 001-1v-6a1 1 0 00-1-1h-5z"/>
+      </svg>
+      <div><strong>Kanban board with iCal sync</strong> <span>— built-in task board with auto-generated issue keys (PROJ-1), per-agent ownership, due dates, and custom columns. Emits an RFC 5545 iCal feed that auto-uploads to S3 so tasks appear in Google Calendar and Apple Calendar — including STATUS mapping from board columns.</span></div>
+    </li>
+
+    <li>
+      <svg class="feat-icon" viewBox="0 0 20 20" fill="currentColor" aria-hidden="true">
+        <path d="M5 3a2 2 0 00-2 2v2a2 2 0 002 2h2a2 2 0 002-2V5a2 2 0 00-2-2H5zm0 8a2 2 0 00-2 2v2a2 2 0 002 2h2a2 2 0 002-2v-2a2 2 0 00-2-2H5zm6-6a2 2 0 012-2h2a2 2 0 012 2v2a2 2 0 01-2 2h-2a2 2 0 01-2-2V5zm0 8a2 2 0 012-2h2a2 2 0 012 2v2a2 2 0 01-2 2h-2a2 2 0 01-2-2v-2z"/>
+      </svg>
+      <div><strong>Per-session + global memory</strong> <span>— each agent gets a persistent Markdown memory file; a global file is shared across all. Both are composed into Claude Code's MEMORY.md at startup, editable live in the dashboard, and auto-migrated when sessions are renamed or restructured.</span></div>
+    </li>
+
+    <li>
+      <svg class="feat-icon" viewBox="0 0 20 20" fill="currentColor" aria-hidden="true">
+        <path fill-rule="evenodd" d="M6 2a1 1 0 00-1 1v1H4a2 2 0 00-2 2v10a2 2 0 002 2h12a2 2 0 002-2V6a2 2 0 00-2-2h-1V3a1 1 0 10-2 0v1H7V3a1 1 0 00-1-1zm0 5a1 1 0 000 2h8a1 1 0 100-2H6z" clip-rule="evenodd"/>
+      </svg>
+      <div><strong>Built-in cron scheduler</strong> <span>— schedule one-time or recurring (hourly/daily/weekly/monthly) commands in any session without touching crontab or an external scheduler. The 30s polling loop computes next-run atomically in SQLite, handling weekday + time encoding, DST, and missed-fire recovery.</span></div>
+    </li>
+
+    <li>
+      <svg class="feat-icon" viewBox="0 0 20 20" fill="currentColor" aria-hidden="true">
+        <path fill-rule="evenodd" d="M7.707 3.293a1 1 0 010 1.414L5.414 7H11a7 7 0 017 7v2a1 1 0 11-2 0v-2a5 5 0 00-5-5H5.414l2.293 2.293a1 1 0 11-1.414 1.414l-4-4a1 1 0 010-1.414l4-4a1 1 0 011.414 0z" clip-rule="evenodd"/>
+      </svg>
+      <div><strong>Git-aware conflict detection</strong> <span>— detects when two sessions share the same working directory and branch, and surfaces a visual warning on both cards. Includes a one-click helper to create an isolated <code style="font-family:'Geist Mono',monospace;font-size:0.8em;">session/{name}</code> branch so agents don't trample each other's work.</span></div>
     </li>
 
     <li>
       <svg class="feat-icon" viewBox="0 0 20 20" fill="currentColor" aria-hidden="true">
         <path d="M2 10a8 8 0 018-8v8h8a8 8 0 11-16 0z"/><path d="M12 2.252A8.014 8.014 0 0117.748 8H12V2.252z"/>
       </svg>
-      <div><strong>Token stats</strong> <span>— daily token usage across every session with per-agent breakdowns and bar charts. Know exactly what each agent is spending before your bill arrives.</span></div>
+      <div><strong>Token tracking from JSONL</strong> <span>— tails Claude Code's conversation logs to aggregate daily token spend per session, including <code style="font-family:'Geist Mono',monospace;font-size:0.8em;">cache_read_input_tokens</code> separately. Deduplicates entries by signature so restarts don't double-count. Reset-to-baseline for period comparisons.</span></div>
+    </li>
+
+    <li>
+      <svg class="feat-icon" viewBox="0 0 20 20" fill="currentColor" aria-hidden="true">
+        <path d="M3 4a1 1 0 011-1h12a1 1 0 011 1v2a1 1 0 01-1 1H4a1 1 0 01-1-1V4zm0 6a1 1 0 011-1h5a1 1 0 011 1v6a1 1 0 01-1 1H3a1 1 0 01-1-1v-6zm9-1a1 1 0 00-1 1v6a1 1 0 001 1h5a1 1 0 001-1v-6a1 1 0 00-1-1h-5z"/>
+      </svg>
+      <div><strong>Web dashboard + PWA</strong> <span>— installable as a home screen app on iOS and Android. Triple-layer persistence: Service Worker Cache API, localStorage (full HTML backup), IndexedDB (issue mirror). Background Sync replays queued commands on reconnect, even when the tab is closed. Works on Tailscale, over LAN, or from your couch.</span></div>
+    </li>
+
+    <li>
+      <svg class="feat-icon" viewBox="0 0 20 20" fill="currentColor" aria-hidden="true">
+        <path fill-rule="evenodd" d="M5 9V7a5 5 0 0110 0v2a2 2 0 012 2v5a2 2 0 01-2 2H5a2 2 0 01-2-2v-5a2 2 0 012-2zm8-2v2H7V7a3 3 0 016 0z" clip-rule="evenodd"/>
+      </svg>
+      <div><strong>Tailscale + auto-TLS</strong> <span>— auto-provisions certificates in order: Tailscale (real Let's Encrypt, trusted everywhere), mkcert (locally-trusted CA), self-signed fallback. Secure remote access from your phone with no VPN config, no port forwarding, no browser warnings.</span></div>
     </li>
 
     <li>
       <svg class="feat-icon" viewBox="0 0 20 20" fill="currentColor" aria-hidden="true">
         <path fill-rule="evenodd" d="M3 5a2 2 0 012-2h10a2 2 0 012 2v8a2 2 0 01-2 2h-2.22l.123.489.804.804A1 1 0 0113 18H7a1 1 0 01-.707-1.707l.804-.804L7.22 15H5a2 2 0 01-2-2V5zm5.771 7H5V5h10v7H8.771z" clip-rule="evenodd"/>
       </svg>
-      <div><strong>Zero dependencies</strong> <span>— single Python file, no build step. Requires only Python 3 and tmux. Install in seconds, run anywhere.</span></div>
+      <div><strong>Single Python file, zero build step</strong> <span>— one ~12,000-line file: Python HTTP server + full HTML/CSS/JS dashboard with drag-and-drop, IndexedDB, GridStack, SSE, and a service worker — all inline. Requires only Python 3 and tmux. Save the file and it restarts itself via <code style="font-family:'Geist Mono',monospace;font-size:0.8em;">os.execv</code>.</span></div>
     </li>
 
   </ul>
