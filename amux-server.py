@@ -3800,6 +3800,7 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
           <div class="chip" onclick="peekQuickSend('/status')">/status</div>
           <div class="chip" onclick="peekQuickSend('/cost')">/cost</div>
           <div class="chip" onclick="peekQuickKeys('Escape')">Esc</div>
+          <div class="chip" onclick="peekQuickSend('continue')">continue</div>
           <div class="chip danger" onclick="peekQuickSend('/compact')">/compact</div>
           <div class="chip danger" onclick="peekQuickSend('/clear')">/clear</div>
         </div>
@@ -4665,6 +4666,7 @@ function render() {
           <div class="chip" onclick="doKeys('${s.name}','C-c')">Ctrl-C</div>
           <div class="chip" onclick="doKeys('${s.name}','Escape')">Esc</div>
           <div class="chip" onclick="doKeys('${s.name}','Enter')">Enter</div>
+          <div class="chip" onclick="doSend('${s.name}','continue')">continue</div>
           <div class="chip" onclick="doKeys('${s.name}','Up')">&#x2191;</div>
           <div class="chip" onclick="doKeys('${s.name}','Down')">&#x2193;</div>
         </div>
@@ -8582,6 +8584,7 @@ function addGridPane(name, x, y, w, h) {
         '<div class="chip" onclick="gpDoKeys(\'' + safeName + '\',\'Escape\')">Esc</div>' +
         '<div class="chip" onclick="gpChipToInput(\'' + safeName + '\',\'/status\')">/status</div>' +
         '<div class="chip" onclick="gpChipToInput(\'' + safeName + '\',\'/cost\')">/cost</div>' +
+        '<div class="chip" onclick="doSend(\'' + safeName + '\',\'continue\')">continue</div>' +
         '<div class="chip danger" onclick="gpChipToInput(\'' + safeName + '\',\'/compact\')">/compact</div>' +
         '<div class="chip danger" onclick="gpChipToInput(\'' + safeName + '\',\'/clear\')">/clear</div>' +
       '</div>' +
