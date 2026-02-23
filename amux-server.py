@@ -2815,14 +2815,14 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
 
   /* Tab bar */
   .tab-bar {
-    display: flex; gap: 0; margin: 0 0 12px 0; padding: 0;
+    display: flex; gap: 0; margin: 0 -16px 12px -16px; padding: 0 0 0 16px;
     border-bottom: 1px solid var(--border);
     position: sticky; top: 60px; z-index: 39; background: var(--bg);
     overflow-x: auto; -webkit-overflow-scrolling: touch; scroll-behavior: smooth;
   }
   .tab-bar::-webkit-scrollbar { display: none; }
   .tab-bar button {
-    flex: none; padding: 10px 8px; font-size: 0.85rem; font-weight: 600;
+    flex: none; padding: 10px 10px; font-size: 0.85rem; font-weight: 600;
     background: none; border: none; border-bottom: 2px solid transparent;
     color: var(--dim); cursor: pointer; transition: color 0.15s, border-color 0.15s;
     -webkit-tap-highlight-color: transparent; white-space: nowrap;
@@ -8090,10 +8090,11 @@ function _gpSafeId(name) {
 
 function enterGridMode() {
   const view = document.getElementById('grid-view');
-  // Position below the sticky header so the header remains visible
-  const header = document.querySelector('.header-row');
-  if (header) {
-    const rect = header.getBoundingClientRect();
+  // Position below the tab bar so both header and tabs remain visible
+  const tabBar = document.querySelector('.tab-bar');
+  const ref = tabBar || document.querySelector('.header-row');
+  if (ref) {
+    const rect = ref.getBoundingClientRect();
     view.style.top = rect.bottom + 'px';
   }
   view.classList.add('active');
