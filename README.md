@@ -1,23 +1,24 @@
 # amux — Claude Code Multiplexer
 
-Run dozens of Claude Code agents in parallel, monitored and self-healing, orchestrated from a single dashboard. amux wraps tmux to launch headless Claude Code instances, injects each session with `$AMUX_SESSION` and `$AMUX_URL` so agents can coordinate without being told how, and runs a background thread that watches every session's output to keep them alive and unblocked.
+amux wraps tmux to run dozens of Claude Code agents in parallel — and keep them running unattended. A background thread snapshots every session every 60s: auto-compacts when context drops below 20%, restarts and replays on thinking-block corruption, and unblocks sessions stuck waiting for input. Every session gets `$AMUX_SESSION` and `$AMUX_URL` injected at startup; the global memory file shared across all sessions contains the full REST API reference, so agents can discover peers, claim tasks atomically, and coordinate without being explicitly programmed to do so.
 
-Access everything from your browser, phone (PWA), or terminal.
+No build step, no external services — Python 3 and tmux. Access everything from your browser, phone (PWA), or terminal.
 
 <video src="amux.mp4" width="920" autoplay loop muted playsinline></video>
 
 ## How it works
 
-**Status detection** — amux parses Claude Code's actual terminal output to determine state. No API hooks, no patches. Unicode dingbat spinners (U+2700–27BF) + ellipsis = working. "Enter to select" / "❯ 1. Yes" UI chrome = waiting for input. Completed spinner + "for Xm Ys" = idle. Status streams to all clients via SSE.
+**Status detection** — amux parses Claude Code's actual terminal output after stripping ANSI escapes. No API hooks, no patches, no modifications to Claude Code. Unicode dingbat spinners (U+2700–27BF) + trailing ellipsis = working. "Enter to select" / "❯ 1. Yes" UI chrome = waiting for input. Completed spinner + "for Xm Ys" = idle. Status streams to all clients via SSE.
 
 **Self-healing** — a background thread snapshots every session every 60s:
 - Context < 20%? Sends `/compact` automatically (5-minute cooldown).
-- `redacted_thinking … cannot be modified` detected? Restarts the session and replays the last meaningful user message.
-- Session stuck waiting for input? With `CC_AUTO_CONTINUE=1`, auto-responds based on prompt type: Enter for option selectors, "1" for numbered prompts, "continue" for interrupted state.
+- `redacted_thinking … cannot be modified` detected? Restarts the session and replays the last user message.
+- Session stuck waiting for input for 2+ snapshots? With `CC_AUTO_CONTINUE=1`, auto-responds based on prompt type.
+- Safety-prompt UI chrome ("Esc to cancel") detected in a YOLO session? Auto-answers with "1" — that marker never appears on open-ended model questions, so the distinction is reliable.
 
-**Orchestration** — every session gets `$AMUX_SESSION` and `$AMUX_URL` at startup. The global memory file (shared across all sessions) contains the full REST API reference, so any agent can discover peers, delegate tasks, claim board items, and peek output without being explicitly told how.
+**Orchestration** — every session gets `$AMUX_SESSION` and `$AMUX_URL` at startup. The global memory file (`GET /api/memory/global`, shared across all sessions) contains the full REST API reference, so any agent can discover peers, peek their output, delegate tasks, and atomically claim board items without being explicitly told how.
 
-**Single file** — everything lives in `amux-server.py`: ~12,000 lines of Python server + inline HTML/CSS/JS. No build step. Save the file and it restarts itself via `os.execv`.
+**Single file** — everything lives in `amux-server.py`: ~12,000 lines of Python `ThreadingHTTPServer` + inline HTML/CSS/JS dashboard. No build step, no npm, no Docker. Save the file and it restarts itself via `os.execv`.
 
 ## Install
 
