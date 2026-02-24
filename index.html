@@ -191,6 +191,97 @@
     footer a:hover { color: var(--fg); }
     footer .sep { opacity: 0.3; }
 
+    /* ── Slideshow ───────────────────────────────────────── */
+    .slides-wrap {
+      margin-bottom: 2.5rem;
+    }
+
+    .slides-frame {
+      position: relative;
+      border: 1px solid var(--code-border);
+      border-radius: 8px;
+      overflow: hidden;
+      background: #000;
+      aspect-ratio: 695 / 840;
+      cursor: pointer;
+    }
+
+    .slides-frame img {
+      position: absolute;
+      inset: 0;
+      width: 100%;
+      height: 100%;
+      object-fit: cover;
+      object-position: top;
+      opacity: 0;
+      transition: opacity 0.35s ease;
+      display: block;
+    }
+
+    .slides-frame img.active { opacity: 1; }
+
+    .slides-nav {
+      position: absolute;
+      inset: 0;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      pointer-events: none;
+    }
+
+    .slides-nav button {
+      pointer-events: all;
+      background: rgba(0,0,0,0.5);
+      border: none;
+      color: #fff;
+      width: 32px;
+      height: 48px;
+      cursor: pointer;
+      font-size: 1rem;
+      opacity: 0;
+      transition: opacity 0.15s;
+      flex-shrink: 0;
+    }
+
+    .slides-frame:hover .slides-nav button { opacity: 1; }
+    .slides-nav button:hover { background: rgba(0,0,0,0.75); }
+
+    .slides-meta {
+      padding: 0.75rem 0 0;
+    }
+
+    .slides-label {
+      font-size: 0.8rem;
+      font-weight: 600;
+      color: var(--fg);
+      margin-bottom: 0.2rem;
+    }
+
+    .slides-desc {
+      font-size: 0.8rem;
+      color: var(--muted);
+      line-height: 1.5;
+    }
+
+    .slides-dots {
+      display: flex;
+      gap: 0.35rem;
+      margin-top: 0.65rem;
+    }
+
+    .slides-dots button {
+      width: 5px;
+      height: 5px;
+      border-radius: 50%;
+      border: none;
+      background: var(--border);
+      cursor: pointer;
+      padding: 0;
+      transition: background 0.15s;
+    }
+
+    .slides-dots button.active { background: var(--accent); }
+
     #demo-lightbox {
       display: none;
       position: fixed;
@@ -250,6 +341,29 @@
     <pre><span class="cmd-dollar">$</span> git clone https://github.com/mixpeek/amux &amp;&amp; cd amux &amp;&amp; ./install.sh
 <span class="cmd-dollar">$</span> amux register api --dir ~/Dev/api --yolo &amp;&amp; amux start api
 <span class="cmd-dollar">$</span> amux serve  <span class="cmd-comment"># → https://localhost:8822</span></pre>
+  </div>
+
+  <!-- ── Slideshow ─────────────────────────────────────── -->
+  <div class="slides-wrap">
+    <div class="slides-frame" id="slides-frame">
+      <img src="screenshots/sessions-overview.jpg" alt="Session Dashboard" class="active">
+      <img src="screenshots/session-expanded.jpg" alt="Session Card">
+      <img src="screenshots/search-and-send.jpg" alt="Search and Send">
+      <img src="screenshots/live-terminal.jpg" alt="Live Terminal">
+      <img src="screenshots/file-explorer.jpg" alt="File Explorer">
+      <img src="screenshots/session-memory.jpg" alt="Session Memory">
+      <img src="screenshots/kanban-board.jpg" alt="Kanban Board">
+      <img src="screenshots/calendar.jpg" alt="Calendar">
+      <div class="slides-nav">
+        <button id="slides-prev" aria-label="Previous">&#8249;</button>
+        <button id="slides-next" aria-label="Next">&#8250;</button>
+      </div>
+    </div>
+    <div class="slides-meta">
+      <div class="slides-label" id="slides-label">Session Dashboard</div>
+      <div class="slides-desc" id="slides-desc">All running agents at a glance — live status, token spend, model, and current task.</div>
+      <div class="slides-dots" id="slides-dots"></div>
+    </div>
   </div>
 
   <p class="section-label">How it works</p>
@@ -380,6 +494,41 @@
   <video id="demo-video" src="amux.mp4" width="920" loop muted playsinline controls onclick="event.stopPropagation()"></video>
 </div>
 <script>
+  // Slideshow
+  var slides = [
+    { img: 'screenshots/sessions-overview.jpg',  label: 'Session Dashboard',  desc: 'All running agents at a glance — live status, token spend, model, and current task.' },
+    { img: 'screenshots/session-expanded.jpg',   label: 'Expanded Session Card', desc: 'Inline live output with quick-action chips and a send bar, without leaving the sessions list.' },
+    { img: 'screenshots/search-and-send.jpg',    label: 'Search & Send',       desc: 'Full-text search across all session output. Click a match to jump to it and send commands inline.' },
+    { img: 'screenshots/live-terminal.jpg',      label: 'Live Terminal Peek',  desc: 'Full scrollback with search, file previews, and syntax-highlighted diffs. No terminal attachment needed.' },
+    { img: 'screenshots/file-explorer.jpg',      label: 'File Explorer',       desc: "Browse the agent's working directory from the dashboard. Click any file to preview it." },
+    { img: 'screenshots/session-memory.jpg',     label: 'Session Memory',      desc: 'Per-session markdown context that persists across restarts. Global memory shared across all agents.' },
+    { img: 'screenshots/kanban-board.jpg',       label: 'Kanban Board',        desc: 'SQLite-backed board with auto-generated issue keys, tags, per-agent ownership, and custom columns.' },
+    { img: 'screenshots/calendar.jpg',           label: 'Calendar & Scheduler', desc: 'Board items with due dates appear as calendar events. Built-in cron for recurring agent commands.' },
+  ];
+  var si = 0, stimer;
+  var imgs = document.querySelectorAll('#slides-frame img');
+  var lbl = document.getElementById('slides-label');
+  var dsc = document.getElementById('slides-desc');
+  var dotsEl = document.getElementById('slides-dots');
+  slides.forEach(function(_, i) {
+    var d = document.createElement('button');
+    if (i === 0) d.className = 'active';
+    d.addEventListener('click', function() { goTo(i); resetTimer(); });
+    dotsEl.appendChild(d);
+  });
+  var dots = dotsEl.querySelectorAll('button');
+  function goTo(n) {
+    imgs[si].classList.remove('active'); dots[si].classList.remove('active');
+    si = (n + slides.length) % slides.length;
+    imgs[si].classList.add('active'); dots[si].classList.add('active');
+    lbl.textContent = slides[si].label;
+    dsc.textContent = slides[si].desc;
+  }
+  function resetTimer() { clearInterval(stimer); stimer = setInterval(function() { goTo(si + 1); }, 4000); }
+  document.getElementById('slides-prev').addEventListener('click', function(e) { e.stopPropagation(); goTo(si - 1); resetTimer(); });
+  document.getElementById('slides-next').addEventListener('click', function(e) { e.stopPropagation(); goTo(si + 1); resetTimer(); });
+  resetTimer();
+
   var lb = document.getElementById('demo-lightbox');
   var vid = document.getElementById('demo-video');
   document.getElementById('demo-btn').addEventListener('click', function() {
