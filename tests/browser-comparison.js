@@ -87,7 +87,12 @@ async function run() {
   {
     const t = Date.now();
     try {
-      await page.evaluate(() => typeof fetchBoard === 'function' && fetchBoard());
+      // Switch to status (column) view, fetch data, then render
+      await page.evaluate(async () => {
+        boardViewMode = 'status';
+        await fetchBoard();
+        renderBoard();
+      });
       await page.waitForSelector('.board-col-header', { timeout: 5000 });
       const cols = await page.$$eval('.board-col-header', els => els.map(e => e.textContent.trim()));
       record('Read board columns', cols.length > 0, Date.now() - t, cols.join(', '));

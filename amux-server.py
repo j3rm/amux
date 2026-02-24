@@ -8067,10 +8067,13 @@ function _renderBoardCard(item) {
 }
 
 function _renderBoardBySession(visible, container) {
-  // Group all items by session
+  // Separate human (yours) vs agent items
+  const humanItems = visible.filter(i => i.owner_type !== 'agent');
+  const agentVisible = visible.filter(i => i.owner_type === 'agent');
+  // Group agent items by session
   const groups = {};
   const noSession = [];
-  visible.forEach(function(item) {
+  agentVisible.forEach(function(item) {
     if (item.session) {
       if (!groups[item.session]) groups[item.session] = [];
       groups[item.session].push(item);
