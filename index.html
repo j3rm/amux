@@ -142,12 +142,13 @@
       list-style: none;
       display: flex;
       flex-direction: column;
-      gap: 0.55rem;
+      gap: 1rem;
       margin-bottom: 3rem;
     }
 
     .features li {
       font-size: 0.9rem;
+      line-height: 1.6;
       color: var(--muted);
     }
 
@@ -236,12 +237,12 @@
   </div>
 
   <ul class="features">
-    <li><strong>Self-healing watchdog</strong> — compacts, recovers from corruption, unblocks stuck sessions</li>
-    <li><strong>Truly headless YOLO</strong> — detects and auto-answers tool-approval prompts</li>
-    <li><strong>Agent coordination</strong> — <code style="font-family:'Geist Mono',monospace;font-size:0.8em;">$AMUX_URL</code> injected at startup; agents discover peers and claim tasks</li>
-    <li><strong>Atomic task claiming</strong> — SQLite CAS, no Redis, no duplicates</li>
-    <li><strong>Dashboard + PWA</strong> — live output, kanban board, workspace. Phone-ready via Tailscale.</li>
-    <li><strong>One Python file</strong> — ~12k lines, self-restarts on save. Just <code style="font-family:'Geist Mono',monospace;font-size:0.8em;">python3</code> + <code style="font-family:'Geist Mono',monospace;font-size:0.8em;">tmux</code>.</li>
+    <li><strong>Self-healing watchdog</strong> — a background thread snapshots every session every 60s. Context below 20% → sends <code style="font-family:'Geist Mono',monospace;font-size:0.8em;">/compact</code>. Thinking-block corruption detected in output → restarts and replays the last message. Session stuck waiting for input → auto-responds. All silent, all broadcast as toast alerts.</li>
+    <li><strong>Truly headless YOLO mode</strong> — <code style="font-family:'Geist Mono',monospace;font-size:0.8em;">--dangerously-skip-permissions</code> still shows blocking tool-approval prompts. amux detects them by matching the "Esc to cancel" marker in terminal output (that string never appears on open-ended questions) and auto-answers, keeping sessions actually unattended.</li>
+    <li><strong>Agent coordination out of the box</strong> — <code style="font-family:'Geist Mono',monospace;font-size:0.8em;">$AMUX_SESSION</code> and <code style="font-family:'Geist Mono',monospace;font-size:0.8em;">$AMUX_URL</code> are injected at every session's startup. A global memory file shipped with the full REST API reference lets agents discover peers, peek their output, post tasks to the board, and delegate work — without being explicitly programmed to do so.</li>
+    <li><strong>Atomic task claiming — no broker</strong> — <code style="font-family:'Geist Mono',monospace;font-size:0.8em;">POST /api/board/:id/claim</code> uses SQLite 3.35+ <code style="font-family:'Geist Mono',monospace;font-size:0.8em;">UPDATE … RETURNING</code> as a compare-and-swap: the row only moves todo → doing if it's still unclaimed. Dozens of agents can race for the same queue with no Redis, no queue broker, no duplicated work.</li>
+    <li><strong>Web dashboard + PWA</strong> — live session cards with status, token stats, and quick-actions. Peek mode with full scrollback, search, and file previews. Multi-pane workspace to watch agents side by side. Kanban board with iCal sync. Installable on iOS and Android. Tailscale gives you real TLS and phone access with zero config.</li>
+    <li><strong>One Python file, zero build step</strong> — ~12k lines: a <code style="font-family:'Geist Mono',monospace;font-size:0.8em;">ThreadingHTTPServer</code> with manual routing plus the entire dashboard as inline HTML/CSS/JS. Edit the file; it restarts itself via <code style="font-family:'Geist Mono',monospace;font-size:0.8em;">os.execv</code> on save. Only dependencies are <code style="font-family:'Geist Mono',monospace;font-size:0.8em;">python3</code> and <code style="font-family:'Geist Mono',monospace;font-size:0.8em;">tmux</code>.</li>
   </ul>
 
   <hr>
