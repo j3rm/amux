@@ -6884,7 +6884,7 @@ let _filesShowHidden = false;
 })();
 function setFilesCwd() {
   _filesCwd = _filesPath;
-  fetch(API + '/api/prefs', {method:'PUT', headers:{'Content-Type':'application/json'}, body:JSON.stringify({key:'files_cwd', value:_filesCwd})}).catch(()=>{});
+  fetch(API + '/api/prefs', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({key:'files_cwd', value:_filesCwd})}).catch(()=>{});
   _updateFilesCwdBtn();
 }
 function _updateFilesCwdBtn() {
@@ -11085,8 +11085,8 @@ class CCHandler(BaseHTTPRequestHandler):
             rows = db.execute("SELECT key, value FROM prefs").fetchall()
             return self._json({r["key"]: r["value"] for r in rows})
 
-        # PUT /api/prefs — set a pref: {"key":"...", "value":"..."}
-        if method == "PUT" and path == "/api/prefs":
+        # POST /api/prefs — set a pref: {"key":"...", "value":"..."}
+        if method == "POST" and path == "/api/prefs":
             body = json.loads(self.rfile.read(int(self.headers.get("Content-Length", 0))))
             key = body.get("key", "")
             value = body.get("value", "")
