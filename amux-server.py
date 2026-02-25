@@ -2312,6 +2312,9 @@ def start_session(name: str, extra_flags: str = "", _skip_conv_id: bool = False)
         cmd += f" {session_flag}"
     if extra_flags:
         cmd += f" {extra_flags}"
+    # Default to sonnet if no --model specified anywhere
+    if "--model" not in cmd:
+        cmd += " --model sonnet"
     try:
         tmux_sess = tmux_name(name)
         # Create session with window naming options set upfront so Claude
