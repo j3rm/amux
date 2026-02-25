@@ -180,6 +180,8 @@ _session_auto_actions: dict = {} # {name: {"last_compact": ts, "last_restart": t
 # ── Remote browser (screenshot-based Playwright child process) ──
 _rb_proc: subprocess.Popen | None = None
 _rb_lock = threading.Lock()
+_rb_profile: str = "default"  # current active profile name
+_RB_PROFILES_DIR = CC_HOME / "playwright-auth" / "profiles"
 
 _RB_AGENT_SCRIPT = r"""
 const { chromium } = require('PLAYWRIGHT_PATH');
@@ -187,7 +189,9 @@ const { homedir } = require('os');
 const readline = require('readline');
 
 let ctx = null, page = null;
-const PROFILE = homedir() + '/.amux/playwright-auth/profile';
+const PROFILES_DIR = homedir() + '/.amux/playwright-auth/profiles';
+const DEFAULT_PROFILE = homedir() + '/.amux/playwright-auth/profile';
+const fs = require('fs');
 
 const rl = readline.createInterface({ input: process.stdin, terminal: false });
 rl.on('line', async (line) => {
@@ -197,7 +201,13 @@ rl.on('line', async (line) => {
     switch (cmd.action) {
       case 'start': {
         if (ctx) { try { await ctx.close(); } catch(e) {} }
-        ctx = await chromium.launchPersistentContext(PROFILE, {
+        // Use named profile or default
+        let profilePath = DEFAULT_PROFILE;
+        if (cmd.profile) {
+          profilePath = PROFILES_DIR + '/' + cmd.profile.replace(/[^a-zA-Z0-9_-]/g, '');
+          fs.mkdirSync(profilePath, { recursive: true });
+        }
+        ctx = await chromium.launchPersistentContext(profilePath, {
           headless: true,
           viewport: { width: 1280, height: 800 },
           ignoreHTTPSErrors: true,
@@ -207,7 +217,7 @@ rl.on('line', async (line) => {
         if (cmd.url) {
           await page.goto(cmd.url, { waitUntil: 'domcontentloaded', timeout: 15000 }).catch(()=>{});
         }
-        respond({ ok: true, url: page.url(), title: await page.title() });
+        respond({ ok: true, url: page.url(), title: await page.title(), profile: cmd.profile || 'default' });
         break;
       }
       case 'navigate': {
@@ -4271,6 +4281,16 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
 </div>
 
 <div id="browser-view" style="display:none;flex-direction:column;flex:1;min-height:0;">
+  <!-- Profile bar -->
+  <div style="padding:4px 12px;display:flex;align-items:center;gap:6px;border-bottom:1px solid var(--border);flex-shrink:0;font-size:0.72rem;">
+    <span style="color:var(--dim);">Profile:</span>
+    <select id="rb-profile" onchange="_rbSwitchProfile(this.value)" style="font-size:0.72rem;padding:2px 6px;background:var(--card-bg);color:var(--fg);border:1px solid var(--border);border-radius:4px;">
+      <option value="default">default</option>
+    </select>
+    <button class="btn" onclick="_rbNewProfile()" style="font-size:0.6rem;padding:1px 6px;">+ New</button>
+    <button class="btn" id="rb-del-profile" onclick="_rbDeleteProfile()" style="font-size:0.6rem;padding:1px 6px;color:var(--red);display:none;" title="Delete profile">&#x2715;</button>
+    <span id="rb-profile-status" style="color:var(--dim);margin-left:auto;"></span>
+  </div>
   <!-- URL bar -->
   <div style="padding:6px 12px;display:flex;align-items:center;gap:6px;border-bottom:1px solid var(--border);flex-shrink:0;">
     <button class="btn" onclick="_rbCmd('back')" style="font-size:0.8rem;padding:2px 6px;" title="Back">&#x25C0;</button>
@@ -7281,19 +7301,85 @@ function closeFilePreview() {
 // ═══════ REMOTE BROWSER ═══════
 let _rbActive = false;
 let _rbLoading = false;
+let _rbCurrentProfile = 'default';
+
+async function _rbLoadProfiles() {
+  try {
+    const r = await fetch(API + '/api/browser/profiles');
+    const d = await r.json();
+    const sel = document.getElementById('rb-profile');
+    sel.innerHTML = '';
+    for (const p of (d.profiles || [])) {
+      const opt = document.createElement('option');
+      opt.value = p.name;
+      opt.textContent = p.name;
+      sel.appendChild(opt);
+    }
+    _rbCurrentProfile = d.active || 'default';
+    sel.value = _rbCurrentProfile;
+    document.getElementById('rb-del-profile').style.display = _rbCurrentProfile !== 'default' ? '' : 'none';
+  } catch(e) {}
+}
+
+async function _rbNewProfile() {
+  const name = prompt('Profile name:');
+  if (!name || !name.trim()) return;
+  const clean = name.trim().replace(/[^a-zA-Z0-9_-]/g, '-');
+  try {
+    const r = await fetch(API + '/api/browser/profiles', {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({ name: clean }),
+    });
+    if (r.ok) {
+      await _rbLoadProfiles();
+      document.getElementById('rb-profile').value = clean;
+      _rbSwitchProfile(clean);
+    }
+  } catch(e) {}
+}
+
+async function _rbDeleteProfile() {
+  const sel = document.getElementById('rb-profile');
+  const name = sel.value;
+  if (name === 'default') return;
+  if (!confirm('Delete profile "' + name + '"? All saved cookies and sessions will be lost.')) return;
+  try {
+    await fetch(API + '/api/browser/profiles/' + encodeURIComponent(name), { method: 'DELETE' });
+    if (_rbActive) await _rbStop();
+    await _rbLoadProfiles();
+  } catch(e) {}
+}
+
+async function _rbSwitchProfile(name) {
+  _rbCurrentProfile = name;
+  document.getElementById('rb-del-profile').style.display = name !== 'default' ? '' : 'none';
+  document.getElementById('rb-profile-status').textContent = '';
+  // If browser is running, restart with new profile
+  if (_rbActive) {
+    await _rbStop();
+    await _rbStart();
+  }
+}
 
 async function _rbStart(url) {
   const status = document.getElementById('rb-status');
   status.textContent = 'Starting...';
   _rbLoading = true;
   try {
+    const body = { url: url || '' };
+    if (_rbCurrentProfile && _rbCurrentProfile !== 'default') body.profile = _rbCurrentProfile;
     const r = await fetch(API + '/api/browser/start', {
       method: 'POST', headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({ url: url || '' }),
+      body: JSON.stringify(body),
     });
     const d = await r.json();
     if (!d.ok) { status.textContent = d.error || 'Failed'; _rbLoading = false; return; }
     _rbActive = true;
+    if (d.profile) {
+      _rbCurrentProfile = d.profile;
+      document.getElementById('rb-profile').value = d.profile;
+    }
+    document.getElementById('rb-profile-status').textContent = 'Active: ' + _rbCurrentProfile;
     status.textContent = '';
     document.getElementById('rb-placeholder').style.display = 'none';
     document.getElementById('rb-screen').style.display = 'block';
@@ -8652,6 +8738,7 @@ function switchView(view) {
   document.getElementById('tab-logs').classList.toggle('active', view === 'logs');
   if (view === 'files') loadFiles(_filesPath);
   if (view === 'reports') fetchReports();
+  if (view === 'browser') _rbLoadProfiles();
   if (view === 'logs') { fetchLogs(); _startLogsTimer(); } else { _stopLogsTimer(); }
   if (view === 'board') {
     renderBoard();
@@ -12059,12 +12146,53 @@ class CCHandler(BaseHTTPRequestHandler):
 
         # ── Remote browser endpoints ──
         if method == "POST" and path == "/api/browser/start":
+            global _rb_profile
             body = self._read_body()
-            result = _rb_send({"action": "start", "url": body.get("url", "")})
+            profile = body.get("profile", "").strip()
+            cmd = {"action": "start", "url": body.get("url", "")}
+            if profile and profile != "default":
+                cmd["profile"] = profile
+                _rb_profile = profile
+            else:
+                _rb_profile = "default"
+            result = _rb_send(cmd)
+            if result.get("ok"):
+                result["profile"] = _rb_profile
             return self._json(result, 200 if result.get("ok") else 500)
 
         if method == "POST" and path == "/api/browser/stop":
             result = _rb_send({"action": "stop"})
+            return self._json({"ok": True})
+
+        # GET /api/browser/profiles — list available profiles
+        if method == "GET" and path == "/api/browser/profiles":
+            profiles = [{"name": "default", "path": str(CC_HOME / "playwright-auth" / "profile")}]
+            if _RB_PROFILES_DIR.exists():
+                for d in sorted(_RB_PROFILES_DIR.iterdir()):
+                    if d.is_dir() and not d.name.startswith("."):
+                        profiles.append({"name": d.name, "path": str(d)})
+            return self._json({"profiles": profiles, "active": _rb_profile})
+
+        # POST /api/browser/profiles — create a new profile
+        if method == "POST" and path == "/api/browser/profiles":
+            body = self._read_body()
+            name = re.sub(r'[^a-zA-Z0-9_-]', '-', body.get("name", "").strip())
+            if not name or name == "default":
+                return self._json({"error": "invalid profile name"}, 400)
+            profile_dir = _RB_PROFILES_DIR / name
+            profile_dir.mkdir(parents=True, exist_ok=True)
+            return self._json({"ok": True, "name": name}, 201)
+
+        # DELETE /api/browser/profiles/<name>
+        del_profile_m = re.match(r"^/api/browser/profiles/([a-zA-Z0-9_-]+)$", path)
+        if method == "DELETE" and del_profile_m:
+            name = del_profile_m.group(1)
+            if name == "default":
+                return self._json({"error": "cannot delete default profile"}, 400)
+            profile_dir = _RB_PROFILES_DIR / name
+            if profile_dir.exists():
+                import shutil
+                shutil.rmtree(str(profile_dir), ignore_errors=True)
             return self._json({"ok": True})
 
         if method == "POST" and path == "/api/browser/navigate":
