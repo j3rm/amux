@@ -726,6 +726,10 @@ CREATE TABLE IF NOT EXISTS reports (
     last_refresh INTEGER,
     cached_data  TEXT
 );
+CREATE TABLE IF NOT EXISTS prefs (
+    key   TEXT PRIMARY KEY,
+    value TEXT NOT NULL
+);
 """
 
 
@@ -6867,6 +6871,14 @@ let _exploreShowHidden = false;
 // ═══════ FILES TAB (inline directory browser) ═══════
 let _filesPath = '/';
 let _filesShowHidden = false;
+// Load saved working dir from server prefs
+(async () => {
+  try {
+    const r = await fetch(API + '/api/prefs?key=files_cwd');
+    const d = await r.json();
+    if (d.value) _filesPath = d.value;
+  } catch(e) {}
+})();
 function toggleFilesHidden() {
   _filesShowHidden = !_filesShowHidden;
   const btn = document.getElementById('files-hidden-btn');
@@ -6878,6 +6890,8 @@ async function loadFiles(path) {
   const body = document.getElementById('files-body');
   body.innerHTML = '<div style="padding:16px;color:var(--dim)">Loading...</div>';
   _filesPath = path;
+  // Persist working dir to server
+  fetch(API + '/api/prefs', {method:'PUT', headers:{'Content-Type':'application/json'}, body:JSON.stringify({key:'files_cwd', value:path})}).catch(()=>{});
   // Breadcrumb
   const parts = path.split('/').filter(Boolean);
   let crumbHtml = '<span class="explore-crumb" onclick="loadFiles(\'/\')">/</span>';
@@ -11045,6 +11059,28 @@ class CCHandler(BaseHTTPRequestHandler):
             if f.exists():
                 f.unlink()
             return self._json({"ok": True})
+
+        # GET /api/prefs — read all prefs (or ?key=X for one)
+        if method == "GET" and path == "/api/prefs":
+            key = qs.get("key", [""])[0]
+            db = get_db()
+            if key:
+                row = db.execute("SELECT value FROM prefs WHERE key=?", (key,)).fetchone()
+                return self._json({"key": key, "value": row["value"] if row else None})
+            rows = db.execute("SELECT key, value FROM prefs").fetchall()
+            return self._json({r["key"]: r["value"] for r in rows})
+
+        # PUT /api/prefs — set a pref: {"key":"...", "value":"..."}
+        if method == "PUT" and path == "/api/prefs":
+            body = json.loads(self.rfile.read(int(self.headers.get("Content-Length", 0))))
+            key = body.get("key", "")
+            value = body.get("value", "")
+            if not key:
+                return self._json({"error": "key required"}, 400)
+            db = get_db()
+            db.execute("INSERT INTO prefs (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value=?", (key, value, value))
+            db.commit()
+            return self._json({"ok": True, "key": key, "value": value})
 
         # GET /api/stats/daily
         if method == "GET" and path == "/api/stats/daily":
