@@ -4271,13 +4271,36 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
 
 <!-- Skills modal -->
 <div id="skills-modal" class="overlay" style="z-index:200;" onclick="if(event.target===this)closeSkills()">
-  <div style="display:flex;flex-direction:column;height:100%;max-width:560px;margin:0 auto;width:100%;">
+  <div style="display:flex;flex-direction:column;height:100%;max-width:600px;margin:0 auto;width:100%;">
     <div class="overlay-header">
-      <h2>&#x26A1; Skills &amp; commands</h2>
-      <button class="btn" onclick="closeSkills()">&#x2715;</button>
+      <h2>&#x26A1; Skills library</h2>
+      <div style="display:flex;gap:8px;">
+        <button class="btn primary" onclick="editSkill()" style="font-size:0.8rem;">+ New skill</button>
+        <button class="btn" onclick="closeSkills()">&#x2715;</button>
+      </div>
     </div>
-    <p style="font-size:0.8rem;color:var(--dim);margin:0 0 14px;">Use these with <code style="background:var(--card);padding:1px 5px;border-radius:4px;font-size:0.78rem;">/command</code> in any Claude Code session.</p>
+    <p style="font-size:0.8rem;color:var(--dim);margin:0 0 14px;">Shared skills for all sessions. Use with <code style="background:var(--card);padding:1px 5px;border-radius:4px;font-size:0.78rem;">/command</code> in Claude Code.</p>
     <div id="skills-list" style="flex:1;overflow-y:auto;display:flex;flex-direction:column;gap:8px;"></div>
+  </div>
+</div>
+<!-- Skill editor modal -->
+<div id="skill-edit-modal" class="overlay" style="z-index:210;" onclick="if(event.target===this)closeSkillEdit()">
+  <div style="display:flex;flex-direction:column;height:100%;max-width:700px;margin:0 auto;width:100%;">
+    <div class="overlay-header">
+      <h2 id="skill-edit-title">New skill</h2>
+      <div style="display:flex;gap:8px;">
+        <button class="btn" id="skill-delete-btn" onclick="deleteSkill()" style="color:var(--red);display:none;">Delete</button>
+        <button class="btn primary" onclick="saveSkill()">Save</button>
+        <button class="btn" onclick="closeSkillEdit()">&#x2715;</button>
+      </div>
+    </div>
+    <div style="display:flex;gap:8px;margin-bottom:10px;">
+      <label style="font-size:0.8rem;color:var(--dim);align-self:center;flex-shrink:0;">Name:</label>
+      <input id="skill-edit-name" class="send-input" style="min-height:36px;font-size:0.85rem;padding:6px 10px;font-family:'SF Mono','Fira Code',monospace;"
+        placeholder="my-skill" autocomplete="off">
+    </div>
+    <textarea id="skill-edit-content" class="peek-memory-textarea" style="flex:1;"
+      placeholder="---&#10;description: What this skill does&#10;allowed-tools: Bash, Read, Edit&#10;argument-hint: [args]&#10;---&#10;&#10;# Skill instructions...&#10;&#10;$ARGUMENTS"></textarea>
   </div>
 </div>
 
@@ -9824,16 +9847,16 @@ async function openSkills() {
   try {
     const skills = await fetch(API + '/api/skills').then(r => r.json());
     if (!skills.length) {
-      list.innerHTML = '<div style="color:var(--dim);font-size:0.85rem;text-align:center;padding:20px;">No skills found in ~/.claude/commands/</div>';
+      list.innerHTML = '<div style="color:var(--dim);font-size:0.85rem;text-align:center;padding:20px;">No skills yet. Click <b>+ New skill</b> to create one.</div>';
       return;
     }
     list.innerHTML = skills.map(s => {
       const cmd = '/' + esc(s.name);
       const hint = s.hint ? '<div class="skill-card-hint">' + esc(s.hint) + '</div>' : '';
-      return '<div class="skill-card">' +
+      return '<div class="skill-card" style="cursor:pointer;" onclick="editSkill(\'' + esc(s.name) + '\')">' +
         '<div style="display:flex;align-items:center;justify-content:space-between;">' +
           '<span class="skill-card-name">' + cmd + '</span>' +
-          '<button class="btn" style="font-size:0.65rem;padding:2px 8px;" onclick="navigator.clipboard.writeText(\'' + esc(s.name) + '\');showToast(\'Copied!\')">Copy</button>' +
+          '<button class="btn" style="font-size:0.65rem;padding:2px 8px;" onclick="event.stopPropagation();navigator.clipboard.writeText(\'' + esc(s.name) + '\');showToast(\'Copied!\')">Copy</button>' +
         '</div>' +
         (s.description ? '<div class="skill-card-desc">' + esc(s.description) + '</div>' : '') +
         hint +
@@ -9845,6 +9868,62 @@ async function openSkills() {
 }
 function closeSkills() {
   document.getElementById('skills-modal').classList.remove('active');
+}
+let _skillEditName = null;
+async function editSkill(name) {
+  _skillEditName = name || null;
+  const modal = document.getElementById('skill-edit-modal');
+  const nameInput = document.getElementById('skill-edit-name');
+  const contentInput = document.getElementById('skill-edit-content');
+  const delBtn = document.getElementById('skill-delete-btn');
+  if (name) {
+    document.getElementById('skill-edit-title').textContent = 'Edit: /' + name;
+    nameInput.value = name;
+    nameInput.readOnly = true;
+    delBtn.style.display = '';
+    try {
+      const data = await fetch(API + '/api/skills/' + encodeURIComponent(name)).then(r => r.json());
+      contentInput.value = data.content || '';
+    } catch(e) { contentInput.value = ''; }
+  } else {
+    document.getElementById('skill-edit-title').textContent = 'New skill';
+    nameInput.value = '';
+    nameInput.readOnly = false;
+    contentInput.value = '---\ndescription: \nallowed-tools: Bash, Read, Edit\nargument-hint: [args]\n---\n\n# Instructions\n\nThe user\'s request is: **$ARGUMENTS**\n';
+    delBtn.style.display = 'none';
+  }
+  modal.classList.add('active');
+  setTimeout(() => (name ? contentInput : nameInput).focus(), 50);
+}
+function closeSkillEdit() {
+  document.getElementById('skill-edit-modal').classList.remove('active');
+}
+async function saveSkill() {
+  const name = document.getElementById('skill-edit-name').value.trim().replace(/[^a-zA-Z0-9_-]/g, '-');
+  const content = document.getElementById('skill-edit-content').value;
+  if (!name) { showToast('Name required'); return; }
+  if (!content.trim()) { showToast('Content required'); return; }
+  const r = await fetch(API + '/api/skills/' + encodeURIComponent(name), {
+    method: 'POST', headers: {'Content-Type':'application/json'},
+    body: JSON.stringify({ content })
+  });
+  if (r.ok) {
+    showToast('Saved /' + name);
+    closeSkillEdit();
+    openSkills();  // refresh list
+  } else {
+    showToast('Save failed');
+  }
+}
+async function deleteSkill() {
+  const name = _skillEditName;
+  if (!name) return;
+  const r = await fetch(API + '/api/skills/' + encodeURIComponent(name), { method: 'DELETE' });
+  if (r.ok) {
+    showToast('Deleted /' + name);
+    closeSkillEdit();
+    openSkills();
+  }
 }
 
 function openAbout() {
@@ -10837,28 +10916,62 @@ class CCHandler(BaseHTTPRequestHandler):
                             _write_claude_memory(sname, wd)
                 return self._json({"ok": True})
 
-        # GET /api/skills — list Claude Code commands from ~/.claude/commands/
+        # GET /api/skills — list skills from shared library (~/.amux/skills/)
         if method == "GET" and path == "/api/skills":
             skills = []
-            cmd_dir = CLAUDE_HOME / "commands"
-            if cmd_dir.is_dir():
-                for f in sorted(cmd_dir.glob("*.md")):
-                    try:
-                        text = f.read_text(errors="replace")
-                        desc, hint = "", ""
-                        if text.startswith("---"):
-                            fm_end = text.find("---", 3)
-                            if fm_end > 0:
-                                fm = text[3:fm_end]
-                                for line in fm.splitlines():
-                                    if line.startswith("description:"):
-                                        desc = line.split(":", 1)[1].strip()
-                                    elif line.startswith("argument-hint:"):
-                                        hint = line.split(":", 1)[1].strip()
-                        skills.append({"name": f.stem, "description": desc, "hint": hint})
-                    except Exception:
-                        pass
+            skills_dir = CC_HOME / "skills"
+            skills_dir.mkdir(parents=True, exist_ok=True)
+            for f in sorted(skills_dir.glob("*.md")):
+                try:
+                    text = f.read_text(errors="replace")
+                    desc, hint = "", ""
+                    if text.startswith("---"):
+                        fm_end = text.find("---", 3)
+                        if fm_end > 0:
+                            fm = text[3:fm_end]
+                            for line in fm.splitlines():
+                                if line.startswith("description:"):
+                                    desc = line.split(":", 1)[1].strip()
+                                elif line.startswith("argument-hint:"):
+                                    hint = line.split(":", 1)[1].strip()
+                    skills.append({"name": f.stem, "description": desc, "hint": hint})
+                except Exception:
+                    pass
             return self._json(skills)
+
+        # GET /api/skills/<name> — get full skill content
+        if method == "GET" and path.startswith("/api/skills/"):
+            name = path.split("/api/skills/", 1)[1]
+            if not name or "/" in name:
+                return self._json({"error": "invalid name"}, 400)
+            f = CC_HOME / "skills" / (name + ".md")
+            if not f.exists():
+                return self._json({"error": "not found"}, 404)
+            return self._json({"name": name, "content": f.read_text(errors="replace")})
+
+        # POST /api/skills/<name> — create or update a skill
+        if method == "POST" and path.startswith("/api/skills/"):
+            name = path.split("/api/skills/", 1)[1]
+            if not name or "/" in name:
+                return self._json({"error": "invalid name"}, 400)
+            body = json.loads(self.rfile.read(int(self.headers.get("Content-Length", 0))))
+            content = body.get("content", "")
+            if not content.strip():
+                return self._json({"error": "content required"}, 400)
+            skills_dir = CC_HOME / "skills"
+            skills_dir.mkdir(parents=True, exist_ok=True)
+            (skills_dir / (name + ".md")).write_text(content)
+            return self._json({"ok": True, "name": name})
+
+        # DELETE /api/skills/<name> — delete a skill
+        if method == "DELETE" and path.startswith("/api/skills/"):
+            name = path.split("/api/skills/", 1)[1]
+            if not name or "/" in name:
+                return self._json({"error": "invalid name"}, 400)
+            f = CC_HOME / "skills" / (name + ".md")
+            if f.exists():
+                f.unlink()
+            return self._json({"ok": True})
 
         # GET /api/stats/daily
         if method == "GET" and path == "/api/stats/daily":
@@ -12051,8 +12164,33 @@ def _auto_update_loop():
             script.write_bytes(new_content)
             last_sha = sha
             slog(f"[auto-update] updated to {sha[:8]} — file watcher will restart")
+            # Also sync skills directory from repo
+            _sync_skills_from_github(_ur, repo, branch)
         except Exception as e:
             slog(f"[auto-update] error: {e}")
+
+
+def _sync_skills_from_github(_ur, repo, branch):
+    """Download skills/*.md from GitHub repo into ~/.amux/skills/."""
+    try:
+        api_url = f"https://api.github.com/repos/{repo}/contents/skills?ref={branch}"
+        req = _ur.Request(api_url, headers={"Accept": "application/vnd.github.v3+json"})
+        with _ur.urlopen(req, timeout=10) as resp:
+            files = json.loads(resp.read())
+        skills_dir = CC_HOME / "skills"
+        skills_dir.mkdir(parents=True, exist_ok=True)
+        synced = 0
+        for f in files:
+            if not f["name"].endswith(".md"):
+                continue
+            with _ur.urlopen(f["download_url"], timeout=10) as resp:
+                content = resp.read()
+            (skills_dir / f["name"]).write_bytes(content)
+            synced += 1
+        if synced:
+            slog(f"[auto-update] synced {synced} skills from {repo}")
+    except Exception as e:
+        slog(f"[auto-update] skills sync error: {e}")
 
 
 # ═══════════════════════════════════════════
