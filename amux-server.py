@@ -11124,6 +11124,16 @@ function renderServerList() {
   const list = document.getElementById('server-list');
   const servers = _getSavedServers();
   const current = location.origin;
+  const isPWA = navigator.standalone || window.matchMedia('(display-mode: standalone)').matches;
+  // Pre-compute sync payload for <a> tags
+  const allServers = [...servers];
+  if (!allServers.some(srv => srv.url.replace(/\/+$/, '') === current)) {
+    allServers.push({ name: location.host, url: current });
+  }
+  const payload = btoa(JSON.stringify({
+    servers: allServers,
+    deviceName: localStorage.getItem('amux_device_name') || ''
+  }));
   let html = '';
   // Current server always shown first
   html += '<div style="display:flex;align-items:center;justify-content:space-between;padding:6px 8px;border-radius:6px;background:rgba(88,166,255,0.08);margin-bottom:4px;">';
@@ -11134,13 +11144,14 @@ function renderServerList() {
   servers.forEach((s, i) => {
     const isCurrent = s.url.replace(/\/+$/, '') === current;
     if (isCurrent) return;  // skip — already shown above
-    html += '<div style="display:flex;align-items:center;justify-content:space-between;padding:6px 8px;border-radius:6px;margin-bottom:4px;cursor:pointer;transition:background 0.12s;" onmouseenter="this.style.background=\'rgba(255,255,255,0.04)\'" onmouseleave="this.style.background=\'none\'" onclick="switchServer(' + i + ')">';
+    const syncUrl = s.url + '/?_sync=' + encodeURIComponent(payload);
+    html += '<a style="display:flex;align-items:center;justify-content:space-between;padding:6px 8px;border-radius:6px;margin-bottom:4px;cursor:pointer;transition:background 0.12s;text-decoration:none;color:inherit;" href="' + esc(syncUrl) + '"' + (isPWA ? ' target="_blank"' : '') + '>';
     html += '<div style="min-width:0;flex:1;">';
     html += '<div style="font-size:0.75rem;font-weight:500;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">' + esc(s.name || s.url) + '</div>';
     if (s.name) html += '<div style="font-size:0.65rem;color:var(--dim);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">' + esc(s.url.replace(/^https?:\/\//, '')) + '</div>';
     html += '</div>';
-    html += '<button class="btn" style="font-size:0.6rem;padding:1px 6px;flex-shrink:0;margin-left:8px;" onclick="event.stopPropagation();removeServer(' + i + ')">&#x2715;</button>';
-    html += '</div>';
+    html += '<button class="btn" style="font-size:0.6rem;padding:1px 6px;flex-shrink:0;margin-left:8px;" onclick="event.preventDefault();event.stopPropagation();removeServer(' + i + ');renderServerList()">&#x2715;</button>';
+    html += '</a>';
   });
   if (!servers.length || servers.every(s => s.url.replace(/\/+$/, '') === current)) {
     html += '<div style="color:var(--dim);font-size:0.7rem;text-align:center;padding:4px 0;">No other servers saved</div>';
@@ -11267,6 +11278,16 @@ function renderSettingsServerList() {
   const el = document.getElementById('settings-server-list');
   const servers = _getSavedServers();
   const current = location.origin;
+  const isPWA = navigator.standalone || window.matchMedia('(display-mode: standalone)').matches;
+  // Pre-compute sync payload so server items can be real <a> tags (user gesture = direct tap)
+  const allServers = [...servers];
+  if (!allServers.some(srv => srv.url.replace(/\/+$/, '') === current)) {
+    allServers.push({ name: location.host, url: current });
+  }
+  const payload = btoa(JSON.stringify({
+    servers: allServers,
+    deviceName: localStorage.getItem('amux_device_name') || ''
+  }));
   let html = '';
   // Current server
   html += '<div class="settings-server-item settings-server-current">';
@@ -11277,13 +11298,16 @@ function renderSettingsServerList() {
   html += '</div>';
   servers.forEach((s, i) => {
     if (s.url.replace(/\/+$/, '') === current) return;
-    html += '<div class="settings-server-item" onclick="switchServer(' + i + ')">';
+    const syncUrl = s.url + '/?_sync=' + encodeURIComponent(payload);
+    // Use real <a> tag so the user's tap is a direct gesture on the link.
+    // Programmatic a.click() loses the user gesture context and Safari PWA blocks it.
+    html += '<a class="settings-server-item" href="' + esc(syncUrl) + '"' + (isPWA ? ' target="_blank"' : '') + ' style="text-decoration:none;color:inherit;">';
     html += '<div style="min-width:0;flex:1;">';
     html += '<div class="settings-server-name">' + esc(s.name || s.url.replace(/^https?:\/\//, '')) + '</div>';
     if (s.name) html += '<div class="settings-server-url">' + esc(s.url.replace(/^https?:\/\//, '')) + '</div>';
     html += '</div>';
-    html += '<button class="btn" style="font-size:0.55rem;padding:1px 5px;flex-shrink:0;margin-left:6px;" onclick="event.stopPropagation();removeServer(' + i + ');renderSettingsServerList()">&#x2715;</button>';
-    html += '</div>';
+    html += '<button class="btn" style="font-size:0.55rem;padding:1px 5px;flex-shrink:0;margin-left:6px;" onclick="event.preventDefault();event.stopPropagation();removeServer(' + i + ');renderSettingsServerList()">&#x2715;</button>';
+    html += '</a>';
   });
   if (!servers.length || servers.every(s => s.url.replace(/\/+$/, '') === current)) {
     html += '<div style="color:var(--dim);font-size:0.68rem;text-align:center;padding:4px 0;">No other servers</div>';
