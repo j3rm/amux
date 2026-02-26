@@ -12862,7 +12862,13 @@ class CCHandler(BaseHTTPRequestHandler):
                     },
                 )
                 try:
-                    with _urq.urlopen(req, timeout=30) as r:
+                    import ssl as _ssl
+                    try:
+                        import certifi as _certifi
+                        _ssl_ctx = _ssl.create_default_context(cafile=_certifi.where())
+                    except ImportError:
+                        _ssl_ctx = _ssl.create_default_context()
+                    with _urq.urlopen(req, timeout=30, context=_ssl_ctx) as r:
                         result = json.loads(r.read())
                     return self._json({"text": result.get("text", "")})
                 except Exception as e:
