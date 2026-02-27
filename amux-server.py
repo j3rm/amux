@@ -8066,6 +8066,12 @@ function _showExploreMenu(path, btn) {
   document.querySelectorAll('.explore-menu-popup').forEach(el => el.remove());
   const popup = document.createElement('div');
   popup.className = 'explore-menu-popup';
+  // Pin / Unpin
+  const pinItem = document.createElement('button');
+  pinItem.className = 'explore-menu-item';
+  pinItem.textContent = _isPinned(path) ? '📌 Unpin' : '📌 Pin to top';
+  pinItem.onclick = () => { popup.remove(); _togglePin(path); loadExplore(_explorePath); };
+  popup.appendChild(pinItem);
   const copyItem = document.createElement('button');
   copyItem.className = 'explore-menu-item';
   copyItem.textContent = 'Copy path';
@@ -8163,15 +8169,21 @@ async function loadExplore(path) {
       body.innerHTML += '<div style="padding:16px;color:var(--dim)">Empty directory</div>';
       return;
     }
-    for (const entry of data.entries) {
+    const pins = _loadPins();
+    const pinSet = new Set(pins);
+    const pinned = pins.map(p => data.entries.find(e => path.replace(/\/$/, '') + '/' + e.name === p)).filter(Boolean);
+    const rest = data.entries.filter(e => !pinSet.has(path.replace(/\/$/, '') + '/' + e.name));
+    for (const entry of [...pinned, ...rest]) {
+      const entryPath = path.replace(/\/$/, '') + '/' + entry.name;
+      const isPinned = pinSet.has(entryPath);
       const row = document.createElement('div');
-      row.className = 'explore-row';
+      row.className = 'explore-row' + (isPinned ? ' explore-row-pinned' : '');
       const icon = entry.type === 'dir' ? '&#x1F4C2;' : '&#x1F4C4;';
       const displayName = entry.name + (entry.type === 'dir' ? '/' : '');
-      const entryPath = path.replace(/\/$/, '') + '/' + entry.name;
+      const pinIndicator = isPinned ? '<span class="explore-pin-dot" title="Pinned">&#x1F4CC;</span>' : '';
       const menuBtn = `<button class="explore-menu-btn" title="Options" onclick="event.stopPropagation();_showExploreMenu('${entryPath.replace(/'/g,"\\'")}',this)">⋯</button>`;
       const mtime = entry.modified ? `<span class="explore-mtime">${timeAgo(entry.modified)}</span>` : '';
-      row.innerHTML = `<span class="explore-icon">${icon}</span><span class="explore-name">${esc(displayName)}</span><span class="explore-size">${esc(_fmtSize(entry.size))}</span>${mtime}${menuBtn}`;
+      row.innerHTML = `<span class="explore-icon">${icon}</span>${pinIndicator}<span class="explore-name">${esc(displayName)}</span><span class="explore-size">${esc(_fmtSize(entry.size))}</span>${mtime}${menuBtn}`;
       if (entry.type === 'dir') {
         row.onclick = () => loadExplore(entryPath);
       } else {
@@ -11044,8 +11056,9 @@ const _idb = (() => {
         d.createObjectStore('files', { keyPath: 'path' });
       }
     };
-    req.onsuccess = () => { db = req.result; resolve(db); };
+    req.onsuccess = () => { db = req.result; db.onversionchange = () => { db.close(); db = null; }; resolve(db); };
     req.onerror = () => reject(req.error);
+    req.onblocked = () => { if (db) { db.close(); db = null; } };
   });
   const _txw = (store, fn) => open().then(d => new Promise((resolve, reject) => {
     const tx = d.transaction(store, 'readwrite');
