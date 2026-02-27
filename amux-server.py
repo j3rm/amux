@@ -11766,7 +11766,8 @@ function renderSettingsServerList() {
     const syncUrl = s.url + '/?_sync=' + encodeURIComponent(payload);
     // Use real <a> tag so the user's tap is a direct gesture on the link.
     // Programmatic a.click() loses the user gesture context and Safari PWA blocks it.
-    html += '<a class="settings-server-item" href="' + esc(syncUrl) + '"' + (isPWA ? ' target="_blank"' : '') + ' style="text-decoration:none;color:inherit;">';
+    // stopPropagation prevents ghost-tap click-through to session cards behind settings panel.
+    html += '<a class="settings-server-item" href="' + esc(syncUrl) + '"' + (isPWA ? ' target="_blank"' : '') + ' onclick="event.stopPropagation();closeSettings();" style="text-decoration:none;color:inherit;">';
     html += '<div style="min-width:0;flex:1;">';
     html += '<div class="settings-server-name">' + esc(s.name || s.url.replace(/^https?:\/\//, '')) + '</div>';
     if (s.name) html += '<div class="settings-server-url">' + esc(s.url.replace(/^https?:\/\//, '')) + '</div>';
