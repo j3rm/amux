@@ -4669,7 +4669,7 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
         <button class="peek-nav-btn" onclick="peekSearchNext()" title="Next match (Enter)">&#x2193;</button>
         <button class="search-clear" onclick="event.stopPropagation();clearPeekSearch()">&#x2715;</button>
       </div>
-      <button class="btn" id="peek-explore-btn" onclick="openExplore(peekSessionDir)" title="Browse files">&#x1F4C2;</button>
+      <button class="btn" id="peek-explore-btn" onclick="openExplore(peekSessionDir,peekSession)" title="Browse files">&#x1F4C2;</button>
       <button class="btn" onclick="closePeek()">Close</button>
     </div>
   </div>
@@ -5622,7 +5622,7 @@ function render() {
           ${!online ? '<span class="cached-badge">cached</span>' : ''}
         </div>` : ''}
       </div>
-      ${s.dir ? `<div class="card-dir"><span class="card-dir-path" onclick="event.stopPropagation();openExplore('${s.dir.replace(/'/g,"\\'")}')" style="cursor:pointer;" title="Browse files">${esc(s.dir)}</span></div>` : ''}
+      ${s.dir ? `<div class="card-dir"><span class="card-dir-path" onclick="event.stopPropagation();openExplore('${s.dir.replace(/'/g,"\\'")}','${s.name.replace(/'/g,"\\'")}')" style="cursor:pointer;" title="Browse files">${esc(s.dir)}</span></div>` : ''}
       ${s.creator ? `<div class="card-dir" style="font-size:0.72rem;">${esc(s.creator)}</div>` : ''}
       ${s.dir ? _renderBranchBadge(s.name) : ''}
       ${isExp && s.desc ? `<div class="card-desc">${esc(s.desc)}</div>` : ''}
@@ -7864,18 +7864,19 @@ let _filesPath = '/';
 let _filesCwd = '/';   // saved working directory (persisted on server)
 let _filesShowHidden = false;
 
-// ── File pins (persisted in localStorage) ──
-const _PINS_KEY = 'amux_file_pins';
-function _loadPins() {
-  try { return JSON.parse(localStorage.getItem(_PINS_KEY) || '[]'); } catch(e) { return []; }
+// ── File pins (persisted in localStorage, scoped by session or global) ──
+let _exploreSession = null;  // set when explore overlay is opened from a session
+function _pinsKey(session) { return session ? 'amux_pins_' + session : 'amux_file_pins'; }
+function _loadPins(session) {
+  try { return JSON.parse(localStorage.getItem(_pinsKey(session)) || '[]'); } catch(e) { return []; }
 }
-function _savePins(pins) { localStorage.setItem(_PINS_KEY, JSON.stringify(pins)); }
-function _isPinned(path) { return _loadPins().includes(path); }
-function _togglePin(path) {
-  const pins = _loadPins();
+function _savePins(pins, session) { localStorage.setItem(_pinsKey(session), JSON.stringify(pins)); }
+function _isPinned(path, session) { return _loadPins(session).includes(path); }
+function _togglePin(path, session) {
+  const pins = _loadPins(session);
   const i = pins.indexOf(path);
   if (i >= 0) pins.splice(i, 1); else pins.push(path);
-  _savePins(pins);
+  _savePins(pins, session);
 }
 // Load saved working dir from server prefs
 (async () => {
@@ -8040,8 +8041,9 @@ async function cacheFilesDir(rootPath, maxDepth = 2) {
   setTimeout(() => setStatus(''), 5000);
 }
 
-function openExplore(startPath) {
+function openExplore(startPath, session) {
   _explorePath = startPath || '/';
+  _exploreSession = session || null;
   document.getElementById('explore-overlay').classList.add('active');
   loadExplore(_explorePath);
 }
@@ -8069,8 +8071,8 @@ function _showExploreMenu(path, btn) {
   // Pin / Unpin
   const pinItem = document.createElement('button');
   pinItem.className = 'explore-menu-item';
-  pinItem.textContent = _isPinned(path) ? '📌 Unpin' : '📌 Pin to top';
-  pinItem.onclick = () => { popup.remove(); _togglePin(path); loadExplore(_explorePath); };
+  pinItem.textContent = _isPinned(path, _exploreSession) ? '📌 Unpin' : '📌 Pin to top';
+  pinItem.onclick = () => { popup.remove(); _togglePin(path, _exploreSession); loadExplore(_explorePath); };
   popup.appendChild(pinItem);
   const copyItem = document.createElement('button');
   copyItem.className = 'explore-menu-item';
@@ -8169,7 +8171,7 @@ async function loadExplore(path) {
       body.innerHTML += '<div style="padding:16px;color:var(--dim)">Empty directory</div>';
       return;
     }
-    const pins = _loadPins();
+    const pins = _loadPins(_exploreSession);
     const pinSet = new Set(pins);
     const pinned = pins.map(p => data.entries.find(e => path.replace(/\/$/, '') + '/' + e.name === p)).filter(Boolean);
     const rest = data.entries.filter(e => !pinSet.has(path.replace(/\/$/, '') + '/' + e.name));
