@@ -745,13 +745,10 @@ def _yolo_auto_respond():
 
 
 def _yolo_loop():
-    """Background thread: auto-respond to yolo-blocking prompts every 3s."""
-    while True:
-        time.sleep(3)
-        try:
-            _yolo_auto_respond()
-        except Exception:
-            pass
+    try:
+        _yolo_auto_respond()
+    except Exception:
+        pass
 
 
 def _push_alert(alert_type: str, session: str, message: str):
@@ -933,13 +930,10 @@ def _snapshot_all_sessions():
 
 
 def _snapshot_loop():
-    """Background thread: snapshot all sessions every 60 seconds."""
-    while True:
-        try:
-            _snapshot_all_sessions()
-        except Exception:
-            pass
-        time.sleep(60)
+    try:
+        _snapshot_all_sessions()
+    except Exception:
+        pass
 
 
 def get_claude_stats(work_dir: str) -> dict:
@@ -1855,11 +1849,27 @@ def _run_schedule(sched):
 
 
 def _scheduler_loop():
-    """Background thread — checks and fires due schedules every 30 seconds."""
-    import time
+    """Unified background scheduler — 1s tick drives both:
+    1. _JOB_REGISTRY: internal recurring Python functions (email sync, snapshots, etc.)
+    2. DB schedules table: user-configured tmux commands (cron-style, once, etc.)
+    """
     from datetime import datetime
+    _DB_CHECK_INTERVAL = 30  # only hit SQLite every 30s for DB schedules
+    _last_db_check = 0.0
     while True:
-        time.sleep(30)
+        time.sleep(1)
+        now = time.time()
+
+        # ── 1. Internal registered jobs ──────────────────────────────────────
+        for job in _JOB_REGISTRY:
+            if now >= job["next_run"]:
+                job["next_run"] = now + job["interval"]
+                threading.Thread(target=job["func"], daemon=True, name=job["name"]).start()
+
+        # ── 2. DB-backed user schedules (tmux commands) ───────────────────────
+        if now - _last_db_check < _DB_CHECK_INTERVAL:
+            continue
+        _last_db_check = now
         try:
             now_str = datetime.now().strftime("%Y-%m-%dT%H:%M")
             db = get_db()
@@ -1881,7 +1891,6 @@ def _scheduler_loop():
                                (now_str, next_r, now_ts, sched["id"]))
             if due:
                 db.commit()
-
         except Exception as e:
             slog(f"[sched] scheduler loop error: {e}")
 
@@ -2744,6 +2753,28 @@ _EMAIL_LOOKBACK_DAYS = int(os.environ.get("AMUX_EMAIL_LOOKBACK_DAYS",  "60"))
 _EMAIL_CALENDAR_NAME = os.environ.get("AMUX_CALENDAR_NAME", "")  # empty = first writable calendar
 _email_sync_lock     = threading.Lock()
 
+# ═══════════════════════════════════════════
+# UNIFIED JOB SCHEDULER
+# All internal recurring jobs register here. _scheduler_loop() drives them
+# alongside the DB-backed user schedules (tmux commands).
+# ═══════════════════════════════════════════
+
+_JOB_REGISTRY: list[dict] = []
+
+
+def schedule_job(func, interval: float, *, name: str | None = None, initial_delay: float | None = None):
+    """Register a recurring background job.
+    func            — callable, run in a daemon thread each tick
+    interval        — seconds between runs
+    initial_delay   — seconds before first run (default: interval)
+    """
+    _JOB_REGISTRY.append({
+        "name":     name or func.__name__,
+        "func":     func,
+        "interval": interval,
+        "next_run": time.time() + (initial_delay if initial_delay is not None else interval),
+    })
+
 
 def _email_last_synced() -> int:
     """Return unix timestamp of last successful email sync (0 = never)."""
@@ -3013,16 +3044,13 @@ def _email_sync() -> None:
     _email_set_synced(now_ts)
 
 
-def _email_sync_loop() -> None:
-    """Background thread: sync Mail.app → Calendar.app on schedule."""
-    time.sleep(20)  # let server fully start
-    while True:
-        try:
-            with _email_sync_lock:
-                _email_sync()
-        except Exception as e:
-            slog(f"[email] sync loop error: {e}")
-        time.sleep(_EMAIL_SYNC_INTERVAL)
+def _email_sync_job() -> None:
+    """Scheduled job: sync Mail.app → Calendar.app (called by _scheduler_loop)."""
+    try:
+        with _email_sync_lock:
+            _email_sync()
+    except Exception as e:
+        slog(f"[email] sync error: {e}")
 
 
 # ═══════════════════════════════════════════
@@ -15095,51 +15123,42 @@ _AUTO_UPDATE_BRANCH = os.environ.get("AMUX_AUTO_UPDATE_BRANCH", "main")
 _AUTO_UPDATE_INTERVAL = int(os.environ.get("AMUX_AUTO_UPDATE_INTERVAL", "60"))  # seconds
 
 
-def _auto_update_loop():
-    """Poll GitHub for changes to amux-server.py and overwrite self if newer.
-    The existing file-watcher thread detects the mtime change and restarts."""
-    repo = _AUTO_UPDATE_REPO
+def _auto_update_check(_state: dict = {}):
+    """Scheduled job: poll GitHub for changes and overwrite self if newer.
+    Uses mutable default dict to carry last_sha across ticks."""
+    import urllib.request as _ur, ast as _ast
+    repo   = _AUTO_UPDATE_REPO
     branch = _AUTO_UPDATE_BRANCH
     script = Path(__file__).resolve()
-    last_sha = None
     api_url = f"https://api.github.com/repos/{repo}/commits?path=amux-server.py&sha={branch}&per_page=1"
     raw_url = f"https://raw.githubusercontent.com/{repo}/{branch}/amux-server.py"
-    import urllib.request as _ur, ast as _ast
-    slog(f"[auto-update] watching {repo}@{branch} every {_AUTO_UPDATE_INTERVAL}s")
-    while True:
-        time.sleep(_AUTO_UPDATE_INTERVAL)
+    try:
+        req = _ur.Request(api_url, headers={"Accept": "application/vnd.github.v3+json"})
+        with _ur.urlopen(req, timeout=10) as resp:
+            commits = json.loads(resp.read())
+        if not commits:
+            return
+        sha = commits[0]["sha"]
+        if "last_sha" not in _state:
+            _state["last_sha"] = sha
+            return  # first poll — just record, don't update
+        if sha == _state["last_sha"]:
+            return
+        slog(f"[auto-update] new commit {sha[:8]}, downloading...")
+        with _ur.urlopen(raw_url, timeout=30) as resp:
+            new_content = resp.read()
         try:
-            # Check latest commit SHA for the file
-            req = _ur.Request(api_url, headers={"Accept": "application/vnd.github.v3+json"})
-            with _ur.urlopen(req, timeout=10) as resp:
-                commits = json.loads(resp.read())
-            if not commits:
-                continue
-            sha = commits[0]["sha"]
-            if last_sha is None:
-                last_sha = sha
-                continue  # first poll — just record, don't update
-            if sha == last_sha:
-                continue
-            # New commit — download the raw file
-            slog(f"[auto-update] new commit {sha[:8]}, downloading...")
-            with _ur.urlopen(raw_url, timeout=30) as resp:
-                new_content = resp.read()
-            # Validate Python syntax before overwriting
-            try:
-                _ast.parse(new_content)
-            except SyntaxError as e:
-                slog(f"[auto-update] SKIP — syntax error in remote file: {e}")
-                last_sha = sha  # don't re-check this commit
-                continue
-            # Overwrite self — file watcher will detect mtime change and restart
-            script.write_bytes(new_content)
-            last_sha = sha
-            slog(f"[auto-update] updated to {sha[:8]} — file watcher will restart")
-            # Also sync skills directory from repo
-            _sync_skills_from_github(_ur, repo, branch)
-        except Exception as e:
-            slog(f"[auto-update] error: {e}")
+            _ast.parse(new_content)
+        except SyntaxError as e:
+            slog(f"[auto-update] SKIP — syntax error in remote file: {e}")
+            _state["last_sha"] = sha
+            return
+        script.write_bytes(new_content)
+        _state["last_sha"] = sha
+        slog(f"[auto-update] updated to {sha[:8]} — file watcher will restart")
+        _sync_skills_from_github(_ur, repo, branch)
+    except Exception as e:
+        slog(f"[auto-update] error: {e}")
 
 
 def _sync_skills_from_github(_ur, repo, branch):
@@ -15392,25 +15411,21 @@ def main():
         threading.Thread(target=_cert_server, args=(port,), daemon=True).start()
         print(f"  Cert:    http://{lan_ip}:{port + 1}/api/cert")
 
+    # Register all recurring jobs with the unified scheduler
+    schedule_job(_yolo_loop,             interval=3,                    name="yolo",        initial_delay=3)
+    schedule_job(_snapshot_loop,         interval=60,                   name="snapshot",    initial_delay=0)
+    schedule_job(_email_sync_job,        interval=_EMAIL_SYNC_INTERVAL, name="email_sync",  initial_delay=20)
+    if _AUTO_UPDATE_REPO:
+        slog(f"[auto-update] watching {_AUTO_UPDATE_REPO}@{_AUTO_UPDATE_BRANCH} every {_AUTO_UPDATE_INTERVAL}s")
+        schedule_job(_auto_update_check, interval=_AUTO_UPDATE_INTERVAL, name="auto_update", initial_delay=_AUTO_UPDATE_INTERVAL)
+
     # Start file watcher thread
     watcher = threading.Thread(target=_watch_self, args=(server,), daemon=True)
     watcher.start()
 
-    # Start session log snapshot thread
-    snapshotter = threading.Thread(target=_snapshot_loop, daemon=True)
-    snapshotter.start()
-
-    # Start yolo auto-responder thread
-    threading.Thread(target=_yolo_loop, daemon=True).start()
-    # Initial snapshot immediately
+    # Initial snapshot immediately, then unified scheduler takes over
     threading.Thread(target=_snapshot_all_sessions, daemon=True).start()
-    # Start schedule runner thread
     threading.Thread(target=_scheduler_loop, daemon=True).start()
-    # Start email → calendar sync thread
-    threading.Thread(target=_email_sync_loop, daemon=True).start()
-    # Start auto-update thread (if configured)
-    if _AUTO_UPDATE_REPO:
-        threading.Thread(target=_auto_update_loop, daemon=True).start()
 
     try:
         server.serve_forever()
