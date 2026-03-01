@@ -5062,6 +5062,7 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
     <button class="tile-btn" id="tile-group-btn" onclick="setLayoutMode('group')" title="Group by status" style="font-size:0.75rem;font-weight:700;">#</button>
     <button class="tile-btn tile-grid-only" id="tile-grid-btn" onclick="setLayoutMode('grid')" title="Grid view">&#x268F;</button>
     <button class="tile-btn" id="tile-reset-btn" onclick="resetCardOrder()" title="Reset to default order (pinned → last active)" style="display:none;font-size:0.8rem;">&#x21BA;</button>
+    <button class="tile-btn" id="tile-collapse-btn" onclick="collapseAll()" title="Collapse all sessions" style="display:none;font-size:0.75rem;">&#x2B06;</button>
   </div>
 </div>
 <div id="tag-filters" class="tag-filters"></div>
@@ -6754,6 +6755,11 @@ function toggle(name) {
   if (expanded.has(name)) {
     fetchStats(name);
   }
+}
+
+function collapseAll() {
+  expanded.clear();
+  render();
 }
 // Double-tap header to peek
 let _lastHeaderTap = { name: null, time: 0 };
@@ -9945,6 +9951,8 @@ function resetCardOrder() {
 function _updateResetBtn() {
   const btn = document.getElementById('tile-reset-btn');
   if (btn) btn.style.display = cardOrder.length > 0 ? '' : 'none';
+  const cb = document.getElementById('tile-collapse-btn');
+  if (cb) cb.style.display = expanded.size > 0 ? '' : 'none';
 }
 
 function setLayoutMode(mode) {
