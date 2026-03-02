@@ -1489,6 +1489,26 @@ CREATE TABLE IF NOT EXISTS waitlist (
     note     TEXT,
     ts       INTEGER NOT NULL
 );
+CREATE TABLE IF NOT EXISTS org (
+    id         TEXT PRIMARY KEY DEFAULT 'default',
+    name       TEXT NOT NULL DEFAULT 'My Workspace',
+    created_at INTEGER NOT NULL
+);
+CREATE TABLE IF NOT EXISTS org_members (
+    id         TEXT PRIMARY KEY,
+    email      TEXT NOT NULL UNIQUE,
+    name       TEXT,
+    role       TEXT NOT NULL DEFAULT 'member',
+    joined_at  INTEGER NOT NULL
+);
+CREATE TABLE IF NOT EXISTS org_invites (
+    token      TEXT PRIMARY KEY,
+    email      TEXT,
+    created_at INTEGER NOT NULL,
+    expires_at INTEGER NOT NULL,
+    used_at    INTEGER,
+    used_by    TEXT
+);
 """
 
 
@@ -5151,6 +5171,19 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
               <span class="theme-track"><span class="theme-thumb"></span></span>
             </label>
           </div>
+        </div>
+        <div class="settings-sep"></div>
+        <div class="settings-section" id="settings-team-section">
+          <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px;">
+            <div class="settings-section-label" style="margin:0;">Team</div>
+            <button class="btn" style="font-size:0.7rem;padding:2px 8px;" onclick="openTeamInvite()">+ Invite</button>
+          </div>
+          <div id="settings-org-name-wrap" style="margin-bottom:6px;">
+            <input id="settings-org-name" class="search-input" type="text" placeholder="Workspace name"
+              style="width:100%;box-sizing:border-box;font-size:0.8rem;"
+              onblur="saveOrgName(this.value)" onkeydown="if(event.key==='Enter')this.blur()">
+          </div>
+          <div id="settings-members-list" style="font-size:0.78rem;color:var(--dim);"></div>
         </div>
         <div class="settings-sep"></div>
         <div class="settings-section" style="text-align:center;display:flex;flex-direction:column;gap:8px;">
@@ -13280,6 +13313,83 @@ document.addEventListener('click', function(e) {
   if (wrap && !wrap.contains(e.target)) closeSettings();
 });
 
+// ── Team / Org / Invites ──────────────────────────────────────────────────────
+async function loadTeamSection() {
+  try {
+    const [orgRes, membersRes] = await Promise.all([
+      fetch('/api/org'), fetch('/api/org/members')
+    ]);
+    const org = await orgRes.json();
+    const members = await membersRes.json();
+    const nameEl = document.getElementById('settings-org-name');
+    if (nameEl && nameEl !== document.activeElement) nameEl.value = org.name || '';
+    const list = document.getElementById('settings-members-list');
+    if (!list) return;
+    if (!members.length) {
+      list.innerHTML = '<span style="color:var(--dim);font-size:0.75rem;">No members yet — invite someone!</span>';
+    } else {
+      list.innerHTML = members.map(m => `
+        <div style="display:flex;justify-content:space-between;align-items:center;padding:3px 0;border-bottom:1px solid var(--border);">
+          <span>${m.name || m.email}</span>
+          <span style="color:var(--dim);font-size:0.7rem;">${m.role}</span>
+        </div>`).join('');
+    }
+  } catch(e) {}
+}
+
+async function saveOrgName(val) {
+  val = val.trim();
+  if (!val) return;
+  await fetch('/api/org', {method:'PATCH', headers:{'Content-Type':'application/json'}, body: JSON.stringify({name: val})});
+}
+
+async function openTeamInvite() {
+  closeSettings();
+  const res = await fetch('/api/org/invites', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({})});
+  const data = await res.json();
+  if (!data.url) { alert('Failed to create invite'); return; }
+  // Show modal with copyable link
+  const modal = document.createElement('div');
+  modal.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,0.7);display:flex;align-items:center;justify-content:center;z-index:9999;';
+  modal.innerHTML = `<div style="background:var(--bg2,#1a1a1a);border:1px solid var(--border,#333);border-radius:12px;padding:28px;max-width:480px;width:90%;box-sizing:border-box;">
+    <h3 style="margin:0 0 8px;font-size:1rem;">Invite to workspace</h3>
+    <p style="color:var(--dim);font-size:0.82rem;margin:0 0 14px;">Share this link. It expires in 7 days.</p>
+    <div style="display:flex;gap:8px;">
+      <input id="invite-link-input" type="text" value="${data.url}" readonly
+        style="flex:1;padding:8px 10px;border-radius:6px;border:1px solid var(--border,#333);background:var(--bg,#111);color:inherit;font-size:0.8rem;min-width:0;">
+      <button onclick="(function(){var el=document.getElementById('invite-link-input');el.select();navigator.clipboard.writeText(el.value).then(()=>{this.textContent='Copied!';setTimeout(()=>this.textContent='Copy',1500)})}).call(this)"
+        style="padding:8px 14px;border-radius:6px;background:var(--accent,#a78bfa);color:#000;border:none;cursor:pointer;font-weight:600;white-space:nowrap;">Copy</button>
+    </div>
+    <div style="margin-top:16px;text-align:right;">
+      <button onclick="this.closest('div[style*=fixed]').remove()"
+        style="padding:6px 18px;border-radius:6px;background:var(--bg3,#222);border:1px solid var(--border,#333);color:inherit;cursor:pointer;">Done</button>
+    </div>
+  </div>`;
+  document.body.appendChild(modal);
+  modal.addEventListener('click', e => { if (e.target === modal) modal.remove(); });
+  // Auto-copy
+  setTimeout(() => { try { navigator.clipboard.writeText(data.url); } catch(e) {} }, 100);
+}
+
+// Load team section whenever settings opens
+const _origToggleSettings = toggleSettings;
+toggleSettings = function() {
+  _origToggleSettings();
+  const menu = document.getElementById('settings-menu');
+  if (menu && menu.style.display !== 'none') loadTeamSection();
+};
+
+// Accept invite token from URL on page load
+(function() {
+  const params = new URLSearchParams(location.search);
+  const tok = params.get('invite_token');
+  if (!tok) return;
+  fetch('/invite/' + tok, {method:'POST', headers:{'Content-Type':'application/json'},
+    body: JSON.stringify({email: 'guest'})}).catch(()=>{});
+  // Clean URL
+  history.replaceState({}, '', location.pathname);
+})();
+
 function forceUpdate() {
   const el = document.getElementById('update-status');
   el.textContent = 'Updating...';
@@ -15871,6 +15981,153 @@ class CCHandler(BaseHTTPRequestHandler):
                     "SELECT id, email, note, ts FROM waitlist ORDER BY ts DESC"
                 ).fetchall()
                 return self._json([dict(r) for r in rows])
+
+        # ── Org / Team / Invites ──────────────────────────────────────────────
+        if path.startswith("/api/org") or path.startswith("/invite/"):
+            import secrets as _sec
+            db = get_db()
+
+            def _get_org():
+                row = db.execute("SELECT * FROM org WHERE id='default'").fetchone()
+                if not row:
+                    db.execute("INSERT INTO org (id, name, created_at) VALUES ('default','My Workspace',?)",
+                               (int(time.time()),))
+                    db.commit()
+                    row = db.execute("SELECT * FROM org WHERE id='default'").fetchone()
+                return dict(row)
+
+            # GET /api/org — org info + member count
+            if method == "GET" and path == "/api/org":
+                org = _get_org()
+                members = db.execute("SELECT COUNT(*) FROM org_members").fetchone()[0]
+                invites = db.execute(
+                    "SELECT COUNT(*) FROM org_invites WHERE used_at IS NULL AND expires_at > ?",
+                    (int(time.time()),)
+                ).fetchone()[0]
+                return self._json({**org, "member_count": members, "invite_count": invites})
+
+            # PATCH /api/org — rename workspace
+            if method == "PATCH" and path == "/api/org":
+                body = self._read_body()
+                name = body.get("name", "").strip()[:80]
+                if not name:
+                    return self._json({"error": "name required"}, 400)
+                _get_org()
+                db.execute("UPDATE org SET name=? WHERE id='default'", (name,))
+                db.commit()
+                return self._json({"ok": True, "name": name})
+
+            # GET /api/org/members
+            if method == "GET" and path == "/api/org/members":
+                rows = db.execute(
+                    "SELECT id, email, name, role, joined_at FROM org_members ORDER BY joined_at"
+                ).fetchall()
+                return self._json([dict(r) for r in rows])
+
+            # DELETE /api/org/members/:id
+            if method == "DELETE" and path.startswith("/api/org/members/"):
+                mid = path[len("/api/org/members/"):]
+                db.execute("DELETE FROM org_members WHERE id=?", (mid,))
+                db.commit()
+                return self._json({"ok": True})
+
+            # GET /api/org/invites — list pending invites
+            if method == "GET" and path == "/api/org/invites":
+                now = int(time.time())
+                rows = db.execute(
+                    "SELECT token, email, created_at, expires_at, used_at, used_by "
+                    "FROM org_invites WHERE used_at IS NULL AND expires_at > ? ORDER BY created_at DESC",
+                    (now,)
+                ).fetchall()
+                host = self.headers.get("Host", "localhost:8822")
+                scheme = "https" if self.headers.get("X-Forwarded-Proto") == "https" else "http"
+                base = f"{scheme}://{host}"
+                return self._json([{**dict(r), "url": f"{base}/invite/{r['token']}"} for r in rows])
+
+            # POST /api/org/invites — create invite
+            if method == "POST" and path == "/api/org/invites":
+                body = self._read_body()
+                email = body.get("email", "").strip().lower() or None
+                token = _sec.token_urlsafe(24)
+                now = int(time.time())
+                expires = now + 7 * 86400  # 7 days
+                db.execute(
+                    "INSERT INTO org_invites (token, email, created_at, expires_at) VALUES (?,?,?,?)",
+                    (token, email, now, expires)
+                )
+                db.commit()
+                host = self.headers.get("Host", "localhost:8822")
+                scheme = "https" if self.headers.get("X-Forwarded-Proto") == "https" else "http"
+                url = f"{scheme}://{host}/invite/{token}"
+                return self._json({"token": token, "url": url, "expires_at": expires}, 201)
+
+            # DELETE /api/org/invites/:token
+            if method == "DELETE" and path.startswith("/api/org/invites/"):
+                tok = path[len("/api/org/invites/"):]
+                db.execute("DELETE FROM org_invites WHERE token=?", (tok,))
+                db.commit()
+                return self._json({"ok": True})
+
+            # GET /invite/:token — landing page
+            if method == "GET" and path.startswith("/invite/"):
+                tok = path[len("/invite/"):]
+                now = int(time.time())
+                row = db.execute(
+                    "SELECT * FROM org_invites WHERE token=? AND used_at IS NULL AND expires_at > ?",
+                    (tok, now)
+                ).fetchone()
+                org = _get_org()
+                if not row:
+                    html = f"""<!doctype html><html><head><meta charset=utf-8><title>Invalid Invite</title>
+<style>body{{font-family:system-ui;background:#0d0d0d;color:#e8e8e8;display:flex;align-items:center;justify-content:center;min-height:100vh;margin:0}}
+.card{{background:#1a1a1a;border:1px solid #333;border-radius:12px;padding:32px;max-width:400px;text-align:center}}
+h2{{margin:0 0 12px;color:#f87171}}p{{color:#888;margin:0}}</style></head>
+<body><div class=card><h2>Invite expired or invalid</h2><p>This invite link is no longer valid.</p></div></body></html>"""
+                    return self._html(html, 410)
+                host = self.headers.get("Host", "localhost:8822")
+                scheme = "https" if self.headers.get("X-Forwarded-Proto") == "https" else "http"
+                redirect = f"{scheme}://{host}/"
+                html = f"""<!doctype html><html><head><meta charset=utf-8><title>Join {org['name']}</title>
+<style>body{{font-family:system-ui;background:#0d0d0d;color:#e8e8e8;display:flex;align-items:center;justify-content:center;min-height:100vh;margin:0}}
+.card{{background:#1a1a1a;border:1px solid #333;border-radius:12px;padding:40px;max-width:420px;text-align:center;width:100%}}
+h1{{margin:0 0 6px;font-size:1.4rem}}.org{{color:#a78bfa;font-weight:600}}
+p{{color:#888;margin:12px 0 28px;font-size:0.9rem;line-height:1.5}}
+.btn{{background:#a78bfa;color:#000;border:none;border-radius:8px;padding:12px 32px;font-size:1rem;font-weight:600;cursor:pointer;text-decoration:none;display:inline-block}}
+.btn:hover{{background:#c4b5fd}}.note{{font-size:0.75rem;color:#555;margin-top:16px}}</style></head>
+<body><div class=card>
+<h1>You&#39;re invited to join</h1>
+<div class=org>{org['name']}</div>
+<p>Someone has shared their amux workspace with you.<br>Click below to open it.</p>
+<a class=btn href="{redirect}?invite_token={tok}">Accept Invite</a>
+<div class=note>This invite expires in 7 days.</div>
+</div></body></html>"""
+                return self._html(html)
+
+            # POST /invite/:token — mark used (called by frontend after auth)
+            if method == "POST" and path.startswith("/invite/"):
+                tok = path[len("/invite/"):]
+                body = self._read_body()
+                used_by = body.get("email", "").strip() or body.get("name", "").strip() or "anonymous"
+                now = int(time.time())
+                row = db.execute(
+                    "SELECT * FROM org_invites WHERE token=? AND used_at IS NULL AND expires_at > ?",
+                    (tok, now)
+                ).fetchone()
+                if not row:
+                    return self._json({"error": "invalid or expired invite"}, 410)
+                db.execute("UPDATE org_invites SET used_at=?, used_by=? WHERE token=?",
+                           (now, used_by, tok))
+                # Add to members if not already there
+                mid = _sec.token_urlsafe(12)
+                try:
+                    db.execute(
+                        "INSERT INTO org_members (id, email, name, role, joined_at) VALUES (?,?,?,?,?)",
+                        (mid, used_by, body.get("name", "").strip() or None, "member", now)
+                    )
+                except Exception:
+                    pass
+                db.commit()
+                return self._json({"ok": True})
 
         return self._json({"error": "method not allowed"}, 405)
 
