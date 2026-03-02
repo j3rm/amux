@@ -92,13 +92,18 @@ _LOGIN_HTML = """<!DOCTYPE html>
       }
     }
 
+    // Pre-set key so Clerk auto-init finds it during IIFE execution
+    window.__clerk_publishable_key = PK;
+
     const s = document.createElement('script');
-    s.setAttribute('data-clerk-publishable-key', PK);
-    s.crossOrigin = 'anonymous';
-    s.src = 'https://clerk.amux.io/npm/@clerk/clerk-js@4/dist/clerk.browser.js';
+    s.src = 'https://cdn.jsdelivr.net/npm/@clerk/clerk-js@4/dist/clerk.browser.js';
     s.onerror = () => setStatus('Failed to load auth library.');
     s.onload = async () => {
-      await window.Clerk.load();
+      try {
+        await window.Clerk.load();
+      } catch(e) {
+        // already loaded is fine
+      }
       if (window.Clerk.user) {
         await exchangeAndRedirect();
         return;
