@@ -3583,12 +3583,13 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
   #archived-section { padding: 0 12px 12px; }
   .archived-footer {
     display: flex; align-items: center; gap: 8px;
-    padding: 8px 10px; border-radius: 8px; cursor: pointer;
-    border: 1px dashed var(--border); color: var(--dim);
-    font-size: 0.8rem; user-select: none; margin-top: 4px;
+    padding: 9px 12px; border-radius: 8px; cursor: pointer;
+    border: 1px solid var(--border); color: var(--text);
+    font-size: 0.82rem; font-weight: 600; user-select: none; margin-top: 8px;
+    background: var(--card);
   }
-  .archived-footer:hover { border-color: var(--accent); color: var(--text); }
-  .archived-chevron { font-size: 0.65rem; transition: transform 0.15s; }
+  .archived-footer:hover { border-color: var(--accent); }
+  .archived-chevron { font-size: 0.65rem; transition: transform 0.15s; color: var(--dim); }
   .archived-chevron.open { transform: rotate(90deg); }
   .archived-body { margin-top: 6px; display: flex; flex-direction: column; gap: 4px; }
   .archived-card {
@@ -5956,7 +5957,7 @@ async function toggleAutoCompact(checked) {
 // ═══════ STATE & GLOBALS ═══════
 const API = '';
 let sessions = [];
-let archivedExpanded = false;
+let archivedExpanded = true;
 let gitInfo = {};  // {sessionName: {branch, repo, _conflict}}
 let _initialLoad = true;   // true until first data arrives from server
 let _lastDataTime = null;  // timestamp of last successful data
