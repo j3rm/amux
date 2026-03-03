@@ -13841,7 +13841,7 @@ async function openTeamInvite() {
     </div>
     <div style="margin-top:16px;text-align:right;">
       <button onclick="this.closest('div[style*=fixed]').remove()"
-        style="padding:6px 18px;border-radius:6px;background:var(--bg3,#222);border:1px solid var(--border,#333);color:inherit;cursor:pointer;">Done</button>
+        style="padding:6px 18px;border-radius:6px;background:var(--bg3,#222);border:1px solid var(--border,#333);color:#ddd;cursor:pointer;">Done</button>
     </div>
   </div>`;
   document.body.appendChild(modal);

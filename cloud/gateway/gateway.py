@@ -6,7 +6,7 @@ Verifies Clerk JWTs, starts/stops Docker containers per user, reverse-proxies re
 
 import os, json, time, sqlite3, subprocess, threading, urllib.request, urllib.error, base64
 import hmac, hashlib
-from http.server import HTTPServer, BaseHTTPRequestHandler
+from http.server import HTTPServer, BaseHTTPRequestHandler, ThreadingHTTPServer
 
 # ── Config ────────────────────────────────────────────────────────────────────
 CLERK_PUBLISHABLE_KEY = os.environ["CLERK_PUBLISHABLE_KEY"]
@@ -73,10 +73,11 @@ _LOGIN_HTML = """<!DOCTYPE html>
       setStatus('Starting your workspace\u2026');
       try {
         const token = await window.Clerk.session.getToken();
+        const email = window.Clerk.user?.primaryEmailAddress?.emailAddress || '';
         const res = await fetch('/api/cloud-auth', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ token })
+          body: JSON.stringify({ token, email })
         });
         if (res.ok) {
           window.location.replace(POST_LOGIN_REDIRECT || '/');
@@ -315,6 +316,33 @@ def verify_clerk_token(token):
                            options={"verify_aud": False})
     return payload["sub"], payload.get("email", "")
 
+_clerk_email_cache = {}  # user_id -> email, simple in-memory cache
+
+def _clerk_get_email(user_id):
+    """Fetch user email from Clerk API. Returns '' on failure."""
+    if user_id in _clerk_email_cache:
+        return _clerk_email_cache[user_id]
+    try:
+        req = urllib.request.Request(
+            f"https://api.clerk.com/v1/users/{user_id}",
+            headers={"Authorization": f"Bearer {CLERK_SECRET_KEY}"}
+        )
+        resp = urllib.request.urlopen(req, timeout=5)
+        data = json.loads(resp.read())
+        addrs = data.get("email_addresses", [])
+        primary_id = data.get("primary_email_address_id", "")
+        email = ""
+        for a in addrs:
+            if a.get("id") == primary_id:
+                email = a.get("email_address", "")
+                break
+        if not email and addrs:
+            email = addrs[0].get("email_address", "")
+        _clerk_email_cache[user_id] = email
+        return email
+    except Exception:
+        return ""
+
 # ── Idle reaper ────────────────────────────────────────────────────────────────
 def _reaper():
     while True:
@@ -347,19 +375,45 @@ def proxy(handler, port, path, qs, user_email=""):
     fwd = {k: v for k, v in handler.headers.items() if k.lower() not in skip}
     if user_email:
         fwd["X-Amux-User-Email"] = user_email
+    is_sse = handler.headers.get("Accept", "") == "text/event-stream"
     req = urllib.request.Request(url, data=body, method=handler.command, headers=fwd)
     try:
-        resp = urllib.request.urlopen(req, timeout=60)
+        resp = urllib.request.urlopen(req, timeout=None if is_sse else 60)
         handler.send_response(resp.status)
         for k, v in resp.headers.items():
             if k.lower() not in ("transfer-encoding",):
                 handler.send_header(k, v)
         handler.end_headers()
-        handler.wfile.write(resp.read())
+        if is_sse:
+            # Stream SSE chunk-by-chunk so client gets events immediately
+            try:
+                while True:
+                    chunk = resp.read(4096)
+                    if not chunk:
+                        break
+                    handler.wfile.write(chunk)
+                    handler.wfile.flush()
+            except (BrokenPipeError, ConnectionResetError):
+                pass
+        else:
+            try:
+                handler.wfile.write(resp.read())
+            except (BrokenPipeError, ConnectionResetError):
+                pass
     except urllib.error.HTTPError as e:
-        handler.send_response(e.code)
-        handler.end_headers()
-        handler.wfile.write(e.read())
+        try:
+            handler.send_response(e.code)
+            handler.end_headers()
+            handler.wfile.write(e.read())
+        except (BrokenPipeError, ConnectionResetError):
+            pass
+    except urllib.error.URLError as e:
+        try:
+            handler.send_response(502)
+            handler.end_headers()
+            handler.wfile.write(f"Bad Gateway: {e.reason}".encode())
+        except (BrokenPipeError, ConnectionResetError):
+            pass
 
 # ── Request handler ────────────────────────────────────────────────────────────
 class Handler(BaseHTTPRequestHandler):
@@ -461,10 +515,14 @@ class Handler(BaseHTTPRequestHandler):
             length = int(self.headers.get("Content-Length", 0))
             body = json.loads(self.rfile.read(length)) if length else {}
             token = body.get("token", "")
+            client_email = body.get("email", "").strip()  # email sent from Clerk.js
             try:
                 user_id, email = verify_clerk_token(token)
             except Exception as e:
                 return self._json({"error": f"invalid token: {e}"}, 401)
+            # Prefer email from client (Clerk.js), then JWT, then Clerk API
+            if not email:
+                email = client_email or _clerk_get_email(user_id)
             db = get_db()
             now = int(time.time())
             with _db_lock:
@@ -546,6 +604,13 @@ class Handler(BaseHTTPRequestHandler):
 
         port = row["port"]
         user_email = row["email"] or email
+        # If we still don't have an email, fetch from Clerk API and persist it
+        if not user_email:
+            user_email = _clerk_get_email(user_id)
+            if user_email:
+                with _db_lock:
+                    db.execute("UPDATE users SET email=? WHERE id=?", (user_email, user_id))
+                    db.commit()
 
         # ── Gateway-level org/invite interceptors ─────────────────────────────
 
@@ -709,4 +774,4 @@ if __name__ == "__main__":
     os.makedirs(DATA_DIR, exist_ok=True)
     get_db()
     print(f"[gateway] listening on :{PORT}")
-    HTTPServer(("0.0.0.0", PORT), Handler).serve_forever()
+    ThreadingHTTPServer(("0.0.0.0", PORT), Handler).serve_forever()
