@@ -5302,8 +5302,8 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
   </div>
   <div id="offline-ops" class="offline-queue-ops"></div>
 </div>
-<div id="archived-section"></div>
 <div id="cards" class="cards"></div>
+<div id="archived-section"></div>
 </div>
 <div id="board-view" style="display:none;">
   <div class="board-toolbar">
