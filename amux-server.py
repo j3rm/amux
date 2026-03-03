@@ -2926,11 +2926,18 @@ def start_session(name: str, extra_flags: str = "", _skip_conv_id: bool = False)
                 break
         else:
             shell_rc += f"cd {shlex.quote(work_dir)}; "
+        # Forward API keys from server env into the tmux session
+        _env_args = []
+        for _ekey in ("ANTHROPIC_API_KEY", "OPENAI_API_KEY"):
+            _eVal = os.environ.get(_ekey, "")
+            if _eVal:
+                _env_args += ["-e", f"{_ekey}={_eVal}"]
         subprocess.run(
             ["tmux", "new-session", "-d", "-s", tmux_sess, "-n", name, "-c", work_dir,
              "-e", "TMUX_SESSION_NAME=" + name,
              "-e", "AMUX_SESSION=" + name,
              "-e", "AMUX_URL=https://localhost:8822",
+             *_env_args,
              shell_rc + cmd],
             check=True, capture_output=True, timeout=10,
         )
