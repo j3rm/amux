@@ -15,6 +15,7 @@ R2_ACCESS_KEY         = os.environ["R2_ACCESS_KEY"]
 R2_SECRET_KEY         = os.environ["R2_SECRET_KEY"]
 CF_ACCOUNT_ID         = os.environ["CF_ACCOUNT_ID"]
 COOKIE_SECRET         = os.environ.get("COOKIE_SECRET", "change-me")
+ANTHROPIC_API_KEY     = os.environ.get("ANTHROPIC_API_KEY", "")
 
 PORT          = int(os.environ.get("GATEWAY_PORT", "8080"))
 COMPOSE_TPL   = os.path.join(os.path.dirname(__file__), "../docker/docker-compose.template.yml")
@@ -218,7 +219,8 @@ def _write_compose(user_id, port):
         .replace("${USER_ID}", user_id)
         .replace("${USER_PORT}", str(port))
         .replace("${R2_ACCESS_KEY}", R2_ACCESS_KEY)
-        .replace("${R2_SECRET_KEY}", R2_SECRET_KEY))
+        .replace("${R2_SECRET_KEY}", R2_SECRET_KEY)
+        .replace("${ANTHROPIC_API_KEY}", ANTHROPIC_API_KEY))
     d = _compose_dir(user_id)
     open(os.path.join(d, "docker-compose.yml"), "w").write(compose)
     open(os.path.join(d, "litestream.yml"), "w").write(

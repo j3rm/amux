@@ -1583,6 +1583,63 @@ def get_db() -> sqlite3.Connection:
     return _db_local.conn
 
 
+def _init_claude_config():
+    """Pre-configure ~/.claude.json to skip the interactive setup wizard.
+
+    When ANTHROPIC_API_KEY is available in the environment, this writes the
+    minimal config needed so claude starts directly in interactive mode without
+    showing the onboarding wizard, folder trust dialog, or API key prompt.
+    """
+    import json as _json
+    import pathlib as _pathlib
+
+    api_key = os.environ.get("ANTHROPIC_API_KEY", "")
+    if not api_key:
+        return
+
+    # claude uses the last 20 chars of the key as its identifier
+    key_hash = api_key[-20:]
+
+    claude_json = _pathlib.Path.home() / ".claude.json"
+    cfg = {}
+    if claude_json.exists():
+        try:
+            cfg = _json.loads(claude_json.read_text())
+        except Exception:
+            cfg = {}
+
+    changed = False
+
+    # Skip the onboarding wizard (theme + auth steps)
+    if not cfg.get("hasCompletedOnboarding"):
+        cfg["hasCompletedOnboarding"] = True
+        cfg.setdefault("theme", "dark")
+        changed = True
+
+    # Approve API key so the "use this key?" prompt is skipped
+    responses = cfg.setdefault("customApiKeyResponses", {"approved": [], "rejected": []})
+    approved = responses.get("approved", [])
+    rejected = responses.get("rejected", [])
+    if key_hash not in approved:
+        responses["approved"] = [key_hash] + [k for k in approved if k != key_hash]
+        responses["rejected"] = [k for k in rejected if k != key_hash]
+        changed = True
+
+    # Trust common workspaces to skip the "do you trust this folder?" dialog.
+    # Pre-trust the home directory (default session work_dir) and /app (cloud image work_dir).
+    import pathlib as _pathlib2
+    trust_dirs = [str(_pathlib2.Path.home()), "/app"]
+    projects = cfg.setdefault("projects", {})
+    for trust_dir in trust_dirs:
+        proj = projects.setdefault(trust_dir, {})
+        if not proj.get("hasTrustDialogAccepted"):
+            proj["hasTrustDialogAccepted"] = True
+            changed = True
+
+    if changed:
+        claude_json.write_text(_json.dumps(cfg, indent=2))
+
+
 def _init_db():
     """Create SQLite tables if they don't exist."""
     db = get_db()
@@ -17037,6 +17094,9 @@ def main():
     # Initialize SQLite and migrate flat-file data on first run
     _init_db()
     _migrate_flat_to_sqlite()
+
+    # Pre-configure ~/.claude.json to skip interactive setup wizard
+    _init_claude_config()
 
     server = ResilientHTTPSServer(("0.0.0.0", port), CCHandler)
 

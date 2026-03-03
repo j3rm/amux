@@ -1,5 +1,5 @@
 # Per-user docker-compose — instantiated by gateway.py
-# Variables replaced: USER_ID, USER_PORT, CF_ACCOUNT_ID, R2_ACCESS_KEY, R2_SECRET_KEY
+# Variables replaced: USER_ID, USER_PORT, CF_ACCOUNT_ID, R2_ACCESS_KEY, R2_SECRET_KEY, ANTHROPIC_API_KEY
 
 services:
   amux:
@@ -11,6 +11,7 @@ services:
       - /opt/amux-cloud/app/amux-server.py:/app/amux-server.py:ro
     environment:
       AMUX_PORT: "8822"
+      ANTHROPIC_API_KEY: "${ANTHROPIC_API_KEY}"
     ports:
       - "${USER_PORT}:8822"
     healthcheck:

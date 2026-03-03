@@ -25,7 +25,8 @@ jobs:
 
       - name: Deploy amux-server.py (shared mount for all containers)
         run: |
-          rsync -e "ssh -i ~/.ssh/amux_cloud" amux-server.py \
+          # --inplace: overwrite in place to preserve inode (Docker bind mounts track inode, not path)
+          rsync --inplace -e "ssh -i ~/.ssh/amux_cloud" amux-server.py \
             root@5.161.66.217:/opt/amux-cloud/app/amux-server.py
           # Touch to trigger auto-restart in all running containers
           ssh -i ~/.ssh/amux_cloud root@5.161.66.217 \
@@ -33,7 +34,7 @@ jobs:
 
       - name: Deploy gateway.py
         run: |
-          rsync -e "ssh -i ~/.ssh/amux_cloud" cloud/gateway/gateway.py \
+          rsync --inplace -e "ssh -i ~/.ssh/amux_cloud" cloud/gateway/gateway.py \
             root@5.161.66.217:/opt/amux-cloud/gateway/gateway.py
           ssh -i ~/.ssh/amux_cloud root@5.161.66.217 \
             'systemctl restart amux-gateway && echo "gateway restarted"'
