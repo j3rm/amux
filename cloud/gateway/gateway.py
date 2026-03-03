@@ -60,6 +60,7 @@ _LOGIN_HTML = """<!DOCTYPE html>
   <script>
     const PK = '__CLERK_PK__';
     let exchanging = false;
+    const POST_LOGIN_REDIRECT = '__POST_LOGIN_REDIRECT__';
 
     function setStatus(msg) {
       document.getElementById('status').textContent = msg;
@@ -78,7 +79,7 @@ _LOGIN_HTML = """<!DOCTYPE html>
           body: JSON.stringify({ token })
         });
         if (res.ok) {
-          window.location.replace('/');
+          window.location.replace(POST_LOGIN_REDIRECT || '/');
         } else {
           const d = await res.json().catch(() => ({}));
           document.getElementById('clerk-root').innerHTML = '';
@@ -115,6 +116,45 @@ _LOGIN_HTML = """<!DOCTYPE html>
 </body>
 </html>"""
 
+# ── Invite accept HTML ─────────────────────────────────────────────────────────
+_INVITE_ACCEPT_HTML = """<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Join workspace — amux</title>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+    body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+      background: #0a0a0a; color: #e5e5e5;
+      min-height: 100vh; display: flex; align-items: center; justify-content: center; }
+    .card { background: #1a1a1a; border: 1px solid #333; border-radius: 12px;
+      padding: 40px; max-width: 420px; width: 90%; text-align: center; }
+    h1 { font-size: 1.3rem; margin-bottom: 8px; }
+    .owner { color: #a78bfa; font-weight: 600; font-size: 1.1rem; margin-bottom: 14px; }
+    p { color: #888; font-size: 0.88rem; margin-bottom: 28px; line-height: 1.5; }
+    .btn { display: inline-block; background: #a78bfa; color: #000; border: none;
+      border-radius: 8px; padding: 12px 32px; font-size: 1rem; font-weight: 600;
+      cursor: pointer; width: 100%; }
+    .btn:hover { background: #c4b5fd; }
+    .note { font-size: 0.72rem; color: #555; margin-top: 14px; }
+    form { margin: 0; }
+  </style>
+</head>
+<body>
+  <div class="card">
+    <h1>You've been invited to</h1>
+    <div class="owner">__OWNER_EMAIL__</div>
+    <p>Accept to view their sessions, board, and files.<br>
+       You can switch back to your own workspace anytime from Settings.</p>
+    <form action="/api/gateway/invite/__TOKEN__/accept" method="POST">
+      <button class="btn" type="submit">Accept Invitation</button>
+    </form>
+    <div class="note">This invite expires in 7 days.</div>
+  </div>
+</body>
+</html>"""
+
 # ── DB ────────────────────────────────────────────────────────────────────────
 _db_lock = threading.Lock()
 
@@ -135,6 +175,22 @@ def get_db():
             id    INTEGER PRIMARY KEY AUTOINCREMENT,
             email TEXT NOT NULL UNIQUE,
             ts    INTEGER NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS org_invites (
+            token       TEXT PRIMARY KEY,
+            owner_id    TEXT NOT NULL,
+            email       TEXT,
+            created_at  INTEGER NOT NULL,
+            expires_at  INTEGER NOT NULL,
+            used_at     INTEGER,
+            used_by     TEXT
+        );
+        CREATE TABLE IF NOT EXISTS org_members (
+            owner_id    TEXT NOT NULL,
+            member_id   TEXT NOT NULL,
+            member_email TEXT,
+            joined_at   INTEGER NOT NULL,
+            PRIMARY KEY (owner_id, member_id)
         );
     """)
     conn.commit()
@@ -318,18 +374,57 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
-    def _serve_login(self, invite_token=""):
-        html = _LOGIN_HTML.replace("__CLERK_PK__", CLERK_PUBLISHABLE_KEY)
-        if invite_token:
-            redirect_path = f"/?invite_token={invite_token}"
-            html = html.replace("window.location.replace('/')",
-                                f"window.location.replace('{redirect_path}')")
-        body = html.encode()
-        self.send_response(200)
+    def _html(self, body_str, code=200):
+        body = body_str.encode() if isinstance(body_str, str) else body_str
+        self.send_response(code)
         self.send_header("Content-Type", "text/html; charset=utf-8")
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()
         self.wfile.write(body)
+
+    def _redirect(self, location, extra_cookies=None):
+        self.send_response(302)
+        self.send_header("Location", location)
+        for cookie in (extra_cookies or []):
+            self.send_header("Set-Cookie", cookie)
+        self.send_header("Content-Length", "0")
+        self.end_headers()
+
+    def _serve_login(self, post_login_redirect="/"):
+        html = (_LOGIN_HTML
+                .replace("__CLERK_PK__", CLERK_PUBLISHABLE_KEY)
+                .replace("__POST_LOGIN_REDIRECT__", post_login_redirect))
+        self._html(html)
+
+    def _serve_invite_accept(self, token, owner_email):
+        html = (_INVITE_ACCEPT_HTML
+                .replace("__OWNER_EMAIL__", owner_email or "someone")
+                .replace("__TOKEN__", token))
+        self._html(html)
+
+    def _read_body(self):
+        length = int(self.headers.get("Content-Length", 0))
+        if not length:
+            return {}
+        raw = self.rfile.read(length)
+        ct = self.headers.get("Content-Type", "")
+        if "json" in ct:
+            try:
+                return json.loads(raw)
+            except Exception:
+                return {}
+        return {}  # form posts: token is in URL, no fields needed
+
+    def _is_https(self):
+        return self.headers.get("X-Forwarded-Proto", "") == "https"
+
+    def _base_url(self):
+        scheme = "https" if self._is_https() else "http"
+        host = self.headers.get("Host", f"localhost:{PORT}")
+        return f"{scheme}://{host}"
+
+    def _secure_cookie_flags(self):
+        return "; Secure" if self._is_https() else ""
 
     def do_OPTIONS(self):
         self.send_response(204)
@@ -370,7 +465,6 @@ class Handler(BaseHTTPRequestHandler):
                 user_id, email = verify_clerk_token(token)
             except Exception as e:
                 return self._json({"error": f"invalid token: {e}"}, 401)
-            # Upsert user
             db = get_db()
             now = int(time.time())
             with _db_lock:
@@ -387,27 +481,26 @@ class Handler(BaseHTTPRequestHandler):
                     db.commit()
             cookie_val = _make_cookie(user_id)
             resp_body = json.dumps({"ok": True}).encode()
-            is_https = self.headers.get("X-Forwarded-Proto", "") == "https"
-            secure_flag = "; Secure" if is_https else ""
+            sec = self._secure_cookie_flags()
             self.send_response(200)
             self.send_header("Content-Type", "application/json")
             self.send_header("Content-Length", str(len(resp_body)))
             self.send_header("Set-Cookie",
-                f"amux_session={cookie_val}; HttpOnly{secure_flag}; SameSite=Lax; "
+                f"amux_session={cookie_val}; HttpOnly{sec}; SameSite=Lax; "
                 f"Max-Age={COOKIE_MAX_AGE}; Path=/")
             self.send_header("Access-Control-Allow-Origin", "*")
             self.end_headers()
             self.wfile.write(resp_body)
             return
 
-        # ── Unauthenticated invite links — serve login with redirect ──────────
+        # ── Unauthenticated invite: serve login with post-login redirect to invite page ──
         if path.startswith("/invite/") and self.command == "GET":
             cookies = _parse_cookies(self.headers.get("Cookie", ""))
             if not cookies.get("amux_session"):
                 accept = self.headers.get("Accept", "")
                 if "text/html" in accept:
                     invite_token = path[len("/invite/"):]
-                    return self._serve_login(invite_token=invite_token)
+                    return self._serve_login(post_login_redirect=f"/invite/{invite_token}")
 
         # ── Resolve user: Bearer token OR session cookie ──
         user_id = None
@@ -425,13 +518,11 @@ class Handler(BaseHTTPRequestHandler):
                 try:
                     user_id = _verify_cookie(session_val)
                 except ValueError:
-                    # Expired/invalid — send back to login
                     accept = self.headers.get("Accept", "")
                     if "text/html" in accept:
                         return self._serve_login()
                     return self._json({"error": "session expired"}, 401)
             else:
-                # No auth — serve login page for browsers, 401 for API
                 accept = self.headers.get("Accept", "")
                 if "text/html" in accept:
                     return self._serve_login()
@@ -454,16 +545,158 @@ class Handler(BaseHTTPRequestHandler):
                 db.commit()
 
         port = row["port"]
-        user_email = row["email"] or email  # prefer DB email, fallback to JWT
+        user_email = row["email"] or email
 
-        # Wake container if needed
-        if not container_running(user_id):
+        # ── Gateway-level org/invite interceptors ─────────────────────────────
+
+        # GET /invite/<token> while authenticated → show accept page
+        if path.startswith("/invite/") and self.command == "GET":
+            tok = path[len("/invite/"):]
+            inv = db.execute(
+                "SELECT owner_id FROM org_invites WHERE token=? AND used_at IS NULL AND expires_at > ?",
+                (tok, now)
+            ).fetchone()
+            if not inv:
+                return self._html("<html><body style='font-family:sans-serif;background:#0a0a0a;color:#e5e5e5;display:flex;align-items:center;justify-content:center;min-height:100vh;'><div style='text-align:center'><h2 style='color:#f87171'>Invite expired or invalid</h2><p style='color:#888;margin-top:8px'>This invite link is no longer valid.</p></div></body></html>", 410)
+            owner = db.execute("SELECT email FROM users WHERE id=?", (inv["owner_id"],)).fetchone()
+            owner_email = owner["email"] if owner else "someone"
+            if inv["owner_id"] == user_id:
+                return self._html("<html><body style='font-family:sans-serif;background:#0a0a0a;color:#e5e5e5;display:flex;align-items:center;justify-content:center;min-height:100vh;'><div style='text-align:center'><h2>That's your own invite link!</h2><p style='color:#888;margin-top:8px'>Share it with someone else.</p></div></body></html>")
+            return self._serve_invite_accept(tok, owner_email)
+
+        # POST /api/gateway/invite/<token>/accept → accept invite, set amux_org, redirect
+        if path.startswith("/api/gateway/invite/") and path.endswith("/accept"):
+            tok = path[len("/api/gateway/invite/"):-len("/accept")]
+            inv = db.execute(
+                "SELECT owner_id FROM org_invites WHERE token=? AND used_at IS NULL AND expires_at > ?",
+                (tok, now)
+            ).fetchone()
+            if not inv:
+                return self._json({"error": "invalid or expired invite"}, 410)
+            owner_id = inv["owner_id"]
+            db.execute("UPDATE org_invites SET used_at=?, used_by=? WHERE token=?",
+                       (now, user_id, tok))
+            db.execute(
+                "INSERT OR IGNORE INTO org_members (owner_id, member_id, member_email, joined_at) "
+                "VALUES (?,?,?,?)", (owner_id, user_id, user_email, now))
+            db.commit()
+            sec = self._secure_cookie_flags()
+            return self._redirect(
+                self._base_url() + "/",
+                extra_cookies=[f"amux_org={owner_id}; HttpOnly{sec}; SameSite=Lax; Path=/"]
+            )
+
+        # POST /api/org/invites → create gateway-level invite (intercepted before container)
+        if path == "/api/org/invites" and self.command == "POST":
+            import secrets as _sec
+            body = self._read_body()
+            tok = _sec.token_urlsafe(24)
+            expires = now + 7 * 86400
+            db.execute(
+                "INSERT INTO org_invites (token, owner_id, email, created_at, expires_at) "
+                "VALUES (?,?,?,?,?)",
+                (tok, user_id, body.get("email") or None, now, expires)
+            )
+            db.commit()
+            url = f"{self._base_url()}/invite/{tok}"
+            return self._json({"token": tok, "url": url, "expires_at": expires}, 201)
+
+        # GET /api/org/invites → list invites created by this user (gateway-level)
+        if path == "/api/org/invites" and self.command == "GET":
+            rows = db.execute(
+                "SELECT token, email, created_at, expires_at, used_at, used_by "
+                "FROM org_invites WHERE owner_id=? AND used_at IS NULL AND expires_at > ? "
+                "ORDER BY created_at DESC",
+                (user_id, now)
+            ).fetchall()
+            base = self._base_url()
+            return self._json([{**dict(r), "url": f"{base}/invite/{r['token']}"} for r in rows])
+
+        # DELETE /api/org/invites/<token>
+        if path.startswith("/api/org/invites/") and self.command == "DELETE":
+            tok = path[len("/api/org/invites/"):]
+            db.execute("DELETE FROM org_invites WHERE token=? AND owner_id=?", (tok, user_id))
+            db.commit()
+            return self._json({"ok": True})
+
+        # GET /api/gateway/orgs → list orgs accessible to this user
+        if path == "/api/gateway/orgs" and self.command == "GET":
+            orgs = [{"id": user_id, "email": user_email, "is_own": True}]
+            member_rows = db.execute(
+                "SELECT u.id, u.email FROM org_members m JOIN users u ON m.owner_id = u.id "
+                "WHERE m.member_id=?", (user_id,)
+            ).fetchall()
+            for r in member_rows:
+                orgs.append({"id": r["id"], "email": r["email"], "is_own": False})
+            return self._json(orgs)
+
+        # POST /api/gateway/switch-org → set amux_org cookie
+        if path == "/api/gateway/switch-org" and self.command == "POST":
+            body = self._read_body()
+            org_id = body.get("org_id", "").strip()
+            sec = self._secure_cookie_flags()
+            if org_id == user_id or not org_id:
+                # Switch back to own workspace
+                return self._redirect(
+                    self._base_url() + "/",
+                    extra_cookies=[f"amux_org=; Max-Age=0; Path=/; HttpOnly{sec}; SameSite=Lax"]
+                )
+            member_row = db.execute(
+                "SELECT 1 FROM org_members WHERE owner_id=? AND member_id=?",
+                (org_id, user_id)
+            ).fetchone()
+            if not member_row:
+                return self._json({"error": "not a member of this workspace"}, 403)
+            return self._redirect(
+                self._base_url() + "/",
+                extra_cookies=[f"amux_org={org_id}; HttpOnly{sec}; SameSite=Lax; Path=/"]
+            )
+
+        # GET /api/gateway/members → list members of your workspace
+        if path == "/api/gateway/members" and self.command == "GET":
+            rows = db.execute(
+                "SELECT u.email, m.joined_at FROM org_members m JOIN users u ON m.member_id = u.id "
+                "WHERE m.owner_id=? ORDER BY m.joined_at",
+                (user_id,)
+            ).fetchall()
+            return self._json([dict(r) for r in rows])
+
+        # DELETE /api/gateway/members/<member_id> → remove from workspace
+        if path.startswith("/api/gateway/members/") and self.command == "DELETE":
+            mid = path[len("/api/gateway/members/"):]
+            db.execute("DELETE FROM org_members WHERE owner_id=? AND member_id=?", (user_id, mid))
+            db.commit()
+            return self._json({"ok": True})
+
+        # ── Determine target container (own or org member's) ──────────────────
+        cookies = _parse_cookies(self.headers.get("Cookie", ""))
+        org_cookie = cookies.get("amux_org", "")
+        target_user_id = user_id
+        target_port = port
+        target_email = user_email
+
+        if org_cookie and org_cookie != user_id:
+            member_row = db.execute(
+                "SELECT u.port, u.email FROM org_members m JOIN users u ON m.owner_id = u.id "
+                "WHERE m.owner_id=? AND m.member_id=?",
+                (org_cookie, user_id)
+            ).fetchone()
+            if member_row and member_row["port"]:
+                target_user_id = org_cookie
+                target_port = member_row["port"]
+                target_email = member_row["email"] or user_email
+            else:
+                # Invalid/stale org cookie — clear it and use own container
+                org_cookie = ""
+
+        # Wake target container if needed
+        if not container_running(target_user_id):
             try:
-                start_container(user_id, port)
+                start_container(target_user_id, target_port)
             except Exception as e:
                 return self._json({"error": f"failed to start instance: {e}"}, 503)
 
-        proxy(self, port, path, qs, user_email=user_email)
+        proxy(self, target_port, path, qs, user_email=target_email)
 
     def do_GET(self):    self._handle()
     def do_POST(self):   self._handle()

@@ -5157,6 +5157,14 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
     <button id="notif-btn" onclick="toggleNotifications()" title="Session notifications" style="background:none;border:none;cursor:pointer;padding:2px 4px;font-size:1rem;opacity:0.5;line-height:1;" aria-label="Toggle notifications">&#x1F514;</button>
   </div>
   <div style="display:flex;gap:8px;align-items:center;">
+    <div id="org-switcher-wrap" style="display:none;position:relative;">
+      <button id="org-switcher-btn" onclick="event.stopPropagation();toggleOrgDropdown()"
+        style="background:var(--bg2);border:1px solid var(--border);border-radius:6px;padding:3px 10px 3px 8px;font-size:0.72rem;color:var(--dim);cursor:pointer;display:flex;align-items:center;gap:5px;white-space:nowrap;max-width:160px;overflow:hidden;text-overflow:ellipsis;">
+        <span id="org-switcher-label" style="overflow:hidden;text-overflow:ellipsis;">My workspace</span>
+        <span style="flex-shrink:0;">&#x25BE;</span>
+      </button>
+      <div id="org-switcher-menu" style="display:none;position:absolute;right:0;top:calc(100% + 4px);background:var(--bg2);border:1px solid var(--border);border-radius:8px;min-width:200px;z-index:500;box-shadow:0 4px 16px rgba(0,0,0,0.4);padding:4px;"></div>
+    </div>
     <div class="active-wrap">
       <button class="btn-active" id="active-btn" onclick="event.stopPropagation();toggleActiveDropdown()">
         <span class="active-dot"></span>
@@ -6139,6 +6147,7 @@ function saveQueue() {
 
 // ═══════ DEVICE NAME / CLOUD IDENTITY ═══════
 let _cloudEmail = '';
+let _gatewayOrgs = [];
 
 async function _initIdentity() {
   try {
@@ -6150,9 +6159,64 @@ async function _initIdentity() {
       const banner = document.getElementById('no-apikey-banner');
       if (banner) banner.style.display = '';
     }
-    // Update settings section if already open
     _applyIdentityToSettings();
+    if (_cloudEmail) _loadGatewayOrgs();
   } catch(e) {}
+}
+
+async function _loadGatewayOrgs() {
+  try {
+    const r = await fetch('/api/gateway/orgs');
+    if (!r.ok) return;
+    _gatewayOrgs = await r.json();
+    _renderOrgSwitcher();
+  } catch(e) {}
+}
+
+function _renderOrgSwitcher() {
+  const wrap = document.getElementById('org-switcher-wrap');
+  const label = document.getElementById('org-switcher-label');
+  const menu = document.getElementById('org-switcher-menu');
+  if (!wrap || !_gatewayOrgs.length) return;
+  if (_gatewayOrgs.length <= 1) { wrap.style.display = 'none'; return; }
+  wrap.style.display = '';
+  // Find current org from cookie (or own)
+  const cookieOrg = document.cookie.split(';').map(c => c.trim())
+    .find(c => c.startsWith('amux_org='))?.split('=')[1] || '';
+  const current = _gatewayOrgs.find(o => o.id === cookieOrg) || _gatewayOrgs.find(o => o.is_own);
+  if (label) label.textContent = current ? (current.is_own ? 'My workspace' : (current.email || current.id)) : 'My workspace';
+  if (menu) {
+    menu.innerHTML = _gatewayOrgs.map(o => {
+      const isCurrent = current && o.id === current.id;
+      return `<div onclick="_switchOrg('${esc(o.id)}')" style="padding:8px 12px;border-radius:6px;cursor:pointer;font-size:0.8rem;${isCurrent ? 'background:var(--accent10);font-weight:600;' : ''}display:flex;justify-content:space-between;align-items:center;" onmouseover="this.style.background='var(--bg3)'" onmouseout="this.style.background='${isCurrent ? 'var(--accent10)' : ''}'">
+        <span style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${esc(o.is_own ? 'My workspace' : (o.email || o.id))}</span>
+        ${isCurrent ? '<span style="color:var(--accent);font-size:0.65rem;">current</span>' : ''}
+      </div>`;
+    }).join('') + `<div style="border-top:1px solid var(--border);margin-top:4px;padding-top:4px;">
+      <div onclick="_switchOrg('')" style="padding:6px 12px;border-radius:6px;cursor:pointer;font-size:0.75rem;color:var(--dim);" onmouseover="this.style.background='var(--bg3)'" onmouseout="this.style.background=''">&#x2302; Switch to my workspace</div>
+    </div>`;
+  }
+}
+
+function toggleOrgDropdown() {
+  const menu = document.getElementById('org-switcher-menu');
+  if (!menu) return;
+  const open = menu.style.display === 'none' || !menu.style.display;
+  menu.style.display = open ? '' : 'none';
+  if (open) {
+    const close = () => { menu.style.display = 'none'; document.removeEventListener('click', close); };
+    setTimeout(() => document.addEventListener('click', close), 0);
+  }
+}
+
+async function _switchOrg(orgId) {
+  document.getElementById('org-switcher-menu').style.display = 'none';
+  await fetch('/api/gateway/switch-org', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({org_id: orgId || ''})
+  }).catch(() => {});
+  location.reload();
 }
 
 function _applyIdentityToSettings() {
@@ -13697,25 +13761,58 @@ async function saveApiKey() {
 // ── Team / Org / Invites ──────────────────────────────────────────────────────
 async function loadTeamSection() {
   try {
-    const [orgRes, membersRes] = await Promise.all([
-      fetch('/api/org'), fetch('/api/org/members')
-    ]);
-    const org = await orgRes.json();
-    const members = await membersRes.json();
-    const nameEl = document.getElementById('settings-org-name');
-    if (nameEl && nameEl !== document.activeElement) nameEl.value = org.name || '';
     const list = document.getElementById('settings-members-list');
     if (!list) return;
-    if (!members.length) {
-      list.innerHTML = '<span style="color:var(--dim);font-size:0.75rem;">No members yet — invite someone!</span>';
+
+    if (_cloudEmail) {
+      // Cloud mode: use gateway-level members
+      const [membersRes, invitesRes] = await Promise.all([
+        fetch('/api/gateway/members'), fetch('/api/org/invites')
+      ]);
+      const members = membersRes.ok ? await membersRes.json() : [];
+      const invites = invitesRes.ok ? await invitesRes.json() : [];
+      let html = '';
+      if (members.length) {
+        html += members.map(m => `
+          <div style="display:flex;justify-content:space-between;align-items:center;padding:3px 0;border-bottom:1px solid var(--border);">
+            <span style="font-size:0.78rem;">${esc(m.email || 'Unknown')}</span>
+            <span style="color:var(--dim);font-size:0.68rem;">member</span>
+          </div>`).join('');
+      }
+      if (invites.length) {
+        html += '<div style="margin-top:4px;font-size:0.68rem;color:var(--dim);">Pending invites:</div>';
+        html += invites.map(inv => `
+          <div style="display:flex;justify-content:space-between;align-items:center;padding:2px 0;">
+            <span style="font-size:0.72rem;color:var(--dim);">expires ${new Date(inv.expires_at*1000).toLocaleDateString()}</span>
+            <button onclick="deleteInvite('${esc(inv.token)}')" style="background:none;border:none;color:var(--dim);cursor:pointer;font-size:0.65rem;">revoke</button>
+          </div>`).join('');
+      }
+      list.innerHTML = html || '<span style="color:var(--dim);font-size:0.75rem;">No members yet — invite someone!</span>';
     } else {
-      list.innerHTML = members.map(m => `
-        <div style="display:flex;justify-content:space-between;align-items:center;padding:3px 0;border-bottom:1px solid var(--border);">
-          <span>${m.name || m.email}</span>
-          <span style="color:var(--dim);font-size:0.7rem;">${m.role}</span>
-        </div>`).join('');
+      // Local mode: use container-level org
+      const [orgRes, membersRes] = await Promise.all([
+        fetch('/api/org'), fetch('/api/org/members')
+      ]);
+      const org = await orgRes.json();
+      const members = await membersRes.json();
+      const nameEl = document.getElementById('settings-org-name');
+      if (nameEl && nameEl !== document.activeElement) nameEl.value = org.name || '';
+      if (!members.length) {
+        list.innerHTML = '<span style="color:var(--dim);font-size:0.75rem;">No members yet — invite someone!</span>';
+      } else {
+        list.innerHTML = members.map(m => `
+          <div style="display:flex;justify-content:space-between;align-items:center;padding:3px 0;border-bottom:1px solid var(--border);">
+            <span>${esc(m.name || m.email)}</span>
+            <span style="color:var(--dim);font-size:0.7rem;">${m.role}</span>
+          </div>`).join('');
+      }
     }
   } catch(e) {}
+}
+
+async function deleteInvite(token) {
+  await fetch('/api/org/invites/' + token, {method: 'DELETE'}).catch(() => {});
+  loadTeamSection();
 }
 
 async function saveOrgName(val) {
@@ -13763,15 +13860,14 @@ toggleSettings = function() {
   }
 };
 
-// Accept invite token from URL on page load
+// invite_token param is now handled server-side by gateway (redirect → /invite/<token> accept page)
+// Just clean it from URL if somehow present
 (function() {
   const params = new URLSearchParams(location.search);
-  const tok = params.get('invite_token');
-  if (!tok) return;
-  fetch('/invite/' + tok, {method:'POST', headers:{'Content-Type':'application/json'},
-    body: JSON.stringify({email: 'guest'})}).catch(()=>{});
-  // Clean URL
-  history.replaceState({}, '', location.pathname);
+  if (params.has('invite_token')) {
+    params.delete('invite_token');
+    history.replaceState({}, '', location.pathname + (params.toString() ? '?' + params.toString() : ''));
+  }
 })();
 
 function forceUpdate() {
