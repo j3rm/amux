@@ -513,6 +513,16 @@ class Handler(BaseHTTPRequestHandler):
                 return self._json({"ok": True, "already": True})
 
         # ── Public: exchange Clerk JWT for session cookie ──
+        if path == "/api/cloud-logout" and self.command in ("GET", "POST"):
+            sec = self._secure_cookie_flags()
+            self.send_response(302)
+            self.send_header("Location", "/")
+            self.send_header("Set-Cookie",
+                f"amux_session=; HttpOnly{sec}; SameSite=Lax; Max-Age=0; Path=/")
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+            return
+
         if path == "/api/cloud-auth" and self.command == "POST":
             length = int(self.headers.get("Content-Length", 0))
             body = json.loads(self.rfile.read(length)) if length else {}
