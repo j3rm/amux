@@ -49,6 +49,7 @@ CC_MEMORY = CC_HOME / "memory"
 CC_BOARD_DIR = CC_HOME / "board"
 CC_UPLOADS = CC_HOME / "uploads"
 CC_NOTES = CC_HOME / "notes"
+CC_NOTES_PINS = CC_HOME / "notes" / ".pins.json"
 TEMPLATES_DIR = Path(__file__).parent / "templates"
 CC_LOGS.mkdir(parents=True, exist_ok=True)
 CC_MEMORY.mkdir(parents=True, exist_ok=True)
@@ -3675,6 +3676,7 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
 <link rel="icon" type="image/png" sizes="180x180" href="/icon.png">
 <link rel="apple-touch-icon" href="/icon.png">
 <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/gridstack@7/dist/gridstack.min.css">
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/quill@2.0.3/dist/quill.snow.css">
 <style>
   * { box-sizing: border-box; margin: 0; padding: 0; }
   :root {
@@ -5436,41 +5438,43 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
     color: var(--text); font-size: 0.95rem; font-weight: 600;
     font-family: inherit;
   }
-  .notes-tab-btn {
-    background: transparent; border: 1px solid var(--border); border-radius: 5px;
-    color: var(--dim); font-size: 0.75rem; padding: 3px 8px; cursor: pointer;
-  }
-  .notes-tab-btn.active { background: var(--accent); border-color: var(--accent); color: #fff; }
   .notes-delete-btn {
     background: transparent; border: none; color: var(--dim); cursor: pointer;
     font-size: 0.9rem; padding: 2px 4px; opacity: 0.6;
   }
   .notes-delete-btn:hover { color: var(--red); opacity: 1; }
-  .notes-edit-area { flex: 1; display: flex; overflow: hidden; }
-  .notes-body-input {
-    flex: 1; resize: none; border: none; outline: none; padding: 14px 16px;
-    background: var(--bg); color: var(--text); font-size: 0.85rem;
-    font-family: 'SFMono-Regular', Consolas, 'Liberation Mono', Menlo, monospace;
-    line-height: 1.6; tab-size: 2;
+  /* Quill editor fills pane */
+  .notes-quill-wrap { flex: 1; display: flex; flex-direction: column; overflow: hidden; }
+  .notes-quill-wrap .ql-toolbar.ql-snow {
+    background: var(--card); border-color: var(--border); flex-shrink: 0;
   }
-  .notes-preview-area {
-    flex: 1; overflow-y: auto; padding: 14px 20px;
-    background: var(--bg); color: var(--text); font-size: 0.88rem; line-height: 1.7;
+  .notes-quill-wrap .ql-container.ql-snow {
+    border-color: var(--border); flex: 1; overflow-y: auto; background: var(--bg);
   }
-  .notes-md-preview h1 { font-size: 1.4rem; margin: 0 0 10px; }
-  .notes-md-preview h2 { font-size: 1.15rem; margin: 14px 0 8px; }
-  .notes-md-preview h3 { font-size: 1rem; margin: 12px 0 6px; }
-  .notes-md-preview code { background: rgba(139,148,158,0.15); padding: 1px 4px; border-radius: 3px; font-size: 0.82em; }
-  .notes-md-preview pre { background: rgba(139,148,158,0.12); padding: 10px 12px; border-radius: 6px; overflow-x: auto; }
-  .notes-md-preview pre code { background: none; padding: 0; }
-  .notes-md-preview blockquote { border-left: 3px solid var(--accent); margin: 8px 0; padding: 4px 12px; color: var(--dim); }
-  .notes-md-preview ul, .notes-md-preview ol { padding-left: 20px; margin: 6px 0; }
-  .notes-md-preview li { margin: 2px 0; }
-  .notes-md-preview a { color: var(--accent); }
-  .notes-md-preview hr { border: none; border-top: 1px solid var(--border); margin: 12px 0; }
-  .notes-md-preview table { border-collapse: collapse; width: 100%; margin: 8px 0; }
-  .notes-md-preview th, .notes-md-preview td { border: 1px solid var(--border); padding: 5px 10px; font-size: 0.83rem; }
-  .notes-md-preview th { background: rgba(139,148,158,0.1); }
+  .notes-quill-wrap .ql-editor { color: var(--text); font-size: 0.88rem; line-height: 1.7; min-height: 200px; }
+  .notes-quill-wrap .ql-editor.ql-blank::before { color: var(--dim); font-style: normal; }
+  .notes-quill-wrap .ql-snow .ql-stroke { stroke: var(--dim); }
+  .notes-quill-wrap .ql-snow .ql-fill { fill: var(--dim); }
+  .notes-quill-wrap .ql-snow .ql-picker { color: var(--dim); }
+  .notes-quill-wrap .ql-snow .ql-picker-options { background: var(--card); border-color: var(--border); }
+  .notes-quill-wrap .ql-snow .ql-toolbar button:hover .ql-stroke,
+  .notes-quill-wrap .ql-snow .ql-toolbar button.ql-active .ql-stroke { stroke: var(--accent); }
+  .notes-quill-wrap .ql-snow .ql-toolbar button:hover .ql-fill,
+  .notes-quill-wrap .ql-snow .ql-toolbar button.ql-active .ql-fill { fill: var(--accent); }
+  .notes-quill-wrap .ql-snow .ql-picker-label { color: var(--dim); }
+  .notes-quill-wrap .ql-snow .ql-picker-label:hover,
+  .notes-quill-wrap .ql-snow .ql-picker-label.ql-active { color: var(--accent); }
+  /* Pin button in sidebar */
+  .nli-row { display: flex; align-items: center; gap: 4px; }
+  .nli-title { flex: 1; font-weight: 500; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .nli-pin-btn {
+    background: none; border: none; padding: 0 2px; cursor: pointer; opacity: 0;
+    font-size: 0.75rem; line-height: 1; color: var(--dim); flex-shrink: 0;
+  }
+  .notes-list-item:hover .nli-pin-btn { opacity: 0.5; }
+  .notes-list-item:hover .nli-pin-btn:hover { opacity: 1; color: var(--accent); }
+  .notes-list-item.pinned .nli-pin-btn { opacity: 1; color: var(--accent); }
+  .notes-list-item.pinned { border-left: 2px solid var(--accent); }
   .notes-empty-state {
     position: absolute; inset: 0; display: flex; flex-direction: column;
     align-items: center; justify-content: center;
@@ -5924,15 +5928,12 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
       <input id="notes-title" type="text" placeholder="Note title…" class="notes-title-input" oninput="_notesTitleChange()" onblur="_notesSaveDebounce()">
       <div style="display:flex;gap:6px;align-items:center;">
         <span id="notes-save-status" style="font-size:0.72rem;color:var(--dim);"></span>
-        <button class="notes-tab-btn" id="notes-tab-edit" onclick="_notesSetTab('edit')" title="Edit">Edit</button>
-        <button class="notes-tab-btn" id="notes-tab-preview" onclick="_notesSetTab('preview')" title="Preview">Preview</button>
         <button class="notes-delete-btn" onclick="_notesDelete()" title="Delete note">&#x1F5D1;</button>
       </div>
     </div>
-    <div id="notes-edit-area" class="notes-edit-area">
-      <textarea id="notes-body" class="notes-body-input" placeholder="Write in Markdown…" oninput="_notesSaveDebounce()"></textarea>
+    <div class="notes-quill-wrap" id="notes-quill-wrap" style="display:none;">
+      <div id="notes-quill"></div>
     </div>
-    <div id="notes-preview-area" class="notes-preview-area notes-md-preview" style="display:none;"></div>
     <div class="notes-empty-state" id="notes-empty-state">
       <div style="font-size:2rem;margin-bottom:8px;">📝</div>
       <div style="color:var(--dim);font-size:0.85rem;">Select a note or create a new one</div>
@@ -11658,7 +11659,7 @@ function switchView(view) {
   if (view === 'reports') fetchReports();
   if (view === 'browser') _rbLoadProfiles();
   if (view === 'email') _emailLoad();
-  if (view === 'notes') _notesLoad();
+  if (view === 'notes') { _notesInitQuill(); _notesLoad(); }
   if (view === 'logs') { fetchLogs(); _startLogsTimer(); } else { _stopLogsTimer(); }
   if (view === 'board') {
     renderBoard();
@@ -14837,10 +14838,29 @@ async function pullFromRemote(btn) {
 
 <script>
 // ── Notes tab ─────────────────────────────────────────────────────────────────
-let _notesList = [];
-let _notesActive = null; // { path, title, body }
+let _notesActive = null; // { path, title }
 let _notesSaveTimer = null;
 let _notesAllNotes = [];
+let _quill = null;
+
+function _notesInitQuill() {
+  if (_quill) return;
+  _quill = new Quill('#notes-quill', {
+    theme: 'snow',
+    modules: {
+      toolbar: [
+        [{ header: [1, 2, 3, false] }],
+        ['bold', 'italic', 'underline', 'strike'],
+        ['blockquote', 'code-block'],
+        [{ list: 'ordered' }, { list: 'bullet' }],
+        ['link'],
+        ['clean']
+      ]
+    },
+    placeholder: 'Write your note…'
+  });
+  _quill.on('text-change', () => _notesSaveDebounce());
+}
 
 async function _notesLoad() {
   const r = await fetch(API + '/api/notes');
@@ -14861,10 +14881,14 @@ function _notesRenderList(notes) {
   }
   el.innerHTML = notes.map(n => {
     const active = _notesActive && _notesActive.path === n.path ? ' active' : '';
+    const pinned = n.pinned ? ' pinned' : '';
     const dt = n.updated ? new Date(n.updated * 1000).toLocaleDateString() : '';
     const displayName = n.name || n.path.replace(/\.md$/, '');
-    return `<div class="notes-list-item${active}" onclick="_notesOpen(${JSON.stringify(n.path)})">
-      <div class="nli-title">${esc(displayName)}</div>
+    return `<div class="notes-list-item${active}${pinned}" onclick="_notesOpen(${JSON.stringify(n.path)})">
+      <div class="nli-row">
+        <div class="nli-title">${esc(displayName)}</div>
+        <button class="nli-pin-btn" onclick="event.stopPropagation();_notesTogglePin(${JSON.stringify(n.path)})" title="${n.pinned ? 'Unpin' : 'Pin to top'}">📌</button>
+      </div>
       <div class="nli-date">${dt}</div>
     </div>`;
   }).join('');
@@ -14874,7 +14898,7 @@ function _notesSearchFilter(q) {
   if (!q.trim()) { _notesRenderList(_notesAllNotes); return; }
   const lq = q.toLowerCase();
   _notesRenderList(_notesAllNotes.filter(n =>
-    n.name.toLowerCase().includes(lq) || n.path.toLowerCase().includes(lq)
+    (n.name || '').toLowerCase().includes(lq) || n.path.toLowerCase().includes(lq)
   ));
 }
 
@@ -14882,25 +14906,34 @@ async function _notesOpen(path) {
   const r = await fetch(API + '/api/notes/' + encodeURIComponent(path.replace(/\.md$/, '')));
   if (!r.ok) return;
   const data = await r.json();
-  _notesActive = { path: data.path, body: data.content };
-  const titleFromContent = (data.content.match(/^#\s+(.+)$/m) || [])[1] || '';
+  _notesActive = { path: data.path };
+  // Derive title from content H1 or filename
+  const h1html = data.content.match(/<h1[^>]*>(.*?)<\/h1>/i);
+  const h1md = data.content.match(/^#\s+(.+)$/m);
+  const titleFromContent = h1html ? h1html[1].replace(/<[^>]+>/g, '') : (h1md ? h1md[1] : '');
   const titleFromPath = path.replace(/\.md$/, '').split('/').pop();
   _notesActive.title = titleFromContent || titleFromPath;
   document.getElementById('notes-title').value = _notesActive.title;
-  document.getElementById('notes-body').value = data.content;
+  // Load into Quill
+  if (!_quill) _notesInitQuill();
+  const isHtml = /<[a-z][\s\S]*>/i.test(data.content);
+  if (isHtml) {
+    _quill.root.innerHTML = data.content;
+  } else {
+    // Plain/markdown — set as text (renders literally; user can reformat)
+    _quill.setText(data.content || '');
+  }
   document.getElementById('notes-empty-state').style.display = 'none';
-  document.getElementById('notes-edit-area').style.display = 'flex';
-  _notesSetTab('edit');
+  document.getElementById('notes-quill-wrap').style.display = 'flex';
   _notesRenderList(_notesAllNotes);
 }
 
 async function _notesNew() {
   const ts = Date.now();
   const path = `note-${ts}.md`;
-  const content = '';
   await fetch(API + '/api/notes/' + path.replace(/\.md$/, ''), {
     method: 'POST', headers: {'Content-Type': 'application/json'},
-    body: JSON.stringify({ content })
+    body: JSON.stringify({ content: '' })
   });
   await _notesLoad();
   await _notesOpen(path);
@@ -14911,13 +14944,12 @@ function _notesTitleChange() {
   if (!_notesActive) return;
   const newTitle = document.getElementById('notes-title').value;
   _notesActive.title = newTitle;
-  // Update sidebar list item immediately
+  // Update sidebar immediately
   const activeEl = document.querySelector('#notes-list .notes-list-item.active');
   if (activeEl) {
     const titleEl = activeEl.querySelector('.nli-title');
     if (titleEl) titleEl.textContent = newTitle || _notesActive.path.replace(/\.md$/, '');
   }
-  // Also update in-memory list so re-renders stay in sync
   const listEntry = _notesAllNotes.find(n => n.path === _notesActive.path);
   if (listEntry) listEntry.name = newTitle || listEntry.path.replace(/\.md$/, '');
   _notesSaveDebounce();
@@ -14930,28 +14962,23 @@ function _notesSaveDebounce() {
 }
 
 async function _notesSave() {
-  if (!_notesActive) return;
-  let body = document.getElementById('notes-body').value;
-  const title = document.getElementById('notes-title').value.trim();
-  // Keep/sync first heading to title
-  if (title) {
-    if (/^#\s+.+/m.test(body)) {
-      body = body.replace(/^#\s+.+/m, '# ' + title);
-    } else {
-      body = '# ' + title + '\n\n' + body;
-    }
-    document.getElementById('notes-body').value = body;
-  }
+  if (!_notesActive || !_quill) return;
+  const content = _quill.root.innerHTML === '<p><br></p>' ? '' : _quill.root.innerHTML;
   const pathKey = _notesActive.path.replace(/\.md$/, '');
   await fetch(API + '/api/notes/' + encodeURIComponent(pathKey), {
     method: 'POST', headers: {'Content-Type': 'application/json'},
-    body: JSON.stringify({ content: body })
+    body: JSON.stringify({ content })
   });
   document.getElementById('notes-save-status').textContent = 'Saved';
   setTimeout(() => { document.getElementById('notes-save-status').textContent = ''; }, 2000);
   // Refresh list to update timestamps
   const r = await fetch(API + '/api/notes');
   _notesAllNotes = await r.json();
+  // Re-apply current note's known title before re-rendering
+  if (_notesActive) {
+    const entry = _notesAllNotes.find(n => n.path === _notesActive.path);
+    if (entry && _notesActive.title) entry.name = _notesActive.title;
+  }
   _notesRenderList(_notesAllNotes);
 }
 
@@ -14966,60 +14993,19 @@ async function _notesDelete() {
 
 function _notesShowEmpty() {
   document.getElementById('notes-empty-state').style.display = 'flex';
-  document.getElementById('notes-edit-area').style.display = 'none';
-  document.getElementById('notes-preview-area').style.display = 'none';
+  document.getElementById('notes-quill-wrap').style.display = 'none';
   document.getElementById('notes-title').value = '';
-  document.getElementById('notes-body').value = '';
+  if (_quill) _quill.setText('');
 }
 
-function _notesSetTab(tab) {
-  document.getElementById('notes-tab-edit').classList.toggle('active', tab === 'edit');
-  document.getElementById('notes-tab-preview').classList.toggle('active', tab === 'preview');
-  document.getElementById('notes-edit-area').style.display = tab === 'edit' ? 'flex' : 'none';
-  document.getElementById('notes-preview-area').style.display = tab === 'preview' ? '' : 'none';
-  if (tab === 'preview') {
-    const body = document.getElementById('notes-body').value;
-    document.getElementById('notes-preview-area').innerHTML = _notesMarkdown(body);
-  }
-}
-
-function _notesMarkdown(md) {
-  // Minimal safe markdown renderer
-  let html = esc(md);
-  // Code blocks
-  html = html.replace(/```[\s\S]*?```/g, m => {
-    const inner = m.slice(3, -3).replace(/^[^\n]*\n?/, '');
-    return `<pre><code>${inner}</code></pre>`;
-  });
-  // Inline code
-  html = html.replace(/`([^`]+)`/g, '<code>$1</code>');
-  // Headers
-  html = html.replace(/^### (.+)$/gm, '<h3>$1</h3>');
-  html = html.replace(/^## (.+)$/gm, '<h2>$1</h2>');
-  html = html.replace(/^# (.+)$/gm, '<h1>$1</h1>');
-  // Bold/italic
-  html = html.replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>');
-  html = html.replace(/\*([^*]+)\*/g, '<em>$1</em>');
-  // Blockquote
-  html = html.replace(/^&gt; (.+)$/gm, '<blockquote>$1</blockquote>');
-  // HR
-  html = html.replace(/^---+$/gm, '<hr>');
-  // Links
-  html = html.replace(/\[([^\]]+)\]\(([^)]+)\)/g, '<a href="$2" target="_blank" rel="noopener">$1</a>');
-  // Lists
-  html = html.replace(/^\* (.+)$/gm, '<li>$1</li>');
-  html = html.replace(/^- (.+)$/gm, '<li>$1</li>');
-  html = html.replace(/^\d+\. (.+)$/gm, '<li>$1</li>');
-  html = html.replace(/(<li>.*<\/li>\n?)+/g, m => `<ul>${m}</ul>`);
-  // Paragraphs
-  html = html.replace(/\n\n+/g, '</p><p>');
-  html = '<p>' + html + '</p>';
-  html = html.replace(/<p>(<h[123]>|<ul>|<\/ul>|<pre>|<blockquote>|<hr>)/g, '$1');
-  html = html.replace(/(<\/h[123]>|<\/ul>|<\/pre>|<\/blockquote>|<hr>)<\/p>/g, '$1');
-  html = html.replace(/<p><\/p>/g, '');
-  // Newlines → <br> inside paragraphs
-  html = html.replace(/\n/g, '<br>');
-  return html;
+async function _notesTogglePin(path) {
+  const r = await fetch(API + '/api/notes/' + encodeURIComponent(path.replace(/\.md$/, '')) + '/pin', { method: 'POST' });
+  const d = await r.json();
+  const entry = _notesAllNotes.find(n => n.path === path);
+  if (entry) entry.pinned = d.pinned;
+  // Re-sort: pinned first, then by updated desc
+  _notesAllNotes.sort((a, b) => (b.pinned ? 1 : 0) - (a.pinned ? 1 : 0) || b.updated - a.updated);
+  _notesRenderList(_notesAllNotes);
 }
 
 // ── Email Events tab ──────────────────────────────────────────────────────────
@@ -15101,6 +15087,7 @@ async function _emailDismiss(id) {
 
 <script src="https://cdn.jsdelivr.net/npm/marked@15/marked.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/sortablejs@1.15.6/Sortable.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/quill@2.0.3/dist/quill.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/gridstack@7/dist/gridstack-all.js"></script>
 <div id="grid-view">
@@ -15596,20 +15583,46 @@ class CCHandler(BaseHTTPRequestHandler):
                 return self._json({"ok": True})
 
         # Notes API (/api/notes)
+        if method == "POST" and path.startswith("/api/notes/") and path.endswith("/pin"):
+            note_rel = path[len("/api/notes/"):-len("/pin")]
+            if not note_rel.endswith(".md"):
+                note_rel += ".md"
+            pins = set()
+            if CC_NOTES_PINS.exists():
+                try: pins = set(json.loads(CC_NOTES_PINS.read_text()))
+                except Exception: pass
+            if note_rel in pins:
+                pins.discard(note_rel); pinned = False
+            else:
+                pins.add(note_rel); pinned = True
+            CC_NOTES_PINS.write_text(json.dumps(list(pins)))
+            return self._json({"ok": True, "pinned": pinned})
+
         if method == "GET" and path == "/api/notes":
+            pins = set()
+            if CC_NOTES_PINS.exists():
+                try: pins = set(json.loads(CC_NOTES_PINS.read_text()))
+                except Exception: pass
             notes = []
             if CC_NOTES.exists():
                 for f in sorted(CC_NOTES.rglob("*.md"), key=lambda p: -p.stat().st_mtime):
                     rel = str(f.relative_to(CC_NOTES))
                     stat = f.stat()
-                    # Extract H1 title from first line if present
                     try:
-                        first_line = f.open().readline().strip()
-                        h1 = first_line[2:].strip() if first_line.startswith("# ") else ""
+                        chunk = f.read_bytes(512).decode("utf-8", errors="replace")
+                        import re as _re
+                        m_html = _re.search(r'<h1[^>]*>(.*?)</h1>', chunk, _re.IGNORECASE)
+                        if m_html:
+                            h1 = _re.sub(r'<[^>]+>', '', m_html.group(1)).strip()
+                        else:
+                            first_line = chunk.split('\n')[0].strip()
+                            h1 = first_line[2:].strip() if first_line.startswith("# ") else ""
                     except Exception:
                         h1 = ""
                     name = h1 or f.stem
-                    notes.append({"path": rel, "name": name, "size": stat.st_size, "updated": int(stat.st_mtime)})
+                    notes.append({"path": rel, "name": name, "size": stat.st_size,
+                                  "updated": int(stat.st_mtime), "pinned": rel in pins})
+            notes.sort(key=lambda n: (0 if n["pinned"] else 1, -n["updated"]))
             return self._json(notes)
 
         if path.startswith("/api/notes/"):
