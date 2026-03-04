@@ -3039,11 +3039,19 @@ def start_session(name: str, extra_flags: str = "", _skip_conv_id: bool = False)
         else:
             shell_rc += f"cd {shlex.quote(work_dir)}; "
         # Forward select env vars into the tmux session.
-        # IMPORTANT: Do NOT forward ANTHROPIC_API_KEY — Claude Code manages
-        # its own auth via ~/.claude/ (OAuth/Max). Forwarding a server-level
-        # key overrides the user's login and causes stale-key failures.
+        # ANTHROPIC_API_KEY: only forward if there's no OAuth token in
+        # ~/.claude.json. OAuth/Max users manage their own auth; BYO-key
+        # users (cloud containers without OAuth) need the key injected.
         _env_args = []
-        for _ekey in ("OPENAI_API_KEY",):
+        _has_oauth = False
+        try:
+            import json as _j2
+            _cj = Path.home() / ".claude.json"
+            if _cj.exists():
+                _has_oauth = bool(_j2.loads(_cj.read_text()).get("oauthAccount"))
+        except Exception:
+            pass
+        for _ekey in ([] if _has_oauth else ["ANTHROPIC_API_KEY"]) + ["OPENAI_API_KEY"]:
             _eVal = os.environ.get(_ekey, "")
             if _eVal:
                 _env_args += ["-e", f"{_ekey}={_eVal}"]
