@@ -14884,10 +14884,10 @@ function _notesRenderList(notes) {
     const pinned = n.pinned ? ' pinned' : '';
     const dt = n.updated ? new Date(n.updated * 1000).toLocaleDateString() : '';
     const displayName = n.name || n.path.replace(/\.md$/, '');
-    return `<div class="notes-list-item${active}${pinned}" onclick="_notesOpen(${JSON.stringify(n.path)})">
+    return `<div class="notes-list-item${active}${pinned}" data-path="${esc(n.path)}" onclick="_notesOpen(this.dataset.path)">
       <div class="nli-row">
         <div class="nli-title">${esc(displayName)}</div>
-        <button class="nli-pin-btn" onclick="event.stopPropagation();_notesTogglePin(${JSON.stringify(n.path)})" title="${n.pinned ? 'Unpin' : 'Pin to top'}">📌</button>
+        <button class="nli-pin-btn" onclick="event.stopPropagation();_notesTogglePin(this.closest('[data-path]').dataset.path)" title="${n.pinned ? 'Unpin' : 'Pin to top'}">📌</button>
       </div>
       <div class="nli-date">${dt}</div>
     </div>`;
