@@ -3657,6 +3657,146 @@ def _email_sync_job() -> None:
         slog(f"[email] sync error: {e}")
 
 
+RELEASE_NOTES_HTML = """<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>amux — Release Notes</title>
+<meta name="description" content="amux release notes and changelog. Every commit, every feature, every fix.">
+<meta property="og:title" content="amux Release Notes">
+<meta property="og:description" content="Changelog for amux — the Claude session manager. Features, fixes, and everything in between.">
+<link rel="canonical" href="/release-notes">
+<style>
+*{box-sizing:border-box;margin:0;padding:0}
+body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',system-ui,sans-serif;background:#0d1117;color:#e6edf3;min-height:100vh;line-height:1.5}
+a{color:#58a6ff;text-decoration:none}
+a:hover{text-decoration:underline}
+.rn-header{padding:40px 24px 32px;border-bottom:1px solid #21262d;max-width:860px;margin:0 auto}
+.rn-logo{display:flex;align-items:center;gap:10px;margin-bottom:24px}
+.rn-logo-mark{width:32px;height:32px;background:linear-gradient(135deg,#58a6ff,#a371f7);border-radius:8px;display:flex;align-items:center;justify-content:center;font-weight:800;font-size:0.9rem;color:#fff}
+.rn-logo-name{font-size:1.1rem;font-weight:700;color:#e6edf3}
+.rn-logo-sep{color:#484f58;margin:0 4px}
+.rn-logo-sub{font-size:1.1rem;color:#8b949e}
+h1.rn-title{font-size:2rem;font-weight:700;margin-bottom:8px}
+.rn-subtitle{color:#8b949e;font-size:1rem}
+.rn-content{max-width:860px;margin:0 auto;padding:0 24px 80px}
+.rn-entry{border-bottom:1px solid #21262d;padding:40px 0}
+.rn-entry:last-child{border-bottom:none}
+.rn-entry-meta{display:flex;align-items:center;flex-wrap:wrap;gap:8px;margin-bottom:12px}
+.rn-date{font-size:0.8rem;color:#8b949e}
+.rn-badge{font-size:0.72rem;padding:2px 8px;border-radius:12px;font-weight:600;letter-spacing:0.02em}
+.rn-badge-feat{background:rgba(63,185,80,0.15);color:#3fb950;border:1px solid rgba(63,185,80,0.3)}
+.rn-badge-fix{background:rgba(248,129,62,0.15);color:#f8813e;border:1px solid rgba(248,129,62,0.3)}
+.rn-badge-chore{background:rgba(139,148,158,0.15);color:#8b949e;border:1px solid rgba(139,148,158,0.25)}
+.rn-tag{font-size:0.72rem;padding:2px 8px;border-radius:12px;background:rgba(88,166,255,0.1);color:#58a6ff;border:1px solid rgba(88,166,255,0.2)}
+.rn-commit{font-family:'SF Mono',Consolas,monospace;font-size:0.78rem;color:#8b949e;background:#161b22;border:1px solid #21262d;border-radius:6px;padding:2px 8px}
+.rn-commit:hover{color:#58a6ff;border-color:#58a6ff}
+.rn-entry-title{font-size:1.25rem;font-weight:600;margin-bottom:10px;color:#e6edf3}
+.rn-entry-desc{color:#8b949e;font-size:0.9rem;line-height:1.7;margin-bottom:20px;max-width:680px}
+.rn-video-wrap{border-radius:10px;overflow:hidden;background:#161b22;border:1px solid #21262d;margin-top:4px;aspect-ratio:16/9;max-width:680px;position:relative}
+.rn-video-wrap video{width:100%;height:100%;display:block;object-fit:contain;background:#0d1117}
+.rn-video-placeholder{width:100%;height:100%;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:8px;color:#484f58;font-size:0.85rem;aspect-ratio:16/9;max-width:680px;background:#161b22;border:1px solid #21262d;border-radius:10px}
+.rn-video-placeholder svg{opacity:0.4}
+.rn-load-more{display:flex;justify-content:center;padding:32px 0}
+.rn-load-btn{background:#21262d;color:#e6edf3;border:1px solid #30363d;border-radius:8px;padding:10px 24px;font-size:0.9rem;cursor:pointer;transition:background 0.15s}
+.rn-load-btn:hover{background:#30363d}
+.rn-spinner{display:flex;justify-content:center;padding:40px;color:#484f58;font-size:0.85rem}
+.rn-empty{text-align:center;padding:80px 24px;color:#484f58}
+.rn-sentinel{height:1px}
+@media(max-width:600px){
+  .rn-header{padding:24px 16px 20px}
+  h1.rn-title{font-size:1.5rem}
+  .rn-content{padding:0 16px 60px}
+  .rn-entry{padding:28px 0}
+  .rn-entry-title{font-size:1.1rem}
+}
+</style>
+</head>
+<body>
+<header class="rn-header">
+  <div class="rn-logo">
+    <div class="rn-logo-mark">a</div>
+    <a href="/" class="rn-logo-name">amux</a>
+    <span class="rn-logo-sep">/</span>
+    <span class="rn-logo-sub">release notes</span>
+  </div>
+  <h1 class="rn-title">Release Notes</h1>
+  <p class="rn-subtitle">Every commit. Every feature. Every fix.</p>
+</header>
+<div class="rn-content">
+  <div id="rn-list"></div>
+  <div class="rn-sentinel" id="rn-sentinel"></div>
+  <div class="rn-spinner" id="rn-spinner" style="display:none">Loading&hellip;</div>
+</div>
+<script>
+const GH_RAW = 'https://raw.githubusercontent.com/mixpeek/amux/main/docs/release-notes/videos/';
+const GH_COMMIT = 'https://github.com/mixpeek/amux/commit/';
+let page = 0, loading = false, done = false;
+
+function typeBadge(type) {
+  const cls = type === 'feat' ? 'feat' : type === 'fix' ? 'fix' : 'chore';
+  return `<span class="rn-badge rn-badge-${cls}">${type}</span>`;
+}
+
+function renderEntry(n) {
+  const tags = (n.tags||[]).map(t => `<span class="rn-tag">${t}</span>`).join('');
+  const video = n.video
+    ? `<div class="rn-video-wrap"><video controls preload="none" poster="">
+        <source src="${GH_RAW}${n.video}" type="video/mp4">
+       </video></div>`
+    : `<div class="rn-video-placeholder">
+        <svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><polygon points="5 3 19 12 5 21 5 3"/></svg>
+        <span>Video coming soon</span>
+       </div>`;
+  return `<article class="rn-entry" data-hash="${n.hash}">
+    <div class="rn-entry-meta">
+      <span class="rn-date">${n.date}</span>
+      ${typeBadge(n.type)}
+      ${tags}
+      <a class="rn-commit" href="${GH_COMMIT}${n.hash}" target="_blank" rel="noopener">${n.short}</a>
+    </div>
+    <h2 class="rn-entry-title">${n.title}</h2>
+    <p class="rn-entry-desc">${n.description}</p>
+    ${video}
+  </article>`;
+}
+
+async function loadMore() {
+  if (loading || done) return;
+  loading = true;
+  document.getElementById('rn-spinner').style.display = 'flex';
+  page++;
+  try {
+    const r = await fetch('/api/release-notes?page=' + page + '&per_page=5');
+    const d = await r.json();
+    const list = document.getElementById('rn-list');
+    d.notes.forEach(n => list.insertAdjacentHTML('beforeend', renderEntry(n)));
+    if (!d.has_more) {
+      done = true;
+      document.getElementById('rn-sentinel').remove();
+      if (!d.notes.length && page === 1) {
+        list.innerHTML = '<div class="rn-empty">No release notes yet.</div>';
+      }
+    }
+  } catch(e) { console.error(e); }
+  loading = false;
+  document.getElementById('rn-spinner').style.display = 'none';
+}
+
+// IntersectionObserver for lazy loading
+const sentinel = document.getElementById('rn-sentinel');
+const obs = new IntersectionObserver(entries => {
+  if (entries[0].isIntersecting) loadMore();
+}, { rootMargin: '200px' });
+obs.observe(sentinel);
+
+// Load first batch immediately
+loadMore();
+</script>
+</body>
+</html>"""
+
 # ═══════════════════════════════════════════
 # HTML DASHBOARD
 # ═══════════════════════════════════════════
@@ -15028,20 +15168,20 @@ async function _notesNew() {
 }
 
 function _notesTitleChange() {
-  if (!_notesActive) return;
+  if (!_notesActive || !_quill) return;
   const newTitle = document.getElementById('notes-title').value;
   _notesActive.title = newTitle;
-  // Sync title into Quill as H1 (source=api so text-change won't re-trigger debounce)
-  if (_quill) {
-    const root = _quill.root;
-    const first = root.firstElementChild;
-    if (first && first.tagName === 'H1') {
-      if (first.textContent !== newTitle) first.textContent = newTitle;
-    } else if (newTitle) {
-      const h1 = document.createElement('h1');
-      h1.textContent = newTitle;
-      root.insertBefore(h1, root.firstChild);
-    }
+  // Sync via Quill API (not direct DOM — Quill's delta would reconcile back and override)
+  // Read DOM only to detect; modify only via Quill API with source='api'
+  const firstElem = _quill.root.firstElementChild;
+  const isH1 = firstElem && firstElem.tagName === 'H1';
+  const oldH1Len = isH1 ? firstElem.textContent.length : 0;
+  if (isH1) {
+    if (oldH1Len > 0) _quill.deleteText(0, oldH1Len, 'api');
+    if (newTitle) _quill.insertText(0, newTitle, 'api');
+  } else {
+    _quill.insertText(0, (newTitle || '') + '\n', 'api');
+    _quill.formatLine(0, 1, 'header', 1, 'api');
   }
   // Update sidebar immediately
   const activeEl = document.querySelector('#notes-list .notes-list-item.active');
@@ -15606,6 +15746,34 @@ class CCHandler(BaseHTTPRequestHandler):
                 1,
             )
             return self._html(page)
+
+        # GET /release-notes — standalone SEO-indexable release notes page
+        if method == "GET" and path == "/release-notes":
+            return self._html(RELEASE_NOTES_HTML.encode())
+
+        # GET /api/release-notes — paginated JSON from docs/release-notes/notes.json
+        if method == "GET" and path.startswith("/api/release-notes"):
+            qs = {}
+            if "?" in path:
+                import urllib.parse as _up
+                qs = dict(_up.parse_qsl(path.split("?", 1)[1]))
+            page = int(qs.get("page", "1"))
+            per_page = int(qs.get("per_page", "6"))
+            notes_file = pathlib.Path(__file__).parent / "docs" / "release-notes" / "notes.json"
+            if notes_file.exists():
+                all_notes = json.loads(notes_file.read_text())
+            else:
+                all_notes = []
+            total = len(all_notes)
+            start = (page - 1) * per_page
+            end = start + per_page
+            return self._json({
+                "notes": all_notes[start:end],
+                "total": total,
+                "page": page,
+                "per_page": per_page,
+                "has_more": end < total
+            })
 
         # GET /clear — unregister SW + wipe caches, then redirect to /
         if method == "GET" and path == "/clear":
