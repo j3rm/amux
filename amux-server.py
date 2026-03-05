@@ -923,10 +923,15 @@ def tmux_name(session: str) -> str:
     return new
 
 
+def tmux_target(session: str) -> str:
+    """Return the exact-match tmux target for -t flags (=name prevents prefix collisions)."""
+    return f"={tmux_name(session)}"
+
+
 def is_running(session: str) -> bool:
     try:
         subprocess.run(
-            ["tmux", "has-session", "-t", tmux_name(session)],
+            ["tmux", "has-session", "-t", tmux_target(session)],
             capture_output=True, check=True,
         )
         return True
@@ -937,7 +942,7 @@ def is_running(session: str) -> bool:
 def tmux_capture(session: str, lines: int = 500) -> str:
     try:
         r = subprocess.run(
-            ["tmux", "capture-pane", "-t", tmux_name(session), "-p", "-S", f"-{lines}"],
+            ["tmux", "capture-pane", "-t", tmux_target(session), "-p", "-S", f"-{lines}"],
             capture_output=True, text=True, timeout=5,
         )
         # Strip leading/trailing blank lines so content isn't cut off
@@ -3004,7 +3009,7 @@ def _session_actual_cwd(name: str) -> str | None:
     """Return the actual CWD of a running session's tmux pane, or None if not running."""
     try:
         r = subprocess.run(
-            ["tmux", "display-message", "-t", tmux_name(name), "-p", "#{pane_current_path}"],
+            ["tmux", "display-message", "-t", tmux_target(name), "-p", "#{pane_current_path}"],
             capture_output=True, text=True, timeout=3,
         )
         if r.returncode == 0:
@@ -3388,7 +3393,7 @@ def stop_session(name: str) -> tuple[bool, str]:
         return True, "not running"
     try:
         subprocess.run(
-            ["tmux", "kill-session", "-t", tmux_name(name)],
+            ["tmux", "kill-session", "-t", tmux_target(name)],
             check=True, capture_output=True, timeout=5,
         )
         return True, "stopped"
@@ -3405,7 +3410,7 @@ def archive_session(name: str) -> tuple[bool, str]:
     if is_running(name):
         try:
             r = subprocess.run(
-                ["tmux", "capture-pane", "-t", tmux_name(name), "-p", "-S", "-"],
+                ["tmux", "capture-pane", "-t", tmux_target(name), "-p", "-S", "-"],
                 capture_output=True, text=True, timeout=30,
             )
             if r.stdout.strip():
@@ -3484,7 +3489,7 @@ def send_keys(name: str, keys: str) -> tuple[bool, str]:
     with lock:
         try:
             subprocess.run(
-                ["tmux", "send-keys", "-t", tmux_name(name), keys],
+                ["tmux", "send-keys", "-t", tmux_target(name), keys],
                 check=True, capture_output=True, timeout=5,
             )
             return True, "sent"
@@ -18472,7 +18477,7 @@ p{{color:#888;margin:12px 0 28px;font-size:0.9rem;line-height:1.5}}
             if action == "clear":
                 try:
                     subprocess.run(
-                        ["tmux", "clear-history", "-t", tmux_name(name)],
+                        ["tmux", "clear-history", "-t", tmux_target(name)],
                         capture_output=True, timeout=5,
                     )
                     return self._json({"ok": True, "message": "cleared"})
@@ -18524,7 +18529,7 @@ p{{color:#888;margin:12px 0 28px;font-size:0.9rem;line-height:1.5}}
                     scrollback = ""
                     try:
                         r = subprocess.run(
-                            ["tmux", "capture-pane", "-t", tmux_name(name), "-p", "-S", "-3000"],
+                            ["tmux", "capture-pane", "-t", tmux_target(name), "-p", "-S", "-3000"],
                             capture_output=True, text=True, timeout=10,
                         )
                         raw = r.stdout
@@ -18605,7 +18610,7 @@ p{{color:#888;margin:12px 0 28px;font-size:0.9rem;line-height:1.5}}
                     # Rename tmux session if running
                     if is_running(name):
                         subprocess.run(
-                            ["tmux", "rename-session", "-t", tmux_name(name), tmux_name(new_name)],
+                            ["tmux", "rename-session", "-t", tmux_target(name), tmux_name(new_name)],
                             capture_output=True, timeout=5,
                         )
                     env_file.rename(new_file)
@@ -18663,7 +18668,7 @@ p{{color:#888;margin:12px 0 28px;font-size:0.9rem;line-height:1.5}}
                     if is_running(name) and model_val:
                         try:
                             subprocess.run(
-                                ["tmux", "send-keys", "-t", tmux_name(name), f"/model {model_val}", "Enter"],
+                                ["tmux", "send-keys", "-t", tmux_target(name), f"/model {model_val}", "Enter"],
                                 capture_output=True, timeout=5,
                             )
                         except Exception:
