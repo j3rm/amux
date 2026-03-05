@@ -15193,6 +15193,7 @@ let _notesSaveTimer = null;
 let _notesAllNotes = [];
 let _quill = null;
 let _notesSidebarOpen = localStorage.getItem('amux_notes_sidebar') !== 'closed';
+let _notesOpenAbort = null; // AbortController for in-flight note fetches
 
 function _notesToggleSidebar() {
   _notesSidebarOpen = !_notesSidebarOpen;
@@ -15293,6 +15294,21 @@ function _notesRenderList(notes) {
   }).join('');
 }
 
+function _notesSidebarUpdateActive(path) {
+  document.querySelectorAll('#notes-list .notes-list-item').forEach(el => {
+    el.classList.toggle('active', el.dataset.path === path);
+  });
+}
+
+// Flush unsaved changes when tab/window loses visibility
+document.addEventListener('visibilitychange', () => {
+  if (document.hidden && _notesSaveTimer) {
+    clearTimeout(_notesSaveTimer);
+    _notesSaveTimer = null;
+    _notesSave();
+  }
+});
+
 function _notesSearchFilter(q) {
   if (!q.trim()) { _notesRenderList(_notesAllNotes); return; }
   const lq = q.toLowerCase();
@@ -15302,15 +15318,34 @@ function _notesSearchFilter(q) {
 }
 
 async function _notesOpen(path) {
-  // Flush any pending save before switching notes
+  if (path === _notesActive?.path) return; // already open
+  // Fire pending save in background — don't block switching
+  // (content + pathKey are captured synchronously before the first await in _notesSave)
   if (_notesSaveTimer) {
     clearTimeout(_notesSaveTimer);
     _notesSaveTimer = null;
-    await _notesSave();
+    _notesSave(); // intentionally not awaited
   }
-  const r = await fetch(API + '/api/notes/' + encodeURIComponent(path.replace(/\.md$/, '')));
+  // Cancel any in-flight open request (rapid sidebar clicks)
+  if (_notesOpenAbort) _notesOpenAbort.abort();
+  _notesOpenAbort = new AbortController();
+  const signal = _notesOpenAbort.signal;
+
+  // Optimistic: highlight the clicked item immediately
+  document.querySelectorAll('#notes-list .notes-list-item').forEach(el => {
+    el.classList.toggle('active', el.dataset.path === path);
+  });
+
+  let r;
+  try {
+    r = await fetch(API + '/api/notes/' + encodeURIComponent(path.replace(/\.md$/, '')), { signal });
+  } catch(e) {
+    if (e.name === 'AbortError') return; // superseded by a newer click
+    return;
+  }
   if (!r.ok) return;
   const data = await r.json();
+
   _notesActive = { path: data.path };
   localStorage.setItem('amux_last_note', data.path);
   // Derive title from content H1 or filename
@@ -15323,19 +15358,27 @@ async function _notesOpen(path) {
   // Keep sidebar list name in sync with derived title
   const listEntry = _notesAllNotes.find(n => n.path === data.path);
   if (listEntry) listEntry.name = _notesActive.title;
-  // Load into Quill
+  // Load into Quill with a brief fade for smoothness
   if (!_quill) _notesInitQuill();
+  const quillRoot = _quill.root;
+  quillRoot.style.opacity = '0';
   const isHtml = /<[a-z][\s\S]*>/i.test(data.content);
   if (isHtml) {
     _quill.root.innerHTML = data.content;
   } else {
-    // Plain/markdown — set as text (renders literally; user can reformat)
     _quill.setText(data.content || '');
   }
   document.getElementById('notes-empty-state').style.display = 'none';
   document.getElementById('notes-quill-wrap').style.display = 'flex';
-  _notesRenderList(_notesAllNotes);
+  // Fade in new content
+  requestAnimationFrame(() => {
+    quillRoot.style.transition = 'opacity 0.12s ease';
+    quillRoot.style.opacity = '1';
+    setTimeout(() => { quillRoot.style.transition = ''; }, 150);
+  });
+  _notesSidebarUpdateActive(path);
   _notesUpdatePinBtn();
+  document.getElementById('notes-save-status').textContent = '';
   // On mobile, auto-collapse sidebar after selecting a note
   if (window.innerWidth <= 600 && _notesSidebarOpen) {
     _notesSidebarOpen = false;
@@ -15344,8 +15387,8 @@ async function _notesOpen(path) {
 }
 
 async function _notesNew() {
-  // Flush any pending save before creating a new note (preserves current note's title)
-  if (_notesSaveTimer) { clearTimeout(_notesSaveTimer); _notesSaveTimer = null; await _notesSave(); }
+  // Flush pending save in background before creating (captures path+content synchronously)
+  if (_notesSaveTimer) { clearTimeout(_notesSaveTimer); _notesSaveTimer = null; _notesSave(); }
   // Pick unique "Untitled" / "Untitled 1" / "Untitled 2" filename
   const existing = new Set(_notesAllNotes.map(n => n.path));
   let filename = 'untitled.md';
@@ -15398,8 +15441,7 @@ function _notesTitleChange() {
 
 function _notesSaveDebounce() {
   if (_notesSaveTimer) clearTimeout(_notesSaveTimer);
-  document.getElementById('notes-save-status').textContent = 'Saving…';
-  _notesSaveTimer = setTimeout(_notesSave, 1200);
+  _notesSaveTimer = setTimeout(_notesSave, 800);
 }
 
 async function _notesSave() {
@@ -15416,12 +15458,22 @@ async function _notesSave() {
     setTimeout(() => { statusEl.textContent = ''; }, 2000);
     return;
   }
-  statusEl.textContent = 'Saved';
-  setTimeout(() => { statusEl.textContent = ''; }, 2000);
-  // Update timestamp in place — don't re-fetch (avoids reordering and title resets)
+  statusEl.textContent = '✓ Saved';
+  setTimeout(() => { statusEl.textContent = ''; }, 1500);
+  // Update in-memory list and patch the DOM item in place (no full re-render)
   const saved = _notesAllNotes.find(n => n.path === _notesActive.path);
-  if (saved) { saved.updated = Math.floor(Date.now() / 1000); saved.name = _notesActive.title || saved.name; }
-  _notesRenderList(_notesAllNotes);
+  if (saved) {
+    saved.updated = Math.floor(Date.now() / 1000);
+    saved.name = _notesActive.title || saved.name;
+    const dt = new Date(saved.updated * 1000).toLocaleDateString();
+    const item = document.querySelector(`#notes-list [data-path="${CSS.escape(saved.path)}"]`);
+    if (item) {
+      const dateEl = item.querySelector('.nli-date');
+      if (dateEl) dateEl.textContent = dt;
+      const titleEl = item.querySelector('.nli-title');
+      if (titleEl) titleEl.textContent = saved.name;
+    }
+  }
 }
 
 async function _notesDelete() {
