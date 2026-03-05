@@ -5,6 +5,7 @@ on:
     branches: [main]
     paths:
       - 'site/**'
+      - 'docs/release-notes/notes.json'
   workflow_dispatch:
 
 permissions:
@@ -24,6 +25,9 @@ jobs:
       url: ${{ steps.deployment.outputs.page_url }}
     steps:
       - uses: actions/checkout@v4
+
+      - name: Sync release notes into site
+        run: cp docs/release-notes/notes.json site/changelog/notes.json
 
       - name: Setup Pages
         uses: actions/configure-pages@v5

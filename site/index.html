@@ -221,6 +221,24 @@
       margin-bottom: 2rem;
     }
 
+    /* Changelog list on homepage */
+    .cl-entry {
+      display: flex; gap: 1rem; align-items: baseline;
+      padding: 0.55rem 0; border-bottom: 1px solid var(--border); font-size: 0.85rem;
+    }
+    .cl-entry:last-child { border-bottom: none; }
+    .cl-badge {
+      font-size: 0.65rem; font-weight: 600; padding: 1px 6px; border-radius: 3px;
+      font-family: 'Geist Mono', monospace; text-transform: uppercase;
+      letter-spacing: 0.03em; flex-shrink: 0;
+    }
+    .cl-feat { background: rgba(74,222,128,0.12); color: #4ade80; }
+    .cl-fix  { background: rgba(251,191,36,0.12);  color: #fbbf24; }
+    .cl-docs { background: rgba(96,165,250,0.12);  color: #60a5fa; }
+    .cl-chore { background: rgba(156,163,175,0.12); color: #9ca3af; }
+    .cl-title { color: var(--fg); flex: 1; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .cl-date { color: var(--muted); font-size: 0.72rem; flex-shrink: 0; font-family: 'Geist Mono', monospace; }
+
     footer {
       display: flex;
       flex-wrap: wrap;
@@ -709,6 +727,16 @@
     </div>
   </div>
 
+  <hr>
+
+  <p class="section-label">What's New</p>
+  <div id="changelog-list">
+    <div id="cl-loading" style="color:var(--muted);font-size:0.85rem;">Loading…</div>
+  </div>
+  <div style="margin-top:1rem;">
+    <a href="/changelog/" style="font-size:0.82rem;color:var(--muted);">View full changelog →</a>
+  </div>
+
   <footer>
     <span>MIT License</span>
     <span class="sep">·</span>
@@ -816,6 +844,28 @@
     applyTheme(dark);
     localStorage.setItem('amux_theme', dark ? 'dark' : 'light');
   });
+
+  // Changelog — fetch latest 5 entries from notes.json
+  (function() {
+    var container = document.getElementById('changelog-list');
+    fetch('/changelog/notes.json?v=' + Date.now())
+      .then(function(r) { return r.json(); })
+      .then(function(entries) {
+        var recent = entries.slice(0, 5);
+        if (!recent.length) { container.innerHTML = '<div style="color:var(--muted);font-size:0.85rem;">No entries yet.</div>'; return; }
+        container.innerHTML = recent.map(function(e) {
+          var type = (e.type || 'chore').toLowerCase();
+          return '<div class="cl-entry">' +
+            '<span class="cl-badge cl-' + type + '">' + type + '</span>' +
+            '<span class="cl-title" title="' + e.title.replace(/"/g,'&quot;') + '">' + e.title + '</span>' +
+            '<span class="cl-date">' + (e.date || '') + '</span>' +
+          '</div>';
+        }).join('');
+      })
+      .catch(function() {
+        container.innerHTML = '';
+      });
+  })();
 </script>
 </body>
 </html>
