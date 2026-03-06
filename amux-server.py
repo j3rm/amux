@@ -7138,15 +7138,6 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
     <button id="notif-btn" onclick="toggleNotifications()" title="Session notifications" style="background:none;border:none;cursor:pointer;padding:2px 4px;font-size:1rem;opacity:0.5;line-height:1;" aria-label="Toggle notifications">&#x1F514;</button>
   </div>
   <div style="display:flex;gap:8px;align-items:center;">
-    <div id="instance-switcher-wrap" style="display:none;position:relative;">
-      <button id="instance-switcher-btn" onclick="event.stopPropagation();_toggleInstanceDropdown()"
-        style="background:var(--bg2);border:1px solid var(--border);border-radius:6px;padding:3px 10px 3px 8px;font-size:0.72rem;color:var(--fg);cursor:pointer;display:flex;align-items:center;gap:5px;white-space:nowrap;max-width:160px;overflow:hidden;">
-        <span style="font-size:0.6rem;opacity:0.6;">&#x2807;</span>
-        <span id="instance-switcher-label" style="overflow:hidden;text-overflow:ellipsis;flex:1;">amux</span>
-        <span style="flex-shrink:0;">&#x25BE;</span>
-      </button>
-      <div id="instance-switcher-menu" style="display:none;position:absolute;right:0;top:calc(100% + 4px);background:var(--bg2);border:1px solid var(--border);border-radius:8px;min-width:220px;z-index:500;box-shadow:0 4px 16px rgba(0,0,0,0.4);padding:4px;"></div>
-    </div>
     <div id="org-switcher-wrap" style="display:none;position:relative;">
       <button id="org-switcher-btn" onclick="event.stopPropagation();toggleOrgDropdown()"
         style="background:var(--bg2);border:1px solid var(--border);border-radius:6px;padding:3px 10px 3px 8px;font-size:0.72rem;color:var(--fg);cursor:pointer;display:flex;align-items:center;gap:5px;white-space:nowrap;max-width:200px;overflow:hidden;">
@@ -8433,10 +8424,6 @@ function _renderInstanceSwitcher() {
   // Find current connection name
   const current = conns.find(c => c.url.replace(/\/$/, '') === origin.replace(/\/$/, ''));
 
-  // Header switcher: show if more than one connection saved
-  if (wrap) wrap.style.display = conns.length > 1 ? '' : 'none';
-  if (label) label.textContent = current ? current.name : 'amux';
-
   if (menu) {
     menu.innerHTML = conns.map((c, i) => {
       const isCurr = c.url.replace(/\/$/, '') === origin.replace(/\/$/, '');
@@ -8517,16 +8504,6 @@ function _addConnectionSave() {
   _renderInstanceSwitcher();
 }
 
-function _toggleInstanceDropdown() {
-  const menu = document.getElementById('instance-switcher-menu');
-  if (!menu) return;
-  const open = menu.style.display === 'none' || !menu.style.display;
-  menu.style.display = open ? '' : 'none';
-  if (open) {
-    const close = () => { menu.style.display = 'none'; document.removeEventListener('click', close); };
-    setTimeout(() => document.addEventListener('click', close), 0);
-  }
-}
 
 function _applyIdentityToSettings() {
   const label = document.getElementById('settings-device-label');
