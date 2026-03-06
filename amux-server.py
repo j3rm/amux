@@ -18160,6 +18160,7 @@ class CCHandler(BaseHTTPRequestHandler):
             CC_SESSIONS.mkdir(parents=True, exist_ok=True)
             cfg = {}
             if dir_path:
+                Path(dir_path).expanduser().mkdir(parents=True, exist_ok=True)
                 cfg["CC_DIR"] = dir_path
             desc = body.get("desc", "").strip()
             if desc:
