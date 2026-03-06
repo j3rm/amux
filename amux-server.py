@@ -4485,15 +4485,14 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
   }
   .overlay-header h2 { font-size: 1.1rem; }
   .overlay-body {
-    flex: 1; min-height: 0; overflow-x: hidden; overflow-y: auto;
+    flex: 1; min-height: 0; overflow-x: auto; overflow-y: auto;
     background: #010409; border-radius: 8px;
     padding: 10px; font-family: "SF Mono", "Fira Code", "Cascadia Code", monospace;
-    font-size: 0.78rem; line-height: 1.4; white-space: pre-wrap;
-    word-break: break-all; overflow-wrap: anywhere;
+    font-size: 0.78rem; line-height: 1.4; white-space: pre;
     -webkit-overflow-scrolling: touch;
     -webkit-user-select: text; user-select: text;
     -webkit-touch-callout: default; cursor: text;
-    touch-action: pan-y;
+    touch-action: pan-y pan-x;
   }
   .peek-copy-btn {
     position: absolute; top: 6px; right: 6px; z-index: 10;
@@ -5904,7 +5903,7 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
   .gp-body {
     flex: 1; overflow: auto; padding: 10px;
     font-family: "SF Mono","Fira Code","Cascadia Code",monospace;
-    font-size: 0.76rem; line-height: 1.45; white-space: pre-wrap; word-break: break-all;
+    font-size: 0.76rem; line-height: 1.45; white-space: pre;
     -webkit-overflow-scrolling: touch; color: #c9d1d9;
     user-select: text; -webkit-user-select: text; cursor: text;
   }
