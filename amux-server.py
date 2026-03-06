@@ -3284,6 +3284,10 @@ def start_session(name: str, extra_flags: str = "", _skip_conv_id: bool = False)
     cfg = parse_env_file(f)
     work_dir = str(Path(cfg.get("CC_DIR", str(Path.home()))).expanduser().resolve())
     flags = cfg.get("CC_FLAGS", "")
+    # Claude Code v2.1.69+ rejects --dangerously-skip-permissions when running as root.
+    # Strip it silently — root already has full privileges.
+    if os.getuid() == 0 and "--dangerously-skip-permissions" in flags:
+        flags = flags.replace("--dangerously-skip-permissions", "").strip()
     _ensure_memory(name, work_dir)
 
     # Determine session-specific conversation ID for isolation.
