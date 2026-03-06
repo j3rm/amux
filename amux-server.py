@@ -11038,11 +11038,9 @@ async function loadFiles(path) {
   const body = document.getElementById('files-body');
   body.innerHTML = '<div style="padding:16px;color:var(--dim)">Loading...</div>';
   _filesPath = path;
-  // Update URL so path is shareable / bookmarkable
+  // Update URL hash so path is shareable / bookmarkable (hash works in PWA mode)
   try {
-    const _dlp = new URLSearchParams(location.search);
-    if (path && path !== '/') { _dlp.set('path', path); } else { _dlp.delete('path'); }
-    history.replaceState({}, '', location.pathname + (_dlp.toString() ? '?' + _dlp.toString() : ''));
+    history.replaceState({}, '', location.pathname + (path && path !== '/' ? '#path=' + encodeURIComponent(path) : ''));
   } catch(e) {}
   const srch = document.getElementById('files-search'); if (srch) srch.value = '';
   _updateFilesCwdBtn();
@@ -11367,9 +11365,8 @@ function _copyExplorePathFallback(path) {
   document.body.removeChild(ta);
 }
 function _copyFileDeeplink(path) {
-  const p = new URLSearchParams(location.search);
-  p.set('path', path);
-  const url = location.origin + location.pathname + '?' + p.toString();
+  // Use hash (#path=...) — works in PWA mode (SW never strips fragments, no query-param loss on iOS)
+  const url = location.origin + location.pathname + '#path=' + encodeURIComponent(path);
   if (navigator.clipboard && navigator.clipboard.writeText) {
     navigator.clipboard.writeText(url).then(() => showToast('Link copied'), () => _copyFileDeeplinkFallback(url));
   } else {
@@ -12576,7 +12573,7 @@ function switchView(view) {
   document.getElementById('tab-email').classList.toggle('active', view === 'email');
   document.getElementById('tab-notes').classList.toggle('active', view === 'notes');
   if (view === 'files') loadFiles(_filesPath);
-  else { try { const _svp = new URLSearchParams(location.search); if (_svp.has('path')) { _svp.delete('path'); history.replaceState({}, '', location.pathname + (_svp.toString() ? '?' + _svp.toString() : '')); } } catch(e) {} }
+  else { try { if (location.hash.startsWith('#path=')) history.replaceState({}, '', location.pathname); } catch(e) {} }
   if (view === 'reports') fetchReports();
   if (view === 'browser') _rbLoadProfiles();
   if (view === 'email') _emailLoad();
@@ -15500,10 +15497,19 @@ toggleSettings = function() {
   }
 })();
 
-// Deep-link: ?path=/some/path — navigate to Files tab at that path, or open file viewer if it's a file
+// Deep-link: #path=/some/path (or ?path= for backwards compat)
+// Hash-based routing works in PWA mode — SW never strips fragments, no iOS query-param loss
 (async function _bootstrapDeeplink() {
-  const params = new URLSearchParams(location.search);
-  const dpath = params.get('path');
+  // Prefer hash; fall back to query param for old shared links
+  let dpath = null;
+  const hash = location.hash;
+  if (hash.startsWith('#path=')) {
+    dpath = decodeURIComponent(hash.slice(6));
+  } else {
+    dpath = new URLSearchParams(location.search).get('path');
+    // Migrate old ?path= links to hash format
+    if (dpath) history.replaceState({}, '', location.pathname + '#path=' + encodeURIComponent(dpath));
+  }
   if (!dpath) return;
   try {
     const r = await fetch(API + '/api/ls?path=' + encodeURIComponent(dpath));
@@ -16336,7 +16342,7 @@ PWA_MANIFEST = json.dumps({
 
 # Robust service worker: cache-first with localStorage fallback for multi-day offline
 SERVICE_WORKER = r"""
-const CACHE = 'amux-v0.6.3';
+const CACHE = 'amux-v0.6.4';
 const SHELL_URLS = ['/', '/manifest.json', '/icon.svg', '/icon.png', '/icon-192.png', '/icon-512.png'];
 
 // Install: pre-cache entire app shell
@@ -16378,17 +16384,17 @@ self.addEventListener('fetch', e => {
   // API requests: network only (app JS handles offline queue)
   if (url.pathname.startsWith('/api/')) return;
 
-  // Main HTML: network-first so updates always reach the client when online
+  // Main HTML (SPA): network-first, always cache as canonical '/' key
+  // Hash fragments (#path=...) are client-side only — SW sees bare '/' regardless
   if (url.pathname === '/') {
+    const canonical = new Request('/');
     e.respondWith(
-      fetch(e.request).then(response => {
-        const clone = response.clone();  // clone before any async op
-        if (response.ok) {
-          caches.open(CACHE).then(c => c.put(e.request, clone));
-        }
+      fetch(canonical).then(response => {
+        const clone = response.clone();
+        if (response.ok) caches.open(CACHE).then(c => c.put(canonical, clone));
         return response;
       }).catch(() =>
-        caches.open(CACHE).then(c => c.match(e.request)).then(cached =>
+        caches.open(CACHE).then(c => c.match(canonical)).then(cached =>
           cached || new Response('Offline — please reload when connected', {
             status: 503, headers: { 'Content-Type': 'text/plain' }
           })
