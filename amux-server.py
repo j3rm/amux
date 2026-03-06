@@ -3086,6 +3086,24 @@ curl -sk -X PATCH -H 'Content-Type: application/json' \\
   -d '{"status":"done","desc":"Result: ..."}' \\
   $AMUX_URL/api/board/TASK-ID
 ```
+
+### Notes (shared across all sessions)
+Content is Quill HTML (`<h1>`, `<p>`, `<ul>` etc). Note name becomes the filename.
+```bash
+# List all notes
+curl -sk $AMUX_URL/api/notes
+
+# Read a note
+curl -sk $AMUX_URL/api/notes/my-note
+
+# Create or update a note
+curl -sk -X POST -H 'Content-Type: application/json' \\
+  -d '{"content":"<h1>Title</h1><p>Body</p>"}' \\
+  $AMUX_URL/api/notes/my-note
+
+# Delete a note (moves to trash)
+curl -sk -X DELETE $AMUX_URL/api/notes/my-note
+```
 """
 
 
