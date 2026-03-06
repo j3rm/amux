@@ -1,0 +1,3 @@
+app_identifier "io.amux.app"
+apple_id ""          # your Apple ID email
+team_id ""           # your Apple Developer Team ID
