@@ -3098,8 +3098,13 @@ curl -sk -X PATCH -H 'Content-Type: application/json' \\
   $AMUX_URL/api/board/TASK-ID
 ```
 
-### Notes (shared across all sessions)
-Content is Quill HTML (`<h1>`, `<p>`, `<ul>` etc). Note name becomes the filename.
+### Notes vs board issues — when to use each
+
+**Use notes** (`/api/notes`) for: documents, write-ups, research, drafts, reference material, anything meant to be *read* by a human.
+**Use board issues** (`/api/board`) for: tasks, todos, bugs, action items, anything meant to be *done* or *tracked*.
+
+> Rule of thumb: "create a note about X" → `/api/notes`. "create a task/issue/todo for X" → `/api/board`.
+
 ```bash
 # List all notes
 curl -sk $AMUX_URL/api/notes
@@ -3107,9 +3112,9 @@ curl -sk $AMUX_URL/api/notes
 # Read a note
 curl -sk $AMUX_URL/api/notes/my-note
 
-# Create or update a note
+# Create or update a note (content is plain text or Quill HTML)
 curl -sk -X POST -H 'Content-Type: application/json' \\
-  -d '{"content":"<h1>Title</h1><p>Body</p>"}' \\
+  -d '{"content":"# Title\\n\\nBody text here"}' \\
   $AMUX_URL/api/notes/my-note
 
 # Delete a note (moves to trash)
