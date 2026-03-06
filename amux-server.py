@@ -57,10 +57,7 @@ CC_BOARD_DIR.mkdir(parents=True, exist_ok=True)
 CC_UPLOADS.mkdir(parents=True, exist_ok=True)
 CC_NOTES.mkdir(parents=True, exist_ok=True)
 
-UPLOAD_ALLOWED_EXTS = {
-    ".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp",
-    ".pdf", ".txt", ".md", ".csv", ".json", ".log",
-}
+UPLOAD_ALLOWED_EXTS = None  # None = allow all file types
 UPLOAD_MAX_BYTES = 20 * 1024 * 1024  # 20 MB
 CLAUDE_HOME = Path.home() / ".claude"
 
@@ -7006,7 +7003,7 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
             onpaste="handlePeekPaste(event)"></textarea>
           <div id="slash-ac-list" class="ac-list slash-ac"></div>
         </div>
-        <input type="file" id="peek-file-input" multiple accept="image/*,.pdf,.txt,.md,.csv,.json,.log"
+        <input type="file" id="peek-file-input" multiple
           style="display:none" onchange="handlePeekFileInput(event)">
         <label for="peek-file-input" class="peek-attach-btn" title="Attach file">&#128206;</label>
         <button id="peek-mic-btn" class="peek-attach-btn" title="Dictate" onclick="toggleMic()" style="display:none;">&#127908;</button>
@@ -9712,10 +9709,6 @@ function clearPeekFiles() {
 
 async function uploadAndAttach(file) {
   if (file.size > 20 * 1024 * 1024) { showToast('File too large (max 20 MB)'); return; }
-  const ext = '.' + file.name.split('.').pop().toLowerCase();
-  const allowed = ['.png','.jpg','.jpeg','.gif','.webp','.bmp','.pdf','.txt','.md','.csv','.json','.log'];
-  if (!allowed.includes(ext)) { showToast('Unsupported file type: ' + ext); return; }
-
   const isImage = file.type.startsWith('image/');
   let previewUrl = null;
   if (isImage) previewUrl = URL.createObjectURL(file);
@@ -17814,8 +17807,6 @@ class CCHandler(BaseHTTPRequestHandler):
             body = self._read_body()
             filename = re.sub(r'[^a-zA-Z0-9._\-]', '_', body.get("name", "upload"))[:120]
             ext = Path(filename).suffix.lower()
-            if ext not in UPLOAD_ALLOWED_EXTS:
-                return self._json({"error": f"unsupported file type: {ext}"}, 400)
             raw_b64 = body.get("data", "")
             try:
                 data = base64.b64decode(raw_b64)
