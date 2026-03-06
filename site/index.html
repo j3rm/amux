@@ -1,554 +1,631 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
-  <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>amux — Agent Multiplexer</title>
-  <link rel="icon" href="icon.svg" type="image/svg+xml">
-  <meta name="description" content="Run dozens of Claude Code agents in parallel, unattended, with self-healing. Open-source agent multiplexer — web dashboard, kanban board, mobile PWA. Python 3 + tmux.">
-  <meta name="keywords" content="amux, claude code multiplexer, parallel AI coding agents, AI agent orchestration, self-healing AI agent, claude code dashboard, run multiple claude code, AI coding while you sleep, agent multiplexer, open source AI tools">
-  <link rel="sitemap" type="application/xml" href="/sitemap.xml">
-  <meta name="google-site-verification" content="AJSSTzLMefBajDLdBuVXCqkllDAaLSJ-vWrbabxJQDI">
-  <meta property="og:title" content="amux — Agent Multiplexer">
-  <meta property="og:description" content="Run dozens of Claude Code agents unattended. Python 3 + tmux. Open source.">
-  <meta property="og:url" content="https://amux.io">
-  <meta property="og:image" content="https://amux.io/og-image.png">
-  <meta property="og:image:width" content="1280">
-  <meta property="og:image:height" content="640">
-  <meta name="twitter:card" content="summary_large_image">
-  <meta name="twitter:image" content="https://amux.io/og-image.png">
-  <script type="application/ld+json">{"@context":"https://schema.org","@type":"SoftwareApplication","name":"amux","alternateName":"Agent Multiplexer","description":"Run dozens of Claude Code agents in parallel, unattended, with self-healing. Open-source agent multiplexer with web dashboard, kanban board, and mobile PWA.","url":"https://amux.io","applicationCategory":"DeveloperApplication","operatingSystem":"macOS, Linux","license":"https://opensource.org/licenses/MIT","offers":{"@type":"Offer","price":"0","priceCurrency":"USD"},"author":{"@type":"Organization","name":"Mixpeek","url":"https://mixpeek.com"}}</script>
-  <link rel="preconnect" href="https://fonts.googleapis.com">
-  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-  <link href="https://fonts.googleapis.com/css2?family=Geist:wght@400;500;600&family=Geist+Mono:wght@400;500&display=swap" rel="stylesheet">
-  <style>
-    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<meta name="theme-color" content="#0a0a0c">
+<title>amux — Agent Multiplexer</title>
+<link rel="icon" href="icon.svg" type="image/svg+xml">
+<link rel="icon" type="image/png" sizes="180x180" href="icon.png">
+<meta name="description" content="Run dozens of Claude Code agents in parallel, unattended, with self-healing. Open-source agent multiplexer — web dashboard, kanban board, mobile PWA. Python 3 + tmux.">
+<meta name="keywords" content="amux, claude code multiplexer, parallel AI coding agents, AI agent orchestration, self-healing AI agent, claude code dashboard, run multiple claude code, AI coding while you sleep, agent multiplexer, open source AI tools">
+<link rel="sitemap" type="application/xml" href="/sitemap.xml">
+<meta name="google-site-verification" content="AJSSTzLMefBajDLdBuVXCqkllDAaLSJ-vWrbabxJQDI">
+<meta property="og:title" content="amux — Agent Multiplexer">
+<meta property="og:description" content="Run dozens of Claude Code agents unattended. Python 3 + tmux. Open source.">
+<meta property="og:url" content="https://amux.io">
+<meta property="og:image" content="https://amux.io/og-image.png">
+<meta property="og:image:width" content="1280">
+<meta property="og:image:height" content="640">
+<meta name="twitter:card" content="summary_large_image">
+<meta name="twitter:image" content="https://amux.io/og-image.png">
+<script type="application/ld+json">{"@context":"https://schema.org","@type":"SoftwareApplication","name":"amux","alternateName":"Agent Multiplexer","description":"Run dozens of Claude Code agents in parallel, unattended, with self-healing. Open-source agent multiplexer with web dashboard, kanban board, and mobile PWA.","url":"https://amux.io","applicationCategory":"DeveloperApplication","operatingSystem":"macOS, Linux","license":"https://opensource.org/licenses/MIT","offers":{"@type":"Offer","price":"0","priceCurrency":"USD"},"author":{"@type":"Organization","name":"Mixpeek","url":"https://mixpeek.com"}}</script>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:ital,wght@0,300;0,400;0,500;0,600;0,700;1,400&display=swap" rel="stylesheet">
+<style>
+:root {
+  --bg: #0a0a0c;
+  --surface: #111114;
+  --surface-2: #18181c;
+  --border: #2a2a30;
+  --border-bright: #3a3a42;
+  --text: #e8e8ec;
+  --dim: #8888a0;
+  --muted: #55556a;
+  --green: #4ade80;
+  --green-dim: #22c55e;
+  --green-glow: rgba(74,222,128,0.15);
+  --amber: #fbbf24;
+  --red: #f87171;
+  --blue: #60a5fa;
+  --mono: 'JetBrains Mono', 'SF Mono', Consolas, monospace;
+}
 
-    :root {
-      --bg: #0a0a0a;
-      --fg: #ededed;
-      --muted: #888;
-      --border: #222;
-      --code-bg: #111;
-      --code-border: #1e1e1e;
-      --accent: #4ade80;
-      --btn-bg: #1a1a1a;
-      --btn-hover: #242424;
-    }
+*, *::before, *::after { margin: 0; padding: 0; box-sizing: border-box; }
+html { scroll-behavior: smooth; font-size: 16px; }
 
-    @media (prefers-color-scheme: light) {
-      :root:not([data-theme="dark"]) {
-        --bg: #fafafa;
-        --fg: #111;
-        --muted: #666;
-        --border: #e5e5e5;
-        --code-bg: #f4f4f4;
-        --code-border: #e0e0e0;
-        --accent: #16a34a;
-        --btn-bg: #f0f0f0;
-        --btn-hover: #e5e5e5;
-      }
-    }
+body {
+  background: var(--bg);
+  color: var(--text);
+  font-family: var(--mono);
+  line-height: 1.6;
+  overflow-x: hidden;
+  -webkit-font-smoothing: antialiased;
+}
 
-    [data-theme="light"] {
-      --bg: #fafafa;
-      --fg: #111;
-      --muted: #666;
-      --border: #e5e5e5;
-      --code-bg: #f4f4f4;
-      --code-border: #e0e0e0;
-      --accent: #16a34a;
-      --btn-bg: #f0f0f0;
-      --btn-hover: #e5e5e5;
-    }
+::selection { background: var(--green); color: var(--bg); }
 
-    #theme-toggle {
-      position: fixed;
-      top: 1rem;
-      right: 1rem;
-      z-index: 100;
-      width: 34px;
-      height: 34px;
-      border-radius: 50%;
-      border: 1px solid var(--border);
-      background: var(--btn-bg);
-      color: var(--muted);
-      cursor: pointer;
-      font-size: 0.95rem;
-      display: flex;
-      align-items: center;
-      justify-content: center;
-      transition: background 0.15s, color 0.15s, border-color 0.15s;
-      line-height: 1;
-    }
-    #theme-toggle:hover { background: var(--btn-hover); color: var(--fg); }
+body::before {
+  content: '';
+  position: fixed;
+  inset: 0;
+  background: repeating-linear-gradient(0deg, transparent, transparent 2px, rgba(255,255,255,0.007) 2px, rgba(255,255,255,0.007) 4px);
+  pointer-events: none;
+  z-index: 9999;
+}
 
-    html, body {
-      background: var(--bg);
-      color: var(--fg);
-      font-family: 'Geist', ui-sans-serif, system-ui, -apple-system, sans-serif;
-      font-size: 15px;
-      line-height: 1.6;
-      -webkit-font-smoothing: antialiased;
-    }
+/* ── NAV ── */
+nav {
+  position: fixed; top: 0; left: 0; right: 0; z-index: 100;
+  padding: 0 2rem; height: 56px;
+  display: flex; align-items: center; justify-content: space-between;
+  background: rgba(10,10,12,0.88);
+  backdrop-filter: blur(20px);
+  border-bottom: 1px solid var(--border);
+}
+.nav-logo {
+  font-size: 1rem; font-weight: 700; color: var(--green);
+  text-decoration: none; letter-spacing: -0.02em;
+}
+.nav-logo span { color: var(--muted); font-weight: 400; }
+.nav-links { display: flex; align-items: center; gap: 2rem; }
+.nav-links a {
+  font-size: 0.75rem; color: var(--dim); text-decoration: none;
+  letter-spacing: 0.04em; transition: color 0.2s;
+}
+.nav-links a:hover { color: var(--text); }
+.nav-cta {
+  font-size: 0.75rem !important;
+  background: var(--green) !important; color: var(--bg) !important;
+  padding: 0.4rem 1rem !important; border-radius: 4px;
+  font-weight: 700 !important; transition: opacity 0.2s !important;
+  letter-spacing: 0.02em !important;
+}
+.nav-cta:hover { opacity: 0.85 !important; }
+@media (max-width: 768px) { .nav-links { display: none; } }
 
-    main {
-      max-width: 38rem;
-      margin: 0 auto;
-      padding: 5rem 1.5rem 6rem;
-    }
+/* ── HERO ── */
+.hero {
+  min-height: 100vh;
+  display: flex; flex-direction: column;
+  justify-content: center; align-items: center; text-align: center;
+  padding: 8rem 2rem 4rem;
+  position: relative;
+}
+.hero::before {
+  content: '';
+  position: absolute; top: 0; left: 50%;
+  transform: translateX(-50%);
+  width: 700px; height: 500px;
+  background: radial-gradient(ellipse at center, rgba(74,222,128,0.08) 0%, transparent 70%);
+  pointer-events: none;
+}
+.hero-badge {
+  font-size: 0.68rem; color: var(--green);
+  background: var(--green-glow);
+  border: 1px solid rgba(74,222,128,0.25);
+  padding: 0.3rem 0.85rem; border-radius: 100px;
+  letter-spacing: 0.08em; text-transform: uppercase;
+  margin-bottom: 2rem; display: inline-block;
+  animation: fadeUp 0.5s ease-out;
+}
+.hero h1 {
+  font-size: clamp(2.4rem, 6vw, 4.8rem);
+  font-weight: 700; line-height: 1.05;
+  letter-spacing: -0.04em; max-width: 820px;
+  animation: fadeUp 0.5s ease-out 0.08s both;
+}
+.hero h1 .accent { color: var(--green); }
+.hero-sub {
+  font-size: 0.95rem; color: var(--dim);
+  max-width: 480px; margin: 1.5rem auto 0;
+  line-height: 1.75; font-weight: 400;
+  animation: fadeUp 0.5s ease-out 0.16s both;
+}
+.hero-ctas {
+  display: flex; gap: 0.6rem; margin-top: 2rem; flex-wrap: wrap; justify-content: center;
+  animation: fadeUp 0.5s ease-out 0.2s both;
+}
+.hero-btn {
+  font-size: 0.78rem; font-weight: 600; padding: 0.5rem 1.2rem;
+  border-radius: 6px; text-decoration: none; font-family: var(--mono);
+  letter-spacing: 0.02em; transition: opacity 0.2s;
+  border: 1px solid var(--border); color: var(--dim); background: transparent;
+  cursor: pointer; display: inline-flex; align-items: center; gap: 0.4rem;
+}
+.hero-btn:hover { color: var(--text); border-color: var(--border-bright); }
+.hero-btn-primary {
+  background: var(--green); color: var(--bg);
+  border-color: var(--green);
+}
+.hero-btn-primary:hover { opacity: 0.85; color: var(--bg); }
+@keyframes fadeUp {
+  from { opacity: 0; transform: translateY(18px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
 
-    .wordmark {
-      display: flex;
-      align-items: center;
-      gap: 0.6rem;
-      margin-bottom: 1.1rem;
-    }
+/* ── TERMINAL ── */
+.install-block {
+  margin-top: 2.5rem;
+  animation: fadeUp 0.5s ease-out 0.24s both;
+}
+.terminal-window {
+  background: var(--surface); border: 1px solid var(--border);
+  border-radius: 8px; overflow: hidden; text-align: left;
+  min-width: 540px; max-width: 640px;
+  box-shadow: 0 24px 64px rgba(0,0,0,0.6);
+}
+.terminal-bar {
+  display: flex; align-items: center; gap: 6px;
+  padding: 10px 14px;
+  background: var(--surface-2); border-bottom: 1px solid var(--border);
+}
+.terminal-dot { width: 10px; height: 10px; border-radius: 50%; }
+.terminal-dot.r { background: #ff5f57; }
+.terminal-dot.y { background: #febc2e; }
+.terminal-dot.g { background: #28c840; }
+.terminal-bar-title {
+  font-size: 0.68rem; color: var(--muted); margin-left: 8px;
+}
+.terminal-body {
+  padding: 1.2rem 1.4rem; font-size: 0.8rem; line-height: 1.85;
+}
+.terminal-body .prompt { color: var(--green); }
+.terminal-body .cmd { color: var(--text); }
+.terminal-body .comment { color: var(--muted); }
+.terminal-body .flag { color: var(--amber); }
+.terminal-body .url { color: var(--blue); }
+@media (max-width: 768px) { .terminal-window { min-width: auto; } }
 
-    .wordmark img {
-      width: 32px;
-      height: 32px;
-      border-radius: 7px;
-      display: block;
-    }
+/* ── STATS ── */
+.stats-row {
+  display: flex; gap: 3rem; justify-content: center;
+  margin-top: 3rem; flex-wrap: wrap;
+  animation: fadeUp 0.5s ease-out 0.32s both;
+}
+.stat { text-align: center; }
+.stat-val { font-size: 1.5rem; font-weight: 700; color: var(--text); }
+.stat-label {
+  font-size: 0.66rem; color: var(--muted);
+  letter-spacing: 0.06em; text-transform: uppercase; margin-top: 0.2rem;
+}
 
-    .wordmark h1 {
-      font-size: 1.2rem;
-      font-weight: 600;
-      letter-spacing: -0.02em;
-    }
+/* ── DIVIDER ── */
+.divider {
+  max-width: 1100px; margin: 0 auto;
+  border: none; border-top: 1px solid var(--border);
+}
 
-    .tagline {
-      font-size: 1rem;
-      line-height: 1.6;
-      margin-bottom: 1.6rem;
-      max-width: 32rem;
-    }
+/* ── SECTIONS ── */
+section {
+  padding: 6rem 2rem; max-width: 1100px; margin: 0 auto;
+}
+.section-label {
+  font-size: 0.66rem; color: var(--green);
+  letter-spacing: 0.12em; text-transform: uppercase; margin-bottom: 0.8rem;
+}
+.section-title {
+  font-size: clamp(1.5rem, 3vw, 2.2rem); font-weight: 700;
+  letter-spacing: -0.03em; line-height: 1.15; margin-bottom: 1rem;
+}
+.section-desc {
+  color: var(--dim); max-width: 540px;
+  font-size: 0.88rem; line-height: 1.75; margin-bottom: 3rem; font-weight: 400;
+}
 
-    .tagline strong { font-weight: 600; }
+/* ── REVEAL ── */
+.reveal {
+  opacity: 0; transform: translateY(20px);
+  transition: opacity 0.5s ease, transform 0.5s ease;
+}
+.reveal.visible { opacity: 1; transform: none; }
 
-    .ctas {
-      display: flex;
-      gap: 0.5rem;
-      flex-wrap: wrap;
-      margin-bottom: 2.5rem;
-    }
+/* ── PROBLEMS GRID ── */
+.problems-grid {
+  display: grid; grid-template-columns: 1fr 1fr;
+  gap: 1px; background: var(--border);
+  border: 1px solid var(--border); border-radius: 8px; overflow: hidden;
+}
+@media (max-width: 768px) { .problems-grid { grid-template-columns: 1fr; } }
+.problem-card { background: var(--surface); padding: 1.8rem; position: relative; }
+.problem-card::before {
+  content: attr(data-index);
+  font-size: 0.62rem; color: var(--muted); letter-spacing: 0.1em;
+  display: block; margin-bottom: 0.8rem;
+}
+.problem-pain {
+  font-size: 0.82rem; color: var(--red); margin-bottom: 0.6rem;
+  display: flex; align-items: flex-start; gap: 0.5rem;
+}
+.problem-pain::before { content: 'x'; flex-shrink: 0; font-size: 0.68rem; margin-top: 1px; }
+.problem-fix {
+  font-size: 0.82rem; color: var(--green);
+  display: flex; align-items: flex-start; gap: 0.5rem;
+}
+.problem-fix::before { content: '->'; flex-shrink: 0; color: var(--green-dim); }
 
-    .btn {
-      display: inline-flex;
-      align-items: center;
-      gap: 0.4rem;
-      padding: 0.4rem 0.9rem;
-      border-radius: 6px;
-      font-size: 0.875rem;
-      font-weight: 500;
-      text-decoration: none;
-      border: 1px solid var(--border);
-      background: var(--btn-bg);
-      color: var(--fg);
-      cursor: pointer;
-      font-family: inherit;
-      transition: background 0.12s, opacity 0.12s;
-    }
+/* ── FEATURES LIST ── */
+.features-list {
+  display: flex; flex-direction: column; gap: 0;
+  border: 1px solid var(--border); border-radius: 8px; overflow: hidden;
+}
+.feat-item {
+  padding: 1.2rem 1.4rem;
+  background: var(--surface);
+  border-bottom: 1px solid var(--border);
+  font-size: 0.82rem; line-height: 1.6;
+  transition: background 0.15s;
+}
+.feat-item:last-child { border-bottom: none; }
+.feat-item:hover { background: var(--surface-2); }
+.feat-item strong { color: var(--text); font-weight: 600; }
+.feat-item span { color: var(--dim); font-weight: 400; }
+.feat-item code {
+  font-family: var(--mono); font-size: 0.78em;
+  background: rgba(74,222,128,0.08); color: var(--green);
+  padding: 1px 5px; border-radius: 3px;
+}
 
-    .btn:hover { background: var(--btn-hover); }
+/* ── SLIDESHOW ── */
+.slides-section { padding: 6rem 2rem; }
+.slides-container { max-width: 1100px; margin: 0 auto; }
+.slides-frame {
+  position: relative;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  overflow: hidden;
+  background: #000;
+  aspect-ratio: 695 / 840;
+  cursor: pointer;
+  margin-top: 2rem;
+}
+.slides-frame img {
+  position: absolute; inset: 0;
+  width: 100%; height: 100%;
+  object-fit: cover; object-position: top;
+  opacity: 0; transition: opacity 0.35s ease; display: block;
+}
+.slides-frame img.active { opacity: 1; }
+.slides-nav {
+  position: absolute; inset: 0;
+  display: flex; align-items: center; justify-content: space-between;
+  pointer-events: none;
+}
+.slides-nav button {
+  pointer-events: all;
+  background: rgba(0,0,0,0.5); border: none;
+  color: #fff; width: 32px; height: 48px;
+  cursor: pointer; font-size: 1rem;
+  opacity: 0; transition: opacity 0.15s;
+  font-family: var(--mono);
+}
+.slides-frame:hover .slides-nav button { opacity: 1; }
+.slides-nav button:hover { background: rgba(0,0,0,0.75); }
+.slides-meta { padding: 0.75rem 0 0; }
+.slides-label { font-size: 0.85rem; font-weight: 600; color: var(--text); margin-bottom: 0.2rem; }
+.slides-desc { font-size: 0.8rem; color: var(--dim); line-height: 1.55; }
+.slides-dots { display: flex; gap: 0.35rem; margin-top: 0.65rem; }
+.slides-dots button {
+  width: 6px; height: 6px; border-radius: 50%;
+  border: none; background: var(--border);
+  cursor: pointer; padding: 0; transition: background 0.15s;
+}
+.slides-dots button.active { background: var(--green); }
 
-    .btn-primary {
-      background: var(--accent);
-      border-color: var(--accent);
-      color: #0a0a0a;
-    }
+/* ── CLI TABLE ── */
+.cli-table { width: 100%; border-collapse: collapse; font-size: 0.8rem; }
+.cli-table th {
+  text-align: left; color: var(--muted); font-weight: 500;
+  font-size: 0.66rem; letter-spacing: 0.08em; text-transform: uppercase;
+  padding: 0.75rem 1rem; border-bottom: 1px solid var(--border);
+}
+.cli-table td {
+  padding: 0.65rem 1rem;
+  border-bottom: 1px solid rgba(42,42,48,0.5); vertical-align: top;
+}
+.cli-table tr:hover td { background: var(--surface); }
+.cli-table .cmd-cell  { color: var(--green); white-space: nowrap; }
+.cli-table .alias-cell { color: var(--muted); }
+.cli-table .desc-cell  { color: var(--dim); font-weight: 400; }
 
-    .btn-primary:hover { opacity: 0.88; background: var(--accent); }
+/* ── API ── */
+.api-grid {
+  display: grid; grid-template-columns: 1fr 1fr; gap: 2rem; align-items: start;
+}
+@media (max-width: 768px) { .api-grid { grid-template-columns: 1fr; } }
+.api-endpoints { display: flex; flex-direction: column; gap: 0.3rem; }
+.api-endpoint {
+  display: flex; align-items: center; gap: 0.75rem;
+  padding: 0.45rem 0.7rem; border-radius: 4px;
+  font-size: 0.76rem; transition: background 0.15s;
+}
+.api-endpoint:hover { background: var(--surface); }
+.api-method {
+  font-size: 0.62rem; font-weight: 700; letter-spacing: 0.05em;
+  min-width: 44px; text-align: center; padding: 2px 5px; border-radius: 3px;
+}
+.api-method.get    { color: var(--green); background: var(--green-glow); }
+.api-method.post   { color: var(--blue);  background: rgba(96,165,250,0.1); }
+.api-method.patch  { color: var(--amber); background: rgba(251,191,36,0.1); }
+.api-method.delete { color: var(--red);   background: rgba(248,113,113,0.1); }
+.api-path { color: var(--dim); font-weight: 400; }
 
-    .install-block {
-      margin-bottom: 2.5rem;
-      border: 1px solid var(--code-border);
-      border-radius: 8px;
-      overflow: hidden;
-      background: var(--code-bg);
-    }
+/* ── ARCH ── */
+.arch-visual {
+  display: flex; align-items: center; justify-content: center;
+  gap: 1.2rem; padding: 2.5rem 1rem; flex-wrap: wrap;
+}
+.arch-node {
+  background: var(--surface); border: 1px solid var(--border);
+  border-radius: 6px; padding: 1.4rem 1.8rem; text-align: center; min-width: 150px;
+}
+.arch-node-label { font-size: 0.85rem; font-weight: 600; }
+.arch-node-sub   { font-size: 0.68rem; color: var(--muted); margin-top: 0.25rem; }
+.arch-arrow      { font-size: 1.2rem; color: var(--muted); }
 
-    .install-block pre {
-      padding: 1rem 1.1rem;
-      font-family: 'Geist Mono', ui-monospace, monospace;
-      font-size: 0.8rem;
-      line-height: 1.8;
-      overflow-x: auto;
-    }
+/* ── RESOURCES GRID ── */
+.resources-grid {
+  display: grid; grid-template-columns: repeat(4, 1fr);
+  gap: 2rem; margin-bottom: 3rem;
+}
+@media (max-width: 640px) { .resources-grid { grid-template-columns: repeat(2, 1fr); } }
+.rg-group-label {
+  font-size: 0.62rem; font-weight: 600; letter-spacing: 0.1em;
+  text-transform: uppercase; color: var(--dim); margin-bottom: 0.75rem;
+}
+.rg-group ul { list-style: none; display: flex; flex-direction: column; gap: 0.4rem; }
+.rg-group ul a {
+  font-size: 0.78rem; color: var(--muted); text-decoration: none;
+  transition: color 0.2s;
+}
+.rg-group ul a:hover { color: var(--text); }
 
-    .cmd-comment { color: var(--muted); }
-    .cmd-dollar { color: var(--accent); user-select: none; }
+/* ── CHANGELOG ── */
+.cl-entry {
+  display: flex; gap: 1rem; align-items: baseline;
+  padding: 0.55rem 0; border-bottom: 1px solid var(--border); font-size: 0.82rem;
+}
+.cl-entry:last-child { border-bottom: none; }
+.cl-badge {
+  font-size: 0.62rem; font-weight: 600; padding: 1px 6px; border-radius: 3px;
+  font-family: var(--mono); text-transform: uppercase;
+  letter-spacing: 0.03em; flex-shrink: 0;
+}
+.cl-feat  { background: rgba(74,222,128,0.12); color: var(--green); }
+.cl-fix   { background: rgba(251,191,36,0.12);  color: var(--amber); }
+.cl-docs  { background: rgba(96,165,250,0.12);  color: var(--blue); }
+.cl-perf  { background: rgba(96,165,250,0.12);  color: var(--blue); }
+.cl-chore { background: rgba(85,85,106,0.12); color: var(--dim); }
+.cl-title { color: var(--text); flex: 1; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.cl-date  { color: var(--muted); font-size: 0.68rem; flex-shrink: 0; }
 
-    .section-label {
-      font-size: 0.7rem;
-      font-weight: 500;
-      letter-spacing: 0.1em;
-      text-transform: uppercase;
-      color: var(--muted);
-      margin-bottom: 1.1rem;
-    }
+/* ── CLOUD WAITLIST ── */
+.waitlist-section {
+  padding: 6rem 2rem; border-top: 1px solid var(--border);
+}
+.waitlist-container { max-width: 640px; margin: 0 auto; text-align: center; }
+.waitlist-eyebrow {
+  font-size: 0.66rem; color: var(--green); letter-spacing: 0.12em;
+  text-transform: uppercase; margin-bottom: 0.8rem;
+}
+.waitlist-title {
+  font-size: clamp(1.5rem, 3vw, 2.2rem); font-weight: 700;
+  letter-spacing: -0.03em; line-height: 1.15; margin-bottom: 1rem;
+}
+.waitlist-desc {
+  font-size: 0.88rem; color: var(--dim); line-height: 1.75;
+  margin-bottom: 2rem; font-weight: 400; max-width: 460px; margin-left: auto; margin-right: auto;
+}
+.waitlist-form {
+  display: flex; gap: 0.6rem; max-width: 440px; margin: 0 auto 1rem;
+}
+@media (max-width: 540px) { .waitlist-form { flex-direction: column; } }
+.waitlist-input {
+  flex: 1; padding: 0.65rem 1rem; font-size: 0.82rem;
+  background: var(--surface); border: 1px solid var(--border);
+  border-radius: 6px; color: var(--text); outline: none;
+  font-family: var(--mono); transition: border-color 0.2s;
+}
+.waitlist-input::placeholder { color: var(--muted); }
+.waitlist-input:focus { border-color: var(--green); }
+.waitlist-btn {
+  padding: 0.65rem 1.4rem; font-size: 0.8rem; font-weight: 700;
+  background: var(--green); color: var(--bg); border: none;
+  border-radius: 6px; cursor: pointer; letter-spacing: 0.03em;
+  font-family: var(--mono); white-space: nowrap; transition: opacity 0.2s;
+}
+.waitlist-btn:hover { opacity: 0.85; }
+.waitlist-btn:disabled { opacity: 0.5; cursor: not-allowed; }
+.waitlist-success {
+  display: none; font-size: 0.82rem; color: var(--green);
+  padding: 0.75rem 1rem; border: 1px solid rgba(74,222,128,0.25);
+  border-radius: 6px; background: var(--green-glow); max-width: 440px; margin: 0 auto;
+}
+.waitlist-error {
+  display: none; font-size: 0.8rem; color: var(--red); margin-top: 0.5rem;
+}
+.waitlist-note { font-size: 0.68rem; color: var(--muted); margin-top: 0.75rem; }
+.waitlist-features {
+  display: grid; grid-template-columns: repeat(3, 1fr); gap: 1px;
+  background: var(--border); border: 1px solid var(--border);
+  border-radius: 8px; overflow: hidden; margin-top: 3rem; text-align: left;
+}
+@media (max-width: 640px) { .waitlist-features { grid-template-columns: 1fr; } }
+.wf-item { background: var(--surface); padding: 1.4rem; }
+.wf-label { font-size: 0.68rem; color: var(--muted); letter-spacing: 0.08em; text-transform: uppercase; margin-bottom: 0.4rem; }
+.wf-val { font-size: 0.88rem; color: var(--text); font-weight: 600; }
 
-    .features {
-      list-style: none;
-      display: flex;
-      flex-direction: column;
-      gap: 0.85rem;
-      margin-bottom: 3rem;
-    }
+/* ── LIGHTBOX ── */
+#demo-lightbox {
+  display: none; position: fixed; inset: 0; z-index: 999;
+  background: rgba(0,0,0,0.85);
+  align-items: center; justify-content: center;
+  padding: 1.5rem; cursor: zoom-out;
+}
+#demo-lightbox.open { display: flex; }
+#demo-lightbox video {
+  width: 920px; max-width: 100%; height: auto;
+  border-radius: 8px; box-shadow: 0 24px 80px rgba(0,0,0,0.6);
+  cursor: default;
+}
+#demo-lightbox-close {
+  position: fixed; top: 1rem; right: 1.25rem;
+  background: none; border: none; color: #fff;
+  font-size: 1.6rem; line-height: 1; cursor: pointer; opacity: 0.7;
+  font-family: var(--mono);
+}
+#demo-lightbox-close:hover { opacity: 1; }
 
-    .features li {
-      display: flex;
-      gap: 0.7rem;
-      font-size: 0.9rem;
-      line-height: 1.55;
-    }
-
-    .feat-icon {
-      flex-shrink: 0;
-      width: 18px;
-      height: 18px;
-      margin-top: 0.05rem;
-      color: var(--accent);
-    }
-
-    .features li strong { font-weight: 600; }
-    .features li span { color: var(--muted); }
-
-    hr {
-      border: none;
-      border-top: 1px solid var(--border);
-      margin-bottom: 2rem;
-    }
-
-    /* Changelog list on homepage */
-    .cl-entry {
-      display: flex; gap: 1rem; align-items: baseline;
-      padding: 0.55rem 0; border-bottom: 1px solid var(--border); font-size: 0.85rem;
-    }
-    .cl-entry:last-child { border-bottom: none; }
-    .cl-badge {
-      font-size: 0.65rem; font-weight: 600; padding: 1px 6px; border-radius: 3px;
-      font-family: 'Geist Mono', monospace; text-transform: uppercase;
-      letter-spacing: 0.03em; flex-shrink: 0;
-    }
-    .cl-feat { background: rgba(74,222,128,0.12); color: #4ade80; }
-    .cl-fix  { background: rgba(251,191,36,0.12);  color: #fbbf24; }
-    .cl-docs { background: rgba(96,165,250,0.12);  color: #60a5fa; }
-    .cl-chore { background: rgba(156,163,175,0.12); color: #9ca3af; }
-    .cl-title { color: var(--fg); flex: 1; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-    .cl-date { color: var(--muted); font-size: 0.72rem; flex-shrink: 0; font-family: 'Geist Mono', monospace; }
-
-    footer {
-      display: flex;
-      flex-wrap: wrap;
-      gap: 1rem;
-      font-size: 0.8rem;
-      color: var(--muted);
-    }
-
-    footer a { color: var(--muted); text-decoration: none; }
-    footer a:hover { color: var(--fg); }
-    footer .sep { opacity: 0.3; }
-
-    .link-grid {
-      display: grid;
-      grid-template-columns: repeat(2, 1fr);
-      gap: 1.5rem 2rem;
-      margin-bottom: 3rem;
-    }
-
-    @media (min-width: 540px) {
-      .link-grid { grid-template-columns: repeat(4, 1fr); }
-    }
-
-    .link-grid-group { }
-    .link-grid-group .lg-label {
-      font-size: 0.7rem;
-      font-weight: 600;
-      letter-spacing: 0.06em;
-      text-transform: uppercase;
-      color: var(--muted);
-      margin-bottom: 0.65rem;
-    }
-
-    .link-grid-group ul {
-      list-style: none;
-      margin: 0;
-      padding: 0;
-      display: flex;
-      flex-direction: column;
-      gap: 0.4rem;
-    }
-
-    .link-grid-group ul a {
-      font-size: 0.82rem;
-      color: var(--muted);
-      text-decoration: none;
-    }
-
-    .link-grid-group ul a:hover { color: var(--fg); }
-
-    /* ── Slideshow ───────────────────────────────────────── */
-    .slides-wrap {
-      margin-bottom: 2.5rem;
-    }
-
-    .slides-frame {
-      position: relative;
-      border: 1px solid var(--code-border);
-      border-radius: 8px;
-      overflow: hidden;
-      background: #000;
-      aspect-ratio: 695 / 840;
-      cursor: pointer;
-    }
-
-    .slides-frame img {
-      position: absolute;
-      inset: 0;
-      width: 100%;
-      height: 100%;
-      object-fit: cover;
-      object-position: top;
-      opacity: 0;
-      transition: opacity 0.35s ease;
-      display: block;
-    }
-
-    .slides-frame img.active { opacity: 1; }
-
-    .slides-nav {
-      position: absolute;
-      inset: 0;
-      display: flex;
-      align-items: center;
-      justify-content: space-between;
-      pointer-events: none;
-    }
-
-    .slides-nav button {
-      pointer-events: all;
-      background: rgba(0,0,0,0.5);
-      border: none;
-      color: #fff;
-      width: 32px;
-      height: 48px;
-      cursor: pointer;
-      font-size: 1rem;
-      opacity: 0;
-      transition: opacity 0.15s;
-      flex-shrink: 0;
-    }
-
-    .slides-frame:hover .slides-nav button { opacity: 1; }
-    .slides-nav button:hover { background: rgba(0,0,0,0.75); }
-
-    .slides-meta {
-      padding: 0.75rem 0 0;
-    }
-
-    .slides-label {
-      font-size: 0.8rem;
-      font-weight: 600;
-      color: var(--fg);
-      margin-bottom: 0.2rem;
-    }
-
-    .slides-desc {
-      font-size: 0.8rem;
-      color: var(--muted);
-      line-height: 1.5;
-    }
-
-    .slides-dots {
-      display: flex;
-      gap: 0.35rem;
-      margin-top: 0.65rem;
-    }
-
-    .slides-dots button {
-      width: 5px;
-      height: 5px;
-      border-radius: 50%;
-      border: none;
-      background: var(--border);
-      cursor: pointer;
-      padding: 0;
-      transition: background 0.15s;
-    }
-
-    .slides-dots button.active { background: var(--accent); }
-
-    #demo-lightbox {
-      display: none;
-      position: fixed;
-      inset: 0;
-      z-index: 999;
-      background: rgba(0,0,0,0.85);
-      align-items: center;
-      justify-content: center;
-      padding: 1.5rem;
-      cursor: zoom-out;
-    }
-    #demo-lightbox.open { display: flex; }
-    #demo-lightbox video {
-      width: 920px;
-      max-width: 100%;
-      height: auto;
-      border-radius: 8px;
-      box-shadow: 0 24px 80px rgba(0,0,0,0.6);
-      cursor: default;
-    }
-    #demo-lightbox-close {
-      position: fixed;
-      top: 1rem;
-      right: 1.25rem;
-      background: none;
-      border: none;
-      color: #fff;
-      font-size: 1.6rem;
-      line-height: 1;
-      cursor: pointer;
-      opacity: 0.7;
-    }
-    #demo-lightbox-close:hover { opacity: 1; }
-
-    /* ── Cloud CTA ───────────────────────────────────────── */
-    .cloud-cta {
-      margin-bottom: 2.5rem;
-      border: 1px solid var(--border);
-      border-radius: 10px;
-      padding: 1.4rem 1.4rem 1.3rem;
-      background: var(--code-bg);
-    }
-
-    .cloud-cta-header {
-      display: flex;
-      align-items: center;
-      gap: 0.55rem;
-      margin-bottom: 0.5rem;
-    }
-
-    .cloud-badge {
-      font-size: 0.65rem;
-      font-weight: 600;
-      letter-spacing: 0.07em;
-      text-transform: uppercase;
-      padding: 2px 7px;
-      border-radius: 20px;
-      border: 1px solid var(--border);
-      color: var(--muted);
-    }
-
-    .cloud-cta-title {
-      font-size: 0.95rem;
-      font-weight: 600;
-    }
-
-    .cloud-cta-sub {
-      font-size: 0.84rem;
-      color: var(--muted);
-      margin-bottom: 1rem;
-      line-height: 1.5;
-    }
-
-    .cloud-form {
-      display: flex;
-      gap: 0.5rem;
-    }
-
-    .cloud-form input[type="email"] {
-      flex: 1;
-      min-width: 0;
-      padding: 0.38rem 0.75rem;
-      border-radius: 6px;
-      border: 1px solid var(--border);
-      background: var(--bg);
-      color: var(--fg);
-      font-size: 0.875rem;
-      font-family: inherit;
-      outline: none;
-      transition: border-color 0.15s;
-    }
-
-    .cloud-form input[type="email"]:focus { border-color: var(--accent); }
-    .cloud-form input[type="email"]::placeholder { color: var(--muted); }
-
-    .cloud-form button {
-      padding: 0.38rem 1rem;
-      border-radius: 6px;
-      border: 1px solid var(--accent);
-      background: var(--accent);
-      color: #0a0a0a;
-      font-size: 0.875rem;
-      font-weight: 600;
-      font-family: inherit;
-      cursor: pointer;
-      white-space: nowrap;
-      transition: opacity 0.12s;
-    }
-
-    .cloud-form button:hover { opacity: 0.85; }
-    .cloud-form button:disabled { opacity: 0.45; cursor: default; }
-
-    .cloud-thanks {
-      display: none;
-      font-size: 0.84rem;
-      color: var(--accent);
-      font-weight: 500;
-    }
-
-    .cloud-thanks.show { display: block; }
-    .cloud-form.hide { display: none; }
-
-    @media (max-width: 400px) {
-      .cloud-form { flex-direction: column; }
-    }
-  </style>
+/* ── FOOTER ── */
+footer { border-top: 1px solid var(--border); padding: 2.5rem 2rem; }
+.footer-inner {
+  max-width: 1100px; margin: 0 auto;
+  display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 1rem;
+}
+.footer-brand { font-size: 0.82rem; color: var(--muted); }
+.footer-brand strong { color: var(--dim); font-weight: 600; }
+.footer-links { display: flex; gap: 1.5rem; }
+.footer-links a {
+  font-size: 0.72rem; color: var(--muted); text-decoration: none; transition: color 0.2s;
+}
+.footer-links a:hover { color: var(--text); }
+</style>
 </head>
 <body>
-<button id="theme-toggle" aria-label="Toggle light/dark mode" title="Toggle light/dark mode"></button>
-<main>
 
-  <div class="wordmark">
-    <img src="icon.svg" alt="amux icon">
-    <h1>amux</h1>
+<nav>
+  <a href="/" class="nav-logo">amux <span>v1</span></a>
+  <div class="nav-links">
+    <a href="#why">Why amux</a>
+    <a href="#features">Features</a>
+    <a href="#dashboard">Dashboard</a>
+    <a href="#cli">CLI</a>
+    <a href="#api">API</a>
+    <a href="#cloud">Cloud</a>
+    <a href="/demos/">Demos</a>
+    <a href="https://github.com/mixpeek/amux" class="nav-cta">GitHub</a>
   </div>
+</nav>
 
-  <p class="tagline">
-    Run <strong>dozens of Claude Code agents unattended</strong>.<br>
-    Python 3 + tmux. No build step, no external services.
-  </p>
+<!-- HERO -->
+<section class="hero">
+  <div class="hero-badge">Open Source &middot; Python + tmux</div>
+  <h1>Run <span class="accent">dozens</span> of AI agents<br>in parallel</h1>
+  <p class="hero-sub">amux wraps tmux to manage, monitor, and control headless Claude Code sessions -- from your terminal, browser, or phone.</p>
 
-  <div class="ctas">
-    <a class="btn btn-primary" href="https://github.com/mixpeek/amux#install">Install</a>
-    <a class="btn" href="https://github.com/mixpeek/amux" target="_blank" rel="noopener">GitHub</a>
-    <a class="btn" href="/demos/">See demos</a>
-    <button class="btn" id="demo-btn">Watch video</button>
-  </div>
-
-  <div class="cloud-cta">
-    <div class="cloud-cta-header">
-      <span class="cloud-cta-title">amux cloud</span>
-      <span class="cloud-badge">Coming soon</span>
-    </div>
-    <p class="cloud-cta-sub">Hosted amux — persistent sessions, isolated environment, full feature parity. Free tier available at launch.</p>
-    <div class="cloud-form" id="cloud-form">
-      <input type="email" id="cloud-email" placeholder="you@example.com" autocomplete="email">
-      <button onclick="joinCloud()">Join waitlist</button>
-    </div>
-    <div class="cloud-thanks" id="cloud-thanks">✓ You're on the list.</div>
+  <div class="hero-ctas">
+    <a class="hero-btn hero-btn-primary" href="https://github.com/mixpeek/amux#install">Install</a>
+    <a class="hero-btn" href="https://github.com/mixpeek/amux" target="_blank" rel="noopener">GitHub</a>
+    <a class="hero-btn" href="/demos/">Demos</a>
+    <button class="hero-btn" id="demo-btn">Watch video</button>
   </div>
 
   <div class="install-block">
-    <pre><span class="cmd-dollar">$</span> git clone https://github.com/mixpeek/amux &amp;&amp; cd amux &amp;&amp; ./install.sh
-<span class="cmd-dollar">$</span> amux register api --dir ~/Dev/api --yolo &amp;&amp; amux start api
-<span class="cmd-dollar">$</span> amux serve  <span class="cmd-comment"># → https://localhost:8822</span></pre>
+    <div class="terminal-window">
+      <div class="terminal-bar">
+        <div class="terminal-dot r"></div>
+        <div class="terminal-dot y"></div>
+        <div class="terminal-dot g"></div>
+        <span class="terminal-bar-title">~ / terminal</span>
+      </div>
+      <div class="terminal-body">
+        <div><span class="prompt">$</span> <span class="cmd">git clone https://github.com/mixpeek/amux &amp;&amp; cd amux &amp;&amp; ./install.sh</span></div>
+        <div><span class="prompt">$</span> <span class="cmd">amux register api</span> <span class="flag">--dir</span> <span class="cmd">~/Dev/api</span> <span class="flag">--yolo</span></div>
+        <div><span class="prompt">$</span> <span class="cmd">amux start api</span></div>
+        <div><span class="prompt">$</span> <span class="cmd">amux serve</span></div>
+        <div><span class="comment">-&gt; </span><span class="url">https://localhost:8822</span></div>
+      </div>
+    </div>
   </div>
 
-  <!-- ── Slideshow ─────────────────────────────────────── -->
-  <div class="slides-wrap">
+  <div class="stats-row">
+    <div class="stat"><div class="stat-val">1 file</div><div class="stat-label">Zero deps</div></div>
+    <div class="stat"><div class="stat-val">inf</div><div class="stat-label">Parallel sessions</div></div>
+    <div class="stat"><div class="stat-val">PWA</div><div class="stat-label">iOS + Android</div></div>
+    <div class="stat"><div class="stat-val">SSE</div><div class="stat-label">Real-time</div></div>
+  </div>
+</section>
+
+<hr class="divider">
+
+<!-- WHY -->
+<section id="why" class="reveal">
+  <div class="section-label">Why amux</div>
+  <div class="section-title">Problems it solves</div>
+  <div class="section-desc">Every friction point when running multiple Claude Code agents at scale.</div>
+  <div class="problems-grid">
+    <div class="problem-card" data-index="01">
+      <div class="problem-pain">Claude crashes at 3am from context compaction</div>
+      <div class="problem-fix">Self-healing watchdog -- auto-compacts, restarts, replays last message</div>
+    </div>
+    <div class="problem-card" data-index="02">
+      <div class="problem-pain">No way to monitor 10+ sessions from one place</div>
+      <div class="problem-fix">Web dashboard with live status, token spend, and session peek</div>
+    </div>
+    <div class="problem-card" data-index="03">
+      <div class="problem-pain">Agents duplicate work on the same tasks</div>
+      <div class="problem-fix">Kanban board with atomic task claiming via SQLite CAS</div>
+    </div>
+    <div class="problem-card" data-index="04">
+      <div class="problem-pain">No way to manage agents from your phone</div>
+      <div class="problem-fix">Mobile PWA with offline support and Background Sync</div>
+    </div>
+    <div class="problem-card" data-index="05">
+      <div class="problem-pain">Agents cannot coordinate with each other</div>
+      <div class="problem-fix">REST API orchestration -- send, peek, claim tasks between sessions</div>
+    </div>
+    <div class="problem-card" data-index="06">
+      <div class="problem-pain">No persistent memory across restarts</div>
+      <div class="problem-fix">Per-session and global memory files, auto-snapshotted logs</div>
+    </div>
+  </div>
+</section>
+
+<hr class="divider">
+
+<!-- FEATURES -->
+<section id="features" class="reveal">
+  <div class="section-label">How it works</div>
+  <div class="section-title">Everything under the hood</div>
+  <div class="section-desc">A complete control plane for AI coding agents.</div>
+  <div class="features-list">
+    <div class="feat-item"><strong>Self-healing background watchdog</strong> <span>-- context low -&gt; <code>/compact</code>; thinking-block corruption -&gt; restart + replay; stuck waiting -&gt; auto-respond. All silent.</span></div>
+    <div class="feat-item"><strong>Status from terminal output, not an API</strong> <span>-- parses ANSI-stripped tmux output to detect working / waiting / idle. No hooks, no patches, no modifications to Claude Code.</span></div>
+    <div class="feat-item"><strong>YOLO auto-responder</strong> <span>-- detects blocking tool-approval prompts via the "Esc to cancel" marker (never appears on open-ended questions) and auto-answers. Truly headless.</span></div>
+    <div class="feat-item"><strong>Agent-to-agent orchestration</strong> <span>-- <code>$AMUX_SESSION</code> and <code>$AMUX_URL</code> injected at startup; a shared global memory file gives every agent the full REST API reference. Agents discover peers and delegate work without being told how.</span></div>
+    <div class="feat-item"><strong>Atomic task claiming -- no lock broker</strong> <span>-- <code>POST /api/board/:id/claim</code> is a SQLite CAS. Dozens of agents race for the same queue -- no Redis, no duplicated work.</span></div>
+    <div class="feat-item"><strong>Single Python file, zero build step</strong> <span>-- Python server + full dashboard as inline HTML/CSS/JS. Edit it; it restarts via <code>os.execv</code> on save. Only deps: <code>python3</code> and <code>tmux</code>.</span></div>
+    <div class="feat-item"><strong>Parallel agents, permanent conversation IDs</strong> <span>-- any number of sessions, each with a UUID that survives stop/start. <code>amux exec myproject -- "..."</code> registers, starts, and sends in one shot.</span></div>
+    <div class="feat-item"><strong>Conversation fork</strong> <span>-- clone any session's JSONL history into a new session on a separate branch. Falls back to scrollback when JSONL isn't available.</span></div>
+    <div class="feat-item"><strong>Multi-pane workspace</strong> <span>-- full-screen tiled layout, each pane with its own send bar. Drag to rearrange; layout and named profiles persist.</span></div>
+    <div class="feat-item"><strong>Live peek -- including stopped sessions</strong> <span>-- scroll full scrollback, search, preview files, fire quick-actions without attaching. Output snapshots to disk every 60s and survives restarts.</span></div>
+    <div class="feat-item"><strong>Token tracking from JSONL</strong> <span>-- daily spend per session with cache reads broken out. Deduplicates by signature so restarts don't double-count.</span></div>
+    <div class="feat-item"><strong>Kanban board with iCal sync</strong> <span>-- SQLite-backed with auto-generated keys, per-agent ownership, and custom columns. Exports iCal to S3 -- due dates appear in Google/Apple Calendar.</span></div>
+    <div class="feat-item"><strong>Built-in cron -- no crontab, no systemd</strong> <span>-- schedule one-time or recurring commands in any session. Next-run computed atomically in SQLite with missed-fire recovery, delivered via tmux.</span></div>
+    <div class="feat-item"><strong>Git-aware conflict detection</strong> <span>-- warns when two sessions share the same dir + branch, with a one-click helper to isolate each agent onto its own branch.</span></div>
+    <div class="feat-item"><strong>Web dashboard + PWA</strong> <span>-- installable on iOS and Android. Background Sync replays queued commands on reconnect. TLS auto-provisioned: Tailscale cert -&gt; mkcert -&gt; self-signed fallback.</span></div>
+  </div>
+</section>
+
+<hr class="divider">
+
+<!-- DASHBOARD SCREENSHOTS -->
+<section id="dashboard" class="slides-section reveal">
+  <div class="slides-container">
+    <div class="section-label">Dashboard</div>
+    <div class="section-title">Your fleet at a glance</div>
+    <div class="section-desc">Session cards, peek mode, kanban board, and search -- all in a single-page PWA.</div>
     <div class="slides-frame" id="slides-frame">
       <img src="screenshots/sessions-overview.jpg" alt="Session Dashboard" class="active">
       <img src="screenshots/session-expanded.jpg" alt="Session Card">
@@ -565,307 +642,360 @@
     </div>
     <div class="slides-meta">
       <div class="slides-label" id="slides-label">Session Dashboard</div>
-      <div class="slides-desc" id="slides-desc">All running agents at a glance — live status, token spend, model, and current task.</div>
+      <div class="slides-desc" id="slides-desc">All running agents at a glance -- live status, token spend, model, and current task.</div>
       <div class="slides-dots" id="slides-dots"></div>
     </div>
   </div>
+</section>
 
-  <p class="section-label">How it works</p>
-  <ul class="features">
+<hr class="divider">
 
-    <li>
-      <svg class="feat-icon" viewBox="0 0 20 20" fill="currentColor" aria-hidden="true">
-        <path fill-rule="evenodd" d="M11.49 3.17c-.38-1.56-2.6-1.56-2.98 0a1.532 1.532 0 01-2.286.948c-1.372-.836-2.942.734-2.106 2.106.54.886.061 2.042-.947 2.287-1.561.379-1.561 2.6 0 2.978a1.532 1.532 0 01.947 2.287c-.836 1.372.734 2.942 2.106 2.106a1.532 1.532 0 012.287.947c.379 1.561 2.6 1.561 2.978 0a1.533 1.533 0 012.287-.947c1.372.836 2.942-.734 2.106-2.106a1.533 1.533 0 01.947-2.287c1.561-.379 1.561-2.6 0-2.978a1.532 1.532 0 01-.947-2.287c.836-1.372-.734-2.942-2.106-2.106a1.532 1.532 0 01-2.287-.947zM10 13a3 3 0 100-6 3 3 0 000 6z" clip-rule="evenodd"/>
-      </svg>
-      <div><strong>Self-healing background watchdog</strong> <span>— context low → <code style="font-family:'Geist Mono',monospace;font-size:0.8em;">/compact</code>; thinking-block corruption → restart + replay; stuck waiting → auto-respond. All silent.</span></div>
-    </li>
+<!-- CLI -->
+<section id="cli" class="reveal">
+  <div class="section-label">CLI</div>
+  <div class="section-title">One command, any action</div>
+  <div class="section-desc">Session names support prefix matching -- <code style="color:var(--green)">amux a my</code> resolves to <code style="color:var(--dim)">myproject</code>.</div>
+  <table class="cli-table">
+    <thead>
+      <tr><th>Command</th><th>Alias</th><th>Description</th></tr>
+    </thead>
+    <tbody>
+      <tr><td class="cmd-cell">amux register &lt;n&gt; --dir &lt;path&gt;</td><td class="alias-cell">reg</td><td class="desc-cell">Register a new session</td></tr>
+      <tr><td class="cmd-cell">amux start &lt;n&gt;</td><td class="alias-cell"></td><td class="desc-cell">Start a session headless</td></tr>
+      <tr><td class="cmd-cell">amux stop &lt;n&gt;</td><td class="alias-cell">kill</td><td class="desc-cell">Stop a running session</td></tr>
+      <tr><td class="cmd-cell">amux attach &lt;n&gt;</td><td class="alias-cell">a</td><td class="desc-cell">Attach to a session's tmux pane</td></tr>
+      <tr><td class="cmd-cell">amux peek &lt;n&gt;</td><td class="alias-cell">p</td><td class="desc-cell">View output without attaching</td></tr>
+      <tr><td class="cmd-cell">amux send &lt;n&gt; &lt;text&gt;</td><td class="alias-cell"></td><td class="desc-cell">Send text or a command to a session</td></tr>
+      <tr><td class="cmd-cell">amux exec &lt;n&gt; -- &lt;prompt&gt;</td><td class="alias-cell">run</td><td class="desc-cell">Register + start + send in one shot</td></tr>
+      <tr><td class="cmd-cell">amux ls</td><td class="alias-cell">list</td><td class="desc-cell">List all sessions</td></tr>
+      <tr><td class="cmd-cell">amux serve</td><td class="alias-cell">web</td><td class="desc-cell">Start the web dashboard</td></tr>
+      <tr><td class="cmd-cell">amux start-all</td><td class="alias-cell"></td><td class="desc-cell">Start all registered sessions</td></tr>
+      <tr><td class="cmd-cell">amux defaults</td><td class="alias-cell">config</td><td class="desc-cell">Manage default flags</td></tr>
+    </tbody>
+  </table>
+</section>
 
-    <li>
-      <svg class="feat-icon" viewBox="0 0 20 20" fill="currentColor" aria-hidden="true">
-        <path fill-rule="evenodd" d="M12.316 3.051a1 1 0 01.633 1.265l-4 12a1 1 0 11-1.898-.632l4-12a1 1 0 011.265-.633zM5.707 6.293a1 1 0 010 1.414L3.414 10l2.293 2.293a1 1 0 11-1.414 1.414l-3-3a1 1 0 010-1.414l3-3a1 1 0 011.414 0zm8.586 0a1 1 0 011.414 0l3 3a1 1 0 010 1.414l-3 3a1 1 0 11-1.414-1.414L16.586 10l-2.293-2.293a1 1 0 010-1.414z" clip-rule="evenodd"/>
-      </svg>
-      <div><strong>Status from terminal output, not an API</strong> <span>— parses ANSI-stripped tmux output to detect working / waiting / idle. No hooks, no patches, no modifications to Claude Code.</span></div>
-    </li>
+<hr class="divider">
 
-    <li>
-      <svg class="feat-icon" viewBox="0 0 20 20" fill="currentColor" aria-hidden="true">
-        <path d="M10 2a6 6 0 00-6 6v3.586l-.707.707A1 1 0 004 14h12a1 1 0 00.707-1.707L16 11.586V8a6 6 0 00-6-6zM10 18a3 3 0 01-3-3h6a3 3 0 01-3 3z"/>
-      </svg>
-      <div><strong>YOLO auto-responder</strong> <span>— detects blocking tool-approval prompts via the "Esc to cancel" marker (never appears on open-ended questions) and auto-answers. Truly headless.</span></div>
-    </li>
+<!-- API -->
+<section id="api" class="reveal">
+  <div class="section-label">REST API</div>
+  <div class="section-title">Every action is an endpoint</div>
+  <div class="section-desc">Automate orchestration with curl, scripts, or agents talking to agents.</div>
+  <div class="api-grid">
+    <div class="api-endpoints">
+      <div class="api-endpoint"><span class="api-method get">GET</span><span class="api-path">/api/sessions</span></div>
+      <div class="api-endpoint"><span class="api-method post">POST</span><span class="api-path">/api/sessions</span></div>
+      <div class="api-endpoint"><span class="api-method post">POST</span><span class="api-path">/api/sessions/&lt;n&gt;/start</span></div>
+      <div class="api-endpoint"><span class="api-method post">POST</span><span class="api-path">/api/sessions/&lt;n&gt;/stop</span></div>
+      <div class="api-endpoint"><span class="api-method post">POST</span><span class="api-path">/api/sessions/&lt;n&gt;/send</span></div>
+      <div class="api-endpoint"><span class="api-method get">GET</span><span class="api-path">/api/sessions/&lt;n&gt;/peek</span></div>
+      <div class="api-endpoint"><span class="api-method patch">PATCH</span><span class="api-path">/api/sessions/&lt;n&gt;/config</span></div>
+      <div class="api-endpoint"><span class="api-method post">POST</span><span class="api-path">/api/sessions/&lt;n&gt;/clone</span></div>
+      <div class="api-endpoint"><span class="api-method get">GET</span><span class="api-path">/api/board</span></div>
+      <div class="api-endpoint"><span class="api-method post">POST</span><span class="api-path">/api/board</span></div>
+      <div class="api-endpoint"><span class="api-method patch">PATCH</span><span class="api-path">/api/board/&lt;id&gt;</span></div>
+      <div class="api-endpoint"><span class="api-method delete">DEL</span><span class="api-path">/api/board/&lt;id&gt;</span></div>
+      <div class="api-endpoint"><span class="api-method get">GET</span><span class="api-path">/api/events</span></div>
+      <div class="api-endpoint"><span class="api-method get">GET</span><span class="api-path">/api/stats/daily</span></div>
+    </div>
+    <div>
+      <div class="terminal-window" style="min-width:auto;">
+        <div class="terminal-bar">
+          <div class="terminal-dot r"></div>
+          <div class="terminal-dot y"></div>
+          <div class="terminal-dot g"></div>
+          <span class="terminal-bar-title">orchestration example</span>
+        </div>
+        <div class="terminal-body" style="font-size:0.74rem;">
+          <div><span class="comment"># Send a task to another session</span></div>
+          <div><span class="prompt">$</span> <span class="cmd">curl -sk -X POST \</span></div>
+          <div style="padding-left:1rem"><span class="flag">-H</span> <span class="cmd">'Content-Type: application/json' \</span></div>
+          <div style="padding-left:1rem"><span class="flag">-d</span> <span class="cmd">'{"text":"implement login"}' \</span></div>
+          <div style="padding-left:1rem"><span class="url">$AMUX_URL/api/sessions/worker-1/send</span></div>
+          <br>
+          <div><span class="comment"># Atomically claim a board item</span></div>
+          <div><span class="prompt">$</span> <span class="cmd">curl -sk -X POST \</span></div>
+          <div style="padding-left:1rem"><span class="url">$AMUX_URL/api/board/PROJ-5/claim</span></div>
+          <br>
+          <div><span class="comment"># Watch another session's output</span></div>
+          <div><span class="prompt">$</span> <span class="cmd">curl -sk</span> <span class="url">"$AMUX_URL/api/sessions/worker-1/peek?lines=50"</span></div>
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
 
-    <li>
-      <svg class="feat-icon" viewBox="0 0 20 20" fill="currentColor" aria-hidden="true">
-        <path fill-rule="evenodd" d="M11.3 1.046A1 1 0 0112 2v5h4a1 1 0 01.82 1.573l-7 10A1 1 0 018 18v-5H4a1 1 0 01-.82-1.573l7-10a1 1 0 011.12-.38z" clip-rule="evenodd"/>
-      </svg>
-      <div><strong>Agent-to-agent orchestration</strong> <span>— <code style="font-family:'Geist Mono',monospace;font-size:0.8em;">$AMUX_SESSION</code> and <code style="font-family:'Geist Mono',monospace;font-size:0.8em;">$AMUX_URL</code> injected at startup; a shared global memory file gives every agent the full REST API reference. Agents discover peers and delegate work without being told how.</span></div>
-    </li>
+<hr class="divider">
 
-    <li>
-      <svg class="feat-icon" viewBox="0 0 20 20" fill="currentColor" aria-hidden="true">
-        <path fill-rule="evenodd" d="M5 9V7a5 5 0 0110 0v2a2 2 0 012 2v5a2 2 0 01-2 2H5a2 2 0 01-2-2v-5a2 2 0 012-2zm8-2v2H7V7a3 3 0 016 0z" clip-rule="evenodd"/>
-      </svg>
-      <div><strong>Atomic task claiming — no lock broker</strong> <span>— <code style="font-family:'Geist Mono',monospace;font-size:0.8em;">POST /api/board/:id/claim</code> is a SQLite CAS. Dozens of agents race for the same queue — no Redis, no duplicated work.</span></div>
-    </li>
+<!-- ARCHITECTURE -->
+<section class="reveal">
+  <div class="section-label">Architecture</div>
+  <div class="section-title">Single file. Zero dependencies.</div>
+  <div class="section-desc">Everything lives in <code style="color:var(--green)">amux-server.py</code>. Python's http.server with inline HTML/CSS/JS. No build step, no package manager.</div>
+  <div class="arch-visual">
+    <div class="arch-node">
+      <div class="arch-node-label">CLI</div>
+      <div class="arch-node-sub">bash wrapper</div>
+    </div>
+    <div class="arch-arrow">-&gt;</div>
+    <div class="arch-node" style="border-color:var(--green);">
+      <div class="arch-node-label">amux-server.py</div>
+      <div class="arch-node-sub">Python HTTP + SSE</div>
+    </div>
+    <div class="arch-arrow">-&gt;</div>
+    <div class="arch-node">
+      <div class="arch-node-label">tmux</div>
+      <div class="arch-node-sub">session isolation</div>
+    </div>
+    <div class="arch-arrow">-&gt;</div>
+    <div class="arch-node">
+      <div class="arch-node-label">Claude Code</div>
+      <div class="arch-node-sub">headless agents</div>
+    </div>
+  </div>
+  <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:1px;background:var(--border);border:1px solid var(--border);border-radius:8px;overflow:hidden;margin-top:2rem;">
+    <div style="background:var(--surface);padding:1.4rem;">
+      <div style="font-size:0.66rem;color:var(--muted);letter-spacing:0.08em;text-transform:uppercase;margin-bottom:0.5rem;">State</div>
+      <div style="font-size:0.82rem;color:var(--dim);font-weight:400;">Session .env files + SQLite DB + tmux processes</div>
+    </div>
+    <div style="background:var(--surface);padding:1.4rem;">
+      <div style="font-size:0.66rem;color:var(--muted);letter-spacing:0.08em;text-transform:uppercase;margin-bottom:0.5rem;">Offline</div>
+      <div style="font-size:0.82rem;color:var(--dim);font-weight:400;">IndexedDB + localStorage + Service Worker cache</div>
+    </div>
+    <div style="background:var(--surface);padding:1.4rem;">
+      <div style="font-size:0.66rem;color:var(--muted);letter-spacing:0.08em;text-transform:uppercase;margin-bottom:0.5rem;">Security</div>
+      <div style="font-size:0.82rem;color:var(--dim);font-weight:400;">Local-first. Tailscale or localhost only. No auth required.</div>
+    </div>
+  </div>
+</section>
 
-    <li>
-      <svg class="feat-icon" viewBox="0 0 20 20" fill="currentColor" aria-hidden="true">
-        <path fill-rule="evenodd" d="M3 5a2 2 0 012-2h10a2 2 0 012 2v8a2 2 0 01-2 2h-2.22l.123.489.804.804A1 1 0 0113 18H7a1 1 0 01-.707-1.707l.804-.804L7.22 15H5a2 2 0 01-2-2V5zm5.771 7H5V5h10v7H8.771z" clip-rule="evenodd"/>
-      </svg>
-      <div><strong>Single Python file, zero build step</strong> <span>— ~12,000 lines: Python server + full dashboard as inline HTML/CSS/JS. Edit it; it restarts via <code style="font-family:'Geist Mono',monospace;font-size:0.8em;">os.execv</code> on save. Only deps: <code style="font-family:'Geist Mono',monospace;font-size:0.8em;">python3</code> and <code style="font-family:'Geist Mono',monospace;font-size:0.8em;">tmux</code>.</span></div>
-    </li>
+<hr class="divider">
 
-    <li>
-      <svg class="feat-icon" viewBox="0 0 20 20" fill="currentColor" aria-hidden="true">
-        <rect x="2" y="2" width="6" height="6" rx="1"/><rect x="12" y="2" width="6" height="6" rx="1"/>
-        <rect x="2" y="12" width="6" height="6" rx="1"/><rect x="12" y="12" width="6" height="6" rx="1"/>
-      </svg>
-      <div><strong>Parallel agents, permanent conversation IDs</strong> <span>— any number of sessions, each with a UUID that survives stop/start. <code style="font-family:'Geist Mono',monospace;font-size:0.8em;">amux exec myproject -- "..."</code> registers, starts, and sends in one shot.</span></div>
-    </li>
-
-    <li>
-      <svg class="feat-icon" viewBox="0 0 20 20" fill="currentColor" aria-hidden="true">
-        <path d="M7 3a1 1 0 000 2h6a1 1 0 100-2H7zM4 7a1 1 0 011-1h10a1 1 0 110 2H5a1 1 0 01-1-1zM2 11a2 2 0 012-2h12a2 2 0 012 2v4a2 2 0 01-2 2H4a2 2 0 01-2-2v-4z"/>
-      </svg>
-      <div><strong>Conversation fork</strong> <span>— clone any session's JSONL history into a new session on a separate branch. Falls back to scrollback when JSONL isn't available.</span></div>
-    </li>
-
-    <li>
-      <svg class="feat-icon" viewBox="0 0 20 20" fill="currentColor" aria-hidden="true">
-        <path fill-rule="evenodd" d="M3 3a1 1 0 000 2v8a2 2 0 002 2h2.586l-1.293 1.293a1 1 0 101.414 1.414L10 15.414l2.293 2.293a1 1 0 001.414-1.414L12.414 15H15a2 2 0 002-2V5a1 1 0 100-2H3zm11 4a1 1 0 10-2 0v4a1 1 0 102 0V7zm-3 1a1 1 0 10-2 0v3a1 1 0 102 0V8zM8 9a1 1 0 00-2 0v2a1 1 0 102 0V9z" clip-rule="evenodd"/>
-      </svg>
-      <div><strong>Multi-pane workspace</strong> <span>— full-screen tiled layout, each pane with its own send bar. Drag to rearrange; layout and named profiles persist.</span></div>
-    </li>
-
-    <li>
-      <svg class="feat-icon" viewBox="0 0 20 20" fill="currentColor" aria-hidden="true">
-        <path d="M10 12a2 2 0 100-4 2 2 0 000 4z"/><path fill-rule="evenodd" d="M.458 10C1.732 5.943 5.522 3 10 3s8.268 2.943 9.542 7c-1.274 4.057-5.064 7-9.542 7S1.732 14.057.458 10zM14 10a4 4 0 11-8 0 4 4 0 018 0z" clip-rule="evenodd"/>
-      </svg>
-      <div><strong>Live peek — including stopped sessions</strong> <span>— scroll full scrollback, search, preview files, fire quick-actions without attaching. Output snapshots to disk every 60s and survives restarts.</span></div>
-    </li>
-
-    <li>
-      <svg class="feat-icon" viewBox="0 0 20 20" fill="currentColor" aria-hidden="true">
-        <path d="M2 10a8 8 0 018-8v8h8a8 8 0 11-16 0z"/><path d="M12 2.252A8.014 8.014 0 0117.748 8H12V2.252z"/>
-      </svg>
-      <div><strong>Token tracking from JSONL</strong> <span>— daily spend per session with cache reads broken out. Deduplicates by signature so restarts don't double-count.</span></div>
-    </li>
-
-    <li>
-      <svg class="feat-icon" viewBox="0 0 20 20" fill="currentColor" aria-hidden="true">
-        <path d="M2 4a1 1 0 011-1h14a1 1 0 011 1v2a1 1 0 01-1 1H3a1 1 0 01-1-1V4zm0 6a1 1 0 011-1h5a1 1 0 011 1v6a1 1 0 01-1 1H3a1 1 0 01-1-1v-6zm9-1a1 1 0 00-1 1v6a1 1 0 001 1h5a1 1 0 001-1v-6a1 1 0 00-1-1h-5z"/>
-      </svg>
-      <div><strong>Kanban board with iCal sync</strong> <span>— SQLite-backed with auto-generated keys, per-agent ownership, and custom columns. Exports iCal to S3 — due dates appear in Google/Apple Calendar.</span></div>
-    </li>
-
-    <li>
-      <svg class="feat-icon" viewBox="0 0 20 20" fill="currentColor" aria-hidden="true">
-        <path fill-rule="evenodd" d="M6 2a1 1 0 00-1 1v1H4a2 2 0 00-2 2v10a2 2 0 002 2h12a2 2 0 002-2V6a2 2 0 00-2-2h-1V3a1 1 0 10-2 0v1H7V3a1 1 0 00-1-1zm0 5a1 1 0 000 2h8a1 1 0 100-2H6z" clip-rule="evenodd"/>
-      </svg>
-      <div><strong>Built-in cron — no crontab, no systemd</strong> <span>— schedule one-time or recurring commands in any session. Next-run computed atomically in SQLite with missed-fire recovery, delivered via tmux.</span></div>
-    </li>
-
-    <li>
-      <svg class="feat-icon" viewBox="0 0 20 20" fill="currentColor" aria-hidden="true">
-        <path fill-rule="evenodd" d="M7.707 3.293a1 1 0 010 1.414L5.414 7H11a7 7 0 017 7v2a1 1 0 11-2 0v-2a5 5 0 00-5-5H5.414l2.293 2.293a1 1 0 11-1.414 1.414l-4-4a1 1 0 010-1.414l4-4a1 1 0 011.414 0z" clip-rule="evenodd"/>
-      </svg>
-      <div><strong>Git-aware conflict detection</strong> <span>— warns when two sessions share the same dir + branch, with a one-click helper to isolate each agent onto its own branch.</span></div>
-    </li>
-
-    <li>
-      <svg class="feat-icon" viewBox="0 0 20 20" fill="currentColor" aria-hidden="true">
-        <path d="M3 4a1 1 0 011-1h12a1 1 0 011 1v2a1 1 0 01-1 1H4a1 1 0 01-1-1V4zm0 6a1 1 0 011-1h5a1 1 0 011 1v6a1 1 0 01-1 1H3a1 1 0 01-1-1v-6zm9-1a1 1 0 00-1 1v6a1 1 0 001 1h5a1 1 0 001-1v-6a1 1 0 00-1-1h-5z"/>
-      </svg>
-      <div><strong>Web dashboard + PWA</strong> <span>— installable on iOS and Android. Background Sync replays queued commands on reconnect. TLS auto-provisioned: Tailscale cert → mkcert → self-signed fallback.</span></div>
-    </li>
-
-  </ul>
-
-  <hr>
-
-  <p class="section-label">Resources</p>
-  <div class="link-grid">
-    <div class="link-grid-group">
-      <div class="lg-label">Demos</div>
+<!-- RESOURCES -->
+<section class="reveal">
+  <div class="section-label">Resources</div>
+  <div class="section-title">Explore further</div>
+  <div class="section-desc"></div>
+  <div class="resources-grid">
+    <div class="rg-group">
+      <div class="rg-group-label">Demos</div>
       <ul>
         <li><a href="/demos/session-cards-overview/">Session cards</a></li>
         <li><a href="/demos/self-healing-watchdog/">Self-healing</a></li>
         <li><a href="/demos/atomic-task-claiming/">Atomic claiming</a></li>
         <li><a href="/demos/mobile-pwa/">Mobile PWA</a></li>
-        <li><a href="/demos/">All demos →</a></li>
+        <li><a href="/demos/">All demos -&gt;</a></li>
       </ul>
     </div>
-    <div class="link-grid-group">
-      <div class="lg-label">Compare</div>
+    <div class="rg-group">
+      <div class="rg-group-label">Compare</div>
       <ul>
         <li><a href="/compare/amux-vs-cursor/">vs Cursor</a></li>
         <li><a href="/compare/amux-vs-devin/">vs Devin</a></li>
         <li><a href="/compare/amux-vs-aider/">vs Aider</a></li>
         <li><a href="/compare/amux-vs-claude-code-agent-teams/">vs Agent Teams</a></li>
-        <li><a href="/compare/">All comparisons →</a></li>
+        <li><a href="/compare/">All comparisons -&gt;</a></li>
       </ul>
     </div>
-    <div class="link-grid-group">
-      <div class="lg-label">Guides</div>
+    <div class="rg-group">
+      <div class="rg-group-label">Guides</div>
       <ul>
         <li><a href="/guides/getting-started/">Getting started</a></li>
         <li><a href="/guides/running-10-plus-agents/">Run 10+ agents</a></li>
         <li><a href="/guides/self-healing-configuration/">Self-healing config</a></li>
         <li><a href="/guides/agent-to-agent-orchestration/">Orchestration</a></li>
-        <li><a href="/guides/">All guides →</a></li>
+        <li><a href="/guides/">All guides -&gt;</a></li>
       </ul>
     </div>
-    <div class="link-grid-group">
-      <div class="lg-label">For your stack</div>
+    <div class="rg-group">
+      <div class="rg-group-label">For your stack</div>
       <ul>
         <li><a href="/for/python-developers/">Python</a></li>
         <li><a href="/for/typescript-developers/">TypeScript</a></li>
         <li><a href="/for/react-developers/">React</a></li>
         <li><a href="/for/go-developers/">Go</a></li>
-        <li><a href="/for/">All stacks →</a></li>
+        <li><a href="/for/">All stacks -&gt;</a></li>
       </ul>
     </div>
   </div>
+</section>
 
-  <hr>
+<hr class="divider">
 
-  <p class="section-label">What's New</p>
-  <div id="changelog-list">
-    <div id="cl-loading" style="color:var(--muted);font-size:0.85rem;">Loading…</div>
+<!-- CHANGELOG -->
+<section class="reveal">
+  <div class="section-label">What's new</div>
+  <div class="section-title">Recent changes</div>
+  <div id="changelog-list" style="margin-top:1.5rem;">
+    <div id="cl-loading" style="color:var(--muted);font-size:0.82rem;">Loading...</div>
   </div>
   <div style="margin-top:1rem;">
-    <a href="/changelog/" style="font-size:0.82rem;color:var(--muted);">View full changelog →</a>
+    <a href="/changelog/" style="font-size:0.78rem;color:var(--dim);text-decoration:none;">View full changelog -&gt;</a>
   </div>
+</section>
 
-  <footer>
-    <span>MIT License</span>
-    <span class="sep">·</span>
-    <a href="https://github.com/mixpeek/amux" target="_blank" rel="noopener">github.com/mixpeek/amux</a>
-    <span class="sep">·</span>
-    <span>Built by <a href="https://mixpeek.com" target="_blank" rel="noopener">Mixpeek</a></span>
-  </footer>
+<!-- CLOUD WAITLIST -->
+<div id="cloud" class="waitlist-section reveal">
+  <div class="waitlist-container">
+    <div class="waitlist-eyebrow">amux Cloud -- coming soon</div>
+    <div class="waitlist-title">amux without the setup</div>
+    <div class="waitlist-desc">
+      Hosted amux -- persistent sessions, isolated environment, full feature parity.
+      Free tier available at launch.
+    </div>
+    <div class="waitlist-form" id="waitlist-form">
+      <input class="waitlist-input" id="waitlist-email" type="email" placeholder="you@company.com" autocomplete="email">
+      <button class="waitlist-btn" id="waitlist-btn" onclick="submitWaitlist()">Join waitlist</button>
+    </div>
+    <div class="waitlist-success" id="waitlist-success">You're on the list. We'll reach out when early access opens.</div>
+    <div class="waitlist-error" id="waitlist-error"></div>
+    <div class="waitlist-note">No spam. Early access only.</div>
+    <div class="waitlist-features">
+      <div class="wf-item">
+        <div class="wf-label">Infrastructure</div>
+        <div class="wf-val">Fully managed</div>
+      </div>
+      <div class="wf-item">
+        <div class="wf-label">Access</div>
+        <div class="wf-val">Any device, anywhere</div>
+      </div>
+      <div class="wf-item">
+        <div class="wf-label">Sync</div>
+        <div class="wf-val">Persistent state across sessions</div>
+      </div>
+    </div>
+  </div>
+</div>
 
-</main>
+<footer>
+  <div class="footer-inner">
+    <div class="footer-brand">
+      <strong>amux</strong> &mdash; MIT License. Built by <a href="https://mixpeek.com" style="color:var(--green);text-decoration:none;">Mixpeek</a>
+    </div>
+    <div class="footer-links">
+      <a href="https://github.com/mixpeek/amux">GitHub</a>
+      <a href="/changelog/">Changelog</a>
+      <a href="https://github.com/mixpeek/amux/issues">Issues</a>
+      <a href="https://github.com/mixpeek/amux/blob/main/README.md">Docs</a>
+    </div>
+  </div>
+</footer>
 
+<!-- Video lightbox -->
 <div id="demo-lightbox" onclick="closeLightbox()">
-  <button id="demo-lightbox-close" onclick="closeLightbox()" aria-label="Close">&times;</button>
+  <button id="demo-lightbox-close" onclick="closeLightbox()" aria-label="Close">x</button>
   <video id="demo-video" src="amux.mp4" width="920" loop muted playsinline controls onclick="event.stopPropagation()"></video>
 </div>
+
 <script>
-  // Slideshow
-  var slides = [
-    { img: 'screenshots/sessions-overview.jpg',  label: 'Session Dashboard',  desc: 'All running agents at a glance — live status, token spend, model, and current task.' },
-    { img: 'screenshots/session-expanded.jpg',   label: 'Expanded Session Card', desc: 'Inline live output with quick-action chips and a send bar, without leaving the sessions list.' },
-    { img: 'screenshots/search-and-send.jpg',    label: 'Search & Send',       desc: 'Full-text search across all session output. Click a match to jump to it and send commands inline.' },
-    { img: 'screenshots/live-terminal.jpg',      label: 'Live Terminal Peek',  desc: 'Full scrollback with search, file previews, and syntax-highlighted diffs. No terminal attachment needed.' },
-    { img: 'screenshots/file-explorer.jpg',      label: 'File Explorer',       desc: "Browse the agent's working directory from the dashboard. Click any file to preview it." },
-    { img: 'screenshots/session-memory.jpg',     label: 'Session Memory',      desc: 'Per-session markdown context that persists across restarts. Global memory shared across all agents.' },
-    { img: 'screenshots/kanban-board.jpg',       label: 'Kanban Board',        desc: 'SQLite-backed board with auto-generated issue keys, tags, per-agent ownership, and custom columns.' },
-    { img: 'screenshots/calendar.jpg',           label: 'Calendar & Scheduler', desc: 'Board items with due dates appear as calendar events. Built-in cron for recurring agent commands.' },
-  ];
-  var si = 0, stimer;
-  var imgs = document.querySelectorAll('#slides-frame img');
-  var lbl = document.getElementById('slides-label');
-  var dsc = document.getElementById('slides-desc');
-  var dotsEl = document.getElementById('slides-dots');
-  slides.forEach(function(_, i) {
-    var d = document.createElement('button');
-    if (i === 0) d.className = 'active';
-    d.addEventListener('click', function() { goTo(i); resetTimer(); });
-    dotsEl.appendChild(d);
+// Scroll reveal
+var _revealObs = new IntersectionObserver(function(entries) {
+  entries.forEach(function(e) {
+    if (e.isIntersecting) { e.target.classList.add('visible'); _revealObs.unobserve(e.target); }
   });
-  var dots = dotsEl.querySelectorAll('button');
-  function goTo(n) {
-    imgs[si].classList.remove('active'); dots[si].classList.remove('active');
-    si = (n + slides.length) % slides.length;
-    imgs[si].classList.add('active'); dots[si].classList.add('active');
-    lbl.textContent = slides[si].label;
-    dsc.textContent = slides[si].desc;
+}, { threshold: 0.08 });
+document.querySelectorAll('.reveal').forEach(function(el) { _revealObs.observe(el); });
+
+// Slideshow
+var slides = [
+  { img: 'screenshots/sessions-overview.jpg',  label: 'Session Dashboard',     desc: 'All running agents at a glance -- live status, token spend, model, and current task.' },
+  { img: 'screenshots/session-expanded.jpg',   label: 'Expanded Session Card', desc: 'Inline live output with quick-action chips and a send bar, without leaving the sessions list.' },
+  { img: 'screenshots/search-and-send.jpg',    label: 'Search & Send',         desc: 'Full-text search across all session output. Click a match to jump to it and send commands inline.' },
+  { img: 'screenshots/live-terminal.jpg',      label: 'Live Terminal Peek',    desc: 'Full scrollback with search, file previews, and syntax-highlighted diffs. No terminal attachment needed.' },
+  { img: 'screenshots/file-explorer.jpg',      label: 'File Explorer',         desc: "Browse the agent's working directory from the dashboard. Click any file to preview it." },
+  { img: 'screenshots/session-memory.jpg',     label: 'Session Memory',        desc: 'Per-session markdown context that persists across restarts. Global memory shared across all agents.' },
+  { img: 'screenshots/kanban-board.jpg',       label: 'Kanban Board',          desc: 'SQLite-backed board with auto-generated issue keys, tags, per-agent ownership, and custom columns.' },
+  { img: 'screenshots/calendar.jpg',           label: 'Calendar & Scheduler',  desc: 'Board items with due dates appear as calendar events. Built-in cron for recurring agent commands.' }
+];
+var si = 0, stimer;
+var imgs = document.querySelectorAll('#slides-frame img');
+var lbl = document.getElementById('slides-label');
+var dsc = document.getElementById('slides-desc');
+var dotsEl = document.getElementById('slides-dots');
+slides.forEach(function(_, i) {
+  var d = document.createElement('button');
+  if (i === 0) d.className = 'active';
+  d.addEventListener('click', function() { goTo(i); resetTimer(); });
+  dotsEl.appendChild(d);
+});
+var dots = dotsEl.querySelectorAll('button');
+function goTo(n) {
+  imgs[si].classList.remove('active'); dots[si].classList.remove('active');
+  si = (n + slides.length) % slides.length;
+  imgs[si].classList.add('active'); dots[si].classList.add('active');
+  lbl.textContent = slides[si].label;
+  dsc.textContent = slides[si].desc;
+}
+function resetTimer() { clearInterval(stimer); stimer = setInterval(function() { goTo(si + 1); }, 4000); }
+document.getElementById('slides-prev').addEventListener('click', function(e) { e.stopPropagation(); goTo(si - 1); resetTimer(); });
+document.getElementById('slides-next').addEventListener('click', function(e) { e.stopPropagation(); goTo(si + 1); resetTimer(); });
+resetTimer();
+
+// Video lightbox
+var lb = document.getElementById('demo-lightbox');
+var vid = document.getElementById('demo-video');
+document.getElementById('demo-btn').addEventListener('click', function() {
+  lb.classList.add('open'); vid.currentTime = 0; vid.play();
+});
+function closeLightbox() { lb.classList.remove('open'); vid.pause(); }
+document.addEventListener('keydown', function(e) { if (e.key === 'Escape') closeLightbox(); });
+
+// Cloud waitlist (Formspree)
+document.getElementById('waitlist-email').addEventListener('keydown', function(e) {
+  if (e.key === 'Enter') submitWaitlist();
+});
+function submitWaitlist() {
+  var emailEl = document.getElementById('waitlist-email');
+  var btn = document.getElementById('waitlist-btn');
+  var success = document.getElementById('waitlist-success');
+  var error = document.getElementById('waitlist-error');
+  var email = emailEl.value.trim();
+  if (!email || email.indexOf('@') === -1) {
+    error.textContent = 'Please enter a valid email address.';
+    error.style.display = 'block';
+    return;
   }
-  function resetTimer() { clearInterval(stimer); stimer = setInterval(function() { goTo(si + 1); }, 4000); }
-  document.getElementById('slides-prev').addEventListener('click', function(e) { e.stopPropagation(); goTo(si - 1); resetTimer(); });
-  document.getElementById('slides-next').addEventListener('click', function(e) { e.stopPropagation(); goTo(si + 1); resetTimer(); });
-  resetTimer();
+  btn.disabled = true;
+  error.style.display = 'none';
+  fetch('https://formspree.io/f/xgolboon', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', 'Accept': 'application/json' },
+    body: JSON.stringify({ email: email })
+  }).then(function(r) { return r.json().then(function(d) { return { ok: r.ok, d: d }; }); })
+    .then(function(res) {
+      if (res.ok) {
+        document.getElementById('waitlist-form').style.display = 'none';
+        success.style.display = 'block';
+      } else {
+        throw new Error((res.d.errors || [{}])[0].message || 'Request failed');
+      }
+    }).catch(function(e) {
+      error.textContent = e.message || 'Something went wrong. Please try again.';
+      error.style.display = 'block';
+      btn.disabled = false;
+    });
+}
 
-  var lb = document.getElementById('demo-lightbox');
-  var vid = document.getElementById('demo-video');
-  document.getElementById('demo-btn').addEventListener('click', function() {
-    lb.classList.add('open'); vid.currentTime = 0; vid.play();
-  });
-  function closeLightbox() { lb.classList.remove('open'); vid.pause(); }
-  document.addEventListener('keydown', function(e) { if (e.key === 'Escape') closeLightbox(); });
-
-  // Cloud waitlist
-  document.getElementById('cloud-email').addEventListener('keydown', function(e) {
-    if (e.key === 'Enter') joinCloud();
-  });
-  function joinCloud() {
-    var email = document.getElementById('cloud-email').value.trim();
-    if (!email) return document.getElementById('cloud-email').focus();
-    var form = document.getElementById('cloud-form');
-    var thanks = document.getElementById('cloud-thanks');
-    var btn = form.querySelector('button');
-    btn.disabled = true;
-    btn.textContent = '...';
-    fetch('https://formspree.io/f/xgolboon', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'Accept': 'application/json' },
-      body: JSON.stringify({ email: email })
-    }).then(function(r) { return r.json().then(function(d) { return { ok: r.ok, d: d }; }); })
-      .then(function(res) {
-        if (res.ok) {
-          form.classList.add('hide');
-          thanks.classList.add('show');
-        } else {
-          btn.disabled = false;
-          btn.textContent = 'Join waitlist';
-          alert((res.d.errors || [{}])[0].message || 'Something went wrong.');
-        }
-      }).catch(function() {
-        btn.disabled = false;
-        btn.textContent = 'Join waitlist';
-        alert('Could not connect. Try again shortly.');
-      });
-  }
-
-  // Theme toggle
-  var root = document.documentElement;
-  var toggle = document.getElementById('theme-toggle');
-  function isDark() { return root.getAttribute('data-theme') === 'dark' || (!root.getAttribute('data-theme') && !window.matchMedia('(prefers-color-scheme: light)').matches); }
-  function applyTheme(dark) {
-    root.setAttribute('data-theme', dark ? 'dark' : 'light');
-    toggle.textContent = dark ? '☀' : '🌙';
-    toggle.title = dark ? 'Switch to light mode' : 'Switch to dark mode';
-  }
-  var saved = localStorage.getItem('amux_theme');
-  applyTheme(saved ? saved === 'dark' : !window.matchMedia('(prefers-color-scheme: light)').matches);
-  toggle.addEventListener('click', function() {
-    var dark = !isDark();
-    applyTheme(dark);
-    localStorage.setItem('amux_theme', dark ? 'dark' : 'light');
-  });
-
-  // Changelog — fetch latest 5 entries from notes.json
-  (function() {
-    var container = document.getElementById('changelog-list');
-    fetch('/changelog/notes.json?v=' + Date.now())
-      .then(function(r) { return r.json(); })
-      .then(function(entries) {
-        var recent = entries.slice(0, 5);
-        if (!recent.length) { container.innerHTML = '<div style="color:var(--muted);font-size:0.85rem;">No entries yet.</div>'; return; }
-        container.innerHTML = recent.map(function(e) {
-          var type = (e.type || 'chore').toLowerCase();
-          return '<div class="cl-entry">' +
-            '<span class="cl-badge cl-' + type + '">' + type + '</span>' +
-            '<span class="cl-title" title="' + e.title.replace(/"/g,'&quot;') + '">' + e.title + '</span>' +
-            '<span class="cl-date">' + (e.date || '') + '</span>' +
-          '</div>';
-        }).join('');
-      })
-      .catch(function() {
-        container.innerHTML = '';
-      });
-  })();
+// Changelog
+(function() {
+  var container = document.getElementById('changelog-list');
+  fetch('/changelog/notes.json?v=' + Date.now())
+    .then(function(r) { return r.json(); })
+    .then(function(entries) {
+      var recent = entries.slice(0, 5);
+      if (!recent.length) { container.innerHTML = '<div style="color:var(--muted);font-size:0.82rem;">No entries yet.</div>'; return; }
+      container.innerHTML = recent.map(function(e) {
+        var type = (e.type || 'chore').toLowerCase();
+        return '<div class="cl-entry">' +
+          '<span class="cl-badge cl-' + type + '">' + type + '</span>' +
+          '<span class="cl-title" title="' + e.title.replace(/"/g,'&quot;') + '">' + e.title + '</span>' +
+          '<span class="cl-date">' + (e.date || '') + '</span>' +
+        '</div>';
+      }).join('');
+    })
+    .catch(function() { container.innerHTML = ''; });
+})();
 </script>
 </body>
 </html>
