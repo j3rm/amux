@@ -4133,6 +4133,7 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
 <link rel="apple-touch-icon" href="/icon.png">
 <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/gridstack@7/dist/gridstack.min.css">
 <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/quill@2.0.3/dist/quill.snow.css">
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/quilljs-markdown@latest/dist/quilljs-markdown-common-style.css">
 <style>
   * { box-sizing: border-box; margin: 0; padding: 0; }
   :root {
@@ -15930,6 +15931,10 @@ function _notesInitQuill() {
     },
     placeholder: 'Write your note…'
   });
+  // Enable inline markdown shortcuts (** → bold, # → heading, etc.)
+  if (typeof QuillMarkdown !== 'undefined') {
+    try { new QuillMarkdown(_quill); } catch(e) { console.warn('quilljs-markdown init failed:', e); }
+  }
   _quill.on('text-change', (delta, old, source) => {
     if (source === 'api') return;
     // Expand @today → full date + time
@@ -16350,6 +16355,7 @@ async function _emailDismiss(id) {
 <script src="https://cdn.jsdelivr.net/npm/marked@15/marked.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/sortablejs@1.15.6/Sortable.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/quill@2.0.3/dist/quill.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/quilljs-markdown@latest/dist/quilljs-markdown.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/gridstack@7/dist/gridstack-all.js"></script>
 <div id="grid-view">
