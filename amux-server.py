@@ -12168,10 +12168,9 @@ function _pwaCb(e) {
     }
   }
 
-  // Cmd+V — paste into best available input.
-  // If the active element is already a focused input/textarea, let the native paste
-  // event fire — this avoids the macOS PWA "Paste" permission popup that triggers
-  // when calling navigator.clipboard.read/readText directly.
+  // Cmd+V — paste into best available input via clipboard API.
+  // We always use clipboard.readText() rather than relying on native paste events,
+  // because Chrome desktop PWA does not reliably fire native paste on focused inputs.
   if (k === 'v') {
     const peekOpen  = document.getElementById('peek-overlay')?.classList.contains('active');
     const boardOpen = document.getElementById('board-detail-overlay')?.classList.contains('active');
@@ -12183,11 +12182,9 @@ function _pwaCb(e) {
       || document.querySelector('.card.open .send-input')
       || document.getElementById('search');
     if (!target) return false;
+    if (!navigator.clipboard?.readText) return false;
 
-    // If the target is already focused, let native paste handle it (no OS permission dialog).
-    if (target === document.activeElement) return false;
-
-    // Target is not focused — we need to redirect paste. Use clipboard API to read then insert.
+    // Use clipboard API for all inputs — native paste is unreliable in Chrome desktop PWA.
     if (!navigator.clipboard?.readText) return false;
     e.preventDefault();
     // Try clipboard.read() first for image/file paste support in peek
