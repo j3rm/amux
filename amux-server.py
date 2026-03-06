@@ -10966,6 +10966,12 @@ async function loadFiles(path) {
   const body = document.getElementById('files-body');
   body.innerHTML = '<div style="padding:16px;color:var(--dim)">Loading...</div>';
   _filesPath = path;
+  // Update URL so path is shareable / bookmarkable
+  try {
+    const _dlp = new URLSearchParams(location.search);
+    if (path && path !== '/') { _dlp.set('path', path); } else { _dlp.delete('path'); }
+    history.replaceState({}, '', location.pathname + (_dlp.toString() ? '?' + _dlp.toString() : ''));
+  } catch(e) {}
   const srch = document.getElementById('files-search'); if (srch) srch.value = '';
   _updateFilesCwdBtn();
   // Breadcrumb
@@ -12474,6 +12480,7 @@ function switchView(view) {
   document.getElementById('tab-email').classList.toggle('active', view === 'email');
   document.getElementById('tab-notes').classList.toggle('active', view === 'notes');
   if (view === 'files') loadFiles(_filesPath);
+  else { try { const _svp = new URLSearchParams(location.search); if (_svp.has('path')) { _svp.delete('path'); history.replaceState({}, '', location.pathname + (_svp.toString() ? '?' + _svp.toString() : '')); } } catch(e) {} }
   if (view === 'reports') fetchReports();
   if (view === 'browser') _rbLoadProfiles();
   if (view === 'email') _emailLoad();
@@ -15395,6 +15402,28 @@ toggleSettings = function() {
     params.delete('invite_token');
     history.replaceState({}, '', location.pathname + (params.toString() ? '?' + params.toString() : ''));
   }
+})();
+
+// Deep-link: ?path=/some/path — navigate to Files tab at that path, or open file viewer if it's a file
+(async function _bootstrapDeeplink() {
+  const params = new URLSearchParams(location.search);
+  const dpath = params.get('path');
+  if (!dpath) return;
+  try {
+    const r = await fetch(API + '/api/ls?path=' + encodeURIComponent(dpath));
+    const d = await r.json();
+    if (d.error === 'not a directory') {
+      // It's a file — navigate to Files tab at parent dir, then open file viewer
+      const parent = dpath.split('/').slice(0, -1).join('/') || '/';
+      _filesPath = parent;
+      switchView('files');
+      openFilePreview(dpath);
+    } else if (!d.error) {
+      // It's a directory — navigate to Files tab at this path
+      _filesPath = dpath;
+      switchView('files');
+    }
+  } catch(e) {}
 })();
 
 function forceUpdate() {
