@@ -5960,6 +5960,25 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
   #notes-view.sidebar-collapsed .notes-expand-btn { display: flex; }
   .notes-search-wrap { padding: 6px 8px; border-bottom: 1px solid var(--border); flex-shrink: 0; }
   .notes-list { flex: 1; overflow-y: auto; }
+  .notes-trash-section { flex-shrink: 0; border-top: 1px solid var(--border); }
+  .notes-trash-header {
+    display: flex; align-items: center; gap: 6px; padding: 7px 12px;
+    cursor: pointer; font-size: 0.78rem; color: var(--dim); user-select: none;
+    transition: color 0.12s;
+  }
+  .notes-trash-header:hover { color: var(--text); }
+  .notes-trash-chevron { font-size: 0.6rem; transition: transform 0.15s; }
+  .notes-trash-chevron.open { transform: rotate(90deg); }
+  .notes-trash-body { overflow: hidden; }
+  .notes-trash-item {
+    display: flex; align-items: center; gap: 6px; padding: 6px 12px;
+    font-size: 0.78rem; color: var(--dim); border-bottom: 1px solid rgba(139,148,158,0.08);
+  }
+  .notes-trash-item-name { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .notes-trash-restore { background: none; border: 1px solid var(--border); border-radius: 4px; padding: 2px 7px; font-size: 0.7rem; color: var(--dim); cursor: pointer; white-space: nowrap; }
+  .notes-trash-restore:hover { border-color: var(--accent); color: var(--accent); }
+  .notes-trash-del { background: none; border: none; color: var(--dim); cursor: pointer; padding: 2px 4px; border-radius: 3px; font-size: 0.75rem; opacity: 0.5; }
+  .notes-trash-del:hover { color: var(--red,#f85149); opacity: 1; }
   /* Mobile: sidebar overlays full width */
   @media (max-width: 600px) {
     #notes-view { position: relative; }
@@ -6597,6 +6616,14 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
       <input id="notes-search" type="search" placeholder="Search notes…" oninput="_notesSearchFilter(this.value)" style="width:100%;box-sizing:border-box;padding:5px 8px;background:var(--bg);border:1px solid var(--border);border-radius:6px;color:var(--text);font-size:0.8rem;outline:none;">
     </div>
     <div id="notes-list" class="notes-list"></div>
+    <div class="notes-trash-section" id="notes-trash-section" style="display:none;">
+      <div class="notes-trash-header" onclick="_notesTrashToggle()">
+        <span class="notes-trash-chevron" id="notes-trash-chevron">&#x25B6;</span>
+        <span>Trash</span>
+        <span id="notes-trash-count" style="margin-left:auto;font-size:0.7rem;"></span>
+      </div>
+      <div class="notes-trash-body" id="notes-trash-body" style="display:none;"></div>
+    </div>
   </div>
   <!-- Editor pane -->
   <div class="notes-editor-pane" id="notes-editor-pane">
@@ -15873,6 +15900,44 @@ async function pullFromRemote(btn) {
 <script>
 // ── Notes tab ─────────────────────────────────────────────────────────────────
 let _notesActive = null; // { path, title }
+let _notesTrashOpen = false;
+
+async function _notesTrashLoad() {
+  const r = await fetch(API + '/api/notes/trash');
+  if (!r.ok) return;
+  const items = await r.json();
+  const section = document.getElementById('notes-trash-section');
+  const count = document.getElementById('notes-trash-count');
+  const body = document.getElementById('notes-trash-body');
+  if (!items.length) { section.style.display = 'none'; return; }
+  section.style.display = '';
+  count.textContent = items.length;
+  body.innerHTML = items.map(it => {
+    const dt = it.updated ? new Date(it.updated * 1000).toLocaleDateString() : '';
+    return `<div class="notes-trash-item">
+      <span class="notes-trash-item-name" title="${esc(it.name)}">${esc(it.name)}</span>
+      <span style="font-size:0.68rem;color:var(--dim);margin-right:4px;">${dt}</span>
+      <button class="notes-trash-restore" onclick="_notesTrashRestore('${esc(it.file)}')" title="Restore">Restore</button>
+      <button class="notes-trash-del" onclick="_notesTrashDelete('${esc(it.file)}')" title="Delete permanently">&#x2715;</button>
+    </div>`;
+  }).join('');
+}
+
+function _notesTrashToggle() {
+  _notesTrashOpen = !_notesTrashOpen;
+  document.getElementById('notes-trash-chevron').classList.toggle('open', _notesTrashOpen);
+  document.getElementById('notes-trash-body').style.display = _notesTrashOpen ? '' : 'none';
+}
+
+async function _notesTrashRestore(file) {
+  const r = await apiCall(API + '/api/notes/trash/' + encodeURIComponent(file) + '/restore', { method: 'POST' });
+  if (r && r.ok) { await _notesLoad(); await _notesTrashLoad(); }
+}
+
+async function _notesTrashDelete(file) {
+  await apiCall(API + '/api/notes/trash/' + encodeURIComponent(file), { method: 'DELETE' });
+  await _notesTrashLoad();
+}
 let _notesSaveTimer = null;
 let _notesAllNotes = [];
 let _quill = null;
@@ -15981,6 +16046,7 @@ async function _notesLoad() {
   }
   _notesAllNotes = fresh;
   _notesRenderList(_notesAllNotes);
+  _notesTrashLoad();
   if (!_notesActive && _notesAllNotes.length === 0) {
     _notesShowEmpty();
   } else if (!_notesActive && _notesAllNotes.length > 0) {
@@ -16228,6 +16294,7 @@ async function _notesDelete() {
   document.querySelector(`#notes-list .notes-list-item[data-path="${_notesActive.path}"]`)?.remove();
   _notesActive = null;
   await apiCall(API + '/api/notes/' + encodeURIComponent(pathKey), { method: 'DELETE' });
+  _notesTrashLoad();
   if (_notesAllNotes.length > 0) {
     await _notesOpen(_notesAllNotes[0].path);
   } else {
@@ -16920,6 +16987,38 @@ class CCHandler(BaseHTTPRequestHandler):
                                   "updated": int(stat.st_mtime), "pinned": rel in pins})
             notes.sort(key=lambda n: (0 if n["pinned"] else 1, -n["updated"]))
             return self._json(notes)
+
+        if method == "GET" and path == "/api/notes/trash":
+            trash_dir = CC_NOTES / ".trash"
+            items = []
+            if trash_dir.exists():
+                for f in sorted(trash_dir.glob("*.md"), key=lambda p: -p.stat().st_mtime):
+                    items.append({"name": f.stem, "file": f.name, "updated": int(f.stat().st_mtime)})
+            return self._json(items)
+
+        if method == "POST" and path.startswith("/api/notes/trash/") and path.endswith("/restore"):
+            fname = path[len("/api/notes/trash/"):-len("/restore")]
+            if ".." in fname or "/" in fname:
+                return self._json({"error": "invalid"}, 400)
+            src = CC_NOTES / ".trash" / fname
+            if not src.exists():
+                return self._json({"error": "not found"}, 404)
+            dst = CC_NOTES / fname
+            if dst.exists():
+                stem, ext = src.stem, src.suffix
+                i = 1
+                while (CC_NOTES / f"{stem}-{i}{ext}").exists(): i += 1
+                dst = CC_NOTES / f"{stem}-{i}{ext}"
+            src.rename(dst)
+            return self._json({"ok": True, "path": str(dst.relative_to(CC_NOTES))})
+
+        if method == "DELETE" and path.startswith("/api/notes/trash/"):
+            fname = path[len("/api/notes/trash/"):]
+            if ".." in fname or "/" in fname:
+                return self._json({"error": "invalid"}, 400)
+            f = CC_NOTES / ".trash" / fname
+            if f.exists(): f.unlink()
+            return self._json({"ok": True})
 
         if path.startswith("/api/notes/"):
             note_rel = path[len("/api/notes/"):]
