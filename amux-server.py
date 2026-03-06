@@ -12260,10 +12260,16 @@ function _pwaCb(e) {
       || document.getElementById('search');
     if (!target) return false;
 
-    // If the target is already focused, native Cmd+V works in Chrome desktop PWA
-    // without triggering the clipboard permission dialog. Only use clipboard.readText
-    // for unfocused targets that need manual paste redirection.
-    if (target === document.activeElement) return false;
+    // If the target is already focused, use execCommand('paste') — it routes through
+    // the OS clipboard directly without triggering the Web Clipboard API permission
+    // dialog, and avoids the error sound from blocked native paste in Chrome PWA.
+    if (target === document.activeElement) {
+      e.preventDefault();
+      try { document.execCommand('paste'); } catch (_) {
+        if (navigator.clipboard?.readText) _pasteTextInto(target);
+      }
+      return true;
+    }
     if (!navigator.clipboard?.readText) return false;
     e.preventDefault();
     // Try clipboard.read() first for image/file paste support in peek
