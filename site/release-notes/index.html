@@ -1,0 +1,112 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>amux — Release Notes</title>
+<meta name="description" content="amux release notes and changelog. Every commit, every feature, every fix.">
+<meta property="og:title" content="amux Release Notes">
+<meta property="og:description" content="Changelog for amux — the Claude session manager. Features, fixes, and everything in between.">
+<meta property="og:url" content="https://amux.io/release-notes/">
+<link rel="canonical" href="https://amux.io/release-notes/">
+<link rel="icon" href="/icon.svg" type="image/svg+xml">
+<style>
+*{box-sizing:border-box;margin:0;padding:0}
+body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',system-ui,sans-serif;background:#0d1117;color:#e6edf3;min-height:100vh;line-height:1.5}
+a{color:#58a6ff;text-decoration:none}
+a:hover{text-decoration:underline}
+.rn-header{padding:40px 24px 32px;border-bottom:1px solid #21262d;max-width:860px;margin:0 auto}
+.rn-logo{display:flex;align-items:center;gap:10px;margin-bottom:24px}
+.rn-logo-mark{width:32px;height:32px;background:linear-gradient(135deg,#58a6ff,#a371f7);border-radius:8px;display:flex;align-items:center;justify-content:center;font-weight:800;font-size:0.9rem;color:#fff}
+.rn-logo-name{font-size:1.1rem;font-weight:700;color:#e6edf3}
+.rn-logo-sep{color:#484f58;margin:0 4px}
+.rn-logo-sub{font-size:1.1rem;color:#8b949e}
+h1.rn-title{font-size:2rem;font-weight:700;margin-bottom:8px}
+.rn-subtitle{color:#8b949e;font-size:1rem}
+.rn-content{max-width:860px;margin:0 auto;padding:0 24px 80px}
+.rn-entry{border-bottom:1px solid #21262d;padding:40px 0}
+.rn-entry:last-child{border-bottom:none}
+.rn-entry-meta{display:flex;align-items:center;flex-wrap:wrap;gap:8px;margin-bottom:12px}
+.rn-date{font-size:0.8rem;color:#8b949e}
+.rn-badge{font-size:0.72rem;padding:2px 8px;border-radius:12px;font-weight:600;letter-spacing:0.02em}
+.rn-badge-feat{background:rgba(63,185,80,0.15);color:#3fb950;border:1px solid rgba(63,185,80,0.3)}
+.rn-badge-fix{background:rgba(248,129,62,0.15);color:#f8813e;border:1px solid rgba(248,129,62,0.3)}
+.rn-badge-chore{background:rgba(139,148,158,0.15);color:#8b949e;border:1px solid rgba(139,148,158,0.25)}
+.rn-tag{font-size:0.72rem;padding:2px 8px;border-radius:12px;background:rgba(88,166,255,0.1);color:#58a6ff;border:1px solid rgba(88,166,255,0.2)}
+.rn-commit{font-family:'SF Mono',Consolas,monospace;font-size:0.78rem;color:#8b949e;background:#161b22;border:1px solid #21262d;border-radius:6px;padding:2px 8px}
+.rn-commit:hover{color:#58a6ff;border-color:#58a6ff}
+.rn-entry-title{font-size:1.25rem;font-weight:600;margin-bottom:10px;color:#e6edf3}
+.rn-entry-desc{color:#8b949e;font-size:0.9rem;line-height:1.7;margin-bottom:20px;max-width:680px}
+.rn-video-wrap{border-radius:10px;overflow:hidden;background:#161b22;border:1px solid #21262d;margin-top:4px;aspect-ratio:16/9;max-width:680px;position:relative}
+.rn-video-wrap video{width:100%;height:100%;display:block;object-fit:contain;background:#0d1117}
+.rn-video-placeholder{width:100%;height:100%;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:8px;color:#484f58;font-size:0.85rem;aspect-ratio:16/9;max-width:680px;background:#161b22;border:1px solid #21262d;border-radius:10px}
+.rn-video-placeholder svg{opacity:0.4}
+.rn-spinner{display:flex;justify-content:center;padding:40px;color:#484f58;font-size:0.85rem}
+.rn-empty{text-align:center;padding:80px 24px;color:#484f58}
+@media(max-width:600px){
+  .rn-header{padding:24px 16px 20px}
+  h1.rn-title{font-size:1.5rem}
+  .rn-content{padding:0 16px 60px}
+  .rn-entry{padding:28px 0}
+  .rn-entry-title{font-size:1.1rem}
+}
+</style>
+</head>
+<body>
+<header class="rn-header">
+  <div class="rn-logo">
+    <div class="rn-logo-mark">a</div>
+    <a href="/" class="rn-logo-name">amux</a>
+    <span class="rn-logo-sep">/</span>
+    <span class="rn-logo-sub">release notes</span>
+  </div>
+  <h1 class="rn-title">Release Notes</h1>
+  <p class="rn-subtitle">Every commit. Every feature. Every fix.</p>
+</header>
+<div class="rn-content">
+  <div id="rn-list"><div class="rn-spinner">Loading&hellip;</div></div>
+</div>
+<script>
+var GH_RAW = 'https://raw.githubusercontent.com/mixpeek/amux/main/docs/release-notes/videos/';
+var GH_COMMIT = 'https://github.com/mixpeek/amux/commit/';
+
+function typeBadge(type) {
+  var cls = type === 'feat' ? 'feat' : type === 'fix' ? 'fix' : 'chore';
+  return '<span class="rn-badge rn-badge-' + cls + '">' + type + '</span>';
+}
+
+function renderEntry(n) {
+  var tags = (n.tags || []).map(function(t) { return '<span class="rn-tag">' + t + '</span>'; }).join('');
+  var video = n.video
+    ? '<div class="rn-video-wrap"><video controls preload="none"><source src="' + GH_RAW + n.video + '" type="video/mp4"></video></div>'
+    : '<div class="rn-video-placeholder"><svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><polygon points="5 3 19 12 5 21 5 3"/></svg><span>Video coming soon</span></div>';
+  return '<article class="rn-entry">' +
+    '<div class="rn-entry-meta">' +
+      '<span class="rn-date">' + (n.date || '') + '</span>' +
+      typeBadge(n.type) +
+      tags +
+      '<a class="rn-commit" href="' + GH_COMMIT + n.hash + '" target="_blank" rel="noopener">' + (n.short || '') + '</a>' +
+    '</div>' +
+    '<h2 class="rn-entry-title">' + n.title + '</h2>' +
+    (n.description ? '<p class="rn-entry-desc">' + n.description + '</p>' : '') +
+    video +
+    '</article>';
+}
+
+fetch('/changelog/notes.json?v=' + Date.now())
+  .then(function(r) { return r.json(); })
+  .then(function(data) {
+    var enriched = data.filter(function(n) { return n.description && n.description.trim(); });
+    var list = document.getElementById('rn-list');
+    if (!enriched.length) {
+      list.innerHTML = '<div class="rn-empty">No release notes yet.</div>';
+      return;
+    }
+    list.innerHTML = enriched.map(renderEntry).join('');
+  })
+  .catch(function() {
+    document.getElementById('rn-list').innerHTML = '<div class="rn-empty">Failed to load release notes.</div>';
+  });
+</script>
+</body>
+</html>
