@@ -11,92 +11,9 @@
   <meta property="og:url" content="https://amux.io/changelog/">
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-  <link href="https://fonts.googleapis.com/css2?family=Geist:wght@400;500;600&family=Geist+Mono:wght@400;500&display=swap" rel="stylesheet">
-  <style>
-    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
-    :root {
-      --bg: #0a0a0a; --fg: #ededed; --muted: #888; --border: #222;
-      --accent: #4ade80; --btn-bg: #1a1a1a; --card: #111; --card-border: #1e1e1e;
-    }
-    @media (prefers-color-scheme: light) {
-      :root:not([data-theme="dark"]) {
-        --bg: #fafafa; --fg: #111; --muted: #666; --border: #e5e5e5;
-        --accent: #16a34a; --btn-bg: #f0f0f0; --card: #fff; --card-border: #e5e5e5;
-      }
-    }
-    [data-theme="light"] {
-      --bg: #fafafa; --fg: #111; --muted: #666; --border: #e5e5e5;
-      --accent: #16a34a; --btn-bg: #f0f0f0; --card: #fff; --card-border: #e5e5e5;
-    }
-    body { background: var(--bg); color: var(--fg); font-family: 'Geist', sans-serif; line-height: 1.6; }
-    a { color: var(--accent); text-decoration: none; }
-    a:hover { text-decoration: underline; }
-
-    #theme-toggle {
-      position: fixed; top: 1rem; right: 1rem; z-index: 100;
-      width: 34px; height: 34px; border-radius: 50%; border: 1px solid var(--border);
-      background: var(--btn-bg); color: var(--muted); cursor: pointer;
-      font-size: 0.95rem; display: flex; align-items: center; justify-content: center;
-    }
-
-    header {
-      border-bottom: 1px solid var(--border); padding: 1rem 1.5rem;
-      display: flex; align-items: center; gap: 1rem;
-    }
-    header a.home { font-weight: 600; font-size: 1rem; color: var(--fg); }
-    header a.home:hover { text-decoration: none; opacity: 0.7; }
-    header .sep { color: var(--muted); }
-
-    main { max-width: 760px; margin: 0 auto; padding: 3rem 1.5rem 6rem; }
-
-    .page-title { font-size: 2rem; font-weight: 600; margin-bottom: 0.4rem; }
-    .page-sub { color: var(--muted); font-size: 0.95rem; margin-bottom: 2.5rem; }
-
-    /* Filter pills */
-    .filters { display: flex; gap: 0.4rem; flex-wrap: wrap; margin-bottom: 2rem; }
-    .filter-pill {
-      padding: 0.3rem 0.8rem; border-radius: 99px; border: 1px solid var(--border);
-      background: var(--btn-bg); color: var(--muted); font-size: 0.78rem;
-      cursor: pointer; transition: all 0.15s; font-family: inherit;
-    }
-    .filter-pill:hover { border-color: var(--accent); color: var(--fg); }
-    .filter-pill.active { background: var(--accent); border-color: var(--accent); color: #000; font-weight: 500; }
-
-    /* Entry */
-    .entry { display: flex; gap: 1.5rem; padding: 1.5rem 0; border-bottom: 1px solid var(--border); }
-    .entry:last-child { border-bottom: none; }
-    .entry-date-col { width: 90px; flex-shrink: 0; padding-top: 2px; }
-    .entry-date { font-size: 0.72rem; color: var(--muted); font-family: 'Geist Mono', monospace; white-space: nowrap; }
-    .entry-hash { font-size: 0.68rem; color: var(--muted); font-family: 'Geist Mono', monospace; margin-top: 3px; opacity: 0.6; }
-    .entry-body { flex: 1; min-width: 0; }
-    .entry-header { display: flex; align-items: center; gap: 0.5rem; flex-wrap: wrap; margin-bottom: 0.5rem; }
-    .type-badge {
-      font-size: 0.68rem; font-weight: 600; padding: 2px 7px; border-radius: 4px;
-      font-family: 'Geist Mono', monospace; text-transform: uppercase; letter-spacing: 0.02em;
-    }
-    .type-feat { background: rgba(74,222,128,0.15); color: #4ade80; }
-    .type-fix  { background: rgba(251,191,36,0.15);  color: #fbbf24; }
-    .type-docs { background: rgba(96,165,250,0.15);  color: #60a5fa; }
-    .type-chore { background: rgba(156,163,175,0.15); color: #9ca3af; }
-    .entry-title { font-size: 0.97rem; font-weight: 500; color: var(--fg); }
-    .entry-desc { font-size: 0.85rem; color: var(--muted); margin-top: 0.5rem; line-height: 1.65; }
-    .entry-tags { display: flex; gap: 0.3rem; flex-wrap: wrap; margin-top: 0.6rem; }
-    .tag {
-      font-size: 0.68rem; padding: 1px 6px; border-radius: 4px;
-      border: 1px solid var(--border); color: var(--muted);
-    }
-
-    #loading { color: var(--muted); padding: 2rem 0; font-size: 0.9rem; }
-    #error { color: #f87171; padding: 2rem 0; font-size: 0.9rem; }
-    #empty { color: var(--muted); padding: 2rem 0; font-size: 0.9rem; }
-
-    @media (max-width: 540px) {
-      .entry { flex-direction: column; gap: 0.5rem; }
-      .entry-date-col { width: auto; display: flex; gap: 0.75rem; align-items: center; }
-      .entry-hash { margin-top: 0; }
-    }
-  </style>
-</head>
+  <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:ital,wght@0,300;0,400;0,500;0,600;0,700;1,400&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="/style.css">
+  </head>
 <body>
 <button id="theme-toggle" aria-label="Toggle theme" onclick="toggleTheme()">☀</button>
 <header>

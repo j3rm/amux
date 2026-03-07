@@ -32,7 +32,7 @@
   --border-bright: #3a3a42;
   --text: #e8e8ec;
   --dim: #8888a0;
-  --muted: #55556a;
+  --muted: #7e7e95;
   --green: #4ade80;
   --green-dim: #22c55e;
   --green-glow: rgba(74,222,128,0.15);
@@ -286,14 +286,14 @@ section {
   border-radius: 8px;
   overflow: hidden;
   background: #000;
-  aspect-ratio: 695 / 840;
+  aspect-ratio: 16 / 10;
   cursor: pointer;
   margin-top: 2rem;
 }
 .slides-frame img {
   position: absolute; inset: 0;
   width: 100%; height: 100%;
-  object-fit: cover; object-position: top;
+  object-fit: contain;
   opacity: 0; transition: opacity 0.35s ease; display: block;
 }
 .slides-frame img.active { opacity: 1; }
@@ -487,6 +487,44 @@ section {
 }
 #demo-lightbox-close:hover { opacity: 1; }
 
+/* ── DIFF TABLE ── */
+.diff-section { padding: 6rem 2rem; }
+.diff-container { max-width: 1100px; margin: 0 auto; }
+.diff-table {
+  width: 100%; border-collapse: collapse; font-size: 0.78rem;
+  border: 1px solid var(--border); border-radius: 8px; overflow: hidden;
+}
+.diff-table th {
+  text-align: left; padding: 0.85rem 1.2rem;
+  background: var(--surface-2); border-bottom: 1px solid var(--border);
+  font-size: 0.66rem; letter-spacing: 0.08em; text-transform: uppercase;
+  color: var(--muted); font-weight: 500;
+}
+.diff-table th:first-child { color: var(--dim); }
+.diff-table th.col-amux { color: var(--green); }
+.diff-table td {
+  padding: 0.7rem 1.2rem;
+  border-bottom: 1px solid rgba(42,42,48,0.5);
+  vertical-align: top;
+}
+.diff-table tr:last-child td { border-bottom: none; }
+.diff-table tr:hover td { background: var(--surface); }
+.diff-table .row-label { color: var(--dim); font-weight: 500; white-space: nowrap; }
+.diff-table .has { color: var(--green); }
+.diff-table .no { color: var(--muted); }
+.diff-table .partial { color: var(--amber); }
+.diff-callout {
+  margin-top: 2.5rem; padding: 1.6rem;
+  background: var(--surface); border: 1px solid var(--border); border-radius: 8px;
+}
+.diff-callout-title {
+  font-size: 0.88rem; font-weight: 600; margin-bottom: 0.6rem; color: var(--text);
+}
+.diff-callout-body {
+  font-size: 0.8rem; color: var(--dim); line-height: 1.7;
+}
+.diff-callout-body strong { color: var(--text); font-weight: 600; }
+
 /* ── FOOTER ── */
 footer { border-top: 1px solid var(--border); padding: 2.5rem 2rem; }
 .footer-inner {
@@ -554,6 +592,81 @@ footer { border-top: 1px solid var(--border); padding: 2.5rem 2rem; }
     <div class="stat"><div class="stat-val">inf</div><div class="stat-label">Parallel sessions</div></div>
     <div class="stat"><div class="stat-val">PWA</div><div class="stat-label">iOS + Android</div></div>
     <div class="stat"><div class="stat-val">SSE</div><div class="stat-label">Real-time</div></div>
+  </div>
+</section>
+
+<hr class="divider">
+
+<!-- DIFF -->
+<section class="diff-section reveal">
+  <div class="diff-container">
+    <div class="section-label">How it's different</div>
+    <div class="section-title">amux is not another Claude wrapper</div>
+    <div class="section-desc">Claude Code runs one agent. amux runs dozens -- with monitoring, coordination, and mobile access that don't exist anywhere else.</div>
+    <table class="diff-table">
+      <thead>
+        <tr>
+          <th></th>
+          <th class="col-amux">amux</th>
+          <th>Claude Code</th>
+          <th>Other wrappers</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td class="row-label">Parallel agents</td>
+          <td class="has">Unlimited, isolated tmux panes</td>
+          <td class="no">Single session per terminal</td>
+          <td class="partial">Limited or manual</td>
+        </tr>
+        <tr>
+          <td class="row-label">Mobile management</td>
+          <td class="has">PWA with offline queue + Background Sync</td>
+          <td class="no">Terminal only</td>
+          <td class="no">Not available</td>
+        </tr>
+        <tr>
+          <td class="row-label">Self-healing</td>
+          <td class="has">Watchdog auto-compacts, restarts, replays</td>
+          <td class="no">Crashes on context overflow</td>
+          <td class="partial">Basic restart only</td>
+        </tr>
+        <tr>
+          <td class="row-label">Agent coordination</td>
+          <td class="has">REST API + atomic task claiming</td>
+          <td class="no">No inter-agent communication</td>
+          <td class="partial">Shared filesystem at best</td>
+        </tr>
+        <tr>
+          <td class="row-label">Live monitoring</td>
+          <td class="has">SSE dashboard with status, spend, peek</td>
+          <td class="no">Must attach to terminal</td>
+          <td class="partial">Logs only</td>
+        </tr>
+        <tr>
+          <td class="row-label">Kanban + scheduling</td>
+          <td class="has">SQLite board, iCal sync, built-in cron</td>
+          <td class="no">None</td>
+          <td class="no">None</td>
+        </tr>
+        <tr>
+          <td class="row-label">Setup</td>
+          <td class="has">1 file, 0 deps, git clone + install.sh</td>
+          <td class="has">pip install</td>
+          <td class="partial">Docker, config files, API keys</td>
+        </tr>
+      </tbody>
+    </table>
+
+    <div class="diff-callout">
+      <div class="diff-callout-title">Built for overnight runs and phone-first workflows</div>
+      <div class="diff-callout-body">
+        Most people discover amux because Claude Code crashes at 3am or they want to check on agents from their phone.
+        The self-healing watchdog handles context compaction, thinking-block corruption, and stuck tool prompts automatically.
+        The mobile PWA queues commands offline and replays them on reconnect -- you can manage a fleet of agents from the couch, the train, or anywhere with a browser.
+        <strong>amux doesn't replace Claude Code. It makes it possible to run it at scale, unattended.</strong>
+      </div>
+    </div>
   </div>
 </section>
 
