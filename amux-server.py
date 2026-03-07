@@ -16155,6 +16155,7 @@ let _notesAllNotes = [];
 let _quill = null;
 let _notesSidebarOpen = localStorage.getItem('amux_notes_sidebar') !== 'closed';
 let _notesOpenAbort = null; // AbortController for in-flight note fetches
+let _notesLoadingContent = false; // suppress text-change saves while loading note content
 let _notesMode = 'edit'; // 'edit' | 'preview'
 
 function _notesPreviewBindCheckboxes(container) {
@@ -16248,7 +16249,7 @@ function _notesInitQuill() {
     try { new QuillMarkdown(_quill); } catch(e) { console.warn('quilljs-markdown init failed:', e); }
   }
   _quill.on('text-change', (delta, old, source) => {
-    if (source === 'api') return;
+    if (source === 'api' || _notesLoadingContent) return;
     // Expand @today → full date + time
     const text = _quill.getText();
     const atIdx = text.indexOf('@today');
@@ -16394,11 +16395,13 @@ async function _notesOpen(path) {
   const quillRoot = _quill.root;
   quillRoot.style.opacity = '0';
   const isHtml = /<[a-z][\s\S]*>/i.test(data.content);
+  _notesLoadingContent = true;
   if (isHtml) {
     _quill.root.innerHTML = data.content;
   } else {
     _quill.setText(data.content || '');
   }
+  setTimeout(() => { _notesLoadingContent = false; }, 0);
   document.getElementById('notes-empty-state').style.display = 'none';
   document.getElementById('notes-mode-tabs').style.display = 'flex';
   // Always show edit mode when switching notes
