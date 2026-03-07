@@ -8351,6 +8351,13 @@ function render() {
       else if (s.status === 'waiting') buckets.waiting.push(s);
       else                             buckets.idle.push(s);
     });
+    // Sort within each bucket: pinned first, then most recently active
+    for (const key of Object.keys(buckets)) {
+      buckets[key].sort((a, b) => {
+        if (a.pinned !== b.pinned) return a.pinned ? -1 : 1;
+        return (b.last_activity || 0) - (a.last_activity || 0);
+      });
+    }
     STATUS_GROUPS.forEach(g => {
       if (_tagGroupCollapsed[g.key] === undefined) _tagGroupCollapsed[g.key] = !g.defaultOpen;
     });
@@ -12409,8 +12416,14 @@ let _sortable = null;
 let _tileJustDragged = false; // keep for toggle() guard
 
 // Natural sort: pinned first, then most recently active
+// Sort that matches the server's list_sessions() order:
+// pinned > running > status priority (active/waiting=0, idle/none=1) > last_activity desc
+const _STATUS_PRI = {active: 0, waiting: 0, idle: 1, '': 1};
 function _naturalSortSessions(a, b) {
   if (a.pinned !== b.pinned) return a.pinned ? -1 : 1;
+  if (a.running !== b.running) return a.running ? -1 : 1;
+  const ap = _STATUS_PRI[a.status] ?? 1, bp = _STATUS_PRI[b.status] ?? 1;
+  if (ap !== bp) return ap - bp;
   return (b.last_activity || 0) - (a.last_activity || 0);
 }
 
