@@ -18183,7 +18183,7 @@ function _crmFuInfo(fuDate) {
   return { text: (overdue ? '⚠ ' : '→ ') + fuDate, overdue };
 }
 
-async let _crmSidebarOpen = localStorage.getItem('amux_crm_sidebar') !== 'closed';
+let _crmSidebarOpen = localStorage.getItem('amux_crm_sidebar') !== 'closed';
 function _crmToggleSidebar() {
   _crmSidebarOpen = !_crmSidebarOpen;
   localStorage.setItem('amux_crm_sidebar', _crmSidebarOpen ? 'open' : 'closed');
@@ -18194,7 +18194,7 @@ function _crmApplySidebarState() {
   if (view) view.classList.toggle('sidebar-collapsed', !_crmSidebarOpen);
 }
 
-function _crmLoad() {
+async function _crmLoad() {
   const r = await fetch(API + '/api/crm/contacts');
   _crmContacts = await r.json();
   _crmRenderList(_crmContacts);
