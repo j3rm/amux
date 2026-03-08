@@ -3079,7 +3079,7 @@ def list_sessions() -> list:
             "task_time": task_time,
             "task_name": _doing_tasks.get(name) or pane_title,
             "tokens": tokens,
-            "worktree": cfg.get("CC_WORKTREE", "") == "1",
+            "branch": cfg.get("CC_BRANCH", ""),
         })
     status_order = {"active": 0, "waiting": 0, "idle": 1, "": 1}
     sessions.sort(key=lambda s: (not s["pinned"], not s["running"], status_order.get(s["status"], 1), -s["last_activity"]))
@@ -3388,50 +3388,42 @@ def _session_work_dir(name: str) -> str:
     return ""
 
 
-def _auto_create_worktree(name: str, work_dir: str, env_file: "Path") -> str | None:
-    """Auto-create a git worktree sibling for a session if work_dir is a git repo root.
-    Returns the worktree path on success, None if not applicable or failed.
-    Skips silently if: not a git repo, path already exists, branch already exists."""
+def _auto_create_branch(name: str, work_dir: str, env_file: "Path") -> bool:
+    """Auto-create a git branch for a session if work_dir is a git repo.
+    Returns True if a branch was created, False otherwise.
+    Sessions share the same working directory but get their own branch."""
     try:
-        # Must be a git repo
         r = subprocess.run(
             ["git", "-C", work_dir, "rev-parse", "--show-toplevel"],
             capture_output=True, text=True, timeout=3,
         )
         if r.returncode != 0:
-            return None
-        repo_root = r.stdout.strip()
-        # Don't create if work_dir is already a worktree (not the main checkout)
-        wl = subprocess.run(
-            ["git", "-C", repo_root, "worktree", "list", "--porcelain"],
+            return False
+        branch = "session/" + re.sub(r"[^a-zA-Z0-9\-]", "-", name).strip("-")
+        # Check if branch already exists
+        rb = subprocess.run(
+            ["git", "-C", work_dir, "show-ref", "--verify", f"refs/heads/{branch}"],
             capture_output=True, text=True, timeout=3,
         )
-        wt_paths = [l.replace("worktree ", "") for l in wl.stdout.splitlines() if l.startswith("worktree ")]
-        if work_dir in wt_paths[1:]:  # [0] is always main checkout
-            return None
-        # Worktree path: sibling of repo root using session name
-        wt_path = str(Path(repo_root).parent / name)
-        if Path(wt_path).exists():
-            return None  # don't clobber existing dir
-        # Branch name: session/<name>
-        branch = "session/" + re.sub(r"[^a-zA-Z0-9\-]", "-", name).strip("-")
+        if rb.returncode == 0:
+            slog(f"[branch] {branch} already exists for {name}")
+            return True  # branch exists, session can use it
+        # Create branch from current HEAD
         r2 = subprocess.run(
-            ["git", "-C", repo_root, "worktree", "add", "-b", branch, wt_path],
-            capture_output=True, text=True, timeout=15,
+            ["git", "-C", work_dir, "branch", branch],
+            capture_output=True, text=True, timeout=5,
         )
         if r2.returncode != 0:
-            slog(f"[worktree] auto-create failed for {name}: {r2.stderr.strip()}")
-            return None
-        # Persist new dir + worktree flag
+            slog(f"[branch] create failed for {name}: {r2.stderr.strip()}")
+            return False
         cfg = parse_env_file(env_file)
-        cfg["CC_DIR"] = wt_path
-        cfg["CC_WORKTREE"] = "1"
+        cfg["CC_BRANCH"] = branch
         _write_env(env_file, cfg)
-        slog(f"[worktree] auto-created {wt_path} on branch {branch}")
-        return wt_path
+        slog(f"[branch] created {branch} for session {name}")
+        return True
     except Exception as e:
-        slog(f"[worktree] auto-create error for {name}: {e}")
-        return None
+        slog(f"[branch] auto-create error for {name}: {e}")
+        return False
 
 
 def _git_info(work_dir: str, detail: bool = False) -> dict:
@@ -3694,12 +3686,10 @@ def start_session(name: str, extra_flags: str = "", _skip_conv_id: bool = False)
         return True, "already running"
     cfg = parse_env_file(f)
     work_dir = str(Path(cfg.get("CC_DIR", str(Path.home()))).expanduser().resolve())
-    # Auto-create git worktree if dir is a git repo and none exists yet for this session
-    if cfg.get("CC_WORKTREE", "") != "1" and work_dir != str(Path.home()):
-        wt = _auto_create_worktree(name, work_dir, f)
-        if wt:
-            work_dir = wt
-            cfg = parse_env_file(f)  # reload after update
+    # Auto-create git branch if dir is a git repo and none exists yet for this session
+    if not cfg.get("CC_BRANCH") and work_dir != str(Path.home()):
+        _auto_create_branch(name, work_dir, f)
+        cfg = parse_env_file(f)  # reload after update
     flags = cfg.get("CC_FLAGS", "")
     # Claude Code v2.1.69+ rejects --dangerously-skip-permissions when running as root.
     # Strip it silently — root already has full privileges.
@@ -7614,6 +7604,7 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
           style="display:none" onchange="handlePeekFileInput(event)">
         <label for="peek-file-input" class="peek-attach-btn" title="Attach file">&#128206;</label>
         <button id="peek-mic-btn" class="peek-attach-btn" title="Dictate" onclick="toggleMic()" style="display:none;">&#127908;</button>
+        <button class="btn" id="peek-push-btn" onclick="gitPush(peekSession,event)" title="Commit, merge to main, push" style="font-size:0.75rem;">&#x2B06; Push</button>
         <button class="btn primary" onclick="sendPeekCmd()">Send</button>
       </div>
       <!-- Drag-over hint (shown by CSS when drag-over class is on peek-overlay) -->
@@ -8946,6 +8937,7 @@ function render() {
             autocapitalize="sentences" spellcheck="true" enterkeyhint="enter"
             oninput="autoGrow(this);cardSlashAcUpdate('${s.name}');cmdHistoryReset()"
             onkeydown="cardSlashAcKeydown('${s.name}',event)"></textarea>
+          <button class="btn" onclick="gitPush('${s.name}',event)" title="Commit, merge to main, push" style="font-size:0.75rem;">&#x2B06; Push</button>
           <button class="btn primary" onclick="sendFromInput('${s.name}')">Send</button>
         </div>` : ''}
       </div>
@@ -9854,6 +9846,26 @@ async function doKeys(name, keys) {
 function autoGrow(el) {
   el.style.height = 'auto';
   el.style.height = Math.min(el.scrollHeight, parseFloat(getComputedStyle(el).maxHeight) || 999) + 'px';
+}
+async function gitPush(name, e) {
+  if (!name) return;
+  const ok = await showConfirm(`Push ${name} to main?\n\nThis will commit all changes, merge into main, and push.`, 'Push', false);
+  if (!ok) return;
+  const btn = e?.target;
+  if (btn) { btn.disabled = true; btn.textContent = 'Pushing...'; }
+  try {
+    const r = await fetch(`/api/sessions/${encodeURIComponent(name)}/git-push`, {method:'POST'});
+    const d = await r.json();
+    if (d.ok) {
+      showToast(`${name}: ${d.steps.join(' \u2192 ')}`);
+    } else {
+      showToast(`Push failed: ${(d.errors||[]).join(', ')}`);
+    }
+  } catch(e) {
+    showToast(`Push error: ${e.message}`);
+  } finally {
+    if (btn) { btn.disabled = false; btn.textContent = '\u2B06 Push'; }
+  }
 }
 async function sendFromInput(name) {
   const inp = document.getElementById('input-' + name);
@@ -18159,6 +18171,8 @@ class ResilientHTTPSServer(ThreadingHTTPServer):
     the server's accept loop.
     """
     daemon_threads = True
+    allow_reuse_address = True
+    allow_reuse_port = True
     ssl_ctx = None  # Set after creation; None = plain HTTP
 
     def process_request_thread(self, request, client_address):
@@ -20580,7 +20594,7 @@ p{{color:#888;margin:12px 0 28px;font-size:0.9rem;line-height:1.5}}
                 cfg_g = parse_env_file(env_file)
                 info = _git_info(wd, detail=detail)
                 if detail:
-                    info["worktree"] = cfg_g.get("CC_WORKTREE", "") == "1"
+                    info["session_branch"] = cfg_g.get("CC_BRANCH", "")
                 return self._json(info)
             if action == "memory":
                 mem_file = _session_mem_file(name)
@@ -20637,27 +20651,9 @@ p{{color:#888;margin:12px 0 28px;font-size:0.9rem;line-height:1.5}}
                     return self._json({"error": "branch name required"}, 400)
                 if not re.match(r'^[a-zA-Z0-9_./@\-]+$', branch):
                     return self._json({"error": "invalid branch name"}, 400)
+                # Legacy: worktree param is accepted but we just create a branch now
                 if use_worktree and create:
-                    # Use client-supplied path (sibling of project dir) or fall back to ~/.amux/worktrees/<name>
-                    client_path = body.get("worktree_path", "").strip()
-                    wt_dir = client_path if client_path else str(CC_HOME / "worktrees" / name)
-                    Path(wt_dir).parent.mkdir(parents=True, exist_ok=True)
-                    try:
-                        r = subprocess.run(
-                            ["git", "-C", wd, "worktree", "add", "-b", branch, wt_dir],
-                            capture_output=True, text=True, timeout=15,
-                        )
-                        if r.returncode != 0:
-                            return self._json({"ok": False, "error": (r.stderr or r.stdout).strip()}, 400)
-                        # Update session's CC_DIR to the worktree path
-                        env_file = CC_SESSIONS / f"{name}.env"
-                        cfg = parse_env_file(env_file)
-                        cfg["CC_DIR"] = wt_dir
-                        cfg["CC_WORKTREE"] = "1"
-                        _write_env(env_file, cfg)
-                        return self._json({"ok": True, "branch": branch, "worktree": wt_dir})
-                    except Exception as ex:
-                        return self._json({"ok": False, "error": str(ex)}, 500)
+                    create = True  # fall through to branch creation below
                 cmd = ["git", "-C", wd, "checkout"]
                 if create:
                     cmd.append("-b")
@@ -20669,6 +20665,78 @@ p{{color:#888;margin:12px 0 28px;font-size:0.9rem;line-height:1.5}}
                     return self._json({"ok": False, "error": (r.stderr or r.stdout).strip()}, 400)
                 except Exception as ex:
                     return self._json({"ok": False, "error": str(ex)}, 500)
+            if action == "git-push":
+                # Commit all changes, merge session branch into main, push
+                wd = _session_work_dir(name)
+                if not wd:
+                    return self._json({"error": "session has no directory"}, 400)
+                cfg_gp = parse_env_file(env_file)
+                branch = cfg_gp.get("CC_BRANCH", "")
+                if not branch:
+                    # Try to detect current branch
+                    rb = subprocess.run(["git", "-C", wd, "branch", "--show-current"],
+                                        capture_output=True, text=True, timeout=3)
+                    branch = rb.stdout.strip() if rb.returncode == 0 else ""
+                if not branch or branch == "main":
+                    return self._json({"error": "no session branch to merge (already on main?)"}, 400)
+                steps = []
+                errors = []
+                try:
+                    # 1. Stage all changes
+                    r = subprocess.run(["git", "-C", wd, "add", "-A"],
+                                       capture_output=True, text=True, timeout=10)
+                    # 2. Check if there's anything to commit
+                    r = subprocess.run(["git", "-C", wd, "diff", "--cached", "--quiet"],
+                                       capture_output=True, text=True, timeout=5)
+                    if r.returncode != 0:
+                        # There are staged changes — commit them
+                        r = subprocess.run(["git", "-C", wd, "commit", "-m",
+                                            f"session {name}: auto-commit before merge"],
+                                           capture_output=True, text=True, timeout=15)
+                        if r.returncode == 0:
+                            steps.append("committed")
+                        else:
+                            errors.append(f"commit failed: {r.stderr.strip()}")
+                    else:
+                        steps.append("nothing to commit")
+                    # 3. Checkout main
+                    r = subprocess.run(["git", "-C", wd, "checkout", "main"],
+                                       capture_output=True, text=True, timeout=10)
+                    if r.returncode != 0:
+                        errors.append(f"checkout main failed: {r.stderr.strip()}")
+                        # Try to go back
+                        subprocess.run(["git", "-C", wd, "checkout", branch],
+                                       capture_output=True, text=True, timeout=5)
+                        return self._json({"ok": False, "steps": steps, "errors": errors}, 400)
+                    steps.append("checked out main")
+                    # 4. Merge session branch
+                    r = subprocess.run(["git", "-C", wd, "merge", branch],
+                                       capture_output=True, text=True, timeout=15)
+                    if r.returncode != 0:
+                        errors.append(f"merge failed: {r.stderr.strip()}")
+                        # Abort merge and go back
+                        subprocess.run(["git", "-C", wd, "merge", "--abort"],
+                                       capture_output=True, text=True, timeout=5)
+                        subprocess.run(["git", "-C", wd, "checkout", branch],
+                                       capture_output=True, text=True, timeout=5)
+                        return self._json({"ok": False, "steps": steps, "errors": errors}, 400)
+                    steps.append(f"merged {branch}")
+                    # 5. Push
+                    r = subprocess.run(["git", "-C", wd, "push", "origin", "main"],
+                                       capture_output=True, text=True, timeout=30)
+                    if r.returncode == 0:
+                        steps.append("pushed to origin/main")
+                    else:
+                        errors.append(f"push failed: {r.stderr.strip()}")
+                    # 6. Go back to session branch (stays alive for future work)
+                    subprocess.run(["git", "-C", wd, "checkout", branch],
+                                   capture_output=True, text=True, timeout=5)
+                    steps.append(f"back on {branch}")
+                except Exception as ex:
+                    errors.append(str(ex))
+                ok_result = len(errors) == 0
+                return self._json({"ok": ok_result, "steps": steps, "errors": errors},
+                                  200 if ok_result else 400)
             if action == "start":
                 ok, msg = start_session(name)
                 meta = _load_meta(name)
@@ -20790,34 +20858,19 @@ p{{color:#888;margin:12px 0 28px;font-size:0.9rem;line-height:1.5}}
             if action == "delete":
                 if is_running(name):
                     stop_session(name)
-                # Remove worktree if one was created for this session
+                # Clean up session branch if one was created
                 cfg_del = parse_env_file(env_file) if env_file.exists() else {}
-                if cfg_del.get("CC_WORKTREE") == "1":
-                    wt_path = cfg_del.get("CC_DIR", "")
-                    if wt_path:
+                branch = cfg_del.get("CC_BRANCH", "")
+                if branch:
+                    work = cfg_del.get("CC_DIR", "")
+                    if work:
                         try:
-                            # Prune the worktree entry from git
-                            repo_dir = subprocess.run(
-                                ["git", "-C", wt_path, "rev-parse", "--git-dir"],
-                                capture_output=True, text=True, timeout=5,
-                            ).stdout.strip()
-                            # Find the main worktree (parent repo)
-                            main_wt = subprocess.run(
-                                ["git", "worktree", "list", "--porcelain"],
-                                capture_output=True, text=True, timeout=5,
-                                cwd=wt_path,
+                            subprocess.run(
+                                ["git", "-C", work, "branch", "-d", branch],
+                                capture_output=True, timeout=5,
                             )
-                            lines = main_wt.stdout.splitlines()
-                            main_path = lines[0].replace("worktree ", "") if lines else ""
-                            if main_path:
-                                subprocess.run(
-                                    ["git", "-C", main_path, "worktree", "remove", "--force", wt_path],
-                                    capture_output=True, timeout=10,
-                                )
                         except Exception:
-                            import shutil as _sh
-                            try: _sh.rmtree(wt_path, ignore_errors=True)
-                            except Exception: pass
+                            pass
                 env_file.unlink(missing_ok=True)
                 (CC_MEMORY / f"{name}.md").unlink(missing_ok=True)
                 _meta_path(name).unlink(missing_ok=True)
@@ -21194,10 +21247,29 @@ def _ensure_tls(lan_ip: str) -> tuple:
 
 # ── Main ──
 
+def _kill_stale_port(port: int):
+    """Kill any stale process holding our port so we can bind cleanly on restart."""
+    try:
+        r = subprocess.run(["lsof", "-ti", f":{port}"], capture_output=True, text=True, timeout=5)
+        if r.returncode == 0:
+            my_pid = os.getpid()
+            for line in r.stdout.strip().splitlines():
+                pid = int(line.strip())
+                if pid != my_pid:
+                    slog(f"[startup] killing stale process {pid} on port {port}")
+                    os.kill(pid, 9)
+            time.sleep(1)
+    except Exception:
+        pass
+
+
 def main():
     port = int(sys.argv[1]) if len(sys.argv) > 1 else 8822
     lan_ip = get_lan_ip()
     no_tls = "--no-tls" in sys.argv
+
+    # Kill any stale server process holding our port (e.g. zombie from Amux.app)
+    _kill_stale_port(port)
 
     # Initialize SQLite and migrate flat-file data on first run
     _init_db()
