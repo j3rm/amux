@@ -1794,9 +1794,43 @@ for i in items: print(i.get('id',''),i.get('status',''),i.get('title',''))" ;;
     sub="$1"; shift 2>/dev/null || true
     case "$sub" in
       add)
-        name="$*"
-        curl -sk -X POST -H 'Content-Type: application/json' \
-          -d "{\"name\":\"$name\"}" "$AMUX_URL/api/crm/contacts" ;;
+        # Usage: amux crm add "Name" [company=X] [email=Y] [role=Z] [phone=P] [linkedin=L]
+        json=$(python3 -c "
+import sys,json
+args=sys.argv[1:]; fields={}; name_parts=[]
+for a in args:
+    if '=' in a: k,v=a.split('=',1); fields[k]=v
+    else: name_parts.append(a)
+if name_parts: fields['name']=' '.join(name_parts)
+print(json.dumps(fields))" "$@")
+        curl -sk -X POST -H 'Content-Type: application/json' -d "$json" "$AMUX_URL/api/crm/contacts" | python3 -c "
+import json,sys; d=json.load(sys.stdin)
+print(d.get('id','error'),'-',d.get('error','created'))" ;;
+      update)
+        # Usage: amux crm update PPL-1 company=X email=Y role=Z ...
+        cid="$1"; shift 2>/dev/null || true
+        json=$(python3 -c "
+import sys,json; fields={}
+for a in sys.argv[1:]:
+    if '=' in a: k,v=a.split('=',1); fields[k]=v
+print(json.dumps(fields))" "$@")
+        curl -sk -X PATCH -H 'Content-Type: application/json' -d "$json" "$AMUX_URL/api/crm/contacts/$cid" | python3 -c "
+import json,sys; d=json.load(sys.stdin)
+print('updated' if d.get('ok') else d.get('error','failed'))" ;;
+      get)
+        cid="$1"
+        curl -sk "$AMUX_URL/api/crm/contacts/$cid" | python3 -c "
+import json,sys
+c=json.load(sys.stdin)
+if 'error' in c: print('Error:',c['error']); sys.exit(1)
+print(c.get('id'),c.get('name'))
+for f in ('company','role','email','phone','linkedin','twitter'):
+    v=c.get(f,'')
+    if v: print('  '+f+':',v)
+tags=c.get('tags',[])
+if tags: print('  tags:',', '.join(tags))
+ixs=c.get('interactions',[])
+if ixs: print('  last interaction:',ixs[0].get('date'),'-',ixs[0].get('notes','')[:60])" ;;
       log)
         cid="$1"; shift 2>/dev/null || true; notes="$*"
         curl -sk -X POST -H 'Content-Type: application/json' \
@@ -1824,7 +1858,9 @@ for s in json.load(sys.stdin): print(s['name'], '(running)' if s.get('running') 
     echo "amux board <done|doing|todo> <ITEM_ID>  — update board item status"
     echo "amux board add <title>                  — create a new board item"
     echo "amux board list                         — list board items"
-    echo "amux crm add <name>                     — add a contact"
+    echo "amux crm add <name> [field=val ...]    — add a contact (fields: company email role phone linkedin)"
+    echo "amux crm update <PPL-id> [field=val ..]  — update contact fields"
+    echo "amux crm get <PPL-id>                   — show contact details"
     echo "amux crm log <PPL-id> <notes>           — log an interaction"
     echo "amux crm followups                      — show upcoming follow-ups"
     echo "amux crm list                           — list all contacts"
