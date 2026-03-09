@@ -26,11 +26,11 @@
   <header class="site-header">
     <a class="logo" href="/">amux</a>
     <nav>
-      <a href="/compare/">Compare</a>
-      <a href="/use-cases/">Use Cases</a>
-      <a href="/guides/">Guides</a>
-      <a href="/demos/">Demos</a>
-      <a href="https://github.com/mixpeek/amux" target="_blank" rel="noopener" class="nav-cta">GitHub</a>
+      <a href="/guides/" class="hide-mobile">guides</a>
+      <a href="/compare/" class="hide-mobile">compare</a>
+      <a href="/demos/" class="hide-mobile">demos</a>
+      <a href="/blog/" class="hide-mobile">blog</a>
+      <a href="https://github.com/mixpeek/amux" target="_blank" rel="noopener" class="nav-cta">sign up</a>
     </nav>
   </header>
   <main>
@@ -53,13 +53,47 @@ amux serve  # → https://localhost:8822</code></pre><a class="btn btn-primary" 
   </main>
   <footer>
     <div class="footer-inner">
-      <a href="/">Home</a><span class="sep"> · </span>
-      <a href="/compare/">Compare</a><span class="sep"> · </span>
-      <a href="/use-cases/">Use Cases</a><span class="sep"> · </span>
-      <a href="/guides/">Guides</a><span class="sep"> · </span>
-      <a href="/demos/">Demos</a><span class="sep"> · </span>
-      <a href="https://github.com/mixpeek/amux" target="_blank" rel="noopener">GitHub</a><span class="sep"> · </span>
-      <span>MIT License</span>
+      <div class="footer-top">
+        <div class="footer-brand-col">
+          <a href="/" style="font-size:0.92rem;font-weight:700;color:var(--text);text-decoration:none;">amux</a>
+          <p>Open-source agent multiplexer for Claude Code.</p>
+        </div>
+        <div class="footer-col">
+          <div class="footer-col-label">Resources</div>
+          <ul>
+            <li><a href="/guides/">Guides</a></li>
+            <li><a href="/blog/">Blog</a></li>
+            <li><a href="/demos/">Demos</a></li>
+            <li><a href="/glossary/">Glossary</a></li>
+            <li><a href="/faq/">FAQ</a></li>
+          </ul>
+        </div>
+        <div class="footer-col">
+          <div class="footer-col-label">Compare</div>
+          <ul>
+            <li><a href="/compare/amux-vs-cursor/">vs Cursor</a></li>
+            <li><a href="/compare/amux-vs-devin/">vs Devin</a></li>
+            <li><a href="/compare/amux-vs-cline/">vs Cline</a></li>
+            <li><a href="/compare/">All comparisons</a></li>
+          </ul>
+        </div>
+        <div class="footer-col">
+          <div class="footer-col-label">More</div>
+          <ul>
+            <li><a href="/use-cases/">Use Cases</a></li>
+            <li><a href="/solutions/">Solutions</a></li>
+            <li><a href="/for/">For your stack</a></li>
+            <li><a href="/changelog/">Changelog</a></li>
+          </ul>
+        </div>
+      </div>
+      <div class="footer-bottom">
+        <span>MIT License. Built by <a href="https://mixpeek.com">Mixpeek</a></span>
+        <div class="footer-bottom-links">
+          <a href="https://github.com/mixpeek/amux" target="_blank" rel="noopener">GitHub</a>
+          <a href="https://github.com/mixpeek/amux/issues">Issues</a>
+        </div>
+      </div>
     </div>
   </footer>
 </body>

@@ -50,121 +50,96 @@ body {
   color: var(--text);
   font-family: var(--mono);
   line-height: 1.6;
-  overflow-x: hidden;
   -webkit-font-smoothing: antialiased;
 }
 
 ::selection { background: var(--green); color: var(--bg); }
 
-body::before {
-  content: '';
-  position: fixed;
-  inset: 0;
-  background: repeating-linear-gradient(0deg, transparent, transparent 2px, rgba(255,255,255,0.007) 2px, rgba(255,255,255,0.007) 4px);
-  pointer-events: none;
-  z-index: 9999;
-}
-
 /* ── NAV ── */
-nav {
-  position: fixed; top: 0; left: 0; right: 0; z-index: 100;
-  padding: 0 2rem; height: 56px;
+.site-header {
+  position: sticky; top: 0; z-index: 100;
   display: flex; align-items: center; justify-content: space-between;
-  background: rgba(10,10,12,0.88);
+  padding: 0 2rem; height: 56px;
+  background: rgba(10,10,12,0.92);
   backdrop-filter: blur(20px);
   border-bottom: 1px solid var(--border);
 }
-.nav-logo {
-  font-size: 1rem; font-weight: 700; color: var(--green);
+.site-header a.logo {
+  font-size: 0.92rem; font-weight: 700; color: var(--text);
   text-decoration: none; letter-spacing: -0.02em;
 }
-.nav-logo span { color: var(--muted); font-weight: 400; }
-.nav-links { display: flex; align-items: center; gap: 2rem; }
-.nav-links a {
-  font-size: 0.75rem; color: var(--dim); text-decoration: none;
-  letter-spacing: 0.04em; transition: color 0.2s;
+.site-header nav {
+  display: flex; align-items: center; gap: 1.75rem;
 }
-.nav-links a:hover { color: var(--text); }
-.nav-cta {
-  font-size: 0.75rem !important;
-  background: var(--green) !important; color: var(--bg) !important;
-  padding: 0.4rem 1rem !important; border-radius: 4px;
-  font-weight: 700 !important; transition: opacity 0.2s !important;
-  letter-spacing: 0.02em !important;
+.site-header nav a {
+  font-size: 0.72rem; color: var(--dim); text-decoration: none;
+  letter-spacing: 0.04em; transition: color 0.15s;
 }
-.nav-cta:hover { opacity: 0.85 !important; }
-@media (max-width: 768px) { .nav-links { display: none; } }
+.site-header nav a:hover { color: var(--text); }
+.site-header nav a.nav-cta {
+  background: var(--text); color: var(--bg);
+  padding: 0.32rem 0.85rem; border-radius: 4px;
+  font-weight: 700; transition: opacity 0.15s;
+}
+.site-header nav a.nav-cta:hover { opacity: 0.85; color: var(--bg); }
+@media (max-width: 768px) {
+  .site-header { padding: 0 1rem; }
+  .site-header nav { gap: 1rem; }
+  .site-header nav a.hide-mobile { display: none; }
+}
 
 /* ── HERO ── */
 .hero {
-  min-height: 100vh;
   display: flex; flex-direction: column;
-  justify-content: center; align-items: center; text-align: center;
-  padding: 8rem 2rem 4rem;
-  position: relative;
-}
-.hero::before {
-  content: '';
-  position: absolute; top: 0; left: 50%;
-  transform: translateX(-50%);
-  width: 700px; height: 500px;
-  background: radial-gradient(ellipse at center, rgba(74,222,128,0.08) 0%, transparent 70%);
-  pointer-events: none;
-}
-.hero-badge {
-  font-size: 0.68rem; color: var(--green);
-  background: var(--green-glow);
-  border: 1px solid rgba(74,222,128,0.25);
-  padding: 0.3rem 0.85rem; border-radius: 100px;
-  letter-spacing: 0.08em; text-transform: uppercase;
-  margin-bottom: 2rem; display: inline-block;
-  animation: fadeUp 0.5s ease-out;
+  align-items: center; text-align: center;
+  padding: 8rem 2rem 5rem;
+  max-width: 720px; margin: 0 auto;
 }
 .hero h1 {
-  font-size: clamp(2.4rem, 6vw, 4.8rem);
-  font-weight: 700; line-height: 1.05;
-  letter-spacing: -0.04em; max-width: 820px;
-  animation: fadeUp 0.5s ease-out 0.08s both;
+  font-size: clamp(2rem, 5vw, 3.2rem);
+  font-weight: 700; line-height: 1.1;
+  letter-spacing: -0.04em;
+  margin-bottom: 1.5rem;
 }
-.hero h1 .accent { color: var(--green); }
 .hero-sub {
-  font-size: 0.95rem; color: var(--dim);
-  max-width: 480px; margin: 1.5rem auto 0;
-  line-height: 1.75; font-weight: 400;
-  animation: fadeUp 0.5s ease-out 0.16s both;
+  font-size: 0.92rem; color: var(--dim);
+  max-width: 520px; line-height: 1.75;
+  margin-bottom: 1rem;
+}
+.hero-features {
+  list-style: none; display: flex; flex-direction: column;
+  gap: 0.5rem; margin: 1.5rem 0 2.5rem;
+  font-size: 0.82rem; color: var(--dim);
+}
+.hero-features li::before {
+  content: '\2713'; color: var(--green);
+  margin-right: 0.6rem; font-weight: 700;
 }
 .hero-ctas {
-  display: flex; gap: 0.6rem; margin-top: 2rem; flex-wrap: wrap; justify-content: center;
-  animation: fadeUp 0.5s ease-out 0.2s both;
+  display: flex; gap: 0.75rem; flex-wrap: wrap; justify-content: center;
 }
-.hero-btn {
-  font-size: 0.78rem; font-weight: 600; padding: 0.5rem 1.2rem;
+.hero-ctas a, .hero-ctas button {
+  font-size: 0.78rem; font-weight: 600; padding: 0.55rem 1.4rem;
   border-radius: 6px; text-decoration: none; font-family: var(--mono);
-  letter-spacing: 0.02em; transition: opacity 0.2s;
+  cursor: pointer; transition: opacity 0.15s;
   border: 1px solid var(--border); color: var(--dim); background: transparent;
-  cursor: pointer; display: inline-flex; align-items: center; gap: 0.4rem;
+  display: inline-flex; align-items: center; gap: 0.4rem;
 }
-.hero-btn:hover { color: var(--text); border-color: var(--border-bright); }
-.hero-btn-primary {
-  background: var(--green); color: var(--bg);
-  border-color: var(--green);
+.hero-ctas a:hover, .hero-ctas button:hover { color: var(--text); border-color: var(--border-bright); }
+.hero-ctas .primary {
+  background: var(--text); color: var(--bg); border-color: var(--text); font-weight: 700;
 }
-.hero-btn-primary:hover { opacity: 0.85; color: var(--bg); }
-@keyframes fadeUp {
-  from { opacity: 0; transform: translateY(18px); }
-  to   { opacity: 1; transform: translateY(0); }
-}
+.hero-ctas .primary:hover { opacity: 0.85; color: var(--bg); }
 
 /* ── TERMINAL ── */
-.install-block {
-  margin-top: 2.5rem;
-  animation: fadeUp 0.5s ease-out 0.24s both;
+.terminal-section {
+  max-width: 600px; margin: 0 auto;
+  padding: 0 2rem 6rem;
 }
 .terminal-window {
   background: var(--surface); border: 1px solid var(--border);
-  border-radius: 8px; overflow: hidden; text-align: left;
-  min-width: 540px; max-width: 640px;
-  box-shadow: 0 24px 64px rgba(0,0,0,0.6);
+  border-radius: 8px; overflow: hidden;
+  box-shadow: 0 16px 48px rgba(0,0,0,0.4);
 }
 .terminal-bar {
   display: flex; align-items: center; gap: 6px;
@@ -179,57 +154,72 @@ nav {
   font-size: 0.68rem; color: var(--muted); margin-left: 8px;
 }
 .terminal-body {
-  padding: 1.2rem 1.4rem; font-size: 0.8rem; line-height: 1.85;
+  padding: 1.2rem 1.4rem; font-size: 0.78rem; line-height: 1.9;
 }
 .terminal-body .prompt { color: var(--green); }
 .terminal-body .cmd { color: var(--text); }
 .terminal-body .comment { color: var(--muted); }
 .terminal-body .flag { color: var(--amber); }
 .terminal-body .url { color: var(--blue); }
-@media (max-width: 768px) { .terminal-window { min-width: auto; } }
-
-/* ── STATS ── */
-.stats-row {
-  display: flex; gap: 3rem; justify-content: center;
-  margin-top: 3rem; flex-wrap: wrap;
-  animation: fadeUp 0.5s ease-out 0.32s both;
-}
-.stat { text-align: center; }
-.stat-val { font-size: 1.5rem; font-weight: 700; color: var(--text); }
-.stat-label {
-  font-size: 0.66rem; color: var(--muted);
-  letter-spacing: 0.06em; text-transform: uppercase; margin-top: 0.2rem;
-}
+.terminal-body .ok { color: var(--green); }
 
 /* ── DIVIDER ── */
-.divider {
-  max-width: 1100px; margin: 0 auto;
-  border: none; border-top: 1px solid var(--border);
-}
+.divider { max-width: 720px; margin: 0 auto; border: none; border-top: 1px solid var(--border); }
 
-/* ── SECTIONS ── */
-section {
-  padding: 6rem 2rem; max-width: 1100px; margin: 0 auto;
+/* ── SECTION ── */
+.section {
+  max-width: 720px; margin: 0 auto;
+  padding: 5rem 2rem;
+}
+.section-wide {
+  max-width: 1100px; margin: 0 auto;
+  padding: 5rem 2rem;
 }
 .section-label {
-  font-size: 0.66rem; color: var(--green);
-  letter-spacing: 0.12em; text-transform: uppercase; margin-bottom: 0.8rem;
+  font-size: 0.62rem; color: var(--muted);
+  letter-spacing: 0.12em; text-transform: uppercase; margin-bottom: 0.6rem;
 }
 .section-title {
-  font-size: clamp(1.5rem, 3vw, 2.2rem); font-weight: 700;
-  letter-spacing: -0.03em; line-height: 1.15; margin-bottom: 1rem;
+  font-size: clamp(1.3rem, 3vw, 1.8rem); font-weight: 700;
+  letter-spacing: -0.03em; line-height: 1.15; margin-bottom: 0.8rem;
 }
 .section-desc {
-  color: var(--dim); max-width: 540px;
-  font-size: 0.88rem; line-height: 1.75; margin-bottom: 3rem; font-weight: 400;
+  color: var(--dim); max-width: 520px;
+  font-size: 0.85rem; line-height: 1.75; margin-bottom: 2.5rem;
 }
+.section-center { text-align: center; }
+.section-center .section-desc { margin-left: auto; margin-right: auto; }
 
 /* ── REVEAL ── */
 .reveal {
-  opacity: 0; transform: translateY(20px);
-  transition: opacity 0.5s ease, transform 0.5s ease;
+  opacity: 0; transform: translateY(16px);
+  transition: opacity 0.45s ease, transform 0.45s ease;
 }
 .reveal.visible { opacity: 1; transform: none; }
+
+/* ── DIFF TABLE ── */
+.diff-table {
+  width: 100%; border-collapse: collapse; font-size: 0.76rem;
+  border: 1px solid var(--border); border-radius: 8px; overflow: hidden;
+}
+.diff-table th {
+  text-align: left; padding: 0.75rem 1rem;
+  background: var(--surface-2); border-bottom: 1px solid var(--border);
+  font-size: 0.62rem; letter-spacing: 0.08em; text-transform: uppercase;
+  color: var(--muted); font-weight: 500;
+}
+.diff-table th.col-amux { color: var(--green); }
+.diff-table td {
+  padding: 0.6rem 1rem;
+  border-bottom: 1px solid rgba(42,42,48,0.5);
+  vertical-align: top;
+}
+.diff-table tr:last-child td { border-bottom: none; }
+.diff-table tr:hover td { background: var(--surface); }
+.diff-table .row-label { color: var(--dim); font-weight: 500; white-space: nowrap; }
+.diff-table .has { color: var(--green); }
+.diff-table .no { color: var(--muted); }
+.diff-table .partial { color: var(--amber); }
 
 /* ── PROBLEMS GRID ── */
 .problems-grid {
@@ -238,39 +228,38 @@ section {
   border: 1px solid var(--border); border-radius: 8px; overflow: hidden;
 }
 @media (max-width: 768px) { .problems-grid { grid-template-columns: 1fr; } }
-.problem-card { background: var(--surface); padding: 1.8rem; position: relative; }
-.problem-card::before {
-  content: attr(data-index);
-  font-size: 0.62rem; color: var(--muted); letter-spacing: 0.1em;
-  display: block; margin-bottom: 0.8rem;
+.problem-card { background: var(--surface); padding: 1.6rem; }
+.problem-card-label {
+  font-size: 0.58rem; color: var(--muted); letter-spacing: 0.1em;
+  margin-bottom: 0.7rem; text-transform: uppercase;
 }
 .problem-pain {
-  font-size: 0.82rem; color: var(--red); margin-bottom: 0.6rem;
+  font-size: 0.8rem; color: var(--red); margin-bottom: 0.5rem;
   display: flex; align-items: flex-start; gap: 0.5rem;
 }
-.problem-pain::before { content: 'x'; flex-shrink: 0; font-size: 0.68rem; margin-top: 1px; }
+.problem-pain::before { content: 'x'; flex-shrink: 0; font-size: 0.65rem; margin-top: 2px; }
 .problem-fix {
-  font-size: 0.82rem; color: var(--green);
+  font-size: 0.8rem; color: var(--green);
   display: flex; align-items: flex-start; gap: 0.5rem;
 }
 .problem-fix::before { content: '->'; flex-shrink: 0; color: var(--green-dim); }
 
-/* ── FEATURES LIST ── */
+/* ── FEATURES ── */
 .features-list {
-  display: flex; flex-direction: column; gap: 0;
+  display: flex; flex-direction: column;
   border: 1px solid var(--border); border-radius: 8px; overflow: hidden;
 }
 .feat-item {
-  padding: 1.2rem 1.4rem;
+  padding: 1rem 1.2rem;
   background: var(--surface);
   border-bottom: 1px solid var(--border);
-  font-size: 0.82rem; line-height: 1.6;
+  font-size: 0.8rem; line-height: 1.6;
   transition: background 0.15s;
 }
 .feat-item:last-child { border-bottom: none; }
 .feat-item:hover { background: var(--surface-2); }
 .feat-item strong { color: var(--text); font-weight: 600; }
-.feat-item span { color: var(--dim); font-weight: 400; }
+.feat-item span { color: var(--dim); }
 .feat-item code {
   font-family: var(--mono); font-size: 0.78em;
   background: rgba(74,222,128,0.08); color: var(--green);
@@ -278,8 +267,6 @@ section {
 }
 
 /* ── SLIDESHOW ── */
-.slides-section { padding: 6rem 2rem; }
-.slides-container { max-width: 1100px; margin: 0 auto; }
 .slides-frame {
   position: relative;
   border: 1px solid var(--border);
@@ -288,7 +275,7 @@ section {
   background: #000;
   aspect-ratio: 16 / 10;
   cursor: pointer;
-  margin-top: 2rem;
+  margin-top: 1.5rem;
 }
 .slides-frame img {
   position: absolute; inset: 0;
@@ -312,10 +299,10 @@ section {
 }
 .slides-frame:hover .slides-nav button { opacity: 1; }
 .slides-nav button:hover { background: rgba(0,0,0,0.75); }
-.slides-meta { padding: 0.75rem 0 0; }
-.slides-label { font-size: 0.85rem; font-weight: 600; color: var(--text); margin-bottom: 0.2rem; }
-.slides-desc { font-size: 0.8rem; color: var(--dim); line-height: 1.55; }
-.slides-dots { display: flex; gap: 0.35rem; margin-top: 0.65rem; }
+.slides-meta { padding: 0.65rem 0 0; }
+.slides-label { font-size: 0.82rem; font-weight: 600; color: var(--text); margin-bottom: 0.15rem; }
+.slides-desc { font-size: 0.78rem; color: var(--dim); line-height: 1.55; }
+.slides-dots { display: flex; gap: 0.3rem; margin-top: 0.5rem; }
 .slides-dots button {
   width: 6px; height: 6px; border-radius: 50%;
   border: none; background: var(--border);
@@ -324,81 +311,93 @@ section {
 .slides-dots button.active { background: var(--green); }
 
 /* ── CLI TABLE ── */
-.cli-table { width: 100%; border-collapse: collapse; font-size: 0.8rem; }
+.cli-table { width: 100%; border-collapse: collapse; font-size: 0.78rem; }
 .cli-table th {
   text-align: left; color: var(--muted); font-weight: 500;
-  font-size: 0.66rem; letter-spacing: 0.08em; text-transform: uppercase;
-  padding: 0.75rem 1rem; border-bottom: 1px solid var(--border);
+  font-size: 0.62rem; letter-spacing: 0.08em; text-transform: uppercase;
+  padding: 0.65rem 0.8rem; border-bottom: 1px solid var(--border);
 }
 .cli-table td {
-  padding: 0.65rem 1rem;
+  padding: 0.55rem 0.8rem;
   border-bottom: 1px solid rgba(42,42,48,0.5); vertical-align: top;
 }
 .cli-table tr:hover td { background: var(--surface); }
 .cli-table .cmd-cell  { color: var(--green); white-space: nowrap; }
 .cli-table .alias-cell { color: var(--muted); }
-.cli-table .desc-cell  { color: var(--dim); font-weight: 400; }
+.cli-table .desc-cell  { color: var(--dim); }
 
 /* ── API ── */
 .api-grid {
   display: grid; grid-template-columns: 1fr 1fr; gap: 2rem; align-items: start;
 }
 @media (max-width: 768px) { .api-grid { grid-template-columns: 1fr; } }
-.api-endpoints { display: flex; flex-direction: column; gap: 0.3rem; }
+.api-endpoints { display: flex; flex-direction: column; gap: 0.25rem; }
 .api-endpoint {
-  display: flex; align-items: center; gap: 0.75rem;
-  padding: 0.45rem 0.7rem; border-radius: 4px;
-  font-size: 0.76rem; transition: background 0.15s;
+  display: flex; align-items: center; gap: 0.65rem;
+  padding: 0.35rem 0.6rem; border-radius: 4px;
+  font-size: 0.72rem; transition: background 0.15s;
 }
 .api-endpoint:hover { background: var(--surface); }
 .api-method {
-  font-size: 0.62rem; font-weight: 700; letter-spacing: 0.05em;
-  min-width: 44px; text-align: center; padding: 2px 5px; border-radius: 3px;
+  font-size: 0.58rem; font-weight: 700; letter-spacing: 0.05em;
+  min-width: 40px; text-align: center; padding: 2px 4px; border-radius: 3px;
 }
 .api-method.get    { color: var(--green); background: var(--green-glow); }
 .api-method.post   { color: var(--blue);  background: rgba(96,165,250,0.1); }
 .api-method.patch  { color: var(--amber); background: rgba(251,191,36,0.1); }
 .api-method.delete { color: var(--red);   background: rgba(248,113,113,0.1); }
-.api-path { color: var(--dim); font-weight: 400; }
+.api-path { color: var(--dim); }
 
 /* ── ARCH ── */
 .arch-visual {
   display: flex; align-items: center; justify-content: center;
-  gap: 1.2rem; padding: 2.5rem 1rem; flex-wrap: wrap;
+  gap: 1rem; padding: 2rem 0; flex-wrap: wrap;
 }
 .arch-node {
   background: var(--surface); border: 1px solid var(--border);
-  border-radius: 6px; padding: 1.4rem 1.8rem; text-align: center; min-width: 150px;
+  border-radius: 6px; padding: 1.2rem 1.6rem; text-align: center; min-width: 130px;
 }
-.arch-node-label { font-size: 0.85rem; font-weight: 600; }
-.arch-node-sub   { font-size: 0.68rem; color: var(--muted); margin-top: 0.25rem; }
-.arch-arrow      { font-size: 1.2rem; color: var(--muted); }
+.arch-node-label { font-size: 0.82rem; font-weight: 600; }
+.arch-node-sub   { font-size: 0.65rem; color: var(--muted); margin-top: 0.2rem; }
+.arch-arrow      { font-size: 1rem; color: var(--muted); }
+.arch-details {
+  display: grid; grid-template-columns: 1fr 1fr 1fr;
+  gap: 1px; background: var(--border);
+  border: 1px solid var(--border); border-radius: 8px; overflow: hidden; margin-top: 1.5rem;
+}
+@media (max-width: 640px) { .arch-details { grid-template-columns: 1fr; } }
+.arch-details-item { background: var(--surface); padding: 1.2rem; }
+.arch-details-label {
+  font-size: 0.6rem; color: var(--muted); letter-spacing: 0.08em;
+  text-transform: uppercase; margin-bottom: 0.4rem;
+}
+.arch-details-val { font-size: 0.78rem; color: var(--dim); }
 
-/* ── RESOURCES GRID ── */
+/* ── RESOURCES ── */
 .resources-grid {
   display: grid; grid-template-columns: repeat(4, 1fr);
-  gap: 2rem; margin-bottom: 3rem;
+  gap: 2rem; margin-bottom: 2rem;
 }
 @media (max-width: 640px) { .resources-grid { grid-template-columns: repeat(2, 1fr); } }
 .rg-group-label {
-  font-size: 0.62rem; font-weight: 600; letter-spacing: 0.1em;
-  text-transform: uppercase; color: var(--dim); margin-bottom: 0.75rem;
+  font-size: 0.58rem; font-weight: 600; letter-spacing: 0.1em;
+  text-transform: uppercase; color: var(--dim); margin-bottom: 0.6rem;
 }
-.rg-group ul { list-style: none; display: flex; flex-direction: column; gap: 0.4rem; }
+.rg-group ul { list-style: none; display: flex; flex-direction: column; gap: 0.35rem; }
 .rg-group ul a {
-  font-size: 0.78rem; color: var(--muted); text-decoration: none;
-  transition: color 0.2s;
+  font-size: 0.75rem; color: var(--muted); text-decoration: none;
+  transition: color 0.15s;
 }
 .rg-group ul a:hover { color: var(--text); }
 
 /* ── CHANGELOG ── */
 .cl-entry {
-  display: flex; gap: 1rem; align-items: baseline;
-  padding: 0.55rem 0; border-bottom: 1px solid var(--border); font-size: 0.82rem;
+  display: flex; gap: 0.75rem; align-items: baseline;
+  padding: 0.45rem 0; border-bottom: 1px solid var(--border); font-size: 0.78rem;
 }
 .cl-entry:last-child { border-bottom: none; }
 .cl-badge {
-  font-size: 0.62rem; font-weight: 600; padding: 1px 6px; border-radius: 3px;
+  font-size: 0.58rem; font-weight: 600; padding: 1px 5px; border-radius: 3px;
   font-family: var(--mono); text-transform: uppercase;
   letter-spacing: 0.03em; flex-shrink: 0;
 }
@@ -408,31 +407,31 @@ section {
 .cl-perf  { background: rgba(96,165,250,0.12);  color: var(--blue); }
 .cl-chore { background: rgba(85,85,106,0.12); color: var(--dim); }
 .cl-title { color: var(--text); flex: 1; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.cl-date  { color: var(--muted); font-size: 0.68rem; flex-shrink: 0; }
+.cl-date  { color: var(--muted); font-size: 0.65rem; flex-shrink: 0; }
 
-/* ── CLOUD WAITLIST ── */
+/* ── WAITLIST ── */
 .waitlist-section {
-  padding: 6rem 2rem; border-top: 1px solid var(--border);
+  padding: 5rem 2rem; border-top: 1px solid var(--border);
 }
-.waitlist-container { max-width: 640px; margin: 0 auto; text-align: center; }
+.waitlist-container { max-width: 520px; margin: 0 auto; text-align: center; }
 .waitlist-eyebrow {
-  font-size: 0.66rem; color: var(--green); letter-spacing: 0.12em;
-  text-transform: uppercase; margin-bottom: 0.8rem;
+  font-size: 0.62rem; color: var(--muted); letter-spacing: 0.12em;
+  text-transform: uppercase; margin-bottom: 0.6rem;
 }
 .waitlist-title {
-  font-size: clamp(1.5rem, 3vw, 2.2rem); font-weight: 700;
-  letter-spacing: -0.03em; line-height: 1.15; margin-bottom: 1rem;
+  font-size: clamp(1.3rem, 3vw, 1.8rem); font-weight: 700;
+  letter-spacing: -0.03em; line-height: 1.15; margin-bottom: 0.8rem;
 }
 .waitlist-desc {
-  font-size: 0.88rem; color: var(--dim); line-height: 1.75;
-  margin-bottom: 2rem; font-weight: 400; max-width: 460px; margin-left: auto; margin-right: auto;
+  font-size: 0.85rem; color: var(--dim); line-height: 1.75;
+  margin-bottom: 2rem;
 }
 .waitlist-form {
-  display: flex; gap: 0.6rem; max-width: 440px; margin: 0 auto 1rem;
+  display: flex; gap: 0.5rem; max-width: 420px; margin: 0 auto 0.8rem;
 }
 @media (max-width: 540px) { .waitlist-form { flex-direction: column; } }
 .waitlist-input {
-  flex: 1; padding: 0.65rem 1rem; font-size: 0.82rem;
+  flex: 1; padding: 0.55rem 0.9rem; font-size: 0.8rem;
   background: var(--surface); border: 1px solid var(--border);
   border-radius: 6px; color: var(--text); outline: none;
   font-family: var(--mono); transition: border-color 0.2s;
@@ -440,36 +439,45 @@ section {
 .waitlist-input::placeholder { color: var(--muted); }
 .waitlist-input:focus { border-color: var(--green); }
 .waitlist-btn {
-  padding: 0.65rem 1.4rem; font-size: 0.8rem; font-weight: 700;
-  background: var(--green); color: var(--bg); border: none;
+  padding: 0.55rem 1.2rem; font-size: 0.78rem; font-weight: 700;
+  background: var(--text); color: var(--bg); border: none;
   border-radius: 6px; cursor: pointer; letter-spacing: 0.03em;
   font-family: var(--mono); white-space: nowrap; transition: opacity 0.2s;
 }
 .waitlist-btn:hover { opacity: 0.85; }
 .waitlist-btn:disabled { opacity: 0.5; cursor: not-allowed; }
 .waitlist-success {
-  display: none; font-size: 0.82rem; color: var(--green);
-  padding: 0.75rem 1rem; border: 1px solid rgba(74,222,128,0.25);
-  border-radius: 6px; background: var(--green-glow); max-width: 440px; margin: 0 auto;
+  display: none; font-size: 0.8rem; color: var(--green);
+  padding: 0.65rem 0.9rem; border: 1px solid rgba(74,222,128,0.25);
+  border-radius: 6px; background: var(--green-glow); max-width: 420px; margin: 0 auto;
 }
-.waitlist-error {
-  display: none; font-size: 0.8rem; color: var(--red); margin-top: 0.5rem;
-}
-.waitlist-note { font-size: 0.68rem; color: var(--muted); margin-top: 0.75rem; }
+.waitlist-error { display: none; font-size: 0.78rem; color: var(--red); margin-top: 0.4rem; }
+.waitlist-note { font-size: 0.65rem; color: var(--muted); margin-top: 0.6rem; }
 .waitlist-features {
   display: grid; grid-template-columns: repeat(3, 1fr); gap: 1px;
   background: var(--border); border: 1px solid var(--border);
-  border-radius: 8px; overflow: hidden; margin-top: 3rem; text-align: left;
+  border-radius: 8px; overflow: hidden; margin-top: 2.5rem; text-align: left;
 }
 @media (max-width: 640px) { .waitlist-features { grid-template-columns: 1fr; } }
-.wf-item { background: var(--surface); padding: 1.4rem; }
-.wf-label { font-size: 0.68rem; color: var(--muted); letter-spacing: 0.08em; text-transform: uppercase; margin-bottom: 0.4rem; }
-.wf-val { font-size: 0.88rem; color: var(--text); font-weight: 600; }
+.wf-item { background: var(--surface); padding: 1.2rem; }
+.wf-label { font-size: 0.62rem; color: var(--muted); letter-spacing: 0.08em; text-transform: uppercase; margin-bottom: 0.3rem; }
+.wf-val { font-size: 0.82rem; color: var(--text); font-weight: 600; }
+
+/* ── CTA SECTION ── */
+.cta-section {
+  max-width: 720px; margin: 0 auto;
+  padding: 5rem 2rem; text-align: center;
+}
+.cta-section p {
+  font-size: 0.78rem; color: var(--muted); margin-top: 1rem;
+}
+.cta-section p a { color: var(--dim); text-decoration: none; transition: color 0.15s; }
+.cta-section p a:hover { color: var(--text); }
 
 /* ── LIGHTBOX ── */
 #demo-lightbox {
   display: none; position: fixed; inset: 0; z-index: 999;
-  background: rgba(0,0,0,0.85);
+  background: rgba(0,0,0,0.88);
   align-items: center; justify-content: center;
   padding: 1.5rem; cursor: zoom-out;
 }
@@ -487,233 +495,170 @@ section {
 }
 #demo-lightbox-close:hover { opacity: 1; }
 
-/* ── DIFF TABLE ── */
-.diff-section { padding: 6rem 2rem; }
-.diff-container { max-width: 1100px; margin: 0 auto; }
-.diff-table {
-  width: 100%; border-collapse: collapse; font-size: 0.78rem;
-  border: 1px solid var(--border); border-radius: 8px; overflow: hidden;
-}
-.diff-table th {
-  text-align: left; padding: 0.85rem 1.2rem;
-  background: var(--surface-2); border-bottom: 1px solid var(--border);
-  font-size: 0.66rem; letter-spacing: 0.08em; text-transform: uppercase;
-  color: var(--muted); font-weight: 500;
-}
-.diff-table th:first-child { color: var(--dim); }
-.diff-table th.col-amux { color: var(--green); }
-.diff-table td {
-  padding: 0.7rem 1.2rem;
-  border-bottom: 1px solid rgba(42,42,48,0.5);
-  vertical-align: top;
-}
-.diff-table tr:last-child td { border-bottom: none; }
-.diff-table tr:hover td { background: var(--surface); }
-.diff-table .row-label { color: var(--dim); font-weight: 500; white-space: nowrap; }
-.diff-table .has { color: var(--green); }
-.diff-table .no { color: var(--muted); }
-.diff-table .partial { color: var(--amber); }
-.diff-callout {
-  margin-top: 2.5rem; padding: 1.6rem;
-  background: var(--surface); border: 1px solid var(--border); border-radius: 8px;
-}
-.diff-callout-title {
-  font-size: 0.88rem; font-weight: 600; margin-bottom: 0.6rem; color: var(--text);
-}
-.diff-callout-body {
-  font-size: 0.8rem; color: var(--dim); line-height: 1.7;
-}
-.diff-callout-body strong { color: var(--text); font-weight: 600; }
-
 /* ── FOOTER ── */
-footer { border-top: 1px solid var(--border); padding: 2.5rem 2rem; }
+.site-footer { border-top: 1px solid var(--border); padding: 2rem; }
 .footer-inner {
   max-width: 1100px; margin: 0 auto;
-  display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 1rem;
 }
-.footer-brand { font-size: 0.82rem; color: var(--muted); }
-.footer-brand strong { color: var(--dim); font-weight: 600; }
-.footer-links { display: flex; gap: 1.5rem; }
-.footer-links a {
-  font-size: 0.72rem; color: var(--muted); text-decoration: none; transition: color 0.2s;
+.footer-top {
+  display: grid; grid-template-columns: 1.5fr repeat(4, 1fr);
+  gap: 2rem; margin-bottom: 2rem;
 }
-.footer-links a:hover { color: var(--text); }
+@media (max-width: 768px) {
+  .footer-top { grid-template-columns: 1fr 1fr; gap: 1.5rem; }
+}
+@media (max-width: 480px) {
+  .footer-top { grid-template-columns: 1fr; }
+}
+.footer-brand-col p {
+  font-size: 0.75rem; color: var(--muted); line-height: 1.6; margin-top: 0.5rem;
+}
+.footer-col-label {
+  font-size: 0.58rem; font-weight: 600; letter-spacing: 0.1em;
+  text-transform: uppercase; color: var(--dim); margin-bottom: 0.6rem;
+}
+.footer-col ul { list-style: none; display: flex; flex-direction: column; gap: 0.35rem; }
+.footer-col ul a {
+  font-size: 0.72rem; color: var(--muted); text-decoration: none; transition: color 0.15s;
+}
+.footer-col ul a:hover { color: var(--text); }
+.footer-bottom {
+  border-top: 1px solid var(--border); padding-top: 1.25rem;
+  display: flex; justify-content: space-between; align-items: center;
+  flex-wrap: wrap; gap: 0.75rem;
+  font-size: 0.65rem; color: var(--muted);
+}
+.footer-bottom a { color: var(--muted); text-decoration: none; }
+.footer-bottom a:hover { color: var(--text); }
+.footer-bottom-links { display: flex; gap: 1.25rem; }
 </style>
 </head>
 <body>
 
-<nav>
-  <a href="/" class="nav-logo">amux <span>v1</span></a>
-  <div class="nav-links">
-    <a href="#why">Why amux</a>
-    <a href="#features">Features</a>
-    <a href="#dashboard">Dashboard</a>
-    <a href="#cli">CLI</a>
-    <a href="#api">API</a>
-    <a href="#cloud">Cloud</a>
-    <a href="/demos/">Demos</a>
-    <a href="https://github.com/mixpeek/amux" class="nav-cta">GitHub</a>
-  </div>
-</nav>
+<header class="site-header">
+  <a class="logo" href="/">amux</a>
+  <nav>
+    <a href="/guides/" class="hide-mobile">guides</a>
+    <a href="/compare/" class="hide-mobile">compare</a>
+    <a href="/demos/" class="hide-mobile">demos</a>
+    <a href="/blog/" class="hide-mobile">blog</a>
+    <a href="https://github.com/mixpeek/amux" target="_blank" rel="noopener" class="nav-cta">sign up</a>
+  </nav>
+</header>
 
 <!-- HERO -->
-<section class="hero">
-  <div class="hero-badge">Open Source &middot; Python + tmux</div>
-  <h1>Run <span class="accent">dozens</span> of AI agents<br>in parallel</h1>
-  <p class="hero-sub">amux wraps tmux to manage, monitor, and control headless Claude Code sessions -- from your terminal, browser, or phone.</p>
-
+<div class="hero">
+  <h1>Infra for parallel AI coding agents</h1>
+  <p class="hero-sub">Run dozens of Claude Code sessions unattended via tmux. Self-healing watchdog, web dashboard, mobile PWA, agent-to-agent orchestration.</p>
+  <ul class="hero-features">
+    <li>Self-healing watchdog -- auto-compacts, restarts, and replays on crash</li>
+    <li>Mobile-first PWA with offline queue and Background Sync</li>
+    <li>Single Python file, zero dependencies beyond python3 and tmux</li>
+  </ul>
   <div class="hero-ctas">
-    <a class="hero-btn hero-btn-primary" href="https://github.com/mixpeek/amux#install">Install</a>
-    <a class="hero-btn" href="https://github.com/mixpeek/amux" target="_blank" rel="noopener">GitHub</a>
-    <a class="hero-btn" href="/demos/">Demos</a>
-    <button class="hero-btn" id="demo-btn">Watch video</button>
+    <a class="primary" href="https://github.com/mixpeek/amux#install">get started</a>
+    <button id="demo-btn">watch demo</button>
+    <a href="/demos/">demos</a>
   </div>
+</div>
 
-  <div class="install-block">
-    <div class="terminal-window">
-      <div class="terminal-bar">
-        <div class="terminal-dot r"></div>
-        <div class="terminal-dot y"></div>
-        <div class="terminal-dot g"></div>
-        <span class="terminal-bar-title">~ / terminal</span>
-      </div>
-      <div class="terminal-body">
-        <div><span class="prompt">$</span> <span class="cmd">git clone https://github.com/mixpeek/amux &amp;&amp; cd amux &amp;&amp; ./install.sh</span></div>
-        <div><span class="prompt">$</span> <span class="cmd">amux register api</span> <span class="flag">--dir</span> <span class="cmd">~/Dev/api</span> <span class="flag">--yolo</span></div>
-        <div><span class="prompt">$</span> <span class="cmd">amux start api</span></div>
-        <div><span class="prompt">$</span> <span class="cmd">amux serve</span></div>
-        <div><span class="comment">-&gt; </span><span class="url">https://localhost:8822</span></div>
-      </div>
+<!-- TERMINAL -->
+<div class="terminal-section">
+  <div class="terminal-window">
+    <div class="terminal-bar">
+      <div class="terminal-dot r"></div>
+      <div class="terminal-dot y"></div>
+      <div class="terminal-dot g"></div>
+      <span class="terminal-bar-title">~/Dev/myproject</span>
+    </div>
+    <div class="terminal-body">
+      <div><span class="prompt">$</span> <span class="cmd">git clone https://github.com/mixpeek/amux &amp;&amp; cd amux &amp;&amp; ./install.sh</span></div>
+      <div><span class="prompt">$</span> <span class="cmd">amux register api</span> <span class="flag">--dir</span> <span class="cmd">~/Dev/api</span> <span class="flag">--yolo</span></div>
+      <div><span class="prompt">$</span> <span class="cmd">amux start api</span></div>
+      <div><span class="prompt">$</span> <span class="cmd">amux serve</span></div>
+      <div><span class="ok">&#10003;</span> <span class="comment">Dashboard live at</span> <span class="url">https://localhost:8822</span></div>
     </div>
   </div>
-
-  <div class="stats-row">
-    <div class="stat"><div class="stat-val">1 file</div><div class="stat-label">Zero deps</div></div>
-    <div class="stat"><div class="stat-val">inf</div><div class="stat-label">Parallel sessions</div></div>
-    <div class="stat"><div class="stat-val">PWA</div><div class="stat-label">iOS + Android</div></div>
-    <div class="stat"><div class="stat-val">SSE</div><div class="stat-label">Real-time</div></div>
-  </div>
-</section>
+</div>
 
 <hr class="divider">
 
-<!-- DIFF -->
-<section class="diff-section reveal">
-  <div class="diff-container">
-    <div class="section-label">How it's different</div>
-    <div class="section-title">amux is not another Claude wrapper</div>
-    <div class="section-desc">Claude Code runs one agent. amux runs dozens -- with monitoring, coordination, and mobile access that don't exist anywhere else.</div>
-    <table class="diff-table">
-      <thead>
-        <tr>
-          <th></th>
-          <th class="col-amux">amux</th>
-          <th>Claude Code</th>
-          <th>Other wrappers</th>
-        </tr>
-      </thead>
-      <tbody>
-        <tr>
-          <td class="row-label">Parallel agents</td>
-          <td class="has">Unlimited, isolated tmux panes</td>
-          <td class="no">Single session per terminal</td>
-          <td class="partial">Limited or manual</td>
-        </tr>
-        <tr>
-          <td class="row-label">Mobile management</td>
-          <td class="has">PWA with offline queue + Background Sync</td>
-          <td class="no">Terminal only</td>
-          <td class="no">Not available</td>
-        </tr>
-        <tr>
-          <td class="row-label">Self-healing</td>
-          <td class="has">Watchdog auto-compacts, restarts, replays</td>
-          <td class="no">Crashes on context overflow</td>
-          <td class="partial">Basic restart only</td>
-        </tr>
-        <tr>
-          <td class="row-label">Agent coordination</td>
-          <td class="has">REST API + atomic task claiming</td>
-          <td class="no">No inter-agent communication</td>
-          <td class="partial">Shared filesystem at best</td>
-        </tr>
-        <tr>
-          <td class="row-label">Live monitoring</td>
-          <td class="has">SSE dashboard with status, spend, peek</td>
-          <td class="no">Must attach to terminal</td>
-          <td class="partial">Logs only</td>
-        </tr>
-        <tr>
-          <td class="row-label">Kanban + scheduling</td>
-          <td class="has">SQLite board, iCal sync, built-in cron</td>
-          <td class="no">None</td>
-          <td class="no">None</td>
-        </tr>
-        <tr>
-          <td class="row-label">Setup</td>
-          <td class="has">1 file, 0 deps, git clone + install.sh</td>
-          <td class="has">pip install</td>
-          <td class="partial">Docker, config files, API keys</td>
-        </tr>
-      </tbody>
-    </table>
-
-    <div class="diff-callout">
-      <div class="diff-callout-title">Built for overnight runs and phone-first workflows</div>
-      <div class="diff-callout-body">
-        Most people discover amux because Claude Code crashes at 3am or they want to check on agents from their phone.
-        The self-healing watchdog handles context compaction, thinking-block corruption, and stuck tool prompts automatically.
-        The mobile PWA queues commands offline and replays them on reconnect -- you can manage a fleet of agents from the couch, the train, or anywhere with a browser.
-        <strong>amux doesn't replace Claude Code. It makes it possible to run it at scale, unattended.</strong>
-      </div>
-    </div>
-  </div>
-</section>
+<!-- HOW IT'S DIFFERENT -->
+<div class="section-wide reveal">
+  <div class="section-label">How it's different</div>
+  <div class="section-title">amux is not another Claude wrapper</div>
+  <div class="section-desc">Claude Code runs one agent per terminal. amux runs dozens -- with monitoring, coordination, and mobile access that don't exist anywhere else.</div>
+  <table class="diff-table">
+    <thead>
+      <tr>
+        <th></th>
+        <th class="col-amux">amux</th>
+        <th>Claude Code</th>
+        <th>Other wrappers</th>
+      </tr>
+    </thead>
+    <tbody>
+      <tr><td class="row-label">Parallel agents</td><td class="has">Unlimited, isolated tmux panes</td><td class="no">Single session per terminal</td><td class="partial">Limited or manual</td></tr>
+      <tr><td class="row-label">Mobile management</td><td class="has">PWA with offline queue + Background Sync</td><td class="no">Terminal only</td><td class="no">Not available</td></tr>
+      <tr><td class="row-label">Self-healing</td><td class="has">Watchdog auto-compacts, restarts, replays</td><td class="no">Crashes on context overflow</td><td class="partial">Basic restart only</td></tr>
+      <tr><td class="row-label">Agent coordination</td><td class="has">REST API + atomic task claiming</td><td class="no">No inter-agent communication</td><td class="partial">Shared filesystem at best</td></tr>
+      <tr><td class="row-label">Live monitoring</td><td class="has">SSE dashboard with status, spend, peek</td><td class="no">Must attach to terminal</td><td class="partial">Logs only</td></tr>
+      <tr><td class="row-label">Kanban + scheduling</td><td class="has">SQLite board, iCal sync, built-in cron</td><td class="no">None</td><td class="no">None</td></tr>
+      <tr><td class="row-label">Setup</td><td class="has">1 file, 0 deps, git clone + install.sh</td><td class="has">pip install</td><td class="partial">Docker, config files, API keys</td></tr>
+    </tbody>
+  </table>
+</div>
 
 <hr class="divider">
 
-<!-- WHY -->
-<section id="why" class="reveal">
+<!-- PROBLEMS -->
+<div class="section reveal" id="why">
   <div class="section-label">Why amux</div>
   <div class="section-title">Problems it solves</div>
   <div class="section-desc">Every friction point when running multiple Claude Code agents at scale.</div>
   <div class="problems-grid">
-    <div class="problem-card" data-index="01">
+    <div class="problem-card">
+      <div class="problem-card-label">01</div>
       <div class="problem-pain">Claude crashes at 3am from context compaction</div>
       <div class="problem-fix">Self-healing watchdog -- auto-compacts, restarts, replays last message</div>
     </div>
-    <div class="problem-card" data-index="02">
+    <div class="problem-card">
+      <div class="problem-card-label">02</div>
       <div class="problem-pain">No way to monitor 10+ sessions from one place</div>
       <div class="problem-fix">Web dashboard with live status, token spend, and session peek</div>
     </div>
-    <div class="problem-card" data-index="03">
+    <div class="problem-card">
+      <div class="problem-card-label">03</div>
       <div class="problem-pain">Agents duplicate work on the same tasks</div>
       <div class="problem-fix">Kanban board with atomic task claiming via SQLite CAS</div>
     </div>
-    <div class="problem-card" data-index="04">
+    <div class="problem-card">
+      <div class="problem-card-label">04</div>
       <div class="problem-pain">No way to manage agents from your phone</div>
       <div class="problem-fix">Mobile PWA with offline support and Background Sync</div>
     </div>
-    <div class="problem-card" data-index="05">
+    <div class="problem-card">
+      <div class="problem-card-label">05</div>
       <div class="problem-pain">Agents cannot coordinate with each other</div>
       <div class="problem-fix">REST API orchestration -- send, peek, claim tasks between sessions</div>
     </div>
-    <div class="problem-card" data-index="06">
+    <div class="problem-card">
+      <div class="problem-card-label">06</div>
       <div class="problem-pain">No persistent memory across restarts</div>
       <div class="problem-fix">Per-session and global memory files, auto-snapshotted logs</div>
     </div>
   </div>
-</section>
+</div>
 
 <hr class="divider">
 
 <!-- FEATURES -->
-<section id="features" class="reveal">
+<div class="section reveal" id="features">
   <div class="section-label">How it works</div>
   <div class="section-title">Everything under the hood</div>
   <div class="section-desc">A complete control plane for AI coding agents.</div>
   <div class="features-list">
-    <div class="feat-item"><strong>Self-healing background watchdog</strong> <span>-- context low -&gt; <code>/compact</code>; thinking-block corruption -&gt; restart + replay; stuck waiting -&gt; auto-respond. All silent.</span></div>
+    <div class="feat-item"><strong>Self-healing background watchdog</strong> <span>-- context low -> <code>/compact</code>; thinking-block corruption -> restart + replay; stuck waiting -> auto-respond. All silent.</span></div>
     <div class="feat-item"><strong>Status from terminal output, not an API</strong> <span>-- parses ANSI-stripped tmux output to detect working / waiting / idle. No hooks, no patches, no modifications to Claude Code.</span></div>
     <div class="feat-item"><strong>YOLO auto-responder</strong> <span>-- detects blocking tool-approval prompts via the "Esc to cancel" marker (never appears on open-ended questions) and auto-answers. Truly headless.</span></div>
     <div class="feat-item"><strong>Agent-to-agent orchestration</strong> <span>-- <code>$AMUX_SESSION</code> and <code>$AMUX_URL</code> injected at startup; a shared global memory file gives every agent the full REST API reference. Agents discover peers and delegate work without being told how.</span></div>
@@ -724,48 +669,46 @@ footer { border-top: 1px solid var(--border); padding: 2.5rem 2rem; }
     <div class="feat-item"><strong>Multi-pane workspace</strong> <span>-- full-screen tiled layout, each pane with its own send bar. Drag to rearrange; layout and named profiles persist.</span></div>
     <div class="feat-item"><strong>Live peek -- including stopped sessions</strong> <span>-- scroll full scrollback, search, preview files, fire quick-actions without attaching. Output snapshots to disk every 60s and survives restarts.</span></div>
     <div class="feat-item"><strong>Token tracking from JSONL</strong> <span>-- daily spend per session with cache reads broken out. Deduplicates by signature so restarts don't double-count.</span></div>
-    <div class="feat-item"><strong>People tab — personal CRM</strong> <span>-- contacts with health indicators (days since last touch), full interaction log, follow-up queue, and auto-assigned PPL-N IDs. Fully accessible via CLI: <code>amux crm list/add/log/fu</code>. Optimistic UI throughout.</span></div>
+    <div class="feat-item"><strong>People tab -- personal CRM</strong> <span>-- contacts with health indicators (days since last touch), full interaction log, follow-up queue, and auto-assigned PPL-N IDs. Fully accessible via CLI: <code>amux crm list/add/log/fu</code>. Optimistic UI throughout.</span></div>
     <div class="feat-item"><strong>Kanban board with iCal sync</strong> <span>-- SQLite-backed with auto-generated keys, per-agent ownership, and custom columns. Exports iCal to S3 -- due dates appear in Google/Apple Calendar.</span></div>
     <div class="feat-item"><strong>Built-in cron -- no crontab, no systemd</strong> <span>-- schedule one-time or recurring commands in any session. Next-run computed atomically in SQLite with missed-fire recovery, delivered via tmux.</span></div>
     <div class="feat-item"><strong>Git-aware conflict detection</strong> <span>-- warns when two sessions share the same dir + branch, with a one-click helper to isolate each agent onto its own branch.</span></div>
-    <div class="feat-item"><strong>Web dashboard + PWA</strong> <span>-- installable on iOS and Android. Background Sync replays queued commands on reconnect. TLS auto-provisioned: Tailscale cert -&gt; mkcert -&gt; self-signed fallback.</span></div>
+    <div class="feat-item"><strong>Web dashboard + PWA</strong> <span>-- installable on iOS and Android. Background Sync replays queued commands on reconnect. TLS auto-provisioned: Tailscale cert -> mkcert -> self-signed fallback.</span></div>
   </div>
-</section>
+</div>
 
 <hr class="divider">
 
-<!-- DASHBOARD SCREENSHOTS -->
-<section id="dashboard" class="slides-section reveal">
-  <div class="slides-container">
-    <div class="section-label">Dashboard</div>
-    <div class="section-title">Your fleet at a glance</div>
-    <div class="section-desc">Session cards, peek mode, kanban board, and search -- all in a single-page PWA.</div>
-    <div class="slides-frame" id="slides-frame">
-      <img src="screenshots/sessions-overview.jpg" alt="Session Dashboard" class="active">
-      <img src="screenshots/session-expanded.jpg" alt="Session Card">
-      <img src="screenshots/search-and-send.jpg" alt="Search and Send">
-      <img src="screenshots/live-terminal.jpg" alt="Live Terminal">
-      <img src="screenshots/file-explorer.jpg" alt="File Explorer">
-      <img src="screenshots/session-memory.jpg" alt="Session Memory">
-      <img src="screenshots/kanban-board.jpg" alt="Kanban Board">
-      <img src="screenshots/calendar.jpg" alt="Calendar">
-      <div class="slides-nav">
-        <button id="slides-prev" aria-label="Previous">&#8249;</button>
-        <button id="slides-next" aria-label="Next">&#8250;</button>
-      </div>
-    </div>
-    <div class="slides-meta">
-      <div class="slides-label" id="slides-label">Session Dashboard</div>
-      <div class="slides-desc" id="slides-desc">All running agents at a glance -- live status, token spend, model, and current task.</div>
-      <div class="slides-dots" id="slides-dots"></div>
+<!-- DASHBOARD -->
+<div class="section-wide reveal" id="dashboard">
+  <div class="section-label">Dashboard</div>
+  <div class="section-title">Your fleet at a glance</div>
+  <div class="section-desc">Session cards, peek mode, kanban board, and search -- all in a single-page PWA.</div>
+  <div class="slides-frame" id="slides-frame">
+    <img src="screenshots/sessions-overview.jpg" alt="Session Dashboard" class="active">
+    <img src="screenshots/session-expanded.jpg" alt="Session Card">
+    <img src="screenshots/search-and-send.jpg" alt="Search and Send">
+    <img src="screenshots/live-terminal.jpg" alt="Live Terminal">
+    <img src="screenshots/file-explorer.jpg" alt="File Explorer">
+    <img src="screenshots/session-memory.jpg" alt="Session Memory">
+    <img src="screenshots/kanban-board.jpg" alt="Kanban Board">
+    <img src="screenshots/calendar.jpg" alt="Calendar">
+    <div class="slides-nav">
+      <button id="slides-prev" aria-label="Previous">&#8249;</button>
+      <button id="slides-next" aria-label="Next">&#8250;</button>
     </div>
   </div>
-</section>
+  <div class="slides-meta">
+    <div class="slides-label" id="slides-label">Session Dashboard</div>
+    <div class="slides-desc" id="slides-desc">All running agents at a glance -- live status, token spend, model, and current task.</div>
+    <div class="slides-dots" id="slides-dots"></div>
+  </div>
+</div>
 
 <hr class="divider">
 
 <!-- CLI -->
-<section id="cli" class="reveal">
+<div class="section reveal" id="cli">
   <div class="section-label">CLI</div>
   <div class="section-title">One command, any action</div>
   <div class="section-desc">Session names support prefix matching -- <code style="color:var(--green)">amux a my</code> resolves to <code style="color:var(--dim)">myproject</code>.</div>
@@ -787,12 +730,12 @@ footer { border-top: 1px solid var(--border); padding: 2.5rem 2rem; }
       <tr><td class="cmd-cell">amux defaults</td><td class="alias-cell">config</td><td class="desc-cell">Manage default flags</td></tr>
     </tbody>
   </table>
-</section>
+</div>
 
 <hr class="divider">
 
 <!-- API -->
-<section id="api" class="reveal">
+<div class="section-wide reveal" id="api">
   <div class="section-label">REST API</div>
   <div class="section-title">Every action is an endpoint</div>
   <div class="section-desc">Automate orchestration with curl, scripts, or agents talking to agents.</div>
@@ -826,7 +769,7 @@ footer { border-top: 1px solid var(--border); padding: 2.5rem 2rem; }
           <div class="terminal-dot g"></div>
           <span class="terminal-bar-title">orchestration example</span>
         </div>
-        <div class="terminal-body" style="font-size:0.74rem;">
+        <div class="terminal-body" style="font-size:0.72rem;">
           <div><span class="comment"># Send a task to another session</span></div>
           <div><span class="prompt">$</span> <span class="cmd">curl -sk -X POST \</span></div>
           <div style="padding-left:1rem"><span class="flag">-H</span> <span class="cmd">'Content-Type: application/json' \</span></div>
@@ -843,56 +786,44 @@ footer { border-top: 1px solid var(--border); padding: 2.5rem 2rem; }
       </div>
     </div>
   </div>
-</section>
+</div>
 
 <hr class="divider">
 
 <!-- ARCHITECTURE -->
-<section class="reveal">
+<div class="section reveal">
   <div class="section-label">Architecture</div>
   <div class="section-title">Single file. Zero dependencies.</div>
   <div class="section-desc">Everything lives in <code style="color:var(--green)">amux-server.py</code>. Python's http.server with inline HTML/CSS/JS. No build step, no package manager.</div>
   <div class="arch-visual">
-    <div class="arch-node">
-      <div class="arch-node-label">CLI</div>
-      <div class="arch-node-sub">bash wrapper</div>
+    <div class="arch-node"><div class="arch-node-label">CLI</div><div class="arch-node-sub">bash wrapper</div></div>
+    <div class="arch-arrow">-></div>
+    <div class="arch-node" style="border-color:var(--green);"><div class="arch-node-label">amux-server.py</div><div class="arch-node-sub">Python HTTP + SSE</div></div>
+    <div class="arch-arrow">-></div>
+    <div class="arch-node"><div class="arch-node-label">tmux</div><div class="arch-node-sub">session isolation</div></div>
+    <div class="arch-arrow">-></div>
+    <div class="arch-node"><div class="arch-node-label">Claude Code</div><div class="arch-node-sub">headless agents</div></div>
+  </div>
+  <div class="arch-details">
+    <div class="arch-details-item">
+      <div class="arch-details-label">State</div>
+      <div class="arch-details-val">Session .env files + SQLite DB + tmux processes</div>
     </div>
-    <div class="arch-arrow">-&gt;</div>
-    <div class="arch-node" style="border-color:var(--green);">
-      <div class="arch-node-label">amux-server.py</div>
-      <div class="arch-node-sub">Python HTTP + SSE</div>
+    <div class="arch-details-item">
+      <div class="arch-details-label">Offline</div>
+      <div class="arch-details-val">IndexedDB + localStorage + Service Worker cache</div>
     </div>
-    <div class="arch-arrow">-&gt;</div>
-    <div class="arch-node">
-      <div class="arch-node-label">tmux</div>
-      <div class="arch-node-sub">session isolation</div>
-    </div>
-    <div class="arch-arrow">-&gt;</div>
-    <div class="arch-node">
-      <div class="arch-node-label">Claude Code</div>
-      <div class="arch-node-sub">headless agents</div>
+    <div class="arch-details-item">
+      <div class="arch-details-label">Security</div>
+      <div class="arch-details-val">Local-first. Tailscale or localhost only. No auth required.</div>
     </div>
   </div>
-  <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:1px;background:var(--border);border:1px solid var(--border);border-radius:8px;overflow:hidden;margin-top:2rem;">
-    <div style="background:var(--surface);padding:1.4rem;">
-      <div style="font-size:0.66rem;color:var(--muted);letter-spacing:0.08em;text-transform:uppercase;margin-bottom:0.5rem;">State</div>
-      <div style="font-size:0.82rem;color:var(--dim);font-weight:400;">Session .env files + SQLite DB + tmux processes</div>
-    </div>
-    <div style="background:var(--surface);padding:1.4rem;">
-      <div style="font-size:0.66rem;color:var(--muted);letter-spacing:0.08em;text-transform:uppercase;margin-bottom:0.5rem;">Offline</div>
-      <div style="font-size:0.82rem;color:var(--dim);font-weight:400;">IndexedDB + localStorage + Service Worker cache</div>
-    </div>
-    <div style="background:var(--surface);padding:1.4rem;">
-      <div style="font-size:0.66rem;color:var(--muted);letter-spacing:0.08em;text-transform:uppercase;margin-bottom:0.5rem;">Security</div>
-      <div style="font-size:0.82rem;color:var(--dim);font-weight:400;">Local-first. Tailscale or localhost only. No auth required.</div>
-    </div>
-  </div>
-</section>
+</div>
 
 <hr class="divider">
 
 <!-- RESOURCES -->
-<section class="reveal">
+<div class="section-wide reveal">
   <div class="section-label">Resources</div>
   <div class="section-title">Explore further</div>
   <div class="section-desc"></div>
@@ -904,7 +835,7 @@ footer { border-top: 1px solid var(--border); padding: 2.5rem 2rem; }
         <li><a href="/demos/self-healing-watchdog/">Self-healing</a></li>
         <li><a href="/demos/atomic-task-claiming/">Atomic claiming</a></li>
         <li><a href="/demos/mobile-pwa/">Mobile PWA</a></li>
-        <li><a href="/demos/">All demos -&gt;</a></li>
+        <li><a href="/demos/">All demos -></a></li>
       </ul>
     </div>
     <div class="rg-group">
@@ -914,7 +845,7 @@ footer { border-top: 1px solid var(--border); padding: 2.5rem 2rem; }
         <li><a href="/compare/amux-vs-devin/">vs Devin</a></li>
         <li><a href="/compare/amux-vs-aider/">vs Aider</a></li>
         <li><a href="/compare/amux-vs-claude-code-agent-teams/">vs Agent Teams</a></li>
-        <li><a href="/compare/">All comparisons -&gt;</a></li>
+        <li><a href="/compare/">All comparisons -></a></li>
       </ul>
     </div>
     <div class="rg-group">
@@ -924,7 +855,7 @@ footer { border-top: 1px solid var(--border); padding: 2.5rem 2rem; }
         <li><a href="/guides/running-10-plus-agents/">Run 10+ agents</a></li>
         <li><a href="/guides/self-healing-configuration/">Self-healing config</a></li>
         <li><a href="/guides/agent-to-agent-orchestration/">Orchestration</a></li>
-        <li><a href="/guides/">All guides -&gt;</a></li>
+        <li><a href="/guides/">All guides -></a></li>
       </ul>
     </div>
     <div class="rg-group">
@@ -934,25 +865,25 @@ footer { border-top: 1px solid var(--border); padding: 2.5rem 2rem; }
         <li><a href="/for/typescript-developers/">TypeScript</a></li>
         <li><a href="/for/react-developers/">React</a></li>
         <li><a href="/for/go-developers/">Go</a></li>
-        <li><a href="/for/">All stacks -&gt;</a></li>
+        <li><a href="/for/">All stacks -></a></li>
       </ul>
     </div>
   </div>
-</section>
+</div>
 
 <hr class="divider">
 
 <!-- CHANGELOG -->
-<section class="reveal">
+<div class="section reveal">
   <div class="section-label">What's new</div>
   <div class="section-title">Recent changes</div>
-  <div id="changelog-list" style="margin-top:1.5rem;">
-    <div id="cl-loading" style="color:var(--muted);font-size:0.82rem;">Loading...</div>
+  <div id="changelog-list" style="margin-top:1rem;">
+    <div id="cl-loading" style="color:var(--muted);font-size:0.78rem;">Loading...</div>
   </div>
-  <div style="margin-top:1rem;">
-    <a href="/changelog/" style="font-size:0.78rem;color:var(--dim);text-decoration:none;">View full changelog -&gt;</a>
+  <div style="margin-top:0.75rem;">
+    <a href="/changelog/" style="font-size:0.75rem;color:var(--dim);text-decoration:none;">View full changelog -></a>
   </div>
-</section>
+</div>
 
 <!-- CLOUD WAITLIST -->
 <div id="cloud" class="waitlist-section reveal">
@@ -965,7 +896,7 @@ footer { border-top: 1px solid var(--border); padding: 2.5rem 2rem; }
     </div>
     <div class="waitlist-form" id="waitlist-form">
       <input class="waitlist-input" id="waitlist-email" type="email" placeholder="you@company.com" autocomplete="email">
-      <button class="waitlist-btn" id="waitlist-btn" onclick="submitWaitlist()">Join waitlist</button>
+      <button class="waitlist-btn" id="waitlist-btn" onclick="submitWaitlist()">join waitlist</button>
     </div>
     <div class="waitlist-success" id="waitlist-success">You're on the list. We'll reach out when early access opens.</div>
     <div class="waitlist-error" id="waitlist-error"></div>
@@ -987,17 +918,71 @@ footer { border-top: 1px solid var(--border); padding: 2.5rem 2rem; }
   </div>
 </div>
 
-<footer>
+<!-- CTA -->
+<div class="cta-section">
+  <div class="hero-ctas">
+    <a class="primary" href="https://github.com/mixpeek/amux#install">get started</a>
+    <a href="https://github.com/mixpeek/amux" target="_blank" rel="noopener">GitHub</a>
+  </div>
+  <p>Have questions? <a href="https://github.com/mixpeek/amux/issues">Open an issue</a> or email <a href="mailto:founders@mixpeek.com">founders@mixpeek.com</a></p>
+</div>
+
+<!-- FOOTER -->
+<footer class="site-footer">
   <div class="footer-inner">
-    <div class="footer-brand">
-      <strong>amux</strong> &mdash; MIT License. Built by <a href="https://mixpeek.com" style="color:var(--green);text-decoration:none;">Mixpeek</a>
+    <div class="footer-top">
+      <div class="footer-brand-col">
+        <a href="/" style="font-size:0.92rem;font-weight:700;color:var(--text);text-decoration:none;">amux</a>
+        <p>Open-source agent multiplexer. Run dozens of Claude Code sessions in parallel via tmux.</p>
+      </div>
+      <div class="footer-col">
+        <div class="footer-col-label">Product</div>
+        <ul>
+          <li><a href="/features/web-dashboard/">Dashboard</a></li>
+          <li><a href="/features/self-healing/">Self-healing</a></li>
+          <li><a href="/features/mobile-pwa/">Mobile PWA</a></li>
+          <li><a href="/features/agent-coordination/">Coordination</a></li>
+          <li><a href="/features/single-file-architecture/">Architecture</a></li>
+        </ul>
+      </div>
+      <div class="footer-col">
+        <div class="footer-col-label">Resources</div>
+        <ul>
+          <li><a href="/guides/">Guides</a></li>
+          <li><a href="/blog/">Blog</a></li>
+          <li><a href="/demos/">Demos</a></li>
+          <li><a href="/glossary/">Glossary</a></li>
+          <li><a href="/faq/">FAQ</a></li>
+        </ul>
+      </div>
+      <div class="footer-col">
+        <div class="footer-col-label">Compare</div>
+        <ul>
+          <li><a href="/compare/amux-vs-cursor/">vs Cursor</a></li>
+          <li><a href="/compare/amux-vs-devin/">vs Devin</a></li>
+          <li><a href="/compare/amux-vs-cline/">vs Cline</a></li>
+          <li><a href="/compare/amux-vs-codex/">vs Codex</a></li>
+          <li><a href="/compare/">All comparisons</a></li>
+        </ul>
+      </div>
+      <div class="footer-col">
+        <div class="footer-col-label">More</div>
+        <ul>
+          <li><a href="/use-cases/">Use Cases</a></li>
+          <li><a href="/solutions/">Solutions</a></li>
+          <li><a href="/for/">For your stack</a></li>
+          <li><a href="/changelog/">Changelog</a></li>
+          <li><a href="/release-notes/">Release Notes</a></li>
+        </ul>
+      </div>
     </div>
-    <div class="footer-links">
-      <a href="https://github.com/mixpeek/amux">GitHub</a>
-      <a href="/changelog/">Changelog</a>
-      <a href="/release-notes/">Release Notes</a>
-      <a href="https://github.com/mixpeek/amux/issues">Issues</a>
-      <a href="https://github.com/mixpeek/amux/blob/main/README.md">Docs</a>
+    <div class="footer-bottom">
+      <span>MIT License. Built by <a href="https://mixpeek.com">Mixpeek</a></span>
+      <div class="footer-bottom-links">
+        <a href="https://github.com/mixpeek/amux" target="_blank" rel="noopener">GitHub</a>
+        <a href="https://github.com/mixpeek/amux/issues">Issues</a>
+        <a href="https://github.com/mixpeek/amux/blob/main/README.md">Docs</a>
+      </div>
     </div>
   </div>
 </footer>
@@ -1010,12 +995,12 @@ footer { border-top: 1px solid var(--border); padding: 2.5rem 2rem; }
 
 <script>
 // Scroll reveal
-var _revealObs = new IntersectionObserver(function(entries) {
+var _ro = new IntersectionObserver(function(entries) {
   entries.forEach(function(e) {
-    if (e.isIntersecting) { e.target.classList.add('visible'); _revealObs.unobserve(e.target); }
+    if (e.isIntersecting) { e.target.classList.add('visible'); _ro.unobserve(e.target); }
   });
 }, { threshold: 0.08 });
-document.querySelectorAll('.reveal').forEach(function(el) { _revealObs.observe(el); });
+document.querySelectorAll('.reveal').forEach(function(el) { _ro.observe(el); });
 
 // Slideshow
 var slides = [
@@ -1104,7 +1089,7 @@ function submitWaitlist() {
     .then(function(r) { return r.json(); })
     .then(function(entries) {
       var recent = entries.slice(0, 5);
-      if (!recent.length) { container.innerHTML = '<div style="color:var(--muted);font-size:0.82rem;">No entries yet.</div>'; return; }
+      if (!recent.length) { container.innerHTML = '<div style="color:var(--muted);font-size:0.78rem;">No entries yet.</div>'; return; }
       container.innerHTML = recent.map(function(e) {
         var type = (e.type || 'chore').toLowerCase();
         return '<div class="cl-entry">' +

@@ -1,6 +1,6 @@
 /* amux — shared subpage stylesheet
  * Font: JetBrains Mono (Google Fonts)
- * Theme: dark-only, terminal aesthetic, WCAG AA compliant
+ * Theme: dark-only, minimal, WCAG AA compliant
  * ─────────────────────────────────────────────────────── */
 
 :root {
@@ -48,16 +48,16 @@ body {
   align-items: center;
   justify-content: space-between;
   padding: 0 2rem;
-  height: 52px;
-  background: rgba(10,10,12,0.9);
+  height: 56px;
+  background: rgba(10,10,12,0.92);
   backdrop-filter: blur(20px);
   border-bottom: 1px solid var(--border);
 }
 
 .site-header a.logo {
-  font-size: 0.9rem;
+  font-size: 0.92rem;
   font-weight: 700;
-  color: var(--green);
+  color: var(--text);
   text-decoration: none;
   letter-spacing: -0.02em;
 }
@@ -79,7 +79,7 @@ body {
 .site-header nav a:hover { color: var(--text); }
 
 .site-header nav a.nav-cta {
-  background: var(--green);
+  background: var(--text);
   color: var(--bg);
   padding: 0.32rem 0.85rem;
   border-radius: 4px;
@@ -91,8 +91,8 @@ body {
 
 @media (max-width: 640px) {
   .site-header { padding: 0 1rem; }
-  .site-header nav { gap: 1.1rem; }
-  .site-header nav a:not(.nav-cta):not([href="/"]):not([href="/guides/"]){ display: none; }
+  .site-header nav { gap: 1rem; }
+  .site-header nav a.hide-mobile { display: none; }
 }
 
 /* ── CONTENT ── */
@@ -251,13 +251,13 @@ tr:hover td { background: var(--surface); }
 .btn:hover { background: var(--surface-2); border-color: var(--border-dim); text-decoration: none; }
 
 .btn-primary {
-  background: var(--green);
-  border-color: var(--green);
+  background: var(--text);
+  border-color: var(--text);
   color: var(--bg);
   font-weight: 700;
 }
 
-.btn-primary:hover { opacity: 0.85; background: var(--green); color: var(--bg); }
+.btn-primary:hover { opacity: 0.85; background: var(--text); color: var(--bg); }
 
 /* ── CTA BOX ── */
 .cta-box {
@@ -288,23 +288,54 @@ tr:hover td { background: var(--surface); }
 /* ── FOOTER ── */
 footer {
   border-top: 1px solid var(--border);
-  padding: 1.75rem 2rem;
+  padding: 2rem;
 }
 
 .footer-inner {
   max-width: 46rem;
   margin: 0 auto;
-  display: flex;
-  flex-wrap: wrap;
-  gap: 0.5rem 1.25rem;
-  font-size: 0.7rem;
-  color: var(--muted);
-  align-items: center;
 }
 
-footer a { color: var(--muted); text-decoration: none; }
-footer a:hover { color: var(--text); }
-footer .sep { opacity: 0.3; }
+.footer-top {
+  display: grid;
+  grid-template-columns: 1.2fr repeat(3, 1fr);
+  gap: 1.5rem;
+  margin-bottom: 1.5rem;
+}
+
+@media (max-width: 640px) {
+  .footer-top { grid-template-columns: 1fr 1fr; gap: 1.25rem; }
+}
+
+.footer-brand-col p {
+  font-size: 0.72rem; color: var(--muted); line-height: 1.6; margin-top: 0.4rem;
+}
+
+.footer-col-label {
+  font-size: 0.58rem; font-weight: 600; letter-spacing: 0.1em;
+  text-transform: uppercase; color: var(--dim); margin-bottom: 0.5rem;
+}
+
+.footer-col ul {
+  list-style: none; display: flex; flex-direction: column; gap: 0.3rem;
+  margin: 0; padding: 0;
+}
+
+.footer-col ul a {
+  font-size: 0.72rem; color: var(--muted); text-decoration: none; transition: color 0.15s;
+}
+.footer-col ul a:hover { color: var(--text); }
+
+.footer-bottom {
+  border-top: 1px solid var(--border); padding-top: 1rem;
+  display: flex; justify-content: space-between; align-items: center;
+  flex-wrap: wrap; gap: 0.5rem;
+  font-size: 0.62rem; color: var(--muted);
+}
+
+.footer-bottom a { color: var(--muted); text-decoration: none; }
+.footer-bottom a:hover { color: var(--text); }
+.footer-bottom-links { display: flex; gap: 1rem; }
 
 @media (max-width: 600px) {
   main { padding: 1.75rem 1rem 4rem; }
@@ -356,9 +387,9 @@ footer .sep { opacity: 0.3; }
 }
 
 .filter-btn.active {
-  background: var(--accent);
-  border-color: var(--accent);
-  color: #fff;
+  background: var(--surface-2);
+  border-color: var(--dim);
+  color: var(--text);
 }
 
 .grid {
@@ -376,7 +407,7 @@ footer .sep { opacity: 0.3; }
 }
 
 .demo-card:hover {
-  border-color: var(--accent);
+  border-color: var(--dim);
   transform: translateY(-2px);
 }
 
@@ -412,7 +443,7 @@ footer .sep { opacity: 0.3; }
   font-weight: 600;
   letter-spacing: 0.06em;
   text-transform: uppercase;
-  color: var(--accent);
+  color: var(--dim);
   margin-bottom: 0.3rem;
 }
 
