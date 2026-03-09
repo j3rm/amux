@@ -7056,6 +7056,7 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
   .map-geocoder-result-save { background: var(--accent); color: #fff; border: none; border-radius: 10px; padding: 3px 9px; font-size: 0.72rem; cursor: pointer; flex-shrink: 0; white-space: nowrap; font-family: inherit; }
   .map-geocoder-result-save:hover { opacity: 0.85; }
   .map-geocoder-loading { padding: 10px 14px; font-size: 0.82rem; color: var(--dim); text-align: center; }
+  .map-geocoder-attribution { padding: 4px 14px; font-size: 0.7rem; color: var(--dim); text-align: right; border-top: 1px solid var(--border); }
   @media (max-width: 600px) {
     #map-view { height: calc(100dvh - 122px); background: var(--bg); }
     .map-sidebar { position: absolute; top: 0; left: 0; right: 0; bottom: 0; z-index: 1005; width: 100% !important; min-width: 0 !important; box-shadow: none; overflow: hidden; }
@@ -14867,12 +14868,12 @@ function _mapGeoSearch(q) {
 }
 
 function _mapGeoFetch(q) {
-  var url = 'https://nominatim.openstreetmap.org/search?q=' + encodeURIComponent(q) + '&format=json&limit=6&addressdetails=1';
+  var url = API + '/api/map/search?q=' + encodeURIComponent(q);
   if (_map) {
-    var b = _map.getBounds();
-    url += '&viewbox=' + b.getWest() + ',' + b.getNorth() + ',' + b.getEast() + ',' + b.getSouth() + '&bounded=1';
+    var c = _map.getCenter();
+    url += '&lat=' + c.lat + '&lon=' + c.lng;
   }
-  fetch(url, { headers: { 'Accept-Language': 'en' } })
+  fetch(url)
     .then(function(r) { return r.json(); })
     .then(function(data) { _mapGeoResults = data; _mapGeoSelectedIdx = -1; _mapGeoRenderResults(data); })
     .catch(function() {
@@ -14883,13 +14884,13 @@ function _mapGeoFetch(q) {
 
 function _mapGeoTypeIcon(r) {
   var cat = r.category || '', type = r.type || '';
+  if (type === 'restaurant' || type === 'food' || type === 'cafe' || type === 'bar' || type === 'bakery' || type === 'meal_takeaway') return '&#x1F374;';
+  if (type === 'lodging' || type === 'hotel' || type === 'hostel' || type === 'motel') return '&#x1F3E8;';
+  if (type === 'park' || type === 'natural_feature' || cat === 'natural') return '&#x1F333;';
+  if (type === 'tourist_attraction' || type === 'museum' || type === 'art_gallery' || cat === 'tourism') return '&#x1F3DB;';
+  if (type === 'store' || type === 'shopping_mall' || type === 'supermarket' || cat === 'shop') return '&#x1F6CD;';
+  if (type === 'route' || cat === 'highway') return '&#x1F6E3;';
   if (cat === 'amenity') return '&#x1F3DB;';
-  if (cat === 'natural') return '&#x1F333;';
-  if (cat === 'highway') return '&#x1F6E3;';
-  if (cat === 'tourism') return '&#x1F3D6;';
-  if (type === 'restaurant' || type === 'cafe' || type === 'bar') return '&#x1F374;';
-  if (type === 'hotel' || type === 'hostel') return '&#x1F3E8;';
-  if (cat === 'shop') return '&#x1F6CD;';
   return '&#x1F4CD;';
 }
 
@@ -14897,6 +14898,7 @@ function _mapGeoRenderResults(data) {
   var results = document.getElementById('map-geocoder-results');
   if (!results) return;
   if (!data || data.length === 0) { results.innerHTML = '<div class="map-geocoder-loading">No results found</div>'; return; }
+  var isGoogle = data.length > 0 && data[0].source === 'google';
   results.innerHTML = data.map(function(r, i) {
     var name = (r.name && r.name.length > 0) ? r.name : r.display_name.split(',')[0];
     return '<div class="map-geocoder-result" onclick="_mapGeoSelect(' + i + ')">' +
@@ -14907,7 +14909,7 @@ function _mapGeoRenderResults(data) {
       '</div>' +
       '<button class="map-geocoder-result-save" onclick="event.stopPropagation();_mapGeoSavePin(' + i + ')">+ Pin</button>' +
     '</div>';
-  }).join('');
+  }).join('') + (isGoogle ? '<div class="map-geocoder-attribution">Powered by Google</div>' : '');
   results.style.display = 'block';
 }
 
@@ -20095,6 +20097,79 @@ class CCHandler(BaseHTTPRequestHandler):
                 body = json.loads(self._read_body())
                 CC_MAP.write_text(json.dumps(body))
                 return self._json({"ok": True})
+
+        # Map place search proxy (/api/map/search)
+        if path == "/api/map/search" and method == "GET":
+            import urllib.request as _urq
+            from urllib.parse import quote as _uq
+            q = qs.get("q", [""])[0].strip()
+            if not q:
+                return self._json([])
+            gkey = os.environ.get("GOOGLE_MAPS_API_KEY", "")
+            if gkey:
+                try:
+                    lat = qs.get("lat", [""])[0]
+                    lon = qs.get("lon", [""])[0]
+                    payload = {"textQuery": q, "languageCode": "en", "maxResultCount": 6}
+                    if lat and lon:
+                        try:
+                            payload["locationBias"] = {"circle": {
+                                "center": {"latitude": float(lat), "longitude": float(lon)},
+                                "radius": 50000.0
+                            }}
+                        except ValueError:
+                            pass
+                    body = json.dumps(payload).encode()
+                    req = _urq.Request(
+                        "https://places.googleapis.com/v1/places:searchText",
+                        data=body,
+                        headers={
+                            "Content-Type": "application/json",
+                            "X-Goog-Api-Key": gkey,
+                            "X-Goog-FieldMask": "places.displayName,places.formattedAddress,places.location,places.types"
+                        }
+                    )
+                    with _urq.urlopen(req, timeout=5) as resp:
+                        data = json.loads(resp.read())
+                    results = []
+                    for p in data.get("places", []):
+                        loc = p.get("location", {})
+                        name = p.get("displayName", {}).get("text", "")
+                        addr = p.get("formattedAddress", "")
+                        types = p.get("types", [])
+                        results.append({
+                            "name": name,
+                            "display_name": addr,
+                            "lat": str(loc.get("latitude", 0)),
+                            "lon": str(loc.get("longitude", 0)),
+                            "type": types[0] if types else "",
+                            "source": "google"
+                        })
+                    return self._json(results)
+                except Exception:
+                    pass  # fall through to Nominatim
+            # Nominatim fallback
+            try:
+                nom_url = ("https://nominatim.openstreetmap.org/search?q=" +
+                           _uq(q) + "&format=json&limit=6&addressdetails=1")
+                req = _urq.Request(nom_url, headers={"Accept-Language": "en", "User-Agent": "amux/1.0"})
+                with _urq.urlopen(req, timeout=5) as resp:
+                    data = json.loads(resp.read())
+                results = []
+                for r in data:
+                    name = r.get("name") or r.get("display_name", "").split(",")[0]
+                    results.append({
+                        "name": name,
+                        "display_name": r.get("display_name", ""),
+                        "lat": r.get("lat", "0"),
+                        "lon": r.get("lon", "0"),
+                        "type": r.get("type", ""),
+                        "category": r.get("category", ""),
+                        "source": "osm"
+                    })
+                return self._json(results)
+            except Exception:
+                return self._json([])
 
         # Notes API (/api/notes)
         if method == "POST" and path.startswith("/api/notes/") and path.endswith("/pin"):
