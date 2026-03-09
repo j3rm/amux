@@ -3304,7 +3304,7 @@ def list_sessions() -> list:
             "active_model": active_model,
             "session_created": session_created,
             "task_time": task_time,
-            "task_name": _doing_tasks.get(name) or pane_title,
+            "task_name": _doing_tasks.get(name) or cfg.get("CC_DESC", "") or (pane_title if pane_title.lower() not in ("claude", "claude code", "bash", "zsh", "sh", "") else ""),
             "tokens": tokens,
             "branch": cfg.get("CC_BRANCH", ""),
             "mcp": cfg.get("CC_MCP", ""),
