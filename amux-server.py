@@ -20100,8 +20100,13 @@ class CCHandler(BaseHTTPRequestHandler):
 
         # Map place search proxy (/api/map/search)
         if path == "/api/map/search" and method == "GET":
-            import urllib.request as _urq
+            import urllib.request as _urq, ssl as _ssl
             from urllib.parse import quote as _uq
+            _ctx = _ssl.create_default_context()
+            try: _ctx.load_verify_locations(_ssl.get_default_verify_paths().cafile or "")
+            except Exception: pass
+            try: import certifi as _cf; _ctx = _ssl.create_default_context(cafile=_cf.where())
+            except Exception: _ctx.check_hostname = False; _ctx.verify_mode = _ssl.CERT_NONE
             q = qs.get("q", [""])[0].strip()
             if not q:
                 return self._json([])
@@ -20129,7 +20134,7 @@ class CCHandler(BaseHTTPRequestHandler):
                             "X-Goog-FieldMask": "places.displayName,places.formattedAddress,places.location,places.types"
                         }
                     )
-                    with _urq.urlopen(req, timeout=5) as resp:
+                    with _urq.urlopen(req, timeout=5, context=_ctx) as resp:
                         data = json.loads(resp.read())
                     results = []
                     for p in data.get("places", []):
@@ -20153,7 +20158,7 @@ class CCHandler(BaseHTTPRequestHandler):
                 nom_url = ("https://nominatim.openstreetmap.org/search?q=" +
                            _uq(q) + "&format=json&limit=6&addressdetails=1")
                 req = _urq.Request(nom_url, headers={"Accept-Language": "en", "User-Agent": "amux/1.0"})
-                with _urq.urlopen(req, timeout=5) as resp:
+                with _urq.urlopen(req, timeout=5, context=_ctx) as resp:
                     data = json.loads(resp.read())
                 results = []
                 for r in data:
