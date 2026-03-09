@@ -21630,14 +21630,9 @@ class CCHandler(BaseHTTPRequestHandler):
         # ── Identity (cloud user info forwarded by gateway) ──────────────────
         if path == "/api/identity" and method == "GET":
             email = self.headers.get("X-Amux-User-Email", "")
-            # has_api_key is only True when the user explicitly saved their own key
-            # via settings (written to server.env). Platform-injected env vars don't count.
-            has_key = False
-            if _server_env_file.exists():
-                for _line in _server_env_file.read_text().splitlines():
-                    if _line.startswith("ANTHROPIC_API_KEY=") and _line.split("=", 1)[1].strip():
-                        has_key = True
-                        break
+            # has_api_key: True if ANTHROPIC_API_KEY is available from any source
+            # (server.env file OR process environment e.g. Docker-injected)
+            has_key = bool(os.environ.get("ANTHROPIC_API_KEY", "").strip())
             return self._json({"email": email, "is_cloud": bool(email), "has_api_key": has_key})
 
         # ── Settings env (ANTHROPIC_API_KEY etc.) ─────────────────────────────
