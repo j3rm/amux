@@ -2874,12 +2874,54 @@ def _build_system_metrics() -> dict:
     """Build system resource metrics and per-session process attribution."""
     result: dict = {"system": {}, "sessions": []}
 
+    # ── Collect shell PIDs up-front so we can prime CPU before sleeping ───────
+    shell_pids: dict = {}
+    try:
+        tp = subprocess.run(
+            ["tmux", "list-panes", "-a", "-F", "#{session_name} #{pane_pid}"],
+            capture_output=True, text=True, timeout=5,
+        )
+        if tp.returncode == 0:
+            for line in tp.stdout.splitlines():
+                parts = line.split()
+                if len(parts) == 2 and parts[1].isdigit():
+                    tmux_name = parts[0]
+                    sess_name = tmux_name[len("amux-"):] if tmux_name.startswith("amux-") else tmux_name
+                    shell_pids.setdefault(sess_name, int(parts[1]))
+    except Exception:
+        pass
+
+    # ── Prime per-process CPU + system CPU, then sleep once for all ──────────
+    all_procs: dict = {}
+    _has_psutil = False
+    try:
+        import psutil as _psutil  # type: ignore
+        _has_psutil = True
+        # Prime system-level counter
+        _psutil.cpu_percent()
+        # Prime per-process counters (must happen before the shared sleep)
+        for sname, pid in shell_pids.items():
+            try:
+                proc = _psutil.Process(pid)
+                procs = [proc] + proc.children(recursive=True)
+                alive = [p for p in procs if p.is_running()]
+                for p in alive:
+                    try:
+                        p.cpu_percent(interval=None)  # prime baseline
+                    except Exception:
+                        pass
+                all_procs[sname] = alive
+            except Exception:
+                pass
+        # One shared sleep — covers both system and per-process readings
+        time.sleep(0.5)
+    except ImportError:
+        pass
+
     # ── System-level metrics ──────────────────────────────────────────────────
     try:
         import psutil as _psutil  # type: ignore
-        # Prime CPU counter then wait briefly for an accurate reading
-        _psutil.cpu_percent()
-        time.sleep(0.5)
+        # Read CPU after the sleep (baseline was primed above)
         cpu_pct = _psutil.cpu_percent()
         cpu_per = _psutil.cpu_percent(percpu=True)
         mem = _psutil.virtual_memory()
@@ -2954,41 +2996,6 @@ def _build_system_metrics() -> dict:
         tokens_by_name = {s["name"]: s for s in tok_data.get("sessions", [])}
     except Exception:
         tokens_by_name = {}
-
-    # Collect active session shell PIDs — one tmux call for all sessions
-    shell_pids: dict = {}
-    try:
-        tp = subprocess.run(
-            ["tmux", "list-panes", "-a", "-F", "#{session_name} #{pane_pid}"],
-            capture_output=True, text=True, timeout=5,
-        )
-        if tp.returncode == 0:
-            for line in tp.stdout.splitlines():
-                parts = line.split()
-                if len(parts) == 2 and parts[1].isdigit():
-                    # tmux sessions are named "amux-<session>"; strip prefix
-                    tmux_name = parts[0]
-                    sess_name = tmux_name[len("amux-"):] if tmux_name.startswith("amux-") else tmux_name
-                    shell_pids.setdefault(sess_name, int(parts[1]))
-    except Exception:
-        pass
-
-    # Collect process trees for active sessions (psutil, no blocking sleep needed
-    # since we already slept 0.5s during cpu_percent sampling above)
-    all_procs: dict = {}
-    _has_psutil = False
-    try:
-        import psutil as _psutil  # type: ignore
-        _has_psutil = True
-        for sname, pid in shell_pids.items():
-            try:
-                proc = _psutil.Process(pid)
-                procs = [proc] + proc.children(recursive=True)
-                all_procs[sname] = [p for p in procs if p.is_running()]
-            except Exception:
-                pass
-    except ImportError:
-        pass
 
     # Build session data list
     if CC_SESSIONS.exists():
