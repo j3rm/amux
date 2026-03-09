@@ -3467,8 +3467,10 @@ curl -sk -X POST -H 'Content-Type: application/json' \
   -d '{"url":"https://example.com/dashboard"}' \
   $AMUX_URL/api/browser/navigate
 
-# 3. Take a screenshot (returns JPEG bytes; save with -o screenshot.jpg)
-curl -sk $AMUX_URL/api/browser/screenshot -o /tmp/screen.jpg
+# 3. Take a screenshot — use ?json=1 to get the safe path response (saves to ~/.amux/browser-screenshots/latest.jpg)
+result=$(curl -sk "$AMUX_URL/api/browser/screenshot?json=1")
+path=$(echo "$result" | python3 -c "import sys,json; print(json.load(sys.stdin)['path'])")
+# Then: Read $path  (guaranteed valid JPEG — never use -o file.jpg without ?json=1)
 
 # 4. Click at coordinates
 curl -sk -X POST -H 'Content-Type: application/json' \
@@ -20365,6 +20367,16 @@ class CCHandler(BaseHTTPRequestHandler):
             if not result.get("ok") or "data" not in result:
                 return self._json({"error": result.get("error", "no screenshot")}, 500)
             img_data = base64.b64decode(result["data"])
+            # Always save to a well-known path so agents can Read it safely
+            _ss_dir = Path.home() / ".amux" / "browser-screenshots"
+            _ss_dir.mkdir(parents=True, exist_ok=True)
+            _ss_path = _ss_dir / "latest.jpg"
+            _ss_path.write_bytes(img_data)
+            # If client wants JSON (e.g. agent using ?json=1), return path instead of bytes
+            _want_json = "json=1" in (self.path.split("?", 1)[1] if "?" in self.path else "")
+            if _want_json:
+                return self._json({"ok": True, "path": str(_ss_path), "size": len(img_data),
+                                   "url": result.get("url",""), "title": result.get("title","")})
             self.send_response(200)
             self.send_header("Content-Type", "image/jpeg")
             self.send_header("Content-Length", str(len(img_data)))
@@ -20378,6 +20390,20 @@ class CCHandler(BaseHTTPRequestHandler):
                 import json as _json
                 self.send_header("X-Tabs", _json.dumps(result["tabs"]))
                 self.send_header("X-Active-Tab", str(result.get("activeTab", 0)))
+            self.end_headers()
+            self.wfile.write(img_data)
+            return
+
+        # GET /api/browser/screenshots/latest — serve saved screenshot file (always a valid JPEG)
+        if method == "GET" and path == "/api/browser/screenshots/latest":
+            _ss_path = Path.home() / ".amux" / "browser-screenshots" / "latest.jpg"
+            if not _ss_path.exists():
+                return self._json({"error": "no screenshot taken yet"}, 404)
+            img_data = _ss_path.read_bytes()
+            self.send_response(200)
+            self.send_header("Content-Type", "image/jpeg")
+            self.send_header("Content-Length", str(len(img_data)))
+            self.send_header("Cache-Control", "no-store")
             self.end_headers()
             self.wfile.write(img_data)
             return
