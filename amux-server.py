@@ -20122,7 +20122,7 @@ class CCHandler(BaseHTTPRequestHandler):
                 data.setdefault("settings", {})["googleMapsKey"] = os.environ.get("GOOGLE_MAPS_API_KEY", "")
                 return self._json(data)
             if method == "POST":
-                body = json.loads(self._read_body())
+                body = self._read_body()
                 CC_MAP.write_text(json.dumps(body))
                 return self._json({"ok": True})
 
