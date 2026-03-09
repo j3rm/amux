@@ -458,7 +458,10 @@ def proxy(handler, port, path, qs, user_email="", user_id=None):
 
 # ── Request handler ────────────────────────────────────────────────────────────
 class Handler(BaseHTTPRequestHandler):
-    log_message = lambda *a: None
+    def log_message(self, fmt, *args):
+        import sys
+        sys.stderr.write(f"[gateway] {self.client_address[0]} {fmt % args}\n")
+        sys.stderr.flush()
 
     def _json(self, d, code=200):
         body = json.dumps(d).encode()
@@ -643,6 +646,7 @@ class Handler(BaseHTTPRequestHandler):
             try:
                 user_id, email = verify_clerk_token(auth[7:])
             except Exception as e:
+                print(f"[auth] Bearer verify failed for {path}: {e}", flush=True)
                 return self._json({"error": f"invalid token: {e}"}, 401)
         else:
             cookies = _parse_cookies(self.headers.get("Cookie", ""))
@@ -650,14 +654,17 @@ class Handler(BaseHTTPRequestHandler):
             if session_val:
                 try:
                     user_id = _verify_cookie(session_val)
-                except ValueError:
+                except ValueError as ve:
+                    print(f"[auth] Cookie verify failed for {path}: {ve} cookie_len={len(session_val)}", flush=True)
                     accept = self.headers.get("Accept", "")
-                    if "text/html" in accept:
+                    if "text/html" in accept or not path.startswith("/api/"):
                         return self._serve_login()
                     return self._json({"error": "session expired"}, 401)
             else:
                 accept = self.headers.get("Accept", "")
-                if "text/html" in accept:
+                cookie_header = self.headers.get("Cookie", "")
+                print(f"[auth] No amux_session cookie for {path} accept={accept[:40]} cookies={cookie_header[:60]}", flush=True)
+                if "text/html" in accept or not path.startswith("/api/"):
                     return self._serve_login()
                 return self._json({"error": "unauthorized"}, 401)
 

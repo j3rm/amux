@@ -19631,7 +19631,7 @@ PWA_MANIFEST = json.dumps({
 
 # Robust service worker: cache-first with localStorage fallback for multi-day offline
 SERVICE_WORKER = r"""
-const CACHE = 'amux-v0.6.4';
+const CACHE = 'amux-v0.6.5';
 const SHELL_URLS = ['/', '/manifest.json', '/icon.svg', '/icon.png', '/icon-192.png', '/icon-512.png'];
 
 // Install: pre-cache entire app shell
@@ -19676,7 +19676,7 @@ self.addEventListener('fetch', e => {
   // Main HTML (SPA): network-first, always cache as canonical '/' key
   // Hash fragments (#path=...) are client-side only — SW sees bare '/' regardless
   if (url.pathname === '/') {
-    const canonical = new Request('/');
+    const canonical = new Request('/', { headers: { 'Accept': 'text/html' } });
     e.respondWith(
       fetch(canonical).then(response => {
         const clone = response.clone();
