@@ -14,6 +14,13 @@ Single-file project: everything lives in `amux-server.py` (Python server + inlin
 - The server auto-restarts on file save (watches its own mtime), so changes are live immediately.
 - Always verify Python syntax after edits: `python3 -c "import ast; ast.parse(open('amux-server.py').read())"`
 
+## Deploy
+
+When the user says **"deploy"**, run the full pipeline:
+1. `git add` changed files (typically `amux-server.py`)
+2. `git commit` with a concise message
+3. `git push origin main`
+
 ## Single-codebase rule (CRITICAL)
 
 **`amux-server.py` is identical for both local (OSS) and cloud deployments — no exceptions.**

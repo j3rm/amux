@@ -4769,7 +4769,7 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
   .btn:active { background: var(--border); }
   .btn.primary { background: var(--accent); color: #fff; border-color: var(--accent); }
   .btn.danger { border-color: var(--red); color: var(--red); }
-  .chips { display: flex; gap: 6px; flex-wrap: nowrap; margin-bottom: 10px; overflow-x: auto; -webkit-overflow-scrolling: touch; scrollbar-width: none; }
+  .chips { display: flex; gap: 6px; flex-wrap: nowrap; margin-bottom: 10px; overflow-x: auto; -webkit-overflow-scrolling: touch; scrollbar-width: none; touch-action: pan-x; overscroll-behavior-x: contain; }
   .chips::-webkit-scrollbar { display: none; }
   .chip {
     font-size: 0.78rem; padding: 6px 12px; border-radius: 16px;
@@ -5822,7 +5822,7 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
   }
   .tab-bar {
     display: flex; gap: 0; padding: 0 0 0 16px; flex: 1;
-    overflow-x: auto; -webkit-overflow-scrolling: touch; scroll-behavior: smooth;
+    overflow-x: auto; -webkit-overflow-scrolling: touch; scroll-behavior: smooth; touch-action: pan-x; overscroll-behavior-x: contain;
   }
   .tab-bar::-webkit-scrollbar { display: none; }
   .tab-bar button {
@@ -6774,8 +6774,8 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
   .map-geocoder-result-save:hover { opacity: 0.85; }
   .map-geocoder-loading { padding: 10px 14px; font-size: 0.82rem; color: var(--dim); text-align: center; }
   @media (max-width: 600px) {
-    #map-view { height: calc(100dvh - 122px); }
-    .map-sidebar { position: absolute; top: 0; left: 0; bottom: 0; z-index: 1005; width: 85vw !important; min-width: 0 !important; box-shadow: 4px 0 24px rgba(0,0,0,0.6); overflow: hidden; }
+    #map-view { height: calc(100dvh - 122px); background: var(--bg); }
+    .map-sidebar { position: absolute; top: 0; left: 0; right: 0; bottom: 0; z-index: 1005; width: 100% !important; min-width: 0 !important; box-shadow: none; overflow: hidden; }
     .map-sidebar.hidden { transform: translateX(-110%); }
     .map-open-btn { display: flex; }
     .map-toolbar { gap: 4px; padding: 5px 8px; }
