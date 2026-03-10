@@ -380,11 +380,16 @@ def _reaper():
         try:
             db = get_db()
             cutoff = int(time.time()) - IDLE_SECONDS
+            # Exempt org members — they inherit their owner's keep-alive
+            org_member_ids = {r["member_id"] for r in
+                db.execute("SELECT member_id FROM org_members").fetchall()}
             stale = db.execute(
                 "SELECT id FROM users WHERE last_seen < ? AND plan = 'free'",
                 (cutoff,)).fetchall()
             for row in stale:
                 uid = row["id"]
+                if uid in org_member_ids:
+                    continue
                 if container_running(uid):
                     print(f"[reaper] stopping idle container for {uid}")
                     stop_container(uid)
