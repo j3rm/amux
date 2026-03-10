@@ -8186,6 +8186,7 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
           <div class="chip" onclick="peekQuickKeys('C-o')">Ctrl+O</div>
           <div class="chip" onclick="peekQuickSend('/clear')">/clear</div>
           <div class="chip" onclick="peekQuickSend('/compact')">/compact</div>
+          <div class="chip" onclick="peekQuickKeys('Escape')">Esc</div>
         </div>
         <!-- Attachment chips -->
         <div class="peek-attach-bar" id="peek-attach-bar"></div>
@@ -9534,6 +9535,7 @@ function render() {
           <div class="chip" onclick="doKeys('${s.name}','C-o')">Ctrl+O</div>
           <div class="chip" onclick="chipToInput('${s.name}','/clear')">/clear</div>
           <div class="chip" onclick="chipToInput('${s.name}','/compact')">/compact</div>
+          <div class="chip" onclick="doKeys('${s.name}','Escape')">Esc</div>
         </div>
         <div class="send-row" style="position:relative;">
           <div id="card-ac-${s.name}" class="ac-list slash-ac"></div>
