@@ -14525,7 +14525,14 @@ function switchView(view) {
   if (view === 'map') { _mapLoad(); _mapInit(); }
   if (view === 'metrics') { _metricsLoad(); _metricsApplySidebarState(); } // always refresh on tab switch
   if (view === 'files') loadFiles(_filesPath);
-  else { try { if (location.hash.startsWith('#path=')) history.replaceState({}, '', location.pathname); } catch(e) {} }
+  else {
+    try { if (location.hash.startsWith('#path=')) history.replaceState({}, '', location.pathname); } catch(e) {}
+    if (view === 'sessions' && _exploreSession) {
+      const _sess = _exploreSession;
+      _exploreSession = null;
+      setTimeout(() => openPeek(_sess), 50);
+    }
+  }
   if (view === 'browser') _rbLoadProfiles();
   if (view === 'email') _emailLoad();
   if (view === 'notes') {
