@@ -37,7 +37,6 @@ targets:
           PROVISIONING_PROFILE_SPECIFIER: "match AppStore com.EthanSteininger.nextup"
     sources:
       - path: AmuxApp/Sources
-    resources:
       - path: AmuxApp/Assets.xcassets
     info:
       path: AmuxApp/Info.plist
