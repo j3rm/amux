@@ -3546,10 +3546,10 @@ curl -sk -X POST -H 'Content-Type: application/json' \
   -d '{"url":"https://example.com/dashboard"}' \
   $AMUX_URL/api/browser/navigate
 
-# 3. Take a screenshot — use ?json=1 to get the safe path response (saves to ~/.amux/browser-screenshots/latest.jpg)
-result=$(curl -sk "$AMUX_URL/api/browser/screenshot?json=1")
+# 3. Take a screenshot — always returns JSON with path (NEVER use -o file.jpg)
+result=$(curl -sk "$AMUX_URL/api/browser/screenshot")
 path=$(echo "$result" | python3 -c "import sys,json; print(json.load(sys.stdin)['path'])")
-# Then: Read $path  (guaranteed valid JPEG — never use -o file.jpg without ?json=1)
+# Then: Read $path  (guaranteed valid JPEG at ~/.amux/browser-screenshots/latest.jpg)
 
 # 4. Click at coordinates
 curl -sk -X POST -H 'Content-Type: application/json' \
@@ -12673,7 +12673,7 @@ async function _rbRefresh() {
   const img = document.getElementById('rb-screen');
   const status = document.getElementById('rb-status');
   try {
-    const r = await fetch(API + '/api/browser/screenshot?t=' + Date.now());
+    const r = await fetch(API + '/api/browser/screenshot?raw=1&t=' + Date.now());
     if (!r.ok) { status.textContent = 'Screenshot failed'; return; }
     const blob = await r.blob();
     const old = img.src;
@@ -20906,9 +20906,10 @@ class CCHandler(BaseHTTPRequestHandler):
             _ss_dir.mkdir(parents=True, exist_ok=True)
             _ss_path = _ss_dir / "latest.jpg"
             _ss_path.write_bytes(img_data)
-            # If client wants JSON (e.g. agent using ?json=1), return path instead of bytes
-            _want_json = "json=1" in (self.path.split("?", 1)[1] if "?" in self.path else "")
-            if _want_json:
+            # Default: return JSON with path (safe for agents). Only return raw bytes if ?raw=1
+            _qs = self.path.split("?", 1)[1] if "?" in self.path else ""
+            _want_raw = "raw=1" in _qs
+            if not _want_raw:
                 return self._json({"ok": True, "path": str(_ss_path), "size": len(img_data),
                                    "url": result.get("url",""), "title": result.get("title","")})
             self.send_response(200)
