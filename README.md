@@ -13,6 +13,8 @@ amux start myproject
 amux serve   # → https://localhost:8822
 ```
 
+> **License:** [MIT + Commons Clause](LICENSE) — free to use, modify, and self-host. Commercial resale requires a separate license.
+
 ---
 
 ## Why amux?
@@ -39,7 +41,7 @@ amux serve   # → https://localhost:8822
 - **Conversation fork** — clone session history to new sessions on separate branches
 - **Git conflict detection** — warns when agents share a dir + branch, one-click isolation
 - **Built-in cron** — schedule recurring commands, computed atomically in SQLite
-- **Single file** — ~12,000 lines of Python + inline HTML/CSS/JS. Edit it; it restarts on save. [Learn more →](https://amux.io/features/single-file-architecture/)
+- **Single file** — ~23,000 lines of Python + inline HTML/CSS/JS. Edit it; it restarts on save. [Learn more →](https://amux.io/features/single-file-architecture/)
 
 ---
 
@@ -111,8 +113,8 @@ Session names support prefix matching — `amux attach my` resolves to `myprojec
 Requires `tmux` and `python3`.
 
 ```bash
-git clone <repo> && cd amux
-./install.sh   # installs amux (alias: cc) to /usr/local/bin
+git clone https://github.com/mixpeek/amux && cd amux
+./install.sh   # installs amux to /usr/local/bin
 ```
 
 ### HTTPS
