@@ -44,6 +44,21 @@ platform :ios do
       xcargs: "-skipPackagePluginValidation -allowProvisioningUpdates"
     )
 
+    # Debug: inspect the built .app inside the archive
+    archive_path = lane_context[SharedValues::XCODEBUILD_ARCHIVE]
+    if archive_path
+      app_path = File.join(archive_path, "Products", "Applications", "AmuxApp.app")
+      UI.message("Archive path: #{archive_path}")
+      UI.message("App bundle contents:")
+      sh("ls -la '#{app_path}/' | head -30") rescue nil
+      UI.message("Info.plist in bundle:")
+      sh("/usr/libexec/PlistBuddy -c 'Print :CFBundleIconName' '#{app_path}/Info.plist'") rescue UI.error("CFBundleIconName not found in built plist")
+      UI.message("Assets.car exists?")
+      sh("ls -la '#{app_path}/Assets.car'") rescue UI.error("No Assets.car in bundle")
+      UI.message("AppIcon in Assets.car:")
+      sh("xcrun --sdk iphoneos assetutil --info '#{app_path}/Assets.car' 2>/dev/null | grep -i icon | head -10") rescue UI.error("No icon info in Assets.car")
+    end
+
     upload_to_testflight(api_key: api_key, skip_waiting_for_build_processing: true)
   end
 

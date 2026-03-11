@@ -52,6 +52,10 @@ jobs:
         env:
           MATCH_SSH_KEY: ${{ secrets.MATCH_SSH_KEY }}
 
+      - name: Verify build settings in xcodeproj
+        run: |
+          xcodebuild -project AmuxApp.xcodeproj -scheme AmuxApp -showBuildSettings 2>/dev/null | grep -E "(INFOPLIST_FILE|GENERATE_INFOPLIST|ASSETCATALOG_COMPILER_APPICON|CFBundleIconName)" || echo "No matches found"
+
       - name: Build & upload to TestFlight
         run: bundle exec fastlane beta
         env:
