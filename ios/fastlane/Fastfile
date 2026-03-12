@@ -44,7 +44,13 @@ platform :ios do
       xcargs: "-skipPackagePluginValidation -allowProvisioningUpdates"
     )
 
-    upload_to_testflight(api_key: api_key, skip_waiting_for_build_processing: true)
+    changelog = ENV["CHANGELOG"] || "Bug fixes and improvements."
+
+    upload_to_testflight(
+      api_key: api_key,
+      skip_waiting_for_build_processing: true,
+      changelog: changelog
+    )
   end
 
   # Promote latest TestFlight build to App Store (run manually)
