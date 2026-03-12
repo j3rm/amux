@@ -1193,6 +1193,14 @@ CREATE TABLE IF NOT EXISTS crm_interactions (
 CREATE INDEX IF NOT EXISTS idx_crm_contacts_upd ON crm_contacts(updated) WHERE deleted IS NULL;
 CREATE INDEX IF NOT EXISTS idx_crm_ix_contact   ON crm_interactions(contact_id, date DESC);
 CREATE INDEX IF NOT EXISTS idx_crm_ix_followup  ON crm_interactions(follow_up_date) WHERE follow_up_date IS NOT NULL;
+CREATE TABLE IF NOT EXISTS share_tokens (
+    token      TEXT PRIMARY KEY,
+    session    TEXT NOT NULL,
+    perms      TEXT NOT NULL DEFAULT 'output',
+    created_at INTEGER NOT NULL,
+    expires_at INTEGER,
+    label      TEXT NOT NULL DEFAULT ''
+);
 """
 
 
@@ -1417,6 +1425,18 @@ for c in cs: print(c.get('id',''),c.get('name',''),c.get('company',''))" ;;
     curl -sk "$AMUX_URL/api/sessions" | python3 -c "
 import json,sys
 for s in json.load(sys.stdin): print(s['name'], '(running)' if s.get('running') else '')" ;;
+  share)
+    session="$1"; shift 2>/dev/null || true
+    perms="${1:-output}"
+    result=$(curl -sk -X POST -H 'Content-Type: application/json' \
+      -d "{\"perms\":\"$perms\"}" "$AMUX_URL/api/sessions/$session/share")
+    echo "$result" | python3 -c "import json,sys; d=json.load(sys.stdin); print(d.get('url','error: '+d.get('error','unknown')))" ;;
+  unshare)
+    session="$1"; shift 2>/dev/null || true
+    token="$1"
+    curl -sk -X DELETE -H 'Content-Type: application/json' \
+      -d "{\"token\":\"$token\"}" "$AMUX_URL/api/sessions/$session/share" >/dev/null
+    echo "revoked" ;;
   help|--help|-h|"")
     echo "amux board <done|doing|todo> <ITEM_ID>  — update board item status"
     echo "amux board add <title>                  — create a new board item"
@@ -1427,7 +1447,9 @@ for s in json.load(sys.stdin): print(s['name'], '(running)' if s.get('running') 
     echo "amux crm log <PPL-id> <notes>           — log an interaction"
     echo "amux crm followups                      — show upcoming follow-ups"
     echo "amux crm list                           — list all contacts"
-    echo "amux sessions                           — list sessions" ;;
+    echo "amux sessions                           — list sessions"
+    echo "amux share <session> [perms]            — create a public share link (perms: output, output+files, output+files+notes)"
+    echo "amux unshare <session> [token]          — revoke share link(s)" ;;
   *) echo "amux: unknown command: $cmd" >&2; exit 1 ;;
 esac
 """
@@ -4288,6 +4310,149 @@ def _gmail_list_labels(account: str) -> list:
     except Exception as e:
         slog(f"[gmail] list_labels {account}: {e}")
         return []
+
+
+_SHARE_CSS = """
+:root { --bg:#0d1117; --card:#161b22; --border:#30363d; --text:#e6edf3; --text2:#8b949e; --green:#3fb950; --accent:#58a6ff; }
+*{ box-sizing:border-box; margin:0; padding:0; }
+body{ background:var(--bg); color:var(--text); font-family:'SF Mono',Menlo,Consolas,monospace; font-size:13px; }
+header{ padding:16px 20px; border-bottom:1px solid var(--border); display:flex; align-items:center; gap:12px; }
+header h1{ font-size:16px; font-weight:600; }
+header .status{ width:8px; height:8px; border-radius:50%; background:var(--text2); }
+header .status.running{ background:var(--green); }
+.tabs{ display:flex; border-bottom:1px solid var(--border); padding:0 20px; gap:4px; }
+.tab{ padding:8px 16px; cursor:pointer; color:var(--text2); border-bottom:2px solid transparent; }
+.tab.active{ color:var(--text); border-color:var(--accent); }
+.panel{ display:none; padding:20px; flex:1; overflow:auto; }
+.panel.active{ display:block; }
+#output{ white-space:pre-wrap; word-break:break-word; line-height:1.5; max-height:calc(100vh - 130px); overflow:auto; padding:12px; background:var(--card); border-radius:8px; }
+.file-list{ list-style:none; }
+.file-list li{ padding:6px 8px; border-bottom:1px solid var(--border); cursor:pointer; display:flex; align-items:center; gap:8px; }
+.file-list li:hover{ background:var(--card); }
+.file-content{ white-space:pre-wrap; word-break:break-word; padding:16px; background:var(--card); border-radius:8px; max-height:calc(100vh - 200px); overflow:auto; }
+.breadcrumb{ padding:12px 0; color:var(--text2); }
+.breadcrumb a{ color:var(--accent); text-decoration:none; cursor:pointer; }
+.note-link{ display:block; padding:8px; color:var(--accent); text-decoration:none; border-bottom:1px solid var(--border); }
+.note-link:hover{ background:var(--card); }
+"""
+
+_SHARE_JS = r"""
+const API = '/api/share/' + document.body.dataset.token;
+const HAS_FILES = document.body.dataset.files === '1';
+const HAS_NOTES = document.body.dataset.notes === '1';
+let pollId;
+function switchTab(name) {
+  document.querySelectorAll('.tab').forEach(t => t.classList.toggle('active', t.textContent.trim().toLowerCase() === name));
+  document.querySelectorAll('.panel').forEach(p => p.classList.toggle('active', p.id === 'panel-' + name));
+  if (name === 'output') startPoll(); else stopPoll();
+  if (name === 'files') loadFiles('');
+  if (name === 'notes') loadNotes();
+}
+async function loadOutput() {
+  try {
+    const r = await fetch(API + '/peek?lines=300');
+    const d = await r.json();
+    const el = document.getElementById('output');
+    el.textContent = d.output || '(no output)';
+    el.scrollTop = el.scrollHeight;
+  } catch(e) { console.error(e); }
+}
+async function loadInfo() {
+  try {
+    const r = await fetch(API + '/info');
+    const d = await r.json();
+    document.getElementById('status-dot').classList.toggle('running', d.running);
+    if (d.desc) document.getElementById('session-desc').textContent = d.desc;
+  } catch(e) {}
+}
+function startPoll() { stopPoll(); loadOutput(); pollId = setInterval(loadOutput, 3000); }
+function stopPoll() { if (pollId) clearInterval(pollId); pollId = null; }
+// Files
+let filePath = '';
+async function loadFiles(p) {
+  if (!HAS_FILES) return;
+  filePath = p;
+  const el = document.getElementById('file-list');
+  const fc = document.getElementById('file-content');
+  const bc = document.getElementById('file-breadcrumb');
+  fc.style.display = 'none'; el.style.display = 'block';
+  const parts = p ? p.split('/') : [];
+  let crumbs = '<a onclick="loadFiles(\'\')">root</a>';
+  let acc = '';
+  parts.forEach((seg, i) => { acc += (i ? '/' : '') + seg; crumbs += ' / <a onclick="loadFiles(\'' + acc + '\')">' + seg + '</a>'; });
+  bc.innerHTML = crumbs;
+  try {
+    const r = await fetch(API + '/files?path=' + encodeURIComponent(p));
+    const items = await r.json();
+    if (items.error) { el.innerHTML = '<li>' + items.error + '</li>'; return; }
+    el.innerHTML = items.map(f => {
+      const click = f.is_dir ? "loadFiles('" + f.path + "')" : "viewFile('" + f.path + "')";
+      const icon = f.is_dir ? '\u{1F4C1}' : '\u{1F4C4}';
+      const sz = f.is_dir ? '' : ' <span style="color:var(--text2);font-size:11px;margin-left:auto">' + _fmtSize(f.size) + '</span>';
+      return '<li onclick="' + click + '"><span class="file-icon">' + icon + '</span>' + f.name + sz + '</li>';
+    }).join('');
+  } catch(e) { el.innerHTML = '<li>Error loading files</li>'; }
+}
+function _fmtSize(b) { if (b < 1024) return b + 'B'; if (b < 1048576) return (b/1024).toFixed(1) + 'K'; return (b/1048576).toFixed(1) + 'M'; }
+async function viewFile(p) {
+  document.getElementById('file-list').style.display = 'none';
+  const fc = document.getElementById('file-content'); fc.style.display = 'block'; fc.textContent = 'Loading\u2026';
+  const bc = document.getElementById('file-breadcrumb');
+  const dir = p.includes('/') ? p.substring(0, p.lastIndexOf('/')) : '';
+  bc.innerHTML = '<a onclick="loadFiles(\'' + dir + '\')">\u2190 back</a> / ' + p.split('/').pop();
+  try { const r = await fetch(API + '/files?path=' + encodeURIComponent(p)); fc.textContent = await r.text(); } catch(e) { fc.textContent = 'Error loading file'; }
+}
+// Notes
+async function loadNotes() {
+  if (!HAS_NOTES) return;
+  const el = document.getElementById('notes-list');
+  const nc = document.getElementById('note-content');
+  nc.style.display = 'none'; el.style.display = 'block';
+  try {
+    const r = await fetch(API + '/notes');
+    const notes = await r.json();
+    el.innerHTML = notes.map(n => '<a class="note-link" onclick="viewNote(\'' + n.path + '\')">' + n.path + '</a>').join('');
+  } catch(e) { el.innerHTML = 'Error loading notes'; }
+}
+async function viewNote(p) {
+  document.getElementById('notes-list').style.display = 'none';
+  const nc = document.getElementById('note-content'); nc.style.display = 'block'; nc.textContent = 'Loading\u2026';
+  try { const r = await fetch(API + '/note/' + encodeURIComponent(p)); const d = await r.json(); nc.textContent = d.content || '(empty)'; } catch(e) { nc.textContent = 'Error'; }
+}
+loadInfo(); startPoll();
+"""
+
+
+def _share_viewer_html(token: str, session_name: str, perms: str) -> str:
+    has_files = "files" in perms
+    has_notes = "notes" in perms
+    import html as _html
+    safe_name = _html.escape(session_name)
+    safe_token = _html.escape(token)
+    files_tab = '<div class="tab" onclick="switchTab(\'files\')">Files</div>' if has_files else ""
+    notes_tab = '<div class="tab" onclick="switchTab(\'notes\')">Notes</div>' if has_notes else ""
+    files_panel = ('<div class="panel" id="panel-files"><div class="breadcrumb" id="file-breadcrumb"></div>'
+                   '<ul class="file-list" id="file-list"></ul>'
+                   '<div class="file-content" id="file-content" style="display:none"></div></div>') if has_files else ""
+    notes_panel = ('<div class="panel" id="panel-notes"><div id="notes-list"></div>'
+                   '<div class="file-content" id="note-content" style="display:none"></div></div>') if has_notes else ""
+    return (
+        '<!DOCTYPE html><html lang="en"><head><meta charset="utf-8">'
+        '<meta name="viewport" content="width=device-width,initial-scale=1">'
+        '<title>' + safe_name + ' \u2014 amux shared session</title>'
+        '<style>' + _SHARE_CSS + '</style></head>'
+        '<body data-token="' + safe_token + '"'
+        ' data-files="' + ("1" if has_files else "0") + '"'
+        ' data-notes="' + ("1" if has_notes else "0") + '">'
+        '<header><div class="status" id="status-dot"></div>'
+        '<h1 id="session-name">' + safe_name + '</h1>'
+        '<span id="session-desc" style="color:var(--text2);font-size:12px;"></span></header>'
+        '<div class="tabs"><div class="tab active" onclick="switchTab(\'output\')">Output</div>'
+        + files_tab + notes_tab + '</div>'
+        '<div class="panel active" id="panel-output"><div id="output">Loading\u2026</div></div>'
+        + files_panel + notes_panel +
+        '<script>' + _SHARE_JS + '</script></body></html>'
+    )
 
 
 RELEASE_NOTES_HTML = """<!DOCTYPE html>
@@ -9250,6 +9415,7 @@ function render() {
           <div class="card-menu-item" onclick="event.stopPropagation();duplicateSession('${s.name}')"><span class="mi">&#x2398;</span> Duplicate</div>
           ${s.running ? `<div class="card-menu-item" onclick="event.stopPropagation();cloneSession('${s.name}')"><span class="mi">&#x1F504;</span> Clone &amp; continue</div>` : ''}
           ${!s.running ? `<div class="card-menu-item" onclick="event.stopPropagation();newConversation('${s.name}')"><span class="mi">&#x1F195;</span> New conversation</div>` : ''}
+          <div class="card-menu-item" onclick="event.stopPropagation();closeAllMenus();shareSession('${s.name}')"><span class="mi">&#x1F517;</span> Share link</div>
           <div class="card-menu-item" onclick="event.stopPropagation();archiveSession('${s.name}')"><span class="mi">&#x1F4E6;</span> Archive</div>
           <div class="card-menu-sep"></div>
           <div class="card-menu-item danger" onclick="event.stopPropagation();deleteSession('${s.name}')"><span class="mi">&#x2716;</span> Delete</div>
@@ -10142,6 +10308,36 @@ async function newConversation(session) {
     method: 'PATCH', headers: {'Content-Type':'application/json'},
     body: JSON.stringify({ new_conversation: true })
   });
+}
+
+async function shareSession(session) {
+  const existing = await apiCall(API + '/api/sessions/' + session + '/share');
+  if (!existing) return;
+  const links = await existing.json();
+  if (links.length > 0) {
+    const url = location.origin + '/s/' + links[0].token;
+    if (await showConfirm('Share link:\\n' + url + '\\n\\nRevoke this link?', 'Revoke', true)) {
+      await apiCall(API + '/api/sessions/' + session + '/share', {
+        method: 'DELETE', headers: {'Content-Type':'application/json'},
+        body: JSON.stringify({ token: links[0].token })
+      });
+      showToast('Share link revoked');
+    } else {
+      navigator.clipboard.writeText(url).then(() => showToast('Link copied!'));
+    }
+    return;
+  }
+  const perms = prompt('Share permissions:\n  output — terminal output only\n  output+files — output + working directory\n  output+files+notes — output + files + notes', 'output');
+  if (!perms) return;
+  const r = await apiCall(API + '/api/sessions/' + session + '/share', {
+    method: 'POST', headers: {'Content-Type':'application/json'},
+    body: JSON.stringify({ perms: perms })
+  });
+  if (!r) return;
+  const d = await r.json();
+  if (d.url) {
+    navigator.clipboard.writeText(d.url).then(() => showToast('Share link copied!'));
+  }
 }
 
 async function deleteSession(session) {
@@ -19841,6 +20037,170 @@ class CCHandler(BaseHTTPRequestHandler):
             except Exception as e:
                 return self._json({"error": f"port {proxy_port} not reachable: {e}"}, 502)
             return
+
+        # ── Public share routes: /s/<token> and /api/share/<token>/* ─────────
+        m_share = re.match(r"^/s/([A-Za-z0-9_-]+)$", path)
+        if m_share and method == "GET":
+            token = m_share.group(1)
+            db = get_db()
+            row = db.execute(
+                "SELECT token, session, perms, expires_at, label FROM share_tokens WHERE token=?",
+                (token,),
+            ).fetchone()
+            if not row or (row["expires_at"] and row["expires_at"] < int(time.time())):
+                return self._html("<h2>Link expired or not found</h2>")
+            session_name = row["session"]
+            perms = row["perms"]
+            return self._html(_share_viewer_html(token, session_name, perms))
+
+        m_sapi = re.match(r"^/api/share/([A-Za-z0-9_-]+)/(.+)$", path)
+        if m_sapi:
+            token = m_sapi.group(1)
+            action = m_sapi.group(2)
+            db = get_db()
+            row = db.execute(
+                "SELECT token, session, perms, expires_at FROM share_tokens WHERE token=?",
+                (token,),
+            ).fetchone()
+            if not row or (row["expires_at"] and row["expires_at"] < int(time.time())):
+                return self._json({"error": "invalid or expired share link"}, 404)
+            session_name = row["session"]
+            perms = row["perms"]
+
+            if method == "GET" and action == "peek":
+                lines = int(qs.get("lines", ["200"])[0])
+                output = tmux_capture(session_name, lines)
+                if not output:
+                    output = load_session_log(session_name) or "(no output)"
+                return self._json({"name": session_name, "output": output})
+
+            if method == "GET" and action == "info":
+                env_file = CC_SESSIONS / f"{session_name}.env"
+                if env_file.exists():
+                    cfg = parse_env_file(env_file)
+                    return self._json({
+                        "name": session_name,
+                        "running": is_running(session_name),
+                        "desc": cfg.get("CC_DESC", ""),
+                    })
+                return self._json({"name": session_name, "running": False})
+
+            if method == "GET" and action == "files" and "files" in perms:
+                env_file = CC_SESSIONS / f"{session_name}.env"
+                if not env_file.exists():
+                    return self._json([])
+                cfg = parse_env_file(env_file)
+                raw_dir = cfg.get("CC_DIR", "")
+                if not raw_dir:
+                    return self._json([])
+                work = Path(raw_dir).expanduser().resolve()
+                if not work.is_dir():
+                    return self._json([])
+                sub = qs.get("path", [""])[0]
+                target = (work / sub).resolve()
+                # Prevent path traversal
+                if not str(target).startswith(str(work)):
+                    return self._json({"error": "invalid path"}, 400)
+                if target.is_file():
+                    try:
+                        body = target.read_bytes()
+                        ct = "text/plain; charset=utf-8"
+                        if target.suffix in (".html", ".htm"):
+                            ct = "text/html; charset=utf-8"
+                        elif target.suffix == ".json":
+                            ct = "application/json"
+                        elif target.suffix in (".png", ".jpg", ".jpeg", ".gif", ".svg", ".webp"):
+                            ct = {"png": "image/png", "jpg": "image/jpeg", "jpeg": "image/jpeg",
+                                  "gif": "image/gif", "svg": "image/svg+xml", "webp": "image/webp"}.get(
+                                      target.suffix.lstrip("."), "application/octet-stream")
+                        return self._raw(body, ct)
+                    except Exception:
+                        return self._json({"error": "cannot read file"}, 500)
+                if not target.is_dir():
+                    return self._json({"error": "not found"}, 404)
+                items = []
+                try:
+                    for item in sorted(target.iterdir()):
+                        if item.name.startswith("."):
+                            continue
+                        rel = str(item.relative_to(work))
+                        items.append({
+                            "name": item.name,
+                            "path": rel,
+                            "is_dir": item.is_dir(),
+                            "size": item.stat().st_size if item.is_file() else 0,
+                        })
+                except PermissionError:
+                    pass
+                return self._json(items)
+
+            if method == "GET" and action == "notes" and "notes" in perms:
+                if not CC_NOTES.is_dir():
+                    return self._json([])
+                notes = []
+                for f in sorted(CC_NOTES.glob("**/*.md")):
+                    rel = str(f.relative_to(CC_NOTES))
+                    notes.append({"path": rel, "size": f.stat().st_size})
+                return self._json(notes)
+
+            if method == "GET" and action.startswith("note/") and "notes" in perms:
+                note_rel = action[len("note/"):]
+                if ".." in note_rel or note_rel.startswith("/"):
+                    return self._json({"error": "invalid path"}, 400)
+                if not note_rel.endswith(".md"):
+                    note_rel += ".md"
+                note_path = CC_NOTES / note_rel
+                if note_path.exists():
+                    return self._json({"content": note_path.read_text(errors="replace"), "path": note_rel})
+                return self._json({"error": "not found"}, 404)
+
+            return self._json({"error": "not found"}, 404)
+
+        # ── Share management: /api/sessions/<name>/share ──────────────────────
+        m_share_mgmt = re.match(r"^/api/sessions/([^/]+)/share$", path)
+        if m_share_mgmt:
+            session_name = m_share_mgmt.group(1)
+            env_file = CC_SESSIONS / f"{session_name}.env"
+            if not env_file.exists():
+                return self._json({"error": f"session '{session_name}' not found"}, 404)
+            db = get_db()
+
+            if method == "POST":
+                body = self._read_body()
+                perms = body.get("perms", "output")  # output, output+files, output+files+notes
+                expires_hours = body.get("expires_hours")  # null = never
+                label = body.get("label", "")
+                import secrets as _secrets
+                token = _secrets.token_urlsafe(16)
+                now = int(time.time())
+                expires_at = now + int(expires_hours) * 3600 if expires_hours else None
+                db.execute(
+                    "INSERT INTO share_tokens (token, session, perms, created_at, expires_at, label) VALUES (?,?,?,?,?,?)",
+                    (token, session_name, perms, now, expires_at, label),
+                )
+                db.commit()
+                # Build URL: use X-Forwarded-Host if behind gateway, otherwise localhost
+                host = self.headers.get("X-Forwarded-Host") or self.headers.get("Host") or "localhost:8822"
+                scheme = "https" if self.headers.get("X-Forwarded-Proto") == "https" or ":" not in host or host.endswith(":8822") else "http"
+                url = f"{scheme}://{host}/s/{token}"
+                return self._json({"token": token, "url": url, "expires_at": expires_at})
+
+            if method == "GET":
+                rows = db.execute(
+                    "SELECT token, perms, created_at, expires_at, label FROM share_tokens WHERE session=?",
+                    (session_name,),
+                ).fetchall()
+                return self._json([dict(r) for r in rows])
+
+            if method == "DELETE":
+                body = self._read_body()
+                token = body.get("token", "")
+                if token:
+                    db.execute("DELETE FROM share_tokens WHERE token=? AND session=?", (token, session_name))
+                else:
+                    db.execute("DELETE FROM share_tokens WHERE session=?", (session_name,))
+                db.commit()
+                return self._json({"ok": True})
 
         # PWA assets
         if method == "GET" and path == "/manifest.json":

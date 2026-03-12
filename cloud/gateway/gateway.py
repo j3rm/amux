@@ -453,6 +453,34 @@ def _reaper():
 # Reaper disabled — not needed with current user count
 # threading.Thread(target=_reaper, daemon=True).start()
 
+# ── Share token resolver (caches token→port for 60s) ──────────────────────────
+_share_cache = {}  # token → (port, expiry_time)
+_share_cache_lock = threading.Lock()
+
+def _resolve_share_token(token: str) -> int | None:
+    """Find which container owns a share token. Returns port or None."""
+    now = time.time()
+    with _share_cache_lock:
+        cached = _share_cache.get(token)
+        if cached and cached[1] > now:
+            return cached[0]
+    # Query all running containers
+    db = get_db()
+    rows = db.execute("SELECT id, port FROM users WHERE port IS NOT NULL").fetchall()
+    for row in rows:
+        port = row["port"]
+        try:
+            resp = urllib.request.urlopen(
+                f"http://127.0.0.1:{port}/api/share/{token}/info", timeout=3)
+            if resp.status == 200:
+                with _share_cache_lock:
+                    _share_cache[token] = (port, now + 60)
+                return port
+        except Exception:
+            continue
+    return None
+
+
 # ── Proxy helper ───────────────────────────────────────────────────────────────
 def proxy(handler, port, path, qs, user_email="", user_id=None):
     url = f"http://127.0.0.1:{port}{path}"
@@ -621,6 +649,22 @@ class Handler(BaseHTTPRequestHandler):
                 self.send_header("Content-Length", "0")
                 self.end_headers()
             return
+
+        # ── Public: shared session links — /s/<token> and /api/share/<token>/* ──
+        if path.startswith("/s/") or path.startswith("/api/share/"):
+            # Extract token: /s/<token> or /api/share/<token>/...
+            if path.startswith("/s/"):
+                token = path[3:].split("/")[0]
+            else:
+                token = path[len("/api/share/"):].split("/")[0]
+            if token:
+                # Find which user's container has this share token by querying
+                # each running container. Cache result for 60s to avoid repeated lookups.
+                target_port = _resolve_share_token(token)
+                if target_port:
+                    return proxy(self, target_port, path, qs)
+            # Fall through to 404 if token not found
+            return self._json({"error": "share link not found"}, 404)
 
         # ── Public: waitlist signup ──
         if path == "/api/waitlist" and self.command == "POST":
