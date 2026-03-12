@@ -9857,10 +9857,8 @@ let hiddenTabs = (function() {
     const s = localStorage.getItem('amux_hidden_tabs');
     if (s !== null) return new Set(JSON.parse(s));
   } catch(e) {}
-  // Cloud default: sessions, files, notes, metrics. Local default: sessions, board, files, notes, workspace, crm.
-  const isCloud = location.hostname !== 'localhost' && !location.hostname.startsWith('127.');
-  if (isCloud) return new Set(['board','calendar','scheduler','reports','notifications','logs','browser','email','workspace','crm']);
-  return new Set(['calendar','scheduler','reports','notifications','logs','browser','email','metrics']);
+  // Default visible tabs: sessions, files, scheduler, board, workspace, notes
+  return new Set(['calendar','reports','notifications','logs','browser','email','metrics','crm']);
 })();
 
 let tabOrder = (function() {
