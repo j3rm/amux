@@ -5337,7 +5337,7 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
     position: sticky; top: 0; z-index: 40;
     background: var(--bg); padding: 16px;
     padding-top: max(16px, env(safe-area-inset-top));
-    margin: -16px -16px 0 -16px;
+    margin: calc(-1 * max(16px, env(safe-area-inset-top))) -16px 0 -16px;
   }
   .header-row h1 { margin-bottom: 0; }
   .btn-create {
