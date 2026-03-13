@@ -5480,6 +5480,72 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
   .header-add-menu .card-menu-item { padding: 12px 16px; }
 
   /* Settings dropdown */
+
+  /* ── Walkthrough ── */
+  #wt-overlay {
+    display: none; position: fixed; inset: 0; z-index: 8000;
+  }
+  #wt-overlay.open { display: block; }
+  #wt-backdrop {
+    position: fixed; inset: 0; z-index: 8001;
+    transition: opacity 0.2s;
+  }
+  #wt-spotlight {
+    position: fixed; z-index: 8002;
+    border-radius: 12px;
+    box-shadow: 0 0 0 9999px rgba(0,0,0,0.55);
+    transition: top 0.3s ease, left 0.3s ease, width 0.3s ease, height 0.3s ease;
+    pointer-events: none;
+  }
+  #wt-tooltip {
+    position: fixed; z-index: 8003;
+    background: var(--bg, #fff); border: 1px solid var(--border, #e2e2e5);
+    border-radius: 14px; padding: 20px 22px 16px;
+    max-width: 340px; width: calc(100vw - 40px);
+    box-shadow: 0 8px 32px rgba(0,0,0,0.25);
+    transition: top 0.3s ease, left 0.3s ease, opacity 0.2s;
+  }
+  .wt-step-num {
+    display: inline-block; background: var(--accent, #0a0a0a); color: #fff;
+    font-size: 0.7rem; font-weight: 700; width: 20px; height: 20px;
+    border-radius: 50%; text-align: center; line-height: 20px; margin-right: 6px;
+  }
+  .wt-title {
+    display: inline; font-size: 0.95rem; font-weight: 700; color: var(--text, #0a0a0a);
+  }
+  .wt-body {
+    font-size: 0.85rem; color: var(--dim, #6b6b6b); margin-top: 8px; line-height: 1.55;
+  }
+  .wt-footer {
+    display: flex; align-items: center; justify-content: space-between; margin-top: 14px; gap: 8px;
+  }
+  .wt-dots { display: flex; gap: 5px; }
+  .wt-dot {
+    width: 7px; height: 7px; border-radius: 50%; background: var(--border, #e2e2e5);
+    transition: background 0.2s;
+  }
+  .wt-dot.active { background: var(--accent, #0a0a0a); }
+  .wt-dot.done { background: var(--dim, #999); }
+  .wt-btns { display: flex; gap: 6px; }
+  .wt-btn {
+    padding: 6px 14px; border-radius: 8px; border: 1px solid var(--border, #e2e2e5);
+    background: none; color: var(--text, #0a0a0a); font-size: 0.82rem; font-weight: 600;
+    cursor: pointer; transition: background 0.15s;
+  }
+  .wt-btn:hover { background: var(--surface, #f7f7f8); }
+  .wt-btn-primary {
+    background: var(--accent, #0a0a0a); color: #fff; border-color: var(--accent, #0a0a0a);
+  }
+  .wt-btn-primary:hover { opacity: 0.85; background: var(--accent, #0a0a0a); }
+  .wt-skip {
+    background: none; border: none; color: var(--dim, #6b6b6b); font-size: 0.78rem;
+    cursor: pointer; padding: 4px 0; text-decoration: underline; text-underline-offset: 2px;
+  }
+  .wt-skip:hover { color: var(--text); }
+  @media (max-width: 600px) {
+    #wt-tooltip { max-width: calc(100vw - 32px); padding: 16px; }
+  }
+
   /* ── DevTools Panel ── */
   #devtools-panel {
     position: fixed; bottom: 0; left: 0; right: 0; height: 340px;
@@ -7243,6 +7309,7 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
         <div class="card-menu-item" onclick="event.stopPropagation();closeAddMenu();openConnect()"><span class="mi">&#x1F517;</span> Connect tmux</div>
       </div>
     </div>
+    <button class="settings-btn" id="help-btn" onclick="_wtRestart()" title="Walkthrough" style="font-size:1rem;margin-right:2px">?</button>
     <div class="settings-wrap">
       <button class="settings-btn" id="settings-btn" onclick="event.stopPropagation();toggleSettings()">&#x2699;</button>
       <div class="settings-menu" id="settings-menu">
@@ -17856,6 +17923,157 @@ async function pullFromRemote(btn) {
   // log startup
   _dtLogPush('info', '[devtools] Panel initialised — ' + new Date().toLocaleString());
 })();
+
+// ═══════ Walkthrough ═══════
+(function() {
+  var WT_KEY = 'amux_walkthrough_done';
+  var _wtStep = 0;
+  var _wtSteps = [
+    {
+      target: '#add-btn',
+      title: 'Create a session',
+      body: 'Start here. Each session is a Claude Code agent running in tmux. Pick a project directory, optionally enable YOLO mode, and hit Start.',
+      pos: 'bottom'
+    },
+    {
+      target: '.cards',
+      title: 'Your agent fleet',
+      body: 'Sessions appear here as live cards. Each shows status (working, needs input, idle), token usage, last activity, and the current task.',
+      pos: 'top',
+      padX: 20, padY: 10
+    },
+    {
+      target: function() { return document.querySelector('.send-row') || document.querySelector('.chips'); },
+      targetFallback: '.cards',
+      title: 'Command & control',
+      body: 'Send messages to any agent right from the card. Quick-action chips give one-tap access — continue, compact, cancel, and more.',
+      pos: 'top'
+    },
+    {
+      target: function() { return document.querySelector('.card-menu-btn') || document.querySelector('.card-name'); },
+      targetFallback: '.cards',
+      title: 'Peek inside',
+      body: 'Tap any session name or the \u22EF menu → Peek for a full terminal view. Search output, check git status, edit memory — all without tmux.',
+      pos: 'bottom'
+    },
+    {
+      target: '#tab-board',
+      title: 'Coordinate with the board',
+      body: 'Plan work across your fleet. Create tasks, assign to sessions, and agents claim them atomically — no duplicate work.',
+      pos: 'bottom'
+    },
+    {
+      target: '#tab-grid',
+      title: 'Workspace view',
+      body: 'Watch your whole fleet at once. Drag and resize panes, save layouts, and monitor multiple agents side-by-side.',
+      pos: 'bottom'
+    }
+  ];
+
+  function _wtGetTarget(step) {
+    var s = _wtSteps[step];
+    var el = typeof s.target === 'function' ? s.target() : document.querySelector(s.target);
+    if (!el && s.targetFallback) el = document.querySelector(s.targetFallback);
+    return el;
+  }
+
+  function _wtPosition() {
+    var s = _wtSteps[_wtStep];
+    var el = _wtGetTarget(_wtStep);
+    var spotlight = document.getElementById('wt-spotlight');
+    var tooltip = document.getElementById('wt-tooltip');
+    if (!el) { spotlight.style.display = 'none'; return; }
+
+    var r = el.getBoundingClientRect();
+    var pad = 8;
+    var padX = s.padX || pad;
+    var padY = s.padY || pad;
+    spotlight.style.display = 'block';
+    spotlight.style.top = (r.top - padY) + 'px';
+    spotlight.style.left = (r.left - padX) + 'px';
+    spotlight.style.width = (r.width + padX * 2) + 'px';
+    spotlight.style.height = (r.height + padY * 2) + 'px';
+
+    // Build tooltip content
+    var dots = '';
+    for (var i = 0; i < _wtSteps.length; i++) {
+      var cls = 'wt-dot';
+      if (i < _wtStep) cls += ' done';
+      if (i === _wtStep) cls += ' active';
+      dots += '<div class="' + cls + '"></div>';
+    }
+    var isFirst = _wtStep === 0;
+    var isLast = _wtStep === _wtSteps.length - 1;
+    tooltip.innerHTML =
+      '<div><span class="wt-step-num">' + (_wtStep + 1) + '</span><span class="wt-title">' + s.title + '</span></div>' +
+      '<div class="wt-body">' + s.body + '</div>' +
+      '<div class="wt-footer">' +
+        '<div class="wt-dots">' + dots + '</div>' +
+        '<div class="wt-btns">' +
+          '<button class="wt-skip" onclick="_wtDismiss()">Skip</button>' +
+          (isFirst ? '' : '<button class="wt-btn" onclick="_wtPrev()">Back</button>') +
+          (isLast
+            ? '<button class="wt-btn wt-btn-primary" onclick="_wtDismiss()">Done</button>'
+            : '<button class="wt-btn wt-btn-primary" onclick="_wtNext()">Next</button>') +
+        '</div>' +
+      '</div>';
+
+    // Position tooltip
+    var tw = tooltip.offsetWidth;
+    var th = tooltip.offsetHeight;
+    var gap = 14;
+    var top, left;
+    if (s.pos === 'bottom') {
+      top = r.bottom + padY + gap;
+      left = r.left + r.width / 2 - tw / 2;
+    } else {
+      top = r.top - padY - gap - th;
+      left = r.left + r.width / 2 - tw / 2;
+    }
+    // Clamp to viewport
+    if (left < 12) left = 12;
+    if (left + tw > window.innerWidth - 12) left = window.innerWidth - 12 - tw;
+    if (top < 12) { top = r.bottom + padY + gap; }
+    if (top + th > window.innerHeight - 12) { top = r.top - padY - gap - th; }
+    tooltip.style.top = top + 'px';
+    tooltip.style.left = left + 'px';
+  }
+
+  function _wtShow() {
+    document.getElementById('wt-overlay').classList.add('open');
+    _wtPosition();
+  }
+
+  window._wtNext = function() {
+    if (_wtStep < _wtSteps.length - 1) { _wtStep++; _wtPosition(); }
+  };
+  window._wtPrev = function() {
+    if (_wtStep > 0) { _wtStep--; _wtPosition(); }
+  };
+  window._wtDismiss = function() {
+    document.getElementById('wt-overlay').classList.remove('open');
+    try { localStorage.setItem(WT_KEY, '1'); } catch(e) {}
+  };
+  window._wtRestart = function() {
+    _wtStep = 0;
+    try { localStorage.removeItem(WT_KEY); } catch(e) {}
+    _wtShow();
+  };
+
+  // Auto-launch on first visit after short delay
+  setTimeout(function() {
+    try { if (localStorage.getItem(WT_KEY)) return; } catch(e) {}
+    _wtShow();
+  }, 1500);
+
+  // Reposition on resize/scroll
+  window.addEventListener('resize', function() {
+    if (document.getElementById('wt-overlay').classList.contains('open')) _wtPosition();
+  });
+  window.addEventListener('scroll', function() {
+    if (document.getElementById('wt-overlay').classList.contains('open')) _wtPosition();
+  }, true);
+})();
 </script>
 
 <script>
@@ -19521,6 +19739,13 @@ async function _gmailSubmitCode(account) {
     <div class="grid-stack" id="gridstack"></div>
   </div>
 </div>
+<!-- Walkthrough -->
+<div id="wt-overlay">
+  <div id="wt-backdrop"></div>
+  <div id="wt-spotlight"></div>
+  <div id="wt-tooltip"></div>
+</div>
+
 <!-- DevTools Panel -->
 <div id="devtools-panel">
   <div class="dt-resize-handle" id="dt-resize-handle"></div>
