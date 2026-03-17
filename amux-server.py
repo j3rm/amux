@@ -3651,7 +3651,7 @@ def start_session(name: str, extra_flags: str = "", _skip_conv_id: bool = False)
             ["tmux", "new-session", "-d", "-s", tmux_sess, "-n", name, "-c", work_dir,
              "-e", "TMUX_SESSION_NAME=" + name,
              "-e", "AMUX_SESSION=" + name,
-             "-e", ("AMUX_URL=http" if "--no-tls" in sys.argv else "AMUX_URL=https") + "://localhost:8822",
+             "-e", "AMUX_URL=" + os.environ.get("AMUX_URL", ("http" if "--no-tls" in sys.argv else "https") + "://localhost:8822"),
              *_env_args,
              shell_rc + cmd],
             check=True, capture_output=True, timeout=10,
@@ -8346,6 +8346,7 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
           <div class="chip" onclick="peekQuickSend('/model')">/model</div>
           <div class="chip" onclick="peekQuickSend('/mcp')">/mcp</div>
           <div class="chip danger" onclick="peekQuickKeys('C-c')">Ctrl+C</div>
+          <div class="chip" onclick="peekQuickKeys('BTab')">Shift+Tab</div>
           <div class="chip" onclick="peekQuickKeys('C-o')">Ctrl+O</div>
           <div class="chip" onclick="peekQuickSend('/clear')">/clear</div>
           <div class="chip" onclick="peekQuickSend('/compact')">/compact</div>
@@ -9696,6 +9697,7 @@ function render() {
           <div class="chip" onclick="chipToInput('${s.name}','/model')">/model</div>
           <div class="chip" onclick="chipToInput('${s.name}','/mcp')">/mcp</div>
           <div class="chip danger" onclick="doKeys('${s.name}','C-c')">Ctrl+C</div>
+          <div class="chip" onclick="doKeys('${s.name}','BTab')">Shift+Tab</div>
           <div class="chip" onclick="doKeys('${s.name}','C-o')">Ctrl+O</div>
           <div class="chip" onclick="chipToInput('${s.name}','/clear')">/clear</div>
           <div class="chip" onclick="chipToInput('${s.name}','/compact')">/compact</div>
