@@ -7958,7 +7958,7 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
       <div class="map-tag-chips" id="map-tag-list"></div>
     </div>
     <div class="map-search-section">
-      <input type="search" id="map-search" placeholder="Search pins&#x2026;" oninput="_mapSearch(this.value)" autocomplete="off">
+      <input type="search" id="map-search" placeholder="Search pins, notes, tags&#x2026;" oninput="_mapSearch(this.value)" autocomplete="off">
     </div>
     <div id="map-pin-list" class="map-pin-list"></div>
   </div>
@@ -7979,7 +7979,9 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
   <div class="map-modal-box">
     <div class="map-modal-title" id="map-pin-modal-title">Add Pin</div>
     <input id="map-pin-name" class="map-modal-input" placeholder="Name *" autocomplete="off">
-    <textarea id="map-pin-desc" class="map-modal-textarea" placeholder="Description (optional)" rows="2"></textarea>
+    <textarea id="map-pin-desc" class="map-modal-textarea" placeholder="Short description (optional)" rows="2"></textarea>
+    <div class="map-modal-label">Notes</div>
+    <textarea id="map-pin-notes" class="map-modal-textarea" placeholder="Detailed notes, observations, links&#x2026;" rows="5" style="min-height:100px;"></textarea>
     <div class="map-modal-label">Coordinates</div>
     <div class="map-modal-row">
       <input id="map-pin-lat" class="map-modal-input" placeholder="Latitude" type="number" step="any">
@@ -14530,7 +14532,14 @@ function _mapVisiblePins() {
     if (_mapFilterTags.size > 0 && !(pin.tags && pin.tags.some(function(t) { return _mapFilterTags.has(t); }))) return false;
     if (_mapSearchQ) {
       const q = _mapSearchQ;
-      if (!(pin.name||'').toLowerCase().includes(q) && !(pin.desc||'').toLowerCase().includes(q)) return false;
+      const nameMatch = (pin.name||'').toLowerCase().includes(q);
+      const descMatch = (pin.desc||'').toLowerCase().includes(q);
+      const notesMatch = (pin.notes||'').toLowerCase().includes(q);
+      const tagMatch = (pin.tags||[]).some(function(tid) {
+        const tag = _mapTags.find(function(t) { return t.id === tid; });
+        return tag && tag.name.toLowerCase().includes(q);
+      });
+      if (!nameMatch && !descMatch && !notesMatch && !tagMatch) return false;
     }
     return true;
   });
@@ -14580,12 +14589,14 @@ function _mapRenderPins() {
       const tag = _mapTags.find(function(t) { return t.id === tid; });
       return tag ? '<span class="map-pin-tag" style="background:' + tag.color + ';color:#fff;border-color:' + tag.color + '">' + escHtml(tag.name) + '</span>' : '';
     }).join('');
+    const preview = pin.desc || pin.notes || '';
+    const hasNotes = !!(pin.notes);
     return '<div class="map-pin-item" onclick="_mapFlyToPin(\x27' + pin.id + '\x27)" ondblclick="_mapOpenPinModal(\x27' + pin.id + '\x27)">' +
       '<div class="map-pin-dot" style="background:' + color + '"></div>' +
       '<div class="map-pin-info">' +
-        '<div class="map-pin-name">' + escHtml(pin.name||'Unnamed') + '</div>' +
+        '<div class="map-pin-name">' + escHtml(pin.name||'Unnamed') + (hasNotes ? ' <span style="font-size:0.68rem;color:var(--dim);font-weight:400;">\uD83D\uDCDD</span>' : '') + '</div>' +
         (tagChips ? '<div class="map-pin-tagrow">' + tagChips + '</div>' : '') +
-        (pin.desc ? '<div class="map-pin-desc">' + escHtml(pin.desc.substring(0,70)) + (pin.desc.length>70?'\u2026':'') + '</div>' : '') +
+        (preview ? '<div class="map-pin-desc">' + escHtml(preview.substring(0,80)) + (preview.length>80?'\u2026':'') + '</div>' : '') +
       '</div>' +
       '<button class="map-pin-edit-btn" onclick="event.stopPropagation();_mapOpenPinModal(\x27' + pin.id + '\x27)" title="Edit">&#x270F;</button>' +
     '</div>';
@@ -14603,10 +14614,12 @@ function _mapRenderMarkers() {
       const tag = _mapTags.find(function(t) { return t.id === tid; });
       return tag ? '<span style="display:inline-block;padding:1px 7px;border-radius:8px;font-size:11px;font-weight:500;background:' + tag.color + ';color:#fff;">' + escHtml(tag.name) + '</span>' : '';
     }).join(' ');
+    const notesPreview = pin.notes ? (pin.notes.length > 150 ? pin.notes.substring(0, 150) + '\u2026' : pin.notes) : '';
     marker.bindPopup(
-      '<div style="min-width:140px;font-family:inherit;font-size:13px">' +
+      '<div style="min-width:160px;max-width:280px;font-family:inherit;font-size:13px">' +
         '<div style="font-weight:600;margin-bottom:4px">' + escHtml(pin.name||'Unnamed') + '</div>' +
         (pin.desc ? '<div style="font-size:12px;color:#888;margin-bottom:4px">' + escHtml(pin.desc) + '</div>' : '') +
+        (notesPreview ? '<div style="font-size:11.5px;color:#aaa;margin-bottom:4px;white-space:pre-wrap;line-height:1.4;border-left:2px solid #444;padding-left:6px;">' + escHtml(notesPreview) + '</div>' : '') +
         (tagChips ? '<div style="margin-bottom:4px">' + tagChips + '</div>' : '') +
         '<div style="font-size:11px;color:#999;margin-bottom:6px">' + parseFloat(pin.lat).toFixed(5) + ', ' + parseFloat(pin.lng).toFixed(5) + ' \u2022 <a href="' + _mapGeoMapsUrl(pin.lat, pin.lng, pin.name) + '" target="_blank" rel="noopener" style="color:var(--accent,#58a6ff);text-decoration:none">Google Maps \u2197</a></div>' +
         '<button onclick="_mapOpenPinModal(\x27' + pin.id + '\x27)" style="padding:2px 8px;font-size:12px;cursor:pointer;border:1px solid #aaa;border-radius:4px;background:transparent;color:inherit">Edit</button>' +
@@ -14680,6 +14693,7 @@ function _mapOpenPinModal(id, latlng) {
   document.getElementById('map-pin-modal-title').textContent = pin ? 'Edit Pin' : 'Add Pin';
   document.getElementById('map-pin-name').value = pin ? (pin.name||'') : '';
   document.getElementById('map-pin-desc').value = pin ? (pin.desc||'') : '';
+  document.getElementById('map-pin-notes').value = pin ? (pin.notes||'') : '';
   document.getElementById('map-pin-lat').value = pin ? pin.lat : (latlng ? latlng.lat.toFixed(6) : '');
   document.getElementById('map-pin-lng').value = pin ? pin.lng : (latlng ? latlng.lng.toFixed(6) : '');
   const hint = document.getElementById('map-pin-coords-hint');
@@ -14735,6 +14749,7 @@ function _mapClosePinModal() {
 function _mapSavePin() {
   const name = document.getElementById('map-pin-name').value.trim();
   const desc = document.getElementById('map-pin-desc').value.trim();
+  const notes = document.getElementById('map-pin-notes').value.trim();
   const lat = parseFloat(document.getElementById('map-pin-lat').value);
   const lng = parseFloat(document.getElementById('map-pin-lng').value);
   if (!name) { document.getElementById('map-pin-name').focus(); return; }
@@ -14742,9 +14757,9 @@ function _mapSavePin() {
   const tags = Array.from(document.querySelectorAll('#map-pin-tags-row input[type=checkbox]:checked')).map(function(cb) { return cb.value; });
   if (_mapEditingPin) {
     const pin = _mapPins.find(function(p) { return p.id === _mapEditingPin; });
-    if (pin) { pin.name=name; pin.desc=desc; pin.lat=lat; pin.lng=lng; pin.tags=tags; }
+    if (pin) { pin.name=name; pin.desc=desc; pin.notes=notes; pin.lat=lat; pin.lng=lng; pin.tags=tags; }
   } else {
-    _mapPins.push({ id: 'pin_'+Date.now(), name: name, desc: desc, lat: lat, lng: lng, tags: tags, createdAt: Date.now() });
+    _mapPins.push({ id: 'pin_'+Date.now(), name: name, desc: desc, notes: notes, lat: lat, lng: lng, tags: tags, createdAt: Date.now() });
   }
   _mapSave(); _mapClosePinModal(); _mapRenderPins(); _mapRenderMarkers();
 }
