@@ -1150,9 +1150,9 @@ class Handler(BaseHTTPRequestHandler):
             tok = _sec.token_urlsafe(24)
             expires = now + 7 * 86400
             db.execute(
-                "INSERT INTO org_invites (token, org_id, email, role, created_at, expires_at) "
-                "VALUES (?,?,?,?,?,?)",
-                (tok, org_id, body.get("email") or None, body.get("role", "member"), now, expires)
+                "INSERT INTO org_invites (token, org_id, owner_id, email, role, created_at, expires_at) "
+                "VALUES (?,?,?,?,?,?,?)",
+                (tok, org_id, user_id, body.get("email") or None, body.get("role", "member"), now, expires)
             )
             db.commit()
             url = f"{self._base_url()}/invite/{tok}"
