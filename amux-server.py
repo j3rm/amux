@@ -6309,6 +6309,10 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
     -webkit-overflow-scrolling: touch; padding-bottom: 16px; align-items: flex-start;
     min-height: 200px; touch-action: pan-x pan-y;
   }
+  .board-col-header { cursor: grab; }
+  .board-col-header:active { cursor: grabbing; }
+  .board-col.sortable-ghost { opacity: 0.3; }
+  .board-col.sortable-chosen { box-shadow: 0 8px 24px rgba(0,0,0,0.4); transform: rotate(0.8deg); }
   .board-columns::-webkit-scrollbar { display: none; }
   .board-col {
     flex: 1; min-width: 200px; max-width: 320px;
@@ -14336,6 +14340,7 @@ let activeView = 'sessions';
 let boardItems = [];
 let boardStatuses = [{id:'backlog',label:'Backlog'},{id:'todo',label:'To Do'},{id:'doing',label:'In Progress'},{id:'done',label:'Done'},{id:'discarded',label:'Discarded'}];
 let _boardSortables = [];
+let _boardColSortable = null;
 let boardTimer = null;
 let schedules = [];
 let _schedEditId = null;
@@ -15859,6 +15864,37 @@ function renderBoard() {
   if (typeof Sortable !== 'undefined') {
     _boardSortables.forEach(s => { try { s.destroy(); } catch(e) {} });
     _boardSortables = [];
+    // Column reorder Sortable — drag columns by their header
+    if (_boardColSortable) { try { _boardColSortable.destroy(); } catch(e) {} }
+    _boardColSortable = Sortable.create(container, {
+      animation: 150,
+      handle: '.board-col-header',
+      draggable: '.board-col',
+      ghostClass: 'sortable-ghost',
+      chosenClass: 'sortable-chosen',
+      filter: '.board-add-col-btn',
+      preventOnFilter: false,
+      onStart: function() { document.body.classList.add('board-dragging'); },
+      onEnd: function(evt) {
+        document.body.classList.remove('board-dragging');
+        // Read new order from DOM
+        const order = [...container.querySelectorAll('.board-col')].map(el => el.dataset.col);
+        // Update boardStatuses to match new order
+        const statusMap = {};
+        boardStatuses.forEach(s => { statusMap[s.id] = s; });
+        boardStatuses = order.filter(id => statusMap[id]).map(id => statusMap[id]);
+        // Cache locally so order survives before next fetchBoard()
+        lastStatusesJSON = JSON.stringify(boardStatuses);
+        _idb.putStatuses(boardStatuses);
+        // Persist to server
+        apiCall(API + '/api/board/statuses/reorder', {
+          method: 'PUT',
+          headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify({ order: order })
+        });
+        if (_boardRenderPending) { _boardRenderPending = false; renderBoard(); }
+      }
+    });
     container.querySelectorAll('.board-col').forEach(colEl => {
       _boardSortables.push(Sortable.create(colEl, {
         group: 'board',
@@ -17391,9 +17427,9 @@ const _idb = (() => {
     applyIssueDelta: (issues) => _txw('issues', os => {
       issues.forEach(item => { if (item.deleted) os.delete(item.id); else os.put(item); });
     }),
-    // Replace all statuses in local mirror
+    // Replace all statuses in local mirror (with position for ordering)
     putStatuses: (statuses) => _txw('statuses', os => {
-      os.clear(); statuses.forEach(s => os.put(s));
+      os.clear(); statuses.forEach((s, i) => os.put({ ...s, _pos: i }));
     }),
     // Read all items from a store
     getAll: (store) => open().then(d => new Promise((resolve) => {
@@ -17417,6 +17453,15 @@ const _idb = (() => {
   };
 })();
 
+// IDB fallback: restore statuses from IndexedDB (preserves column order across reloads)
+_idb.getAll('statuses').then(items => {
+  if (items && items.length) {
+    items.sort((a, b) => (a._pos || 0) - (b._pos || 0));
+    boardStatuses = items.map(s => ({ id: s.id, label: s.label }));
+    lastStatusesJSON = JSON.stringify(boardStatuses);
+    if (activeView === 'board') renderBoard();
+  }
+});
 // IDB fallback: if localStorage was purged (iOS), restore from IndexedDB
 if (!boardItems.length) {
   _idb.getAll('issues').then(items => {
@@ -22794,6 +22839,17 @@ class CCHandler(BaseHTTPRequestHandler):
                 ).fetchone()[0]
                 _push_ical_bg()
                 return self._json({"ok": True, "remaining": remaining})
+
+            # PUT /api/board/statuses/reorder — reorder columns
+            if path == "/api/board/statuses/reorder" and method == "PUT":
+                body = self._read_body()
+                order = body.get("order", [])
+                if not order or not isinstance(order, list):
+                    return self._json({"error": "missing order"}, 400)
+                for pos, sid in enumerate(order):
+                    db.execute("UPDATE statuses SET position = ? WHERE id = ?", (pos, sid))
+                db.commit()
+                return self._json({"ok": True})
 
             # GET /api/board/statuses
             if path == "/api/board/statuses":
