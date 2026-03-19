@@ -25,10 +25,7 @@
 	<key>NSFaceIDUsageDescription</key>
 	<string>Used to protect access to your amux dashboard</string>
 	<key>UILaunchScreen</key>
-	<dict>
-		<key>UIColorName</key>
-		<string></string>
-	</dict>
+	<dict/>
 	<key>UISupportedInterfaceOrientations</key>
 	<array>
 		<string>UIInterfaceOrientationPortrait</string>

@@ -23,6 +23,8 @@ struct WebView: UIViewRepresentable {
         webView.uiDelegate = context.coordinator
         webView.allowsBackForwardNavigationGestures = true
         webView.scrollView.contentInsetAdjustmentBehavior = .automatic
+        webView.isOpaque = false
+        webView.backgroundColor = UIColor(red: 0.051, green: 0.067, blue: 0.09, alpha: 1) // #0d1117
 
         // Pull-to-refresh
         let refresh = UIRefreshControl()

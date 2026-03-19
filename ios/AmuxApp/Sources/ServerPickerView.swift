@@ -112,6 +112,8 @@ struct ServerPickerView: View {
 
                 Spacer()
             }
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+            .background(Color(uiColor: .systemBackground))
         }
     }
 }
