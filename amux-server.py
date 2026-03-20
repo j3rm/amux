@@ -1004,8 +1004,8 @@ def get_claude_stats(work_dir: str) -> dict:
 _model_cache = {}  # {work_dir: (model, mtime, timestamp)}
 _MODEL_CACHE_TTL = 15  # seconds
 
-def detect_active_model(work_dir: str) -> str:
-    """Detect the model in use from the most recent Claude JSONL entries."""
+def detect_active_model(work_dir: str, conversation_id: str = "") -> str:
+    """Detect the model in use from the session's own JSONL conversation file."""
     if not work_dir:
         return ""
     resolved = str(Path(work_dir).expanduser().resolve())
@@ -1013,16 +1013,25 @@ def detect_active_model(work_dir: str) -> str:
     project_dir = CLAUDE_HOME / "projects" / project_name
     if not project_dir.is_dir():
         return ""
-    jsonl_files = sorted(project_dir.glob("*.jsonl"), key=lambda f: f.stat().st_mtime, reverse=True)
-    if not jsonl_files:
-        return ""
-    f = jsonl_files[0]
+    # Prefer the session's own conversation JSONL file
+    if conversation_id:
+        conv_file = project_dir / f"{conversation_id}.jsonl"
+        if conv_file.exists():
+            f = conv_file
+        else:
+            return ""
+    else:
+        jsonl_files = sorted(project_dir.glob("*.jsonl"), key=lambda f: f.stat().st_mtime, reverse=True)
+        if not jsonl_files:
+            return ""
+        f = jsonl_files[0]
     try:
         mtime = f.stat().st_mtime
     except OSError:
         return ""
     # Cache hit: same file mtime and within TTL
-    cached = _model_cache.get(work_dir)
+    cache_key = (work_dir, conversation_id)
+    cached = _model_cache.get(cache_key)
     if cached:
         c_model, c_mtime, c_ts = cached
         if c_mtime == mtime or (time.time() - c_ts < _MODEL_CACHE_TTL):
@@ -1042,7 +1051,7 @@ def detect_active_model(work_dir: str) -> str:
                     entry = json.loads(line)
                     model = entry.get("message", {}).get("model", "")
                     if model:
-                        _model_cache[work_dir] = (model, mtime, time.time())
+                        _model_cache[cache_key] = (model, mtime, time.time())
                         return model
                 except (json.JSONDecodeError, AttributeError):
                     continue
@@ -1050,7 +1059,7 @@ def detect_active_model(work_dir: str) -> str:
                 break
     except Exception:
         pass
-    _model_cache[work_dir] = ("", mtime, time.time())
+    _model_cache[cache_key] = ("", mtime, time.time())
     return ""
 
 
@@ -3107,7 +3116,7 @@ def list_sessions() -> list:
         # Detect active model from JSONL
         raw_dir = cfg.get("CC_DIR", "")
         resolved_dir = str(Path(raw_dir).expanduser().resolve()) if raw_dir else ""
-        active_model = detect_active_model(raw_dir)
+        active_model = detect_active_model(raw_dir, meta.get("cc_conversation_id", ""))
         # Parse task time from spinner line
         task_time = _parse_task_time(raw) if raw else ""
         # Token count from JSONL cache (refreshed once above the loop).
