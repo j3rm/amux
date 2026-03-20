@@ -8786,9 +8786,13 @@ let _gatewayOrgs = [];
 async function _initIdentity() {
   try {
     const r = await fetch('/api/identity');
-    if (r.status === 401 && location.hostname !== 'localhost' && !location.hostname.startsWith('127.')) {
-      // Cloud: session expired or not logged in — redirect to login
-      window.location.replace('/api/cloud-logout');
+    if (r.status === 401) {
+      // 401 means we're behind the cloud gateway (local server never returns 401 here).
+      // Redirect to login — but not on self-hosted Tailscale/LAN hosts where 401 could
+      // be a transient network issue.
+      if (location.hostname.endsWith('.amux.io')) {
+        window.location.replace('/api/cloud-logout');
+      }
       return;
     }
     if (!r.ok) return;

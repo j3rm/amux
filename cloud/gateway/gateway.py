@@ -69,6 +69,23 @@ _LOGIN_HTML = """<!DOCTYPE html>
   <div id="clerk-root"></div>
   <div id="passcode-root" style="display:none;"></div>
   <div id="status"></div>
+  <div id="self-host-back" style="display:none;margin-top:24px;">
+    <a href="#" id="self-host-link" style="color:#888;font-size:0.82rem;text-decoration:underline;text-decoration-color:#444;text-underline-offset:3px;">Back to self-hosted</a>
+  </div>
+  <script>
+    // Show "back to self-hosted" if user has amux_connections in localStorage
+    try {
+      const conns = JSON.parse(localStorage.getItem('amux_connections') || '[]');
+      const selfHosted = conns.find(c => c.url && !c.url.includes('cloud.amux.io'));
+      if (selfHosted) {
+        const el = document.getElementById('self-host-back');
+        const link = document.getElementById('self-host-link');
+        el.style.display = '';
+        link.href = selfHosted.url;
+        link.textContent = 'Back to ' + (selfHosted.name || selfHosted.url);
+      }
+    } catch(e) {}
+  </script>
   <script>
     const PK = '__CLERK_PK__';
     let exchanging = false;
