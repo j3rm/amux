@@ -32,7 +32,7 @@ DB_PATH       = os.environ.get("GATEWAY_DB", "/var/amux/gateway.db")
 IDLE_SECONDS  = int(os.environ.get("IDLE_TIMEOUT", "3600"))
 PORT_BASE     = 9000
 COOKIE_MAX_AGE = 86400 * 7  # 7 days
-SIGNUP_PASSCODE = os.environ.get("SIGNUP_PASSCODE", "")
+# Signup is open — no passcode required
 ADMIN_EMAILS    = set(e.strip() for e in os.environ.get("ADMIN_EMAILS", "").split(",") if e.strip())
 GATEWAY_LOG     = "/var/log/amux-gateway.log"
 
@@ -67,78 +67,35 @@ _LOGIN_HTML = """<!DOCTYPE html>
 <body>
   <div class="logo">amux <span>cloud</span></div>
   <div id="clerk-root"></div>
-  <div id="passcode-root" style="display:none;text-align:center;">
-    <div style="font-size:0.95rem;color:#ccc;margin-bottom:14px;">Enter access code to create your account</div>
-    <input id="passcode-input" type="text" placeholder="Access code" autocomplete="off" spellcheck="false"
-      style="padding:10px 14px;border-radius:7px;border:1px solid #333;background:#111;color:#e5e5e5;font-size:1rem;width:240px;text-align:center;">
-    <div style="margin-top:10px;">
-      <button id="passcode-btn" onclick="submitPasscode()"
-        style="padding:9px 28px;border-radius:7px;border:none;background:#7c6fcd;color:#fff;font-size:0.95rem;font-weight:600;cursor:pointer;">Continue</button>
-    </div>
-    <div id="passcode-err" style="color:#f87171;font-size:0.82rem;margin-top:8px;min-height:1.2em;"></div>
-  </div>
+  <div id="passcode-root" style="display:none;"></div>
   <div id="status"></div>
   <script>
     const PK = '__CLERK_PK__';
     let exchanging = false;
-    let pendingPasscode = '';
     const POST_LOGIN_REDIRECT = '__POST_LOGIN_REDIRECT__';
 
     function setStatus(msg) {
       document.getElementById('status').textContent = msg;
     }
 
-    document.getElementById('passcode-input')?.addEventListener('keydown', e => {
-      if (e.key === 'Enter') submitPasscode();
-    });
-
-    async function submitPasscode() {
-      pendingPasscode = document.getElementById('passcode-input').value.trim();
-      document.getElementById('passcode-err').textContent = '';
-      if (!pendingPasscode) { document.getElementById('passcode-err').textContent = 'Please enter the access code'; return; }
-      document.getElementById('passcode-btn').textContent = 'Checking\u2026';
-      exchanging = false;
-      await exchangeAndRedirect();
-    }
-
     async function exchangeAndRedirect() {
       if (exchanging) return;
       exchanging = true;
       const clerkEl = document.getElementById('clerk-root');
-      const pcEl = document.getElementById('passcode-root');
-      if (pcEl.style.display === 'none') {
-        clerkEl.innerHTML = '<div class="spinner"></div>';
-      }
+      clerkEl.innerHTML = '<div class="spinner"></div>';
       setStatus('Starting your workspace\u2026');
       try {
         const token = await window.Clerk.session.getToken();
         const email = window.Clerk.user?.primaryEmailAddress?.emailAddress || '';
-        const payload = { token, email };
-        if (pendingPasscode) payload.passcode = pendingPasscode;
         const res = await fetch('/api/cloud-auth', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify(payload)
+          body: JSON.stringify({ token, email })
         });
         if (res.ok) {
           window.location.replace(POST_LOGIN_REDIRECT || '/');
         } else {
           const d = await res.json().catch(() => ({}));
-          if (d.needs_passcode) {
-            // New user — show passcode prompt
-            clerkEl.style.display = 'none';
-            pcEl.style.display = '';
-            setStatus('');
-            document.getElementById('passcode-input').focus();
-            exchanging = false;
-            return;
-          }
-          if (d.error === 'invalid_passcode') {
-            document.getElementById('passcode-err').textContent = 'Incorrect access code';
-            document.getElementById('passcode-btn').textContent = 'Continue';
-            exchanging = false;
-            return;
-          }
           clerkEl.innerHTML = '';
           setStatus('Auth error: ' + (d.error || res.status));
           exchanging = false;
@@ -972,10 +929,7 @@ class Handler(BaseHTTPRequestHandler):
             with _db_lock:
                 row = db.execute("SELECT id FROM users WHERE id=?", (user_id,)).fetchone()
                 if not row:
-                    # New user — require passcode
-                    passcode = body.get("passcode", "").strip()
-                    if passcode != SIGNUP_PASSCODE:
-                        return self._json({"error": "invalid_passcode", "needs_passcode": True}, 403)
+                    # New user — open signup
                     port = alloc_port(db)
                     db.execute(
                         "INSERT INTO users (id, email, plan, port, created_at, last_seen) VALUES (?,?,?,?,?,?)",
@@ -988,7 +942,7 @@ class Handler(BaseHTTPRequestHandler):
                         "INSERT OR IGNORE INTO org_memberships (org_id, user_id, role, joined_at) VALUES (?,?,?,?)",
                         (user_id, user_id, "owner", now))
                     db.commit()
-                    print(f"[signup] new user {email} ({user_id}) with passcode", flush=True)
+                    print(f"[signup] new user {email} ({user_id})", flush=True)
                 else:
                     db.execute("UPDATE users SET last_seen=?, email=? WHERE id=?",
                                (now, email, user_id))
