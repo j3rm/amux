@@ -693,6 +693,31 @@ def _push_alert(alert_type: str, session: str, message: str):
         _sse_alerts.append({"type": alert_type, "session": session, "message": message, "ts": int(time.time())})
         if len(_sse_alerts) > 50:
             _sse_alerts = _sse_alerts[-50:]
+    _send_pushover(f"amux — {alert_type}", message)
+
+
+def _send_pushover(title: str, message: str, priority: int = 0) -> None:
+    """Fire-and-forget Pushover notification in a background thread."""
+    token = os.environ.get("AMUX_PUSHOVER_TOKEN", "")
+    user  = os.environ.get("AMUX_PUSHOVER_USER", "")
+    if not token or not user:
+        return
+    def _send():
+        try:
+            import urllib.request, urllib.parse
+            data = urllib.parse.urlencode({
+                "token":    token,
+                "user":     user,
+                "title":    title,
+                "message":  message,
+                "priority": priority,
+            }).encode()
+            urllib.request.urlopen(
+                "https://api.pushover.net/1/messages.json", data, timeout=10
+            )
+        except Exception as e:
+            slog(f"[pushover] send failed: {e}")
+    threading.Thread(target=_send, daemon=True).start()
 
 
 # ── Event log (persistent, streamed via SSE) ─────────────────────────
@@ -7499,6 +7524,30 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
               onclick="saveApiKey()">Save</button>
           </div>
           <div id="settings-apikey-status" style="font-size:0.7rem;color:var(--dim);margin-top:4px;"></div>
+        </div>
+        <div class="settings-sep"></div>
+        <div class="settings-section" id="settings-pushover-section">
+          <div class="settings-section-label">Pushover Notifications</div>
+          <div style="font-size:0.72rem;color:var(--dim);margin-bottom:6px;">Receive push notifications on iOS/Android when sessions need attention.</div>
+          <div style="font-size:0.72rem;color:var(--dim);margin-bottom:4px;">App Token</div>
+          <div style="display:flex;gap:6px;align-items:center;margin-bottom:6px;">
+            <input id="settings-pushover-token" type="password" autocomplete="off"
+              class="search-input" placeholder="a…"
+              style="flex:1;font-size:0.78rem;padding:5px 8px;box-sizing:border-box;min-width:0;">
+          </div>
+          <div style="font-size:0.72rem;color:var(--dim);margin-bottom:4px;">User Key</div>
+          <div style="display:flex;gap:6px;align-items:center;margin-bottom:6px;">
+            <input id="settings-pushover-user" type="password" autocomplete="off"
+              class="search-input" placeholder="u…"
+              style="flex:1;font-size:0.78rem;padding:5px 8px;box-sizing:border-box;min-width:0;">
+          </div>
+          <div style="display:flex;gap:6px;">
+            <button class="btn" style="font-size:0.7rem;padding:3px 10px;white-space:nowrap;"
+              onclick="savePushoverKeys()">Save</button>
+            <button class="btn" style="font-size:0.7rem;padding:3px 10px;white-space:nowrap;"
+              onclick="sendPushoverTest()">Send test</button>
+          </div>
+          <div id="settings-pushover-status" style="font-size:0.7rem;color:var(--dim);margin-top:4px;"></div>
         </div>
         <div class="settings-sep"></div>
         <div class="settings-section" id="settings-billing-section" style="display:none;">
@@ -17743,6 +17792,59 @@ async function saveApiKey() {
   } catch(e) { if (st) st.textContent = 'Error: ' + e.message; }
 }
 
+// ── Pushover ───────────────────────────────────────────────────────────────────
+async function loadPushoverKeys() {
+  try {
+    const r = await fetch('/api/settings/env');
+    const data = await r.json();
+    const tInp = document.getElementById('settings-pushover-token');
+    const uInp = document.getElementById('settings-pushover-user');
+    const st = document.getElementById('settings-pushover-status');
+    if (tInp) tInp.placeholder = data.AMUX_PUSHOVER_TOKEN || 'a…';
+    if (uInp) uInp.placeholder = data.AMUX_PUSHOVER_USER || 'u…';
+    if (st) st.textContent = (data.AMUX_PUSHOVER_TOKEN && data.AMUX_PUSHOVER_USER) ? 'Keys saved ✓' : 'No keys set';
+  } catch(e) {}
+}
+
+async function savePushoverKeys() {
+  const tInp = document.getElementById('settings-pushover-token');
+  const uInp = document.getElementById('settings-pushover-user');
+  const st = document.getElementById('settings-pushover-status');
+  const token = tInp ? tInp.value.trim() : '';
+  const user  = uInp ? uInp.value.trim() : '';
+  if (!token && !user) return;
+  st && (st.textContent = 'Saving…');
+  const body = {};
+  if (token) body.AMUX_PUSHOVER_TOKEN = token;
+  if (user)  body.AMUX_PUSHOVER_USER  = user;
+  try {
+    const r = await fetch('/api/settings/env', {method:'PATCH', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify(body)});
+    if (r.ok) {
+      if (tInp) tInp.value = '';
+      if (uInp) uInp.value = '';
+      if (st) st.textContent = 'Saved ✓';
+      await loadPushoverKeys();
+    } else {
+      if (st) st.textContent = 'Save failed';
+    }
+  } catch(e) { if (st) st.textContent = 'Error: ' + e.message; }
+}
+
+async function sendPushoverTest() {
+  const st = document.getElementById('settings-pushover-status');
+  st && (st.textContent = 'Sending…');
+  try {
+    const r = await fetch('/api/pushover/test', {method:'POST'});
+    if (r.ok) {
+      if (st) st.textContent = 'Test sent ✓';
+    } else {
+      const d = await r.json().catch(()=>({}));
+      if (st) st.textContent = d.error || 'Send failed';
+    }
+  } catch(e) { if (st) st.textContent = 'Error: ' + e.message; }
+}
+
 // ── Team / Org / Invites ──────────────────────────────────────────────────────
 async function loadTeamSection() {
   try {
@@ -17918,6 +18020,7 @@ toggleSettings = function() {
     loadTeamSection();
     loadApiKeys();
     loadBillingSection();
+    loadPushoverKeys();
   }
 };
 
@@ -23161,7 +23264,7 @@ end tell
 
         # ── Settings env (ANTHROPIC_API_KEY etc.) ─────────────────────────────
         if path == "/api/settings/env":
-            _allowed_env_keys = {"ANTHROPIC_API_KEY", "OPENAI_API_KEY"}
+            _allowed_env_keys = {"ANTHROPIC_API_KEY", "OPENAI_API_KEY", "AMUX_PUSHOVER_TOKEN", "AMUX_PUSHOVER_USER"}
             if method == "GET":
                 result = {}
                 for k in _allowed_env_keys:
@@ -23205,6 +23308,15 @@ end tell
                     except Exception:
                         pass
                 return self._json({"ok": True})
+
+        # ── Pushover test ──────────────────────────────────────────────────────
+        if path == "/api/pushover/test" and method == "POST":
+            token = os.environ.get("AMUX_PUSHOVER_TOKEN", "")
+            user  = os.environ.get("AMUX_PUSHOVER_USER", "")
+            if not token or not user:
+                return self._json({"error": "Pushover keys not configured"}, 400)
+            _send_pushover("amux — test", "Pushover notifications are working!")
+            return self._json({"ok": True})
 
         # ── Org / Team / Invites ──────────────────────────────────────────────
         if path.startswith("/api/org") or path.startswith("/invite/"):
