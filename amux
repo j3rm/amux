@@ -1,680 +1,116 @@
-#!/usr/bin/env bash
-# amux — phone-friendly Claude Code session manager built on tmux
-# Usage: amux [command] [args...]
+#!/bin/sh
+# amux CLI stub — proxies board/session commands to the amux server API
+AMUX_URL="${AMUX_URL:-https://localhost:8822}"
+cmd="$1"; shift 2>/dev/null || true
 
-set -euo pipefail
-
-CC_VERSION="0.3.0"
-
-# ── Migration from cc/cmux → amux ───────────────────────────────────────────
-# Migrate legacy dirs to ~/.amux if new one doesn't exist
-if [[ ! -d "$HOME/.amux" ]]; then
-  for _old in "$HOME/.cmux" "$HOME/.cc"; do
-    if [[ -d "$_old" ]]; then
-      mv "$_old" "$HOME/.amux"
-      echo "Migrated $_old → ~/.amux"
-      break
-    fi
-  done
-fi
-
-CC_HOME="${CC_HOME:-$HOME/.amux}"
-CC_SESSIONS="$CC_HOME/sessions"
-CC_DEFAULTS="$CC_HOME/defaults.env"
-
-# ── Colors (disabled when not a tty or TERM is dumb) ────────────────────────
-if [[ -t 1 ]] && [[ "${TERM:-dumb}" != "dumb" ]]; then
-  BOLD=$'\033[1m' DIM=$'\033[2m' RESET=$'\033[0m'
-  RED=$'\033[31m' GREEN=$'\033[32m' YELLOW=$'\033[33m'
-  BLUE=$'\033[34m' CYAN=$'\033[36m'
-else
-  BOLD='' DIM='' RESET='' RED='' GREEN='' YELLOW='' BLUE='' CYAN=''
-fi
-
-# ── Helpers ──────────────────────────────────────────────────────────────────
-
-die() { echo "${RED}error:${RESET} $*" >&2; exit 1; }
-
-need_tmux() {
-  command -v tmux &>/dev/null || die "tmux is required. Install with: brew install tmux"
-}
-
-ensure_dirs() {
-  mkdir -p "$CC_SESSIONS"
-  [[ -f "$CC_DEFAULTS" ]] || touch "$CC_DEFAULTS"
-}
-
-# Resolve session name from partial match or alias
-resolve_session() {
-  local query="$1"
-  # Exact match first
-  if [[ -f "$CC_SESSIONS/$query.env" ]]; then
-    echo "$query"
-    return
-  fi
-  # Prefix match
-  local matches=()
-  for f in "$CC_SESSIONS"/*.env; do
-    [[ -f "$f" ]] || continue
-    local name
-    name=$(basename "$f" .env)
-    if [[ "$name" == "$query"* ]]; then
-      matches+=("$name")
-    fi
-  done
-  if [[ ${#matches[@]} -eq 1 ]]; then
-    echo "${matches[0]}"
-    return
-  elif [[ ${#matches[@]} -gt 1 ]]; then
-    die "ambiguous: '$query' matches ${matches[*]}"
-  fi
-  # Number lookup (for dashboard shortcuts)
-  if [[ "$query" =~ ^[0-9]+$ ]]; then
-    local i=1
-    for f in "$CC_SESSIONS"/*.env; do
-      [[ -f "$f" ]] || continue
-      if [[ "$i" -eq "$query" ]]; then
-        basename "$f" .env
-        return
-      fi
-      ((i++))
-    done
-  fi
-  die "session '$query' not found"
-}
-
-# Load session config into env vars
-load_session() {
-  local name="$1"
-  local file="$CC_SESSIONS/$name.env"
-  [[ -f "$file" ]] || die "session '$name' not found"
-  # shellcheck disable=SC1090
-  source "$file"
-}
-
-# Load global defaults
-load_defaults() {
-  [[ -f "$CC_DEFAULTS" ]] && source "$CC_DEFAULTS"
-}
-
-# Get tmux session name (prefixed to avoid conflicts)
-tmux_name() { echo "amux-$1"; }
-
-# Migrate a cmux-* or cc-* tmux session to amux-* if needed
-migrate_tmux() {
-  local name="$1"
-  if tmux has-session -t "amux-$name" 2>/dev/null; then return; fi
-  for old_prefix in "cmux-" "cc-"; do
-    if tmux has-session -t "${old_prefix}${name}" 2>/dev/null; then
-      tmux rename-session -t "${old_prefix}${name}" "amux-$name" 2>/dev/null || true
-      break
-    fi
-  done
-}
-
-# Check if tmux session is alive
-is_running() {
-  migrate_tmux "$1"
-  tmux has-session -t "$(tmux_name "$1")" 2>/dev/null
-}
-
-# Parse Claude Code flags from args, split into CC_FLAGS array and remaining args
-# Sets: CC_FLAGS_STR (for storage), CC_DIR, CC_EXTRA_ARGS
-parse_claude_flags() {
-  CC_FLAGS=()
-  CC_DIR=""
-  CC_EXTRA_ARGS=()
-
-  while [[ $# -gt 0 ]]; do
-    case "$1" in
-      # Flags that take a value
-      --model|--permission-mode|--system-prompt|--append-system-prompt|\
-      --mcp-config|--allowedTools|--allowed-tools|--disallowedTools|--disallowed-tools|\
-      --add-dir|--effort|--settings|--setting-sources|--tools|\
-      --plugin-dir|--agents|--agent|--betas|--debug-file|--json-schema|\
-      --fallback-model|--max-budget-usd|--session-id|--file|--strict-mcp-config)
-        CC_FLAGS+=("$1" "$2")
-        shift 2
-        ;;
-      # Boolean flags
-      --dangerously-skip-permissions|--allow-dangerously-skip-permissions|\
-      --yolo|--verbose|--chrome|--no-chrome|--debug|\
-      --disable-slash-commands|--no-session-persistence|--ide|--fork-session)
-        # --yolo is an alias for --dangerously-skip-permissions
-        if [[ "$1" == "--yolo" ]]; then
-          CC_FLAGS+=("--dangerously-skip-permissions")
-        else
-          CC_FLAGS+=("$1")
-        fi
-        shift
-        ;;
-      # Working directory — resolve to absolute path, create if needed
-      --dir)
-        mkdir -p "$2" 2>/dev/null || true
-        CC_DIR="$(cd "$2" 2>/dev/null && pwd || echo "$2")"
-        shift 2
-        ;;
-      # Everything else goes to extra args
-      *)
-        CC_EXTRA_ARGS+=("$1")
-        shift
-        ;;
-    esac
-  done
-  CC_FLAGS_STR="${CC_FLAGS[*]:-}"
-}
-
-# ── Commands ─────────────────────────────────────────────────────────────────
-
-cmd_register() {
-  local name="${1:-}"
-  [[ -n "$name" ]] || die "usage: amux register <name> [--model opus] [--yolo] [--dir /path] [claude flags...]"
-  shift
-
-  parse_claude_flags "$@"
-
-  local file="$CC_SESSIONS/$name.env"
-  cat > "$file" <<EOF
-# amux session: $name
-# registered: $(date -Iseconds)
-CC_NAME="$name"
-CC_DIR="${CC_DIR:-$(pwd)}"
-CC_FLAGS="${CC_FLAGS_STR}"
-EOF
-
-  echo "${GREEN}registered${RESET} ${BOLD}$name${RESET} → ${CC_DIR:-$(pwd)}"
-  [[ -n "$CC_FLAGS_STR" ]] && echo "  flags: $CC_FLAGS_STR"
-}
-
-cmd_start() {
-  local name
-  name=$(resolve_session "${1:-}")
-  shift 2>/dev/null || true
-  need_tmux
-  load_defaults
-  load_session "$name"
-
-  local tname
-  tname=$(tmux_name "$name")
-
-  if is_running "$name"; then
-    echo "${YELLOW}already running:${RESET} $name — attaching..."
-    tmux attach-session -t "$tname"
-    return
-  fi
-
-  local dir="${CC_DIR:-$HOME}"
-  # Expand ~ in dir path
-  dir="${dir/#\~/$HOME}"
-  [[ -d "$dir" ]] || die "directory not found: $dir"
-
-  # Build claude command
-  local cmd="claude"
-  # Apply global defaults
-  if [[ -n "${CC_DEFAULT_FLAGS:-}" ]]; then
-    cmd="$cmd $CC_DEFAULT_FLAGS"
-  fi
-  # Apply session flags
-  if [[ -n "${CC_FLAGS:-}" ]]; then
-    cmd="$cmd $CC_FLAGS"
-  fi
-  # Apply any extra inline args
-  if [[ $# -gt 0 ]]; then
-    cmd="$cmd $*"
-  fi
-
-  # Create tmux session and attach
-  # Explicit cd to work dir in case shell profile overrides CWD
-  tmux new-session -d -s "$tname" -n "$name" -c "$dir" "cd $(printf '%q' "$dir"); $cmd"
-  # Lock the window name so Claude can't overwrite it with escape sequences
-  tmux set-option -t "$tname" allow-rename off 2>/dev/null
-  tmux set-window-option -t "$tname" automatic-rename off 2>/dev/null
-  echo "${GREEN}started${RESET} ${BOLD}$name${RESET} in $dir"
-  echo "  ${DIM}$cmd${RESET}"
-  tmux attach-session -t "$tname"
-}
-
-cmd_exec() {
-  # Register + start in one step
-  local name="${1:-}"
-  [[ -n "$name" ]] || die "usage: amux exec <name> [--model opus] [--yolo] [--dir /path] [claude flags...]"
-  shift
-
-  parse_claude_flags "$@"
-
-  # Register if not exists, or update
-  local file="$CC_SESSIONS/$name.env"
-  cat > "$file" <<EOF
-# amux session: $name
-# registered: $(date -Iseconds)
-CC_NAME="$name"
-CC_DIR="${CC_DIR:-$(pwd)}"
-CC_FLAGS="${CC_FLAGS_STR}"
-EOF
-
-  # Start
-  cmd_start "$name" "${CC_EXTRA_ARGS[@]+"${CC_EXTRA_ARGS[@]}"}"
-}
-
-cmd_attach() {
-  local name
-  name=$(resolve_session "${1:-}")
-  need_tmux
-  local tname
-  tname=$(tmux_name "$name")
-  is_running "$name" || die "session '$name' is not running. Start with: amux start $name"
-  tmux attach-session -t "$tname"
-}
-
-cmd_peek() {
-  local name
-  name=$(resolve_session "${1:-}")
-  local lines="${2:-30}"
-  need_tmux
-
-  local tname
-  tname=$(tmux_name "$name")
-  is_running "$name" || die "session '$name' is not running"
-
-  echo "${BOLD}── $name ──${RESET}"
-  tmux capture-pane -t "$tname" -p -S "-$lines" 2>/dev/null || echo "${DIM}(no output)${RESET}"
-  echo "${BOLD}── end ──${RESET}"
-}
-
-cmd_send() {
-  local name
-  name=$(resolve_session "${1:-}")
-  shift
-  need_tmux
-
-  local tname
-  tname=$(tmux_name "$name")
-  is_running "$name" || die "session '$name' is not running"
-
-  # Check for --keys flag
-  if [[ "${1:-}" == "--keys" ]]; then
-    shift
-    tmux send-keys -t "$tname" "$@"
-    echo "${GREEN}sent keys${RESET} to $name"
-  else
-    local text="$*"
-    [[ -n "$text" ]] || die "usage: amux send <name> <text>  or  amux send <name> --keys 'C-c'"
-    tmux send-keys -t "$tname" "$text" Enter
-    echo "${GREEN}sent${RESET} to $name: $text"
-  fi
-}
-
-cmd_stop() {
-  local name
-  name=$(resolve_session "${1:-}")
-  need_tmux
-
-  local tname
-  tname=$(tmux_name "$name")
-  if is_running "$name"; then
-    tmux kill-session -t "$tname"
-    echo "${RED}stopped${RESET} $name"
-  else
-    echo "${DIM}$name is not running${RESET}"
-  fi
-}
-
-cmd_rm() {
-  local name
-  name=$(resolve_session "${1:-}")
-
-  # Stop if running
-  if is_running "$name" 2>/dev/null; then
-    cmd_stop "$name"
-  fi
-
-  rm -f "$CC_SESSIONS/$name.env"
-  echo "${RED}removed${RESET} $name"
-}
-
-cmd_info() {
-  local name
-  name=$(resolve_session "${1:-}")
-  load_session "$name"
-
-  echo "${BOLD}$name${RESET}"
-  echo "  dir:   ${CC_DIR:-"(not set)"}"
-  echo "  flags: ${CC_FLAGS:-"(none)"}"
-  if is_running "$name" 2>/dev/null; then
-    echo "  status: ${GREEN}running${RESET}"
-  else
-    echo "  status: ${DIM}stopped${RESET}"
-  fi
-}
-
-cmd_ls() {
-  local i=1
-  local has_any=false
-
-  for f in "$CC_SESSIONS"/*.env; do
-    [[ -f "$f" ]] || continue
-    has_any=true
-    local name
-    name=$(basename "$f" .env)
-    load_session "$name"
-
-    local status_icon status_color
-    if is_running "$name" 2>/dev/null; then
-      status_icon="*"
-      status_color="$GREEN"
-    else
-      status_icon=" "
-      status_color="$DIM"
-    fi
-
-    # Build flag summary
-    local flag_summary=""
-    if [[ "${CC_FLAGS:-}" == *"--dangerously-skip-permissions"* ]]; then
-      flag_summary+=" ${YELLOW}YOLO${RESET}"
-    fi
-    local model_match
-    if model_match=$(echo "${CC_FLAGS:-}" | sed -n 's/.*--model \([^ ]*\).*/\1/p' 2>/dev/null) && [[ -n "$model_match" ]]; then
-      flag_summary+=" ${CYAN}$model_match${RESET}"
-    fi
-
-    # Preview last output line if running
-    local preview=""
-    if is_running "$name" 2>/dev/null; then
-      preview=$(tmux capture-pane -t "$(tmux_name "$name")" -p -S -3 2>/dev/null | grep -v '^$' | tail -1 | cut -c1-60)
-      [[ -n "$preview" ]] && preview=" ${DIM}│ $preview${RESET}"
-    fi
-
-    printf " %s${status_color}%s${RESET} ${BOLD}%-16s${RESET} %s%s%s\n" \
-      "$i" "$status_icon" "$name" "${DIM}${CC_DIR:-}${RESET}" "$flag_summary" "$preview"
-    ((i++))
-  done
-
-  if ! $has_any; then
-    echo "${DIM}No sessions registered. Run: amux register <name>${RESET}"
-  fi
-}
-
-cmd_dashboard() {
-  need_tmux
-  clear
-
-  echo "${BOLD}${BLUE}  amux${RESET} ${DIM}v${CC_VERSION}${RESET}"
-  echo ""
-  cmd_ls
-  echo ""
-  echo "${DIM}Commands: [n]umber to attach, p[n] to peek, s[n] to send, q to quit${RESET}"
-  echo ""
-
-  while true; do
-    read -rp "${CYAN}amux>${RESET} " input || break
-    case "$input" in
-      q|quit|exit)
-        break
-        ;;
-      ls|list)
-        cmd_ls
-        ;;
-      p[0-9]*)
-        local num="${input#p}"
-        local name
-        name=$(resolve_session "$num" 2>/dev/null) && cmd_peek "$name" || echo "${RED}invalid${RESET}"
-        ;;
-      s[0-9]*)
-        # s1 fix the bug → send "fix the bug" to session 1
-        local rest="${input#s}"
-        local num="${rest%% *}"
-        local text="${rest#* }"
-        [[ "$text" == "$num" ]] && text=""
-        local name
-        if name=$(resolve_session "$num" 2>/dev/null); then
-          if [[ -n "$text" ]]; then
-            cmd_send "$name" "$text"
-          else
-            read -rp "  msg> " text
-            [[ -n "$text" ]] && cmd_send "$name" "$text"
-          fi
-        else
-          echo "${RED}invalid${RESET}"
-        fi
-        ;;
-      [0-9]*)
-        local name
-        name=$(resolve_session "$input" 2>/dev/null) && cmd_attach "$name" || echo "${RED}invalid${RESET}"
-        ;;
-      "")
-        ;;
-      *)
-        # Try as session name
-        local name
-        if name=$(resolve_session "$input" 2>/dev/null); then
-          cmd_attach "$name"
-        else
-          echo "${RED}unknown:${RESET} $input"
-        fi
-        ;;
-    esac
-  done
-}
-
-cmd_defaults() {
-  local subcmd="${1:-show}"
-  case "$subcmd" in
-    show)
-      if [[ -s "$CC_DEFAULTS" ]]; then
-        echo "${BOLD}Global defaults:${RESET}"
-        cat "$CC_DEFAULTS"
-      else
-        echo "${DIM}No defaults set. Run: amux defaults edit${RESET}"
-      fi
-      ;;
-    edit)
-      "${EDITOR:-vi}" "$CC_DEFAULTS"
-      ;;
-    reset)
-      : > "$CC_DEFAULTS"
-      echo "${GREEN}defaults reset${RESET}"
-      ;;
-    *)
-      die "usage: amux defaults [show|edit|reset]"
-      ;;
-  esac
-}
-
-cmd_stop_all() {
-  for f in "$CC_SESSIONS"/*.env; do
-    [[ -f "$f" ]] || continue
-    local name
-    name=$(basename "$f" .env)
-    if is_running "$name" 2>/dev/null; then
-      cmd_stop "$name"
-    fi
-  done
-}
-
-cmd_start_all() {
-  for f in "$CC_SESSIONS"/*.env; do
-    [[ -f "$f" ]] || continue
-    local name
-    name=$(basename "$f" .env)
-    if ! is_running "$name" 2>/dev/null; then
-      cmd_start "$name"
-    fi
-  done
-}
-
-cmd_board() {
-  local AMUX_API="${AMUX_API:-https://localhost:8822}"
-  local subcmd="${1:-help}"; shift 2>/dev/null || true
-
-  case "$subcmd" in
-    done|doing|todo|backlog|discarded)
-      local status="$subcmd"
-      local id="${1:-}"; [[ -n "$id" ]] || die "Usage: amux board $status <ISSUE-ID>"
-      local result
-      result=$(curl -sk -X PATCH \
-        -H 'Content-Type: application/json' \
-        -d "{\"status\":\"$status\"}" \
-        "$AMUX_API/api/board/$id")
-      if echo "$result" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d['id'],'→',d['status'])" 2>/dev/null; then
-        :
-      else
-        echo "$result"
-      fi
-      ;;
-    status)
-      local id="${1:-}"; local new_status="${2:-}";
-      [[ -n "$id" && -n "$new_status" ]] || die "Usage: amux board status <ISSUE-ID> <status>"
-      local result
-      result=$(curl -sk -X PATCH \
-        -H 'Content-Type: application/json' \
-        -d "{\"status\":\"$new_status\"}" \
-        "$AMUX_API/api/board/$id")
-      echo "$result" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d['id'],'→',d['status'])" 2>/dev/null || echo "$result"
-      ;;
-    add|create)
-      local title="$*"; [[ -n "$title" ]] || die "Usage: amux board add <title>"
-      local result
-      result=$(curl -sk -X POST \
-        -H 'Content-Type: application/json' \
-        -d "{\"title\":\"$title\",\"status\":\"todo\"}" \
-        "$AMUX_API/api/board")
-      echo "$result" | python3 -c "import sys,json; d=json.load(sys.stdin); print('Created',d['id'],'→',d['title'])" 2>/dev/null || echo "$result"
-      ;;
-    ls|list)
-      curl -sk "$AMUX_API/api/board" | python3 -c "
-import sys,json
+case "$cmd" in
+  board)
+    sub="$1"; shift 2>/dev/null || true
+    case "$sub" in
+      done|doing|todo|backlog|discarded)
+        for id in "$@"; do
+          curl -sk -X PATCH -H 'Content-Type: application/json' \
+            -d "{\"status\":\"$sub\"}" "$AMUX_URL/api/board/$id" >/dev/null
+        done ;;
+      add)
+        title="$*"
+        curl -sk -X POST -H 'Content-Type: application/json' \
+          -d "{\"title\":\"$title\",\"status\":\"todo\",\"session\":\"${AMUX_SESSION:-}\"}" "$AMUX_URL/api/board" ;;
+      list|ls|"")
+        curl -sk "$AMUX_URL/api/board" | python3 -c "
+import json,sys
 items=json.load(sys.stdin)
-for i in sorted(items, key=lambda x: x.get('updated',0), reverse=True):
-    status_sym = {'done':'✓','doing':'▶','todo':'○','backlog':'·','discarded':'✗'}.get(i['status'],'?')
-    print(f\"{status_sym} {i['id']:12s} {i['title'][:60]} [{i['status']}]\")
-"
-      ;;
-    help|*)
-      cat <<EOF
-${BOLD}amux board${RESET} — manage board issues from the CLI
-
-  amux board ls                    List all issues
-  amux board add <title>           Create a new todo issue
-  amux board done <ID>             Move issue to done
-  amux board doing <ID>            Move issue to doing (in progress)
-  amux board todo <ID>             Move issue to todo
-  amux board backlog <ID>          Move issue to backlog
-  amux board status <ID> <status>  Set any status
-EOF
-      ;;
-  esac
-}
-
-cmd_serve() {
-  local port="${1:-8822}"
-  # Resolve cc-server.py relative to the real location of this script
-  local script_dir
-  script_dir="$(cd "$(dirname "$(readlink -f "$0" 2>/dev/null || realpath "$0" 2>/dev/null || echo "$0")")" && pwd)"
-  local server="$script_dir/amux-server.py"
-  # Fall back to old name during migration
-  [[ -f "$server" ]] || server="$script_dir/cc-server.py"
-  [[ -f "$server" ]] || die "amux-server.py not found at $script_dir"
-  command -v python3 &>/dev/null || die "python3 is required for amux serve"
-  exec python3 "$server" "$port"
-}
-
-cmd_help() {
-  cat <<EOF
-${BOLD}amux${RESET} — phone-friendly Claude Code session manager ${DIM}v${CC_VERSION}${RESET}
-
-${BOLD}Session management:${RESET}
-  amux register <name> [flags]   Register a session with Claude Code flags
-  amux start <name>              Start a registered session in tmux
-  amux exec <name> [flags]       Register + start in one step
-  amux stop <name>               Stop a running session
-  amux rm <name>                 Remove a session (stops if running)
-  amux start-all                 Start all registered sessions
-  amux stop-all                  Stop all running sessions
-
-${BOLD}Interaction:${RESET}
-  amux attach <name>             Attach to a running session (detach: Ctrl-b d)
-  amux peek <name> [lines]       View last N lines without attaching (default: 30)
-  amux send <name> <text>        Send text + Enter to a session
-  amux send <name> --keys 'C-c'  Send raw key sequence (e.g., Ctrl-C)
-
-${BOLD}Info:${RESET}
-  amux ls                        List all sessions with status and previews
-  amux info <name>               Show session config details
-  amux defaults [show|edit|reset] Manage global default flags
-
-${BOLD}Dashboard:${RESET}
-  amux                           Interactive dashboard (optimized for phone)
-
-${BOLD}Web Dashboard:${RESET}
-  amux serve [port]              Start web dashboard (default: 8822)
-
-${BOLD}Board:${RESET}
-  amux board ls                  List all board issues
-  amux board add <title>         Create a new issue
-  amux board done <ID>           Mark issue as done
-  amux board doing <ID>          Mark issue as in progress
-  amux board todo <ID>           Mark issue as todo
-  amux board status <ID> <s>     Set any status
-
-${BOLD}Claude Code flags (on register/exec):${RESET}
-  --model <model>              Model: opus, sonnet, haiku, or full ID
-  --yolo                       Alias for --dangerously-skip-permissions
-  --dangerously-skip-permissions  Bypass all permission checks
-  --allow-dangerously-skip-permissions  Enable skip-permissions as option
-  --permission-mode <mode>     acceptEdits, bypassPermissions, default, plan, etc.
-  --system-prompt <prompt>     Override system prompt
-  --append-system-prompt <p>   Append to system prompt
-  --mcp-config <path>          MCP server config file
-  --allowedTools <tools>       Allowed tools list
-  --disallowedTools <tools>    Disallowed tools list
-  --effort <level>             low, medium, high
-  --dir <path>                 Working directory (default: cwd)
-  --verbose                    Verbose mode
-  --chrome / --no-chrome       Browser automation toggle
-  ... and all other claude CLI flags pass through
-
-${BOLD}Session names support fuzzy matching:${RESET}
-  amux peek api                  Matches 'api', 'api-server', etc.
-  amux 3                         Attach to session #3 from amux ls
-
-${BOLD}Examples:${RESET}
-  amux register api --model opus --yolo --dir ~/Dev/myapp
-  amux exec frontend --append-system-prompt "React + Tailwind"
-  amux send api "fix the auth bug in login.ts"
-  amux send api --keys 'C-c'
-  amux peek api 50
-EOF
-}
-
-# ── Main dispatch ────────────────────────────────────────────────────────────
-
-ensure_dirs
-
-case "${1:-}" in
-  register|reg)     shift; cmd_register "$@" ;;
-  start)            shift; cmd_start "$@" ;;
-  exec|run)         shift; cmd_exec "$@" ;;
-  attach|a)         shift; cmd_attach "$@" ;;
-  peek|p)           shift; cmd_peek "$@" ;;
-  send)             shift; cmd_send "$@" ;;
-  stop|kill)        shift; cmd_stop "$@" ;;
-  rm|remove|del)    shift; cmd_rm "$@" ;;
-  ls|list)          shift; cmd_ls "$@" ;;
-  info)             shift; cmd_info "$@" ;;
-  defaults|config)  shift; cmd_defaults "$@" ;;
-  start-all)        cmd_start_all ;;
-  stop-all)         cmd_stop_all ;;
-  serve|web)        shift; cmd_serve "$@" ;;
-  board|b)           shift; cmd_board "$@" ;;
-  help|--help|-h)   cmd_help ;;
-  version|--version|-v) echo "amux v${CC_VERSION}" ;;
-  "")               cmd_dashboard ;;
-  *)
-    # Try as session name shortcut
-    name=$(resolve_session "$1" 2>/dev/null) && cmd_attach "$name" || {
-      echo "${RED}unknown command:${RESET} $1"
-      echo "Run ${BOLD}amux help${RESET} for usage"
-      exit 1
-    }
-    ;;
+for i in items: print(i.get('id',''),i.get('status',''),i.get('title',''))" ;;
+      *) echo "amux board: unknown subcommand: $sub" >&2; exit 1 ;;
+    esac ;;
+  crm)
+    sub="$1"; shift 2>/dev/null || true
+    case "$sub" in
+      add)
+        # Usage: amux crm add "Name" [company=X] [email=Y] [role=Z] [phone=P] [linkedin=L]
+        json=$(python3 -c "
+import sys,json
+args=sys.argv[1:]; fields={}; name_parts=[]
+for a in args:
+    if '=' in a: k,v=a.split('=',1); fields[k]=v
+    else: name_parts.append(a)
+if name_parts: fields['name']=' '.join(name_parts)
+print(json.dumps(fields))" "$@")
+        curl -sk -X POST -H 'Content-Type: application/json' -d "$json" "$AMUX_URL/api/crm/contacts" | python3 -c "
+import json,sys; d=json.load(sys.stdin)
+print(d.get('id','error'),'-',d.get('error','created'))" ;;
+      update)
+        # Usage: amux crm update PPL-1 company=X email=Y role=Z ...
+        cid="$1"; shift 2>/dev/null || true
+        json=$(python3 -c "
+import sys,json; fields={}
+for a in sys.argv[1:]:
+    if '=' in a: k,v=a.split('=',1); fields[k]=v
+print(json.dumps(fields))" "$@")
+        curl -sk -X PATCH -H 'Content-Type: application/json' -d "$json" "$AMUX_URL/api/crm/contacts/$cid" | python3 -c "
+import json,sys; d=json.load(sys.stdin)
+print('updated' if d.get('ok') else d.get('error','failed'))" ;;
+      get)
+        cid="$1"
+        curl -sk "$AMUX_URL/api/crm/contacts/$cid" | python3 -c "
+import json,sys
+c=json.load(sys.stdin)
+if 'error' in c: print('Error:',c['error']); sys.exit(1)
+print(c.get('id'),c.get('name'))
+for f in ('company','role','email','phone','linkedin','twitter'):
+    v=c.get(f,'')
+    if v: print('  '+f+':',v)
+tags=c.get('tags',[])
+if tags: print('  tags:',', '.join(tags))
+ixs=c.get('interactions',[])
+if ixs: print('  last interaction:',ixs[0].get('date'),'-',ixs[0].get('notes','')[:60])" ;;
+      log)
+        cid="$1"; shift 2>/dev/null || true; notes="$*"
+        curl -sk -X POST -H 'Content-Type: application/json' \
+          -d "{\"notes\":\"$notes\",\"date\":\"$(date +%Y-%m-%d)\",\"type\":\"other\"}" \
+          "$AMUX_URL/api/crm/contacts/$cid/interactions" ;;
+      followups|fu)
+        curl -sk "$AMUX_URL/api/crm/followups" | python3 -c "
+import json,sys
+items=json.load(sys.stdin)
+if not items: print('No pending follow-ups')
+for i in items: print(i.get('follow_up_date',''),i.get('name',''),'-',i.get('follow_up_note',''))" ;;
+      list|ls|"")
+        curl -sk "$AMUX_URL/api/crm/contacts" | python3 -c "
+import json,sys
+cs=json.load(sys.stdin)
+if not cs: print('No contacts yet')
+for c in cs: print(c.get('id',''),c.get('name',''),c.get('company',''))" ;;
+      *) echo "amux crm: unknown subcommand: $sub" >&2; exit 1 ;;
+    esac ;;
+  session|sessions)
+    curl -sk "$AMUX_URL/api/sessions" | python3 -c "
+import json,sys
+for s in json.load(sys.stdin): print(s['name'], '(running)' if s.get('running') else '')" ;;
+  share)
+    session="$1"; shift 2>/dev/null || true
+    perms="${1:-output}"
+    result=$(curl -sk -X POST -H 'Content-Type: application/json' \
+      -d "{\"perms\":\"$perms\"}" "$AMUX_URL/api/sessions/$session/share")
+    echo "$result" | python3 -c "import json,sys; d=json.load(sys.stdin); print(d.get('url','error: '+d.get('error','unknown')))" ;;
+  unshare)
+    session="$1"; shift 2>/dev/null || true
+    token="$1"
+    curl -sk -X DELETE -H 'Content-Type: application/json' \
+      -d "{\"token\":\"$token\"}" "$AMUX_URL/api/sessions/$session/share" >/dev/null
+    echo "revoked" ;;
+  help|--help|-h|"")
+    echo "amux board <done|doing|todo> <ITEM_ID>  — update board item status"
+    echo "amux board add <title>                  — create a new board item"
+    echo "amux board list                         — list board items"
+    echo "amux crm add <name> [field=val ...]    — add a contact (fields: company email role phone linkedin)"
+    echo "amux crm update <PPL-id> [field=val ..]  — update contact fields"
+    echo "amux crm get <PPL-id>                   — show contact details"
+    echo "amux crm log <PPL-id> <notes>           — log an interaction"
+    echo "amux crm followups                      — show upcoming follow-ups"
+    echo "amux crm list                           — list all contacts"
+    echo "amux sessions                           — list sessions"
+    echo "amux share <session> [perms]            — create a public share link (perms: output, output+files, output+files+notes)"
+    echo "amux unshare <session> [token]          — revoke share link(s)" ;;
+  *) echo "amux: unknown command: $cmd" >&2; exit 1 ;;
 esac
