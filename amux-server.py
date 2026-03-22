@@ -21458,6 +21458,10 @@ class CCHandler(BaseHTTPRequestHandler):
                 body.setdefault("level", "info")
                 items.insert(0, body)
                 _notif_save(items)
+                _send_pushover(
+                    body.get("title", "amux notification"),
+                    body.get("body", body.get("message", "")),
+                )
                 return self._json({"ok": True, "id": body["id"]})
 
         if path.startswith("/api/notifications/"):
