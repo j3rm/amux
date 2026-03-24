@@ -59,6 +59,7 @@ CC_MAP = CC_HOME / "map.json"
 CC_NOTIFICATIONS = CC_HOME / "notifications.json"
 CC_TRANSCRIPTS = CC_HOME / "transcripts"  # per-session JSONL backups
 CC_GMAIL = CC_HOME / "gmail-tokens"        # per-account Gmail OAuth tokens
+CC_BRANDING = CC_HOME / "branding"         # white-label assets (icon, logo)
 TEMPLATES_DIR = Path(__file__).parent / "templates"
 CC_LOGS.mkdir(parents=True, exist_ok=True)
 CC_MEMORY.mkdir(parents=True, exist_ok=True)
@@ -67,6 +68,7 @@ CC_UPLOADS.mkdir(parents=True, exist_ok=True)
 CC_NOTES.mkdir(parents=True, exist_ok=True)
 CC_TRANSCRIPTS.mkdir(parents=True, exist_ok=True)
 CC_GMAIL.mkdir(parents=True, exist_ok=True)
+CC_BRANDING.mkdir(parents=True, exist_ok=True)
 
 UPLOAD_ALLOWED_EXTS = None  # None = allow all file types
 UPLOAD_MAX_BYTES = 20 * 1024 * 1024  # 20 MB
@@ -7813,7 +7815,7 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
 
 <div class="header-row">
   <div style="display:flex;gap:8px;align-items:center;">
-    <h1 style="margin:0;cursor:pointer;" onclick="openAbout()">amux</h1>
+    <h1 id="brand-header" style="margin:0;cursor:pointer;display:flex;align-items:center;gap:6px;" onclick="openAbout()"><span id="brand-icon-header"></span><span id="brand-name-header">amux</span></h1>
     <span id="conn-status" class="conn-status online" onclick="showQueueModal()"></span>
     <button id="notif-btn" onclick="toggleNotifications()" title="Session notifications" style="background:none;border:none;cursor:pointer;padding:2px 4px;font-size:1rem;opacity:0.5;line-height:1;" aria-label="Toggle notifications">&#x1F514;</button>
   </div>
@@ -8903,14 +8905,47 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
 <div id="about-overlay" class="queue-overlay" onclick="if(event.target===this)this.classList.remove('active')">
   <div class="queue-box" style="max-width:340px;">
     <div style="text-align:center;">
-      <h3 style="margin:0 0 4px;">amux</h3>
-      <div style="color:var(--dim);font-size:0.8rem;">Claude Code Multiplexer</div>
+      <div id="about-brand-preview" style="margin-bottom:4px;"></div>
+      <h3 id="about-brand-name" style="margin:0 0 4px;">amux</h3>
+      <div id="about-brand-tagline" style="color:var(--dim);font-size:0.8rem;">Claude Code Multiplexer</div>
       <div style="color:var(--dim);font-size:0.7rem;font-family:monospace;margin-top:2px;"><script>document.write(location.host)</script></div>
       <div style="margin:8px 0 4px;font-size:0.95rem;font-weight:600;cursor:pointer;" onclick="forceUpdate()" title="Tap to force update">v0.6.0 &#x21BB;</div>
       <div id="update-status" style="color:var(--dim);font-size:0.75rem;min-height:1.2em;"></div>
       <button id="pull-btn" class="btn" onclick="pullFromRemote(this)" style="margin-top:6px;font-size:0.72rem;padding:4px 12px;">&#x2B07; Pull from remote</button>
       <div id="pull-status" style="color:var(--dim);font-size:0.7rem;font-family:monospace;margin-top:4px;min-height:1.2em;white-space:pre-wrap;max-height:60px;overflow-y:auto;"></div>
       <script>if(window._cloudEmail){var _pb=document.getElementById('pull-btn');if(_pb)_pb.style.display='none';}</script>
+    </div>
+    <div id="branding-editor" style="margin-top:12px;border-top:1px solid var(--border);padding-top:12px;">
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px;">
+        <div style="font-size:0.8rem;font-weight:600;">Branding</div>
+        <button class="btn" style="font-size:0.65rem;padding:2px 8px;color:var(--dim);" onclick="resetBranding()">Reset</button>
+      </div>
+      <div style="display:flex;flex-direction:column;gap:6px;">
+        <input id="brand-name-input" class="search-input" type="text" placeholder="App name (default: amux)" style="width:100%;font-size:0.75rem;padding:6px 8px;box-sizing:border-box;">
+        <input id="brand-tagline-input" class="search-input" type="text" placeholder="Tagline (default: Claude Code Multiplexer)" style="width:100%;font-size:0.75rem;padding:6px 8px;box-sizing:border-box;">
+        <div style="display:flex;gap:6px;align-items:center;">
+          <label style="font-size:0.72rem;color:var(--dim);flex-shrink:0;">Accent</label>
+          <input id="brand-color-input" type="color" value="#3fb950" style="width:32px;height:24px;padding:0;border:1px solid var(--border);border-radius:4px;background:transparent;cursor:pointer;">
+          <span id="brand-color-hex" style="font-size:0.7rem;font-family:monospace;color:var(--dim);">#3fb950</span>
+        </div>
+        <div style="display:flex;gap:6px;">
+          <div style="flex:1;">
+            <label style="font-size:0.72rem;color:var(--dim);display:block;margin-bottom:2px;">Icon (square)</label>
+            <div id="brand-icon-drop" onclick="document.getElementById('brand-icon-file').click()" style="border:1px dashed var(--border);border-radius:6px;padding:8px;text-align:center;cursor:pointer;font-size:0.7rem;color:var(--dim);min-height:40px;display:flex;align-items:center;justify-content:center;">
+              <span id="brand-icon-label">Drop or tap</span>
+            </div>
+            <input id="brand-icon-file" type="file" accept="image/*" style="display:none;" onchange="brandFileSelected('icon',this)">
+          </div>
+          <div style="flex:1;">
+            <label style="font-size:0.72rem;color:var(--dim);display:block;margin-bottom:2px;">Logo (wide)</label>
+            <div id="brand-logo-drop" onclick="document.getElementById('brand-logo-file').click()" style="border:1px dashed var(--border);border-radius:6px;padding:8px;text-align:center;cursor:pointer;font-size:0.7rem;color:var(--dim);min-height:40px;display:flex;align-items:center;justify-content:center;">
+              <span id="brand-logo-label">Drop or tap</span>
+            </div>
+            <input id="brand-logo-file" type="file" accept="image/*" style="display:none;" onchange="brandFileSelected('logo',this)">
+          </div>
+        </div>
+        <button class="btn" style="font-size:0.72rem;padding:4px 12px;background:var(--accent);color:#000;font-weight:600;margin-top:2px;" onclick="saveBranding()">Save branding</button>
+      </div>
     </div>
     <div id="daily-stats" style="margin-top:12px;border-top:1px solid var(--border);padding-top:12px;">
       <div style="color:var(--dim);font-size:0.75rem;text-align:center;">Loading token stats...</div>
@@ -18193,6 +18228,7 @@ function enablePollingFallback() {
 // Start SSE (falls back to polling on failure)
 connectSSE();
 _updateNotifBtn();
+loadBranding();
 
 // Register service worker for offline asset caching
 if ('serviceWorker' in navigator) {
@@ -18454,6 +18490,150 @@ async function resetTokenStats() {
     openAbout();
   }).catch(() => showToast('Reset failed'));
 }
+
+// ═══════ BRANDING ═══════
+let _brandData = {};
+let _brandIconB64 = null, _brandLogoB64 = null;
+
+async function loadBranding() {
+  try {
+    const r = await fetch(API + '/api/branding');
+    const d = await r.json();
+    _brandData = d;
+    applyBranding(d);
+  } catch(e) {}
+}
+
+function applyBranding(d) {
+  const name = d.name || 'amux';
+  const tagline = d.tagline || 'Claude Code Multiplexer';
+  const color = d.color || '#3fb950';
+  // Header
+  const nameEl = document.getElementById('brand-name-header');
+  if (nameEl) nameEl.textContent = name;
+  const iconEl = document.getElementById('brand-icon-header');
+  if (iconEl) {
+    if (d.icon_url) {
+      iconEl.innerHTML = '<img src="' + esc(API + d.icon_url) + '" style="width:22px;height:22px;border-radius:4px;object-fit:cover;">';
+    } else {
+      iconEl.innerHTML = '';
+    }
+  }
+  // Page title
+  document.title = name;
+  // About overlay
+  const aboutName = document.getElementById('about-brand-name');
+  if (aboutName) aboutName.textContent = name;
+  const aboutTag = document.getElementById('about-brand-tagline');
+  if (aboutTag) aboutTag.textContent = tagline;
+  const aboutPreview = document.getElementById('about-brand-preview');
+  if (aboutPreview) {
+    if (d.logo_url) {
+      aboutPreview.innerHTML = '<img src="' + esc(API + d.logo_url) + '" style="max-width:180px;max-height:48px;border-radius:4px;margin-bottom:4px;">';
+    } else if (d.icon_url) {
+      aboutPreview.innerHTML = '<img src="' + esc(API + d.icon_url) + '" style="width:48px;height:48px;border-radius:8px;margin-bottom:4px;">';
+    } else {
+      aboutPreview.innerHTML = '';
+    }
+  }
+  // Accent color
+  document.documentElement.style.setProperty('--green', color);
+  document.documentElement.style.setProperty('--accent', color);
+  // Favicon
+  if (d.icon_url) {
+    let fav = document.querySelector('link[rel="icon"]');
+    if (fav) fav.href = API + d.icon_url;
+    let apple = document.querySelector('link[rel="apple-touch-icon"]');
+    if (apple) apple.href = API + d.icon_url;
+  }
+  // Populate editor fields
+  const ni = document.getElementById('brand-name-input');
+  if (ni) ni.value = d.name || '';
+  const ti = document.getElementById('brand-tagline-input');
+  if (ti) ti.value = d.tagline || '';
+  const ci = document.getElementById('brand-color-input');
+  if (ci) { ci.value = color; document.getElementById('brand-color-hex').textContent = color; }
+  // Preview uploaded images in editor
+  const iconDrop = document.getElementById('brand-icon-label');
+  if (iconDrop) iconDrop.textContent = d.icon_url ? 'Uploaded' : 'Drop or tap';
+  const logoDrop = document.getElementById('brand-logo-label');
+  if (logoDrop) logoDrop.textContent = d.logo_url ? 'Uploaded' : 'Drop or tap';
+}
+
+function brandFileSelected(type, input) {
+  const file = input.files[0];
+  if (!file) return;
+  const reader = new FileReader();
+  reader.onload = () => {
+    if (type === 'icon') { _brandIconB64 = reader.result; }
+    else { _brandLogoB64 = reader.result; }
+    document.getElementById('brand-' + type + '-label').textContent = file.name;
+    // Show preview
+    const drop = document.getElementById('brand-' + type + '-drop');
+    drop.innerHTML = '<img src="' + reader.result + '" style="max-width:100%;max-height:40px;border-radius:4px;">';
+  };
+  reader.readAsDataURL(file);
+}
+
+async function saveBranding() {
+  const body = {};
+  const name = document.getElementById('brand-name-input').value.trim();
+  const tagline = document.getElementById('brand-tagline-input').value.trim();
+  const color = document.getElementById('brand-color-input').value;
+  if (name) body.name = name;
+  if (tagline) body.tagline = tagline;
+  if (color && color !== '#3fb950') body.color = color;
+  // Include empty strings to clear values
+  if (!name && _brandData.name) body.name = '';
+  if (!tagline && _brandData.tagline) body.tagline = '';
+  if (_brandIconB64) body.icon = _brandIconB64;
+  if (_brandLogoB64) body.logo = _brandLogoB64;
+  try {
+    const r = await fetch(API + '/api/branding', { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(body) });
+    if (!r.ok) { const d = await r.json(); showToast(d.error || 'Save failed'); return; }
+    _brandIconB64 = null; _brandLogoB64 = null;
+    showToast('Branding saved');
+    loadBranding();
+  } catch(e) { showToast('Save failed'); }
+}
+
+async function resetBranding() {
+  if (!await showConfirm('Reset branding to defaults?', 'Reset', true)) return;
+  try {
+    await fetch(API + '/api/branding', { method: 'DELETE' });
+    _brandIconB64 = null; _brandLogoB64 = null;
+    _brandData = {};
+    applyBranding({});
+    showToast('Branding reset');
+  } catch(e) { showToast('Reset failed'); }
+}
+
+// Branding editor: color preview + drag-and-drop
+document.addEventListener('DOMContentLoaded', () => {
+  const ci = document.getElementById('brand-color-input');
+  if (ci) ci.addEventListener('input', () => {
+    document.getElementById('brand-color-hex').textContent = ci.value;
+  });
+  // Drag-and-drop for icon/logo
+  ['icon', 'logo'].forEach(type => {
+    const drop = document.getElementById('brand-' + type + '-drop');
+    if (!drop) return;
+    drop.addEventListener('dragover', e => { e.preventDefault(); drop.style.borderColor = 'var(--accent)'; });
+    drop.addEventListener('dragleave', () => { drop.style.borderColor = 'var(--border)'; });
+    drop.addEventListener('drop', e => {
+      e.preventDefault(); drop.style.borderColor = 'var(--border)';
+      const file = e.dataTransfer.files[0];
+      if (!file || !file.type.startsWith('image/')) return;
+      const reader = new FileReader();
+      reader.onload = () => {
+        if (type === 'icon') _brandIconB64 = reader.result;
+        else _brandLogoB64 = reader.result;
+        drop.innerHTML = '<img src="' + reader.result + '" style="max-width:100%;max-height:40px;border-radius:4px;">';
+      };
+      reader.readAsDataURL(file);
+    });
+  });
+});
 
 // ═══════ SERVER SWITCHER ═══════
 function _getSavedServers() {
@@ -22649,10 +22829,32 @@ class CCHandler(BaseHTTPRequestHandler):
 
         # PWA assets
         if method == "GET" and path == "/manifest.json":
-            return self._raw(PWA_MANIFEST.encode(), "application/manifest+json", cache=True)
+            # Serve dynamic manifest with custom branding if set
+            manifest = json.loads(PWA_MANIFEST)
+            try:
+                db = get_db()
+                bname = db.execute("SELECT value FROM prefs WHERE key='brand_name'").fetchone()
+                btag = db.execute("SELECT value FROM prefs WHERE key='brand_tagline'").fetchone()
+                bcolor = db.execute("SELECT value FROM prefs WHERE key='brand_color'").fetchone()
+                if bname:
+                    manifest["short_name"] = bname["value"]
+                    manifest["name"] = f"{bname['value']} — {btag['value']}" if btag else bname["value"]
+                if bcolor:
+                    manifest["theme_color"] = bcolor["value"]
+            except Exception:
+                pass
+            return self._raw(json.dumps(manifest).encode(), "application/manifest+json", cache=True)
         if method == "GET" and path == "/sw.js":
             return self._raw(SERVICE_WORKER.encode(), "application/javascript")
         if method == "GET" and path in ("/icon.svg", "/icon.png", "/icon-192.png", "/icon-512.png"):
+            # Serve custom branding icon if available
+            for ext in (".png", ".jpg", ".svg", ".webp"):
+                brand_icon = CC_BRANDING / f"icon{ext}"
+                if brand_icon.exists():
+                    ct = {".png": "image/png", ".jpg": "image/jpeg",
+                          ".svg": "image/svg+xml", ".webp": "image/webp"}[ext]
+                    return self._raw(brand_icon.read_bytes(), ct, cache=True)
+            # Fall back to default icon
             icon_path = Path(__file__).resolve().parent / path.lstrip("/")
             if icon_path.exists():
                 ct = "image/svg+xml" if path.endswith(".svg") else "image/png"
@@ -23069,6 +23271,90 @@ class CCHandler(BaseHTTPRequestHandler):
             db.execute("INSERT INTO prefs (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value=?", (key, value, value))
             db.commit()
             return self._json({"ok": True, "key": key, "value": value})
+
+        # ── Branding / white-label API ──
+        if path == "/api/branding":
+            if method == "GET":
+                db = get_db()
+                rows = db.execute("SELECT key, value FROM prefs WHERE key LIKE 'brand_%'").fetchall()
+                result = {r["key"].replace("brand_", ""): r["value"] for r in rows}
+                # Check for custom images
+                for asset in ("icon", "logo"):
+                    for ext in (".png", ".jpg", ".jpeg", ".svg", ".webp"):
+                        p = CC_BRANDING / f"{asset}{ext}"
+                        if p.exists():
+                            result[f"{asset}_url"] = f"/api/branding/{asset}{ext}"
+                            break
+                return self._json(result)
+
+            if method == "POST":
+                body = self._read_body()
+                db = get_db()
+                saved = {}
+                # Save text prefs
+                for key in ("name", "tagline", "color"):
+                    val = body.get(key)
+                    if val is not None:
+                        db.execute("INSERT INTO prefs (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value=?",
+                                   (f"brand_{key}", str(val), str(val)))
+                        saved[key] = str(val)
+                db.commit()
+                # Save image assets (base64-encoded)
+                for asset in ("icon", "logo"):
+                    b64 = body.get(asset)
+                    if not b64:
+                        continue
+                    # Accept data URL or raw base64
+                    if "," in b64:
+                        b64 = b64.split(",", 1)[1]
+                    try:
+                        data = base64.b64decode(b64)
+                    except Exception:
+                        return self._json({"error": f"invalid base64 for {asset}"}, 400)
+                    if len(data) > 5 * 1024 * 1024:
+                        return self._json({"error": f"{asset} too large (max 5 MB)"}, 400)
+                    # Detect format from magic bytes
+                    if data[:8] == b'\x89PNG\r\n\x1a\n':
+                        ext = ".png"
+                    elif data[:2] == b'\xff\xd8':
+                        ext = ".jpg"
+                    elif data[:4] == b'RIFF' and len(data) > 12 and data[8:12] == b'WEBP':
+                        ext = ".webp"
+                    elif b'<svg' in data[:500]:
+                        ext = ".svg"
+                    else:
+                        return self._json({"error": f"{asset} must be PNG, JPEG, WebP, or SVG"}, 400)
+                    # Remove old assets for this type
+                    for old in CC_BRANDING.glob(f"{asset}.*"):
+                        old.unlink()
+                    dest = CC_BRANDING / f"{asset}{ext}"
+                    dest.write_bytes(data)
+                    saved[f"{asset}_url"] = f"/api/branding/{asset}{ext}"
+                return self._json({"ok": True, **saved})
+
+            if method == "DELETE":
+                db = get_db()
+                db.execute("DELETE FROM prefs WHERE key LIKE 'brand_%'")
+                db.commit()
+                for f in CC_BRANDING.iterdir():
+                    try:
+                        f.unlink()
+                    except Exception:
+                        pass
+                return self._json({"ok": True})
+
+        # Serve branding assets
+        if method == "GET" and path.startswith("/api/branding/"):
+            fname = path[len("/api/branding/"):]
+            if "/" in fname or "\\" in fname or fname.startswith("."):
+                return self._json({"error": "not found"}, 404)
+            fpath = CC_BRANDING / fname
+            if not fpath.exists():
+                return self._json({"error": "not found"}, 404)
+            ext = fpath.suffix.lower()
+            ct = {".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg",
+                  ".svg": "image/svg+xml", ".webp": "image/webp"}.get(ext, "application/octet-stream")
+            return self._raw(fpath.read_bytes(), ct, cache=True)
 
         # GET /api/logs — query structured event logs (SQLite + in-memory ring merged)
         if method == "GET" and path == "/api/logs":
