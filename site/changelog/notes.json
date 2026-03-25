@@ -1,5 +1,41 @@
 [
   {
+    "hash": "fcc5ab3",
+    "short": "fcc5ab3",
+    "title": "White-label branding — custom name, icon, logo, and accent color",
+    "date": "2026-03-24",
+    "type": "feat",
+    "tags": ["branding", "white-label", "customization"],
+    "description": "Click the logo in the top-left to open the branding editor. Customize the app name, tagline, square icon, wide logo, and accent color. Images accept drag-and-drop or file picker. Everything is stored server-side so all connected clients see the same branding. The PWA manifest, page title, favicon, and all icon endpoints dynamically serve custom assets. Reset to defaults with one click. API: GET/POST/DELETE /api/branding."
+  },
+  {
+    "hash": "fd8b6f8",
+    "short": "fd8b6f8",
+    "title": "Fix scheduler cron day-of-week bug and long prompt send failures",
+    "date": "2026-03-16",
+    "type": "fix",
+    "tags": ["scheduler", "send", "reliability"],
+    "description": "Fixed two reported issues: (1) Cron-style scheduled jobs used Python's weekday convention (0=Monday) instead of standard cron (0=Sunday), causing jobs targeting specific days to fire on the wrong day. (2) Long prompts sent from the dashboard could fail silently or get split mid-text. The root cause was tmux's paste-buffer interpreting newlines as Enter keypresses and concurrent sends racing on the same global paste buffer. Fixed by using named buffers with the -p (literal paste) flag, increased timeouts, and proper buffer cleanup."
+  },
+  {
+    "hash": "fd8b6f8",
+    "short": "fd8b6f8",
+    "title": "Offline notes caching — notes always available on device",
+    "date": "2026-03-16",
+    "type": "feat",
+    "tags": ["notes", "offline", "pwa"],
+    "description": "Notes are now cached locally on the device using both localStorage (for the list) and IndexedDB (for individual note content). The notes list loads instantly on startup from cache, and individual notes are cached when opened and updated on save. When offline, notes load from cache instead of showing empty state. Cache is cleaned up when notes are deleted."
+  },
+  {
+    "hash": "fd8b6f8",
+    "short": "fd8b6f8",
+    "title": "Workspace layout presets — one-click grid arrangements",
+    "date": "2026-03-16",
+    "type": "feat",
+    "tags": ["workspace", "ui"],
+    "description": "Added a Layout dropdown to the Workspace tab with 6 preset arrangements: Focus (single column), Split (2 columns), 3 Columns, 2x2 Grid, Main + Sidebar, and Stacked Rows. Selecting a preset instantly rearranges all open panes into the chosen layout. If no panes are open, all sessions are added automatically."
+  },
+  {
     "hash": "2dc168121706eb9290b55f532803732f0a06aedf",
     "short": "2dc1681",
     "title": "Notes sidebar panel icons, offline save queuing, title sync",

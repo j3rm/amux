@@ -59,6 +59,7 @@ CC_MAP = CC_HOME / "map.json"
 CC_NOTIFICATIONS = CC_HOME / "notifications.json"
 CC_TRANSCRIPTS = CC_HOME / "transcripts"  # per-session JSONL backups
 CC_GMAIL = CC_HOME / "gmail-tokens"        # per-account Gmail OAuth tokens
+CC_BRANDING = CC_HOME / "branding"         # white-label assets (icon, logo)
 TEMPLATES_DIR = Path(__file__).parent / "templates"
 CC_LOGS.mkdir(parents=True, exist_ok=True)
 CC_MEMORY.mkdir(parents=True, exist_ok=True)
@@ -67,6 +68,7 @@ CC_UPLOADS.mkdir(parents=True, exist_ok=True)
 CC_NOTES.mkdir(parents=True, exist_ok=True)
 CC_TRANSCRIPTS.mkdir(parents=True, exist_ok=True)
 CC_GMAIL.mkdir(parents=True, exist_ok=True)
+CC_BRANDING.mkdir(parents=True, exist_ok=True)
 
 UPLOAD_ALLOWED_EXTS = None  # None = allow all file types
 UPLOAD_MAX_BYTES = 20 * 1024 * 1024  # 20 MB
@@ -193,34 +195,182 @@ def _aria2_list_all():
     return result
 
 
-# ── Browser automation helpers ────────────────────────────────────────────────
-_BROWSER_HELPER = Path.home() / ".amux" / "browser-helper.js"
-_NODE_BIN = shutil.which("node") or "/usr/local/bin/node"
+# ── Browser automation helpers (browser-use CLI) ─────────────────────────────
+_BROWSER_USE_BIN = shutil.which("browser-use") or "/usr/local/bin/browser-use"
 
-def _pw_list_profiles() -> list:
-    d = Path.home() / ".amux" / "playwright-auth" / "profiles"
-    if not d.exists():
-        return []
-    return sorted(p.name for p in d.iterdir() if p.is_dir())
-
-def _browser_call(cmd: dict, timeout_s: int = 40) -> dict:
-    """Run ~/.amux/browser-helper.js with a JSON command, return parsed result."""
+def _bu_call(args: list, timeout_s: int = 30, session: str = "amux") -> dict:
+    """Run a browser-use CLI command, return parsed JSON result."""
+    cmd = [_BROWSER_USE_BIN, "--json", "--session", session] + args
     try:
-        r = subprocess.run(
-            [_NODE_BIN, str(_BROWSER_HELPER)],
-            input=json.dumps(cmd),
-            capture_output=True,
-            text=True,
-            timeout=timeout_s,
-        )
+        r = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout_s)
         out = r.stdout.strip()
         if not out:
-            return {"error": r.stderr.strip() or f"node exited {r.returncode}"}
+            return {"error": r.stderr.strip() or f"browser-use exited {r.returncode}"}
         return json.loads(out)
     except subprocess.TimeoutExpired:
         return {"error": "browser operation timed out"}
+    except json.JSONDecodeError:
+        return {"error": r.stdout.strip()[:200] if r.stdout else "invalid JSON"}
     except Exception as e:
         return {"error": str(e)}
+
+def _bu_list_profiles() -> list:
+    """List available Chrome profiles via browser-use."""
+    try:
+        r = subprocess.run(
+            [_BROWSER_USE_BIN, "-b", "real", "profile", "list"],
+            capture_output=True, text=True, timeout=10,
+        )
+        profiles = []
+        for line in r.stdout.strip().splitlines():
+            line = line.strip()
+            if line.startswith("Local Chrome") or not line:
+                continue
+            # Format: "Profile 11: Ethan (email@example.com)"
+            if ":" in line:
+                name = line.split(":")[0].strip()
+                profiles.append(name)
+        return profiles
+    except Exception:
+        return []
+
+def _bu_screenshot(session: str = "amux", path: str = "") -> dict:
+    """Take a screenshot, return {path, size}."""
+    dest = path or str(Path.home() / ".amux" / "browser-screenshots" / "latest.jpg")
+    Path(dest).parent.mkdir(parents=True, exist_ok=True)
+    result = _bu_call(["screenshot", dest], session=session)
+    if result.get("success"):
+        try:
+            size = Path(dest).stat().st_size
+        except Exception:
+            size = 0
+        return {"path": dest, "size": size}
+    return result
+
+# ── Terminal (PTY) session management ─────────────────────────────────────────
+import pty
+import fcntl
+import struct
+import select
+import signal
+
+_terminals: dict[str, dict] = {}  # id -> {pid, fd, created, host, cols, rows}
+_term_lock = threading.Lock()
+
+def _term_create(host: str = "", cols: int = 120, rows: int = 40) -> dict:
+    """Spawn a PTY shell (local or SSH)."""
+    env = os.environ.copy()
+    env["TERM"] = "xterm-256color"
+    env["COLORTERM"] = "truecolor"
+    env["LANG"] = env.get("LANG", "en_US.UTF-8")
+
+    if host and host != "local":
+        # SSH to remote host
+        cmd = ["ssh", "-o", "StrictHostKeyChecking=accept-new",
+               "-o", "ServerAliveInterval=30", "-t", host]
+    else:
+        # Local shell
+        shell = os.environ.get("SHELL", "/bin/bash")
+        cmd = [shell, "-l"]
+
+    pid, fd = pty.fork()
+    if pid == 0:
+        # Child — exec the command
+        os.execvpe(cmd[0], cmd, env)
+    else:
+        # Parent — set terminal size
+        fcntl.ioctl(fd, termios_TIOCSWINSZ, struct.pack("HHHH", rows, cols, 0, 0))
+        # Make fd non-blocking
+        flags = fcntl.fcntl(fd, fcntl.F_GETFL)
+        fcntl.fcntl(fd, fcntl.F_SETFL, flags | os.O_NONBLOCK)
+
+        tid = f"term-{uuid.uuid4().hex[:8]}"
+        with _term_lock:
+            _terminals[tid] = {
+                "pid": pid, "fd": fd, "created": int(time.time()),
+                "host": host or "local", "cols": cols, "rows": rows,
+            }
+        return {"id": tid, "host": host or "local", "cols": cols, "rows": rows}
+
+# TIOCSWINSZ constant
+try:
+    import termios
+    termios_TIOCSWINSZ = termios.TIOCSWINSZ
+except (ImportError, AttributeError):
+    termios_TIOCSWINSZ = 0x5414  # Linux default
+
+def _term_read(tid: str, max_bytes: int = 65536) -> bytes:
+    """Read available output from terminal."""
+    with _term_lock:
+        t = _terminals.get(tid)
+    if not t:
+        return b""
+    fd = t["fd"]
+    try:
+        ready, _, _ = select.select([fd], [], [], 0.05)
+        if ready:
+            return os.read(fd, max_bytes)
+    except (OSError, IOError):
+        pass
+    return b""
+
+def _term_write(tid: str, data: bytes):
+    """Write input to terminal."""
+    with _term_lock:
+        t = _terminals.get(tid)
+    if not t:
+        return
+    try:
+        os.write(t["fd"], data)
+    except (OSError, IOError):
+        pass
+
+def _term_resize(tid: str, cols: int, rows: int):
+    """Resize terminal."""
+    with _term_lock:
+        t = _terminals.get(tid)
+    if not t:
+        return
+    try:
+        fcntl.ioctl(t["fd"], termios_TIOCSWINSZ, struct.pack("HHHH", rows, cols, 0, 0))
+        t["cols"] = cols
+        t["rows"] = rows
+        # Send SIGWINCH to the process group
+        os.kill(t["pid"], signal.SIGWINCH)
+    except (OSError, IOError):
+        pass
+
+def _term_destroy(tid: str):
+    """Kill terminal session."""
+    with _term_lock:
+        t = _terminals.pop(tid, None)
+    if not t:
+        return
+    try:
+        os.kill(t["pid"], signal.SIGHUP)
+    except (OSError, ProcessLookupError):
+        pass
+    try:
+        os.close(t["fd"])
+    except OSError:
+        pass
+    try:
+        os.waitpid(t["pid"], os.WNOHANG)
+    except (ChildProcessError, OSError):
+        pass
+
+def _term_alive(tid: str) -> bool:
+    """Check if terminal process is still running."""
+    with _term_lock:
+        t = _terminals.get(tid)
+    if not t:
+        return False
+    try:
+        pid, status = os.waitpid(t["pid"], os.WNOHANG)
+        return pid == 0  # 0 means still running
+    except (ChildProcessError, OSError):
+        return False
+
 
 # SSE shared cache — avoids redundant subprocess calls when multiple tabs connect
 _sse_cache = {
@@ -747,6 +897,16 @@ def _log_event(category: str, action: str, *, session: str = None,
     # Also push to the SSE event log ring so the Logs tab receives it live
     with _event_log_lock:
         _event_log.append(evt)
+    # Auto-log meaningful actions to the session's active board issue
+    if session and category in ("session", "board", "memory", "git"):
+        _SKIP_ACTIONS = {"peeked", "message-sent"}  # noisy / already captured
+        if action not in _SKIP_ACTIONS:
+            issue_id = _session_board_issue_id(session)
+            if issue_id:
+                msg = f"**{action}**"
+                if detail:
+                    msg += f" — {detail[:200]}"
+                threading.Thread(target=_append_board_log, args=(issue_id, msg), daemon=True).start()
 
 
 def _last_meaningful_user_message(work_dir: str) -> str:
@@ -862,6 +1022,19 @@ def _snapshot_all_sessions():
                     send_text(name, "/compact")
                     _push_alert("auto_compact", name,
                                 f"Auto-compacted '{name}' — context was at {pct}%")
+
+            # ── 1b. Reactive: image dimension limit → auto-compact ─────────
+            # Sessions using browser screenshots fill context with large images
+            # until Claude errors with "image exceeds the dimension limit".
+            # The session gets stuck at the prompt unable to proceed.
+            if ("image" in clean and "exceeds the dimension limit" in clean and
+                    now - actions.get("last_compact", 0) > 120):
+                actions["last_compact"] = now
+                actions["post_compact_continue"] = True
+                threading.Thread(target=backup_session_jsonl, args=(name, "pre_compact_img"), daemon=True).start()
+                send_text(name, "/compact")
+                _push_alert("auto_compact", name,
+                            f"Auto-compacted '{name}' — image dimension limit hit")
 
             # ── 2. Reactive: thinking-block corruption → restart + replay ───
             if ("redacted_thinking" in clean and
@@ -1019,8 +1192,8 @@ def get_claude_stats(work_dir: str) -> dict:
 _model_cache = {}  # {work_dir: (model, mtime, timestamp)}
 _MODEL_CACHE_TTL = 15  # seconds
 
-def detect_active_model(work_dir: str) -> str:
-    """Detect the model in use from the most recent Claude JSONL entries."""
+def detect_active_model(work_dir: str, conversation_id: str = "") -> str:
+    """Detect the model in use from the session's own JSONL conversation file."""
     if not work_dir:
         return ""
     resolved = str(Path(work_dir).expanduser().resolve())
@@ -1028,16 +1201,25 @@ def detect_active_model(work_dir: str) -> str:
     project_dir = CLAUDE_HOME / "projects" / project_name
     if not project_dir.is_dir():
         return ""
-    jsonl_files = sorted(project_dir.glob("*.jsonl"), key=lambda f: f.stat().st_mtime, reverse=True)
-    if not jsonl_files:
-        return ""
-    f = jsonl_files[0]
+    # Prefer the session's own conversation JSONL file
+    if conversation_id:
+        conv_file = project_dir / f"{conversation_id}.jsonl"
+        if conv_file.exists():
+            f = conv_file
+        else:
+            return ""
+    else:
+        jsonl_files = sorted(project_dir.glob("*.jsonl"), key=lambda f: f.stat().st_mtime, reverse=True)
+        if not jsonl_files:
+            return ""
+        f = jsonl_files[0]
     try:
         mtime = f.stat().st_mtime
     except OSError:
         return ""
     # Cache hit: same file mtime and within TTL
-    cached = _model_cache.get(work_dir)
+    cache_key = (work_dir, conversation_id)
+    cached = _model_cache.get(cache_key)
     if cached:
         c_model, c_mtime, c_ts = cached
         if c_mtime == mtime or (time.time() - c_ts < _MODEL_CACHE_TTL):
@@ -1057,7 +1239,7 @@ def detect_active_model(work_dir: str) -> str:
                     entry = json.loads(line)
                     model = entry.get("message", {}).get("model", "")
                     if model:
-                        _model_cache[work_dir] = (model, mtime, time.time())
+                        _model_cache[cache_key] = (model, mtime, time.time())
                         return model
                 except (json.JSONDecodeError, AttributeError):
                     continue
@@ -1065,7 +1247,7 @@ def detect_active_model(work_dir: str) -> str:
                 break
     except Exception:
         pass
-    _model_cache[work_dir] = ("", mtime, time.time())
+    _model_cache[cache_key] = ("", mtime, time.time())
     return ""
 
 
@@ -1319,6 +1501,12 @@ CREATE TABLE IF NOT EXISTS share_tokens (
     created_at INTEGER NOT NULL,
     expires_at INTEGER,
     label      TEXT NOT NULL DEFAULT ''
+);
+CREATE TABLE IF NOT EXISTS layout_presets (
+    name       TEXT PRIMARY KEY,
+    hidden     TEXT NOT NULL DEFAULT '[]',
+    tab_order  TEXT NOT NULL DEFAULT '[]',
+    created_at INTEGER NOT NULL
 );
 """
 
@@ -2019,7 +2207,8 @@ def _update_meta(name: str, **kwargs):
 
 
 def _summarize_task_bg(session_name: str, text: str):
-    """Call Claude Haiku in a background thread to summarize a message into a 3-word task label."""
+    """Call Claude Haiku in a background thread to summarize a message into a 3-word task label,
+    then auto-create a board issue for the session."""
     def _run():
         try:
             import anthropic
@@ -2033,9 +2222,94 @@ def _summarize_task_bg(session_name: str, text: str):
             summary = msg.content[0].text.strip().rstrip(".")
             if summary:
                 _update_meta(session_name, task_summary=summary)
+                _auto_create_board_issue(session_name, summary, text)
         except Exception:
             pass
     threading.Thread(target=_run, daemon=True).start()
+
+
+def _auto_create_board_issue(session_name: str, title: str, prompt_text: str):
+    """Create or update a board issue for a session task. If the session already has an
+    active (non-done/discarded) issue, update its title instead of creating a duplicate."""
+    try:
+        db = get_db()
+        # Check for existing active issue for this session
+        existing = db.execute(
+            "SELECT id, status FROM issues WHERE session=? AND deleted IS NULL "
+            "AND status NOT IN ('done','discarded') ORDER BY created DESC LIMIT 1",
+            (session_name,)
+        ).fetchone()
+        now = int(time.time())
+        if existing:
+            # Update title and move to doing
+            db.execute("UPDATE issues SET title=?, status='doing', updated=? WHERE id=?",
+                       (title, now, existing["id"]))
+            db.commit()
+            _sse_cache["board"]["time"] = 0
+            _append_board_log(existing["id"], f"New task: {prompt_text[:200]}")
+            return
+        # Create new issue
+        prefix = _prefix_from_session(session_name)
+        item_id = _next_issue_id(prefix)
+        db.execute(
+            """INSERT INTO issues (id, title, desc, status, session, creator, created, updated, owner_type)
+               VALUES (?, ?, ?, 'doing', ?, 'amux', ?, ?, 'agent')""",
+            (item_id, title, f"**Prompt:** {prompt_text[:300]}", session_name, now, now),
+        )
+        db.commit()
+        _sse_cache["board"]["time"] = 0
+    except Exception as e:
+        print(f"[board] auto-create failed for {session_name}: {e}", flush=True)
+
+
+def _append_board_log(issue_id: str, line: str):
+    """Append an action line to a board issue's description."""
+    try:
+        db = get_db()
+        row = db.execute("SELECT desc FROM issues WHERE id=?", (issue_id,)).fetchone()
+        if not row:
+            return
+        desc = row["desc"] or ""
+        ts = time.strftime("%H:%M")
+        desc = desc.rstrip() + f"\n`{ts}` {line}"
+        db.execute("UPDATE issues SET desc=?, updated=? WHERE id=?",
+                   (desc, int(time.time()), issue_id))
+        db.commit()
+        _sse_cache["board"]["time"] = 0
+    except Exception:
+        pass
+
+
+def _session_board_issue_id(session_name: str) -> str | None:
+    """Return the active board issue ID for a session, if any."""
+    try:
+        row = get_db().execute(
+            "SELECT id FROM issues WHERE session=? AND deleted IS NULL "
+            "AND status NOT IN ('done','discarded') ORDER BY created DESC LIMIT 1",
+            (session_name,)
+        ).fetchone()
+        return row["id"] if row else None
+    except Exception:
+        return None
+
+
+def _complete_session_board_issue(session_name: str):
+    """Move a session's active board issue to done."""
+    try:
+        db = get_db()
+        row = db.execute(
+            "SELECT id FROM issues WHERE session=? AND deleted IS NULL "
+            "AND status NOT IN ('done','discarded') ORDER BY created DESC LIMIT 1",
+            (session_name,)
+        ).fetchone()
+        if row:
+            now = int(time.time())
+            _append_board_log(row["id"], "Session completed")
+            db.execute("UPDATE issues SET status='done', updated=? WHERE id=?", (now, row["id"]))
+            db.commit()
+            _sse_cache["board"]["time"] = 0
+    except Exception:
+        pass
 
 
 _DEFAULT_STATUSES = [
@@ -2225,8 +2499,11 @@ def _cron_next_run(parts: list, base) -> str | None:
     t += _td(minutes=1)
     limit = base + _td(days=366)
     while t < limit:
+        # Cron DOW: 0=Sunday, 6=Saturday. Python weekday(): 0=Monday, 6=Sunday.
+        # Convert: (python_weekday + 1) % 7 → 0=Sun, 1=Mon, ..., 6=Sat
+        cron_dow = (t.weekday() + 1) % 7
         if (_matches(t.month, mon_s) and _matches(t.day, dom_s) and
-                _matches(t.weekday(), dow_s) and _matches(t.hour, hour_s) and
+                _matches(cron_dow, dow_s) and _matches(t.hour, hour_s) and
                 _matches(t.minute, min_s)):
             return t.strftime("%Y-%m-%dT%H:%M")
         t += _td(minutes=1)
@@ -2737,10 +3014,13 @@ def _build_system_metrics() -> dict:
     except Exception:
         tokens_by_name = {}
 
-    # Build session data list
+    # Build session data list (skip archived sessions)
     if CC_SESSIONS.exists():
         for env_file in sorted(CC_SESSIONS.glob("*.env")):
             name = env_file.stem
+            cfg = parse_env_file(env_file)
+            if cfg.get("CC_ARCHIVED") == "1":
+                continue
             s_data: dict = {
                 "name": name,
                 "pids": [],
@@ -2941,6 +3221,8 @@ def _parse_task_time(raw_output: str) -> str:
     return ""
 
 
+_session_prev_status: dict[str, str] = {}  # track status changes for board auto-updates
+
 def list_sessions() -> list:
     sessions = []
     if not CC_SESSIONS.is_dir():
@@ -2990,6 +3272,17 @@ def list_sessions() -> list:
             preview = strip_ansi(lines[-1][:120]) if lines else ""
             if running:
                 status = _detect_claude_status(raw)
+            # Detect session becoming idle → auto-complete board issue
+            prev = _session_prev_status.get(name)
+            if status == "idle" and prev in ("active", "waiting"):
+                threading.Thread(target=_complete_session_board_issue, args=(name,), daemon=True).start()
+            elif status == "idle" and prev == "idle" and not running:
+                # Session stopped while idle — ensure board issue is completed
+                threading.Thread(target=_complete_session_board_issue, args=(name,), daemon=True).start()
+            elif status == "" and prev in ("active", "waiting", "idle"):
+                # Session went from running to not running
+                threading.Thread(target=_complete_session_board_issue, args=(name,), daemon=True).start()
+            _session_prev_status[name] = status if running else ""
             # Filter for intelligible content lines
             intelligible = []
             for l in lines:
@@ -3014,7 +3307,7 @@ def list_sessions() -> list:
         # Detect active model from JSONL
         raw_dir = cfg.get("CC_DIR", "")
         resolved_dir = str(Path(raw_dir).expanduser().resolve()) if raw_dir else ""
-        active_model = detect_active_model(raw_dir)
+        active_model = detect_active_model(raw_dir, meta.get("cc_conversation_id", ""))
         # Parse task time from spinner line
         task_time = _parse_task_time(raw) if raw else ""
         # Token count from JSONL cache (refreshed once above the loop).
@@ -3048,6 +3341,8 @@ def list_sessions() -> list:
             "tokens": tokens,
             "branch": cfg.get("CC_BRANCH", ""),
             "mcp": cfg.get("CC_MCP", ""),
+            "worktree": cfg.get("CC_WORKTREE", "") == "1",
+            "worktree_repo": cfg.get("CC_WORKTREE_REPO", ""),
         })
     status_order = {"active": 0, "waiting": 0, "idle": 1, "": 1}
     sessions.sort(key=lambda s: (not s["pinned"], not s["running"], status_order.get(s["status"], 1), -s["last_activity"]))
@@ -3805,22 +4100,26 @@ def send_text(name: str, text: str) -> tuple[bool, str]:
             # tmux send-keys -l has a ~500 char buffer limit; use load-buffer+paste-buffer for longer text
             if len(text) > 400:
                 import tempfile, os as _os
+                # Use a named buffer to avoid races between concurrent sends
+                buf_name = f"amux-{name}-{int(time.time()*1000)}"
                 with tempfile.NamedTemporaryFile(mode='w', delete=False, suffix='.txt', encoding='utf-8') as f:
                     f.write(text)
                     tmp = f.name
                 try:
-                    subprocess.run(["tmux", "load-buffer", tmp], check=True, capture_output=True, timeout=5)
-                    subprocess.run(["tmux", "paste-buffer", "-t", t], check=True, capture_output=True, timeout=5)
+                    subprocess.run(["tmux", "load-buffer", "-b", buf_name, tmp], check=True, capture_output=True, timeout=10)
+                    # -p flag pastes literally without interpreting newlines as Enter
+                    subprocess.run(["tmux", "paste-buffer", "-p", "-b", buf_name, "-t", t], check=True, capture_output=True, timeout=10)
+                    subprocess.run(["tmux", "delete-buffer", "-b", buf_name], capture_output=True, timeout=5)
                 finally:
                     _os.unlink(tmp)
             else:
                 # Send text literally (-l) then Enter separately
                 subprocess.run(
                     ["tmux", "send-keys", "-t", t, "-l", text],
-                    check=True, capture_output=True, timeout=5,
+                    check=True, capture_output=True, timeout=10,
                 )
             # Give readline time to process all queued characters before Enter arrives
-            time.sleep(0.1)
+            time.sleep(0.15)
             subprocess.run(
                 ["tmux", "send-keys", "-t", t, "Enter"],
                 check=True, capture_output=True, timeout=5,
@@ -3828,6 +4127,8 @@ def send_text(name: str, text: str) -> tuple[bool, str]:
             return True, "sent"
         except subprocess.CalledProcessError as e:
             return False, e.stderr.decode(errors="replace")
+        except subprocess.TimeoutExpired:
+            return False, "timeout sending text"
 
 
 def send_keys(name: str, keys: str) -> tuple[bool, str]:
@@ -4767,6 +5068,7 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
 <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/quill@2.0.3/dist/quill.snow.css">
 <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/quilljs-markdown@latest/dist/quilljs-markdown-common-style.css">
 <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@xterm/xterm@5.5.0/css/xterm.min.css">
 <style>
   * { box-sizing: border-box; margin: 0; padding: 0; }
   :root {
@@ -5087,6 +5389,26 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
   .chip:active { background: rgba(88,166,255,0.25); }
   .chip.danger { background: rgba(248,81,73,0.12); color: var(--red); border-color: rgba(248,81,73,0.25); }
   .chip.danger:active { background: rgba(248,81,73,0.25); }
+  .chip.chip-add { background: rgba(139,148,158,0.10); color: var(--dim); border-color: rgba(139,148,158,0.25); font-size: 1rem; padding: 6px 10px; }
+  .chip.chip-add:hover { background: rgba(139,148,158,0.2); color: var(--text); }
+  .chip.chip-edit-toggle { background: none; border: 1px solid transparent; color: var(--dim); padding: 6px 8px; font-size: 0.85rem; }
+  .chip.chip-edit-toggle:hover { color: var(--accent); }
+  .chip.chip-edit-toggle.active { color: var(--accent); }
+  .chips.editing .chip { cursor: grab; }
+  .chips.editing .chip.dragging { opacity: 0.4; }
+  .chips.editing .chip-remove-btn { display: inline-flex; margin-left: 4px; font-size: 0.7rem; opacity: 0.6; cursor: pointer; }
+  .chips.editing .chip-remove-btn:hover { opacity: 1; color: var(--red); }
+  .chip-remove-btn { display: none; }
+  .chip-picker-overlay { position: fixed; inset: 0; background: rgba(0,0,0,0.6); z-index: 2000; display: flex; align-items: center; justify-content: center; }
+  .chip-picker { background: var(--card); border: 1px solid var(--border); border-radius: 12px; width: 340px; max-height: 70vh; display: flex; flex-direction: column; overflow: hidden; }
+  .chip-picker-header { padding: 12px 16px; border-bottom: 1px solid var(--border); display: flex; align-items: center; gap: 8px; }
+  .chip-picker-header input { flex: 1; background: var(--bg); border: 1px solid var(--border); border-radius: 6px; padding: 6px 10px; color: var(--text); font-size: 0.85rem; outline: none; }
+  .chip-picker-header input:focus { border-color: var(--accent); }
+  .chip-picker-body { overflow-y: auto; padding: 8px 0; max-height: 50vh; }
+  .chip-picker-section { padding: 4px 16px 2px; font-size: 0.7rem; color: var(--dim); text-transform: uppercase; letter-spacing: 0.05em; }
+  .chip-picker-item { padding: 8px 16px; cursor: pointer; display: flex; align-items: center; gap: 8px; font-size: 0.85rem; color: var(--text); }
+  .chip-picker-item:hover { background: rgba(88,166,255,0.1); }
+  .chip-picker-item .cpd { color: var(--dim); font-size: 0.75rem; flex: 1; text-align: right; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   .send-row { display: flex; gap: 8px; min-width: 0; overflow: visible; position: relative; }
   .send-input {
     flex: 1; min-width: 0; font-size: 1rem; padding: 10px 14px; border-radius: 8px;
@@ -5890,8 +6212,6 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
     color: var(--dim); cursor: pointer; padding: 0 8px; font-size: 1.1rem; min-height: 36px;
     display: flex; align-items: center; flex-shrink: 0; }
   .peek-attach-btn:hover { color: var(--text); border-color: var(--accent); }
-  .peek-attach-btn.mic-active { color: var(--red); border-color: var(--red); animation: mic-pulse 1s ease-in-out infinite; }
-  @keyframes mic-pulse { 0%,100% { opacity: 1; } 50% { opacity: 0.5; } }
   /* Drag-over overlay */
   #peek-overlay.drag-over { outline: 2px dashed var(--accent); outline-offset: -3px; }
   #peek-overlay.drag-over .peek-drag-hint {
@@ -6319,6 +6639,10 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
     -webkit-overflow-scrolling: touch; padding-bottom: 16px; align-items: flex-start;
     min-height: 200px; touch-action: pan-x pan-y;
   }
+  .board-col-header { cursor: grab; }
+  .board-col-header:active { cursor: grabbing; }
+  .board-col.sortable-ghost { opacity: 0.3; }
+  .board-col.sortable-chosen { box-shadow: 0 8px 24px rgba(0,0,0,0.4); transform: rotate(0.8deg); }
   .board-columns::-webkit-scrollbar { display: none; }
   .board-col {
     flex: 1; min-width: 200px; max-width: 320px;
@@ -6372,6 +6696,39 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
   .board-drag-handle:hover { opacity: 1 !important; cursor: grab; color: var(--fg); background: rgba(139,148,158,0.12); }
   .board-drag-handle:active { cursor: grabbing; }
   @media (hover: none) { .board-drag-handle { opacity: 0.5; width: 32px; height: 32px; cursor: grab; } }
+  /* ── Board mobile responsive ── */
+  .board-new-btn { font-size: 0.8rem; padding: 5px 12px; white-space: nowrap; flex-shrink: 0; }
+  .board-new-icon { display: none; }
+  @media (max-width: 640px) {
+    .board-toolbar { flex-wrap: wrap; gap: 6px; }
+    .board-search-wrap { order: 1; flex: 1 1 100% !important; min-width: 0; }
+    .board-new-btn { order: 2; padding: 6px; width: 32px; height: 32px; display: flex; align-items: center; justify-content: center; border-radius: 8px; }
+    .board-new-label { display: none; }
+    .board-new-icon { display: inline; font-size: 1.1rem; font-weight: 700; line-height: 1; }
+    .board-owner-toggle { order: 3; flex: 1; }
+    .board-owner-toggle .bv-btn { flex: 1; text-align: center; font-size: 0.78rem; padding: 6px 4px; }
+    .board-view-toggle { order: 4; }
+    .board-view-toggle .bv-btn { padding: 6px 8px; }
+    .board-col { min-width: 160px; max-width: 280px; padding: 8px 6px; }
+    .board-columns { gap: 8px; min-height: 160px; }
+    .board-card { padding: 8px 10px; }
+    .board-card-title { font-size: 0.82rem; }
+    .board-card-desc { font-size: 0.7rem; }
+    .board-card-footer { gap: 4px; }
+    .board-card-footer span { font-size: 0.62rem !important; }
+    .board-card-key { font-size: 0.58rem; }
+    .board-filter-chip { font-size: 0.68rem; padding: 2px 8px; }
+    .board-session-items { padding: 0 2px 4px 12px; }
+    .board-session-name { font-size: 0.78rem; }
+    .board-session-count { font-size: 0.62rem !important; padding: 1px 5px !important; }
+  }
+  @media (max-width: 400px) {
+    .board-col { min-width: 140px; max-width: 260px; }
+    .board-card { padding: 7px 8px; }
+    .board-card-title { font-size: 0.78rem; }
+    .board-col-header { font-size: 0.66rem; padding: 2px 2px 6px 2px; }
+    .board-owner-toggle .bv-btn { font-size: 0.72rem; }
+  }
   .board-card.card-enter { animation: cardEnter 0.3s cubic-bezier(.4,0,.2,1) both; }
   .board-card.card-flip { transition: transform 0.35s cubic-bezier(.4,0,.2,1); }
   @keyframes cardEnter {
@@ -6486,6 +6843,7 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
   .board-filter-chip.active-session { background: rgba(139,148,158,0.15); color: var(--text); border-color: var(--dim); }
   /* Board toolbar + view toggle */
   .board-toolbar { display: flex; gap: 8px; align-items: center; }
+  .board-owner-toggle { display: flex; gap: 2px; background: rgba(255,255,255,0.04); border-radius: 6px; padding: 2px; flex-shrink: 0; }
   .board-view-toggle { display: flex; gap: 2px; background: rgba(255,255,255,0.04); border-radius: 6px; padding: 2px; flex-shrink: 0; }
   .bv-btn {
     padding: 5px 8px; border: none; background: none; color: var(--dim);
@@ -6712,6 +7070,43 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
     -webkit-overflow-scrolling: touch; color: #c9d1d9;
     user-select: text; -webkit-user-select: text; cursor: text;
   }
+  /* Note pane overrides */
+  .gp-note-body {
+    flex: 1; overflow: auto; padding: 0; display: flex; flex-direction: column;
+    background: var(--card); white-space: normal;
+  }
+  .gp-note-body .ql-toolbar {
+    border: none; border-bottom: 1px solid var(--border); padding: 4px 6px;
+    background: var(--card); flex-shrink: 0;
+  }
+  .gp-note-body .ql-toolbar .ql-stroke { stroke: var(--dim); }
+  .gp-note-body .ql-toolbar .ql-fill { fill: var(--dim); }
+  .gp-note-body .ql-toolbar .ql-picker-label { color: var(--dim); }
+  .gp-note-body .ql-container {
+    border: none; flex: 1; overflow: auto; font-family: "Geist","Inter",sans-serif;
+    font-size: 0.82rem; color: var(--text);
+  }
+  .gp-note-body .ql-editor { padding: 12px 14px; min-height: 100%; }
+  .gp-note-body .ql-editor.ql-blank::before { color: var(--dim); }
+  .gp-note-status { font-size: 0.68rem; color: var(--dim); padding: 4px 10px; border-top: 1px solid var(--border); background: var(--card); flex-shrink: 0; }
+  /* Override dark terminal bg for note panes */
+  .grid-stack-item:has(.gp-note-body) .grid-stack-item-content { background: var(--card); }
+  /* Note picker dropdown */
+  .ws-note-dropdown { position: relative; }
+  .ws-note-menu {
+    display: none; position: absolute; top: 100%; left: 0; z-index: 999;
+    background: var(--card); border: 1px solid var(--border); border-radius: 6px;
+    min-width: 220px; max-height: 300px; overflow-y: auto; padding: 4px 0;
+    box-shadow: 0 8px 24px rgba(0,0,0,0.4); margin-top: 4px;
+  }
+  .ws-note-menu.open { display: block; }
+  .ws-note-menu button {
+    display: block; width: 100%; text-align: left; padding: 7px 12px;
+    background: none; border: none; color: var(--text); font-size: 0.78rem;
+    cursor: pointer; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  }
+  .ws-note-menu button:hover { background: rgba(88,166,255,0.1); }
+  .ws-note-menu .ws-note-menu-new { color: var(--accent); font-weight: 500; border-bottom: 1px solid var(--border); }
   #gridstack-container .grid-stack-item-content {
     border: 1px solid var(--border); border-radius: 6px;
     overflow: hidden; display: flex; flex-direction: column;
@@ -7416,22 +7811,22 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
 </div>
 <!-- API key setup modal — shown on cloud when no user key is configured (dismissible) -->
 <div id="apikey-setup-modal" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,0.75);z-index:9999;display:none;align-items:center;justify-content:center;">
-  <div style="background:var(--surface,#1a1a2e);border:1px solid var(--border,#333);border-radius:12px;padding:32px;max-width:440px;width:90%;box-shadow:0 24px 64px rgba(0,0,0,0.6);position:relative;">
-    <button onclick="document.getElementById('apikey-setup-modal').style.display='none'" style="position:absolute;top:12px;right:14px;background:none;border:none;color:var(--dim,#888);font-size:1.2rem;cursor:pointer;padding:4px;" title="Close">&#x2715;</button>
-    <div style="font-size:1.4rem;font-weight:700;margin-bottom:8px;color:var(--text,#e8e8e8);">Set your API key</div>
-    <div style="font-size:0.85rem;color:var(--dim,#888);margin-bottom:24px;line-height:1.5;">
+  <div style="background:#1a1a2e;border:1px solid #333;border-radius:12px;padding:32px;max-width:440px;width:90%;box-shadow:0 24px 64px rgba(0,0,0,0.6);position:relative;color:#e8e8e8;">
+    <button onclick="document.getElementById('apikey-setup-modal').style.display='none'" style="position:absolute;top:12px;right:14px;background:none;border:none;color:#aaa;font-size:1.2rem;cursor:pointer;padding:4px;" title="Close">&#x2715;</button>
+    <div style="font-size:1.4rem;font-weight:700;margin-bottom:8px;color:#fff;">Set your API key</div>
+    <div style="font-size:0.85rem;color:#aaa;margin-bottom:24px;line-height:1.5;">
       Enter your Anthropic API key to start using Claude sessions. Your key is stored privately in your container — amux never has access to it.<br><br>
-      <a href="https://console.anthropic.com/settings/keys" target="_blank" style="color:var(--accent,#7c6fcd);">Get a key at console.anthropic.com &rarr;</a>
+      <a href="https://console.anthropic.com/settings/keys" target="_blank" style="color:#a78bfa;">Get a key at console.anthropic.com &rarr;</a>
     </div>
     <input id="apikey-setup-input" type="password" placeholder="sk-ant-api03-..." autocomplete="off" spellcheck="false"
-      style="width:100%;box-sizing:border-box;padding:10px 12px;border-radius:7px;border:1px solid var(--border,#333);background:var(--bg,#111);color:var(--text,#e8e8e8);font-size:0.92rem;font-family:monospace;margin-bottom:8px;"
+      style="width:100%;box-sizing:border-box;padding:10px 12px;border-radius:7px;border:1px solid #444;background:#111;color:#e8e8e8;font-size:0.92rem;font-family:monospace;margin-bottom:8px;"
       onkeydown="if(event.key==='Enter')apikeySetupSave()">
     <div id="apikey-setup-err" style="color:#f87171;font-size:0.8rem;min-height:18px;margin-bottom:12px;"></div>
     <button id="apikey-setup-btn" onclick="apikeySetupSave()"
-      style="width:100%;padding:11px;border-radius:7px;border:none;background:var(--accent,#7c6fcd);color:#fff;font-size:0.95rem;font-weight:600;cursor:pointer;">
+      style="width:100%;padding:11px;border-radius:7px;border:none;background:#7c6fcd;color:#fff;font-size:0.95rem;font-weight:600;cursor:pointer;">
       Save &amp; continue
     </button>
-    <div style="text-align:center;margin-top:10px;font-size:0.78rem;color:var(--dim,#666);">You can add this later in Settings</div>
+    <div style="text-align:center;margin-top:10px;font-size:0.78rem;color:#888;">You can add this later in Settings</div>
   </div>
 </div>
 <div id="org-banner" style="display:none;background:#1e1b4b;border-bottom:1px solid #4338ca;color:#c7d2fe;padding:7px 16px;text-align:center;font-size:0.82rem;z-index:200;position:relative;display:none;">
@@ -7445,7 +7840,7 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
 
 <div class="header-row">
   <div style="display:flex;gap:8px;align-items:center;">
-    <h1 style="margin:0;cursor:pointer;" onclick="openAbout()">amux</h1>
+    <h1 id="brand-header" style="margin:0;cursor:pointer;display:flex;align-items:center;gap:6px;" onclick="openAbout()"><span id="brand-icon-header"></span><span id="brand-name-header">amux</span></h1>
     <span id="conn-status" class="conn-status online" onclick="showQueueModal()"></span>
     <button id="notif-btn" onclick="toggleNotifications()" title="Session notifications" style="background:none;border:none;cursor:pointer;padding:2px 4px;font-size:1rem;opacity:0.5;line-height:1;" aria-label="Toggle notifications">&#x1F514;</button>
   </div>
@@ -7614,6 +8009,7 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
   <button id="tab-map" onclick="switchView('map')">Map</button>
   <button id="tab-metrics" onclick="switchView('metrics')">Metrics</button>
   <button id="tab-torrents" onclick="switchView('torrents')">Torrents</button>
+  <button id="tab-terminal" onclick="switchView('terminal')">Terminal</button>
 </div>
 <div class="tab-customize-wrap">
   <button class="tab-customize-btn" onclick="event.stopPropagation();toggleTabCustomizer()" title="Show/hide tabs">&#x229E;</button>
@@ -7656,7 +8052,11 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
       <input id="board-search" class="search-input" type="text" placeholder="Search board..." oninput="boardSearchQuery=this.value.toLowerCase();renderBoard()">
       <button class="search-clear" onclick="document.getElementById('board-search').value='';boardSearchQuery='';renderBoard()">&#x2715;</button>
     </div>
-    <button class="btn primary" onclick="openBoardAdd('todo')" style="font-size:0.8rem;padding:5px 12px;white-space:nowrap;flex-shrink:0;">+ New issue</button>
+    <button class="btn primary board-new-btn" onclick="openBoardAdd('todo')"><span class="board-new-label">+ New issue</span><span class="board-new-icon">+</span></button>
+    <div class="board-owner-toggle">
+      <button id="bo-human" class="bv-btn" onclick="setBoardOwner('human')" title="Human issues">Human</button>
+      <button id="bo-agent" class="bv-btn" onclick="setBoardOwner('agent')" title="Session issues">Sessions</button>
+    </div>
     <div class="board-view-toggle">
       <button id="bv-session" class="bv-btn" onclick="setBoardView('session')" title="Group by session">&#x25A4;</button>
       <button id="bv-status" class="bv-btn" onclick="setBoardView('status')" title="Group by status">&#x2630;</button>
@@ -7955,7 +8355,7 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
       <div class="map-tag-chips" id="map-tag-list"></div>
     </div>
     <div class="map-search-section">
-      <input type="search" id="map-search" placeholder="Search pins&#x2026;" oninput="_mapSearch(this.value)" autocomplete="off">
+      <input type="search" id="map-search" placeholder="Search pins, notes, tags&#x2026;" oninput="_mapSearch(this.value)" autocomplete="off">
     </div>
     <div id="map-pin-list" class="map-pin-list"></div>
   </div>
@@ -7976,7 +8376,9 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
   <div class="map-modal-box">
     <div class="map-modal-title" id="map-pin-modal-title">Add Pin</div>
     <input id="map-pin-name" class="map-modal-input" placeholder="Name *" autocomplete="off">
-    <textarea id="map-pin-desc" class="map-modal-textarea" placeholder="Description (optional)" rows="2"></textarea>
+    <textarea id="map-pin-desc" class="map-modal-textarea" placeholder="Short description (optional)" rows="2"></textarea>
+    <div class="map-modal-label">Notes</div>
+    <textarea id="map-pin-notes" class="map-modal-textarea" placeholder="Detailed notes, observations, links&#x2026;" rows="5" style="min-height:100px;"></textarea>
     <div class="map-modal-label">Coordinates</div>
     <div class="map-modal-row">
       <input id="map-pin-lat" class="map-modal-input" placeholder="Latitude" type="number" step="any">
@@ -8074,18 +8476,47 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
   <div id="torrent-empty" style="color:var(--dim);font-size:0.85rem;text-align:center;padding:40px;">No torrents. Paste a magnet link above to start downloading.</div>
 </div>
 
+<!-- Terminal view -->
+<div id="terminal-view" style="display:none;flex-direction:column;flex:1;min-height:0;">
+  <div class="term-toolbar" style="display:flex;align-items:center;gap:8px;padding:0 0 6px 0;flex-wrap:wrap;">
+    <select id="term-profile" style="font-size:0.78rem;padding:4px 8px;background:var(--surface);border:1px solid var(--border);border-radius:4px;color:var(--fg);font-family:inherit;">
+      <option value="local">Local Shell</option>
+    </select>
+    <input id="term-host" type="text" placeholder="user@host" style="width:180px;font-size:0.78rem;padding:4px 8px;background:var(--surface);border:1px solid var(--border);border-radius:4px;color:var(--fg);font-family:inherit;">
+    <button id="term-connect-btn" onclick="_termConnect()" style="padding:4px 12px;background:var(--accent);color:#fff;border:none;border-radius:4px;font-size:0.78rem;cursor:pointer;">Connect</button>
+    <button id="term-disconnect-btn" onclick="_termDisconnect()" style="display:none;padding:4px 12px;background:var(--danger,#e74c3c);color:#fff;border:none;border-radius:4px;font-size:0.78rem;cursor:pointer;">Disconnect</button>
+    <div style="flex:1;"></div>
+    <span id="term-status" style="font-size:0.68rem;color:var(--dim);"></span>
+    <select id="term-fontsize" onchange="_termSetFontSize(this.value)" style="font-size:0.72rem;padding:2px 4px;background:var(--surface);border:1px solid var(--border);border-radius:4px;color:var(--fg);">
+      <option value="12">12px</option>
+      <option value="13">13px</option>
+      <option value="14" selected>14px</option>
+      <option value="15">15px</option>
+      <option value="16">16px</option>
+      <option value="18">18px</option>
+    </select>
+  </div>
+  <div id="term-container" style="flex:1;min-height:0;background:#0d1117;border-radius:6px;overflow:hidden;position:relative;">
+    <div id="term-placeholder" style="display:flex;align-items:center;justify-content:center;height:100%;color:var(--dim);font-size:0.9rem;">
+      Enter a host above and click Connect, or leave blank for a local shell
+    </div>
+  </div>
+</div>
+
 <!-- Video player overlay -->
 <div id="video-overlay" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,0.92);z-index:9999;flex-direction:column;align-items:center;justify-content:center;" onclick="if(event.target===this)_closeVideo()">
   <div id="vp-container" style="position:relative;width:90vw;max-width:1200px;">
     <div id="vp-title" style="color:#fff;font-size:0.85rem;margin-bottom:8px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;"></div>
     <div style="position:relative;background:#000;border-radius:8px;overflow:hidden;">
-      <video id="video-player" playsinline x-webkit-airplay="allow" airplay="allow" style="width:100%;max-height:75vh;display:block;"></video>
+      <video id="video-player" playsinline webkit-playsinline x-webkit-airplay="allow" airplay="allow" preload="metadata" style="width:100%;max-height:75vh;display:block;"></video>
+      <!-- Loading/error overlay -->
+      <div id="vp-status" style="display:none;position:absolute;inset:0;align-items:center;justify-content:center;color:#fff;font-size:0.9rem;background:rgba(0,0,0,0.6);pointer-events:none;z-index:2;"></div>
       <!-- Custom controls -->
-      <div id="vp-controls" style="position:absolute;bottom:0;left:0;right:0;background:linear-gradient(transparent,rgba(0,0,0,0.85));padding:12px 16px 10px;display:flex;flex-direction:column;gap:6px;opacity:1;transition:opacity 0.3s;">
+      <div id="vp-controls" style="position:absolute;bottom:0;left:0;right:0;background:linear-gradient(transparent,rgba(0,0,0,0.85));padding:12px 16px 10px;display:flex;flex-direction:column;gap:6px;opacity:1;transition:opacity 0.3s;z-index:3;">
         <!-- Progress bar -->
-        <div id="vp-progress-wrap" style="position:relative;height:6px;background:rgba(255,255,255,0.15);border-radius:3px;cursor:pointer;" onclick="_vpSeek(event)" onmousemove="_vpHoverTime(event)" onmouseleave="_vpHoverHide()">
-          <div id="vp-buffer" style="position:absolute;height:100%;background:rgba(255,255,255,0.25);border-radius:3px;pointer-events:none;"></div>
-          <div id="vp-played" style="position:absolute;height:100%;background:var(--accent);border-radius:3px;pointer-events:none;"></div>
+        <div id="vp-progress-wrap" style="position:relative;height:8px;background:rgba(255,255,255,0.15);border-radius:4px;cursor:pointer;touch-action:none;" onclick="_vpSeek(event)" onmousemove="_vpHoverTime(event)" onmouseleave="_vpHoverHide()">
+          <div id="vp-buffer" style="position:absolute;height:100%;background:rgba(255,255,255,0.25);border-radius:4px;pointer-events:none;"></div>
+          <div id="vp-played" style="position:absolute;height:100%;background:var(--accent);border-radius:4px;pointer-events:none;"></div>
           <div id="vp-hover-time" style="display:none;position:absolute;top:-28px;background:rgba(0,0,0,0.8);color:#fff;font-size:0.7rem;padding:2px 6px;border-radius:3px;transform:translateX(-50%);pointer-events:none;"></div>
         </div>
         <!-- Buttons row -->
@@ -8093,7 +8524,9 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
           <button id="vp-play" onclick="_vpTogglePlay()" style="background:none;border:none;color:#fff;font-size:1.2rem;cursor:pointer;padding:0;width:24px;">&#x25B6;</button>
           <span id="vp-time" style="color:rgba(255,255,255,0.7);font-size:0.75rem;font-family:'JetBrains Mono',monospace;min-width:100px;">0:00 / 0:00</span>
           <div style="flex:1;"></div>
-          <div style="display:flex;align-items:center;gap:4px;">
+          <button id="vp-pip" onclick="_vpPiP()" style="background:none;border:none;color:#fff;font-size:0.85rem;cursor:pointer;padding:0;display:none;" title="Picture-in-Picture">&#x1F5BC;</button>
+          <button id="vp-airplay" onclick="_vpAirPlay()" style="background:none;border:none;color:#fff;font-size:0.85rem;cursor:pointer;padding:0;display:none;" title="AirPlay">&#x1F4E1;</button>
+          <div id="vp-volume-wrap" style="display:flex;align-items:center;gap:4px;">
             <button id="vp-mute" onclick="_vpToggleMute()" style="background:none;border:none;color:#fff;font-size:0.9rem;cursor:pointer;padding:0;">&#x1F50A;</button>
             <input id="vp-volume" type="range" min="0" max="1" step="0.05" value="1" oninput="_vpSetVolume(this.value)" style="width:70px;accent-color:var(--accent);cursor:pointer;">
           </div>
@@ -8282,7 +8715,7 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
       <label class="field-label">Working directory</label>
       <div class="ac-wrap">
         <input id="create-dir" type="text" placeholder="/path/to/project" autocomplete="off" autocorrect="off"
-          oninput="acFetch(this.value);_branchesLoaded=''" onfocus="acFetch(this.value)"
+          oninput="acFetch(this.value);_branchesLoaded='';clearTimeout(_gitCheckTimer);_gitCheckTimer=setTimeout(()=>_checkDirGit(this.value),500)" onfocus="acFetch(this.value)"
           onpaste="_acSuppressNext=true" onkeydown="acKeydown(event)">
         <div id="ac-list" class="ac-list"></div>
       </div>
@@ -8322,6 +8755,15 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
         <div id="create-branch-suggestions" style="display:none;flex-wrap:wrap;gap:6px;margin-top:8px;"></div>
       </div>
     </div>
+    <div class="field-group" id="create-worktree-field" style="display:none;">
+      <label class="field-label" style="display:flex;align-items:center;gap:6px;cursor:pointer;">
+        <input type="checkbox" id="create-worktree-enabled" onchange="_toggleWorktree(this.checked)" style="width:auto;margin:0;">
+        Use worktree <span class="field-optional">(isolated copy of repo &mdash; no file conflicts between sessions)</span>
+      </label>
+      <div id="create-worktree-info" style="display:none;margin-top:6px;font-size:0.78rem;color:var(--dim);background:rgba(99,102,241,0.06);border-radius:6px;padding:8px 10px;line-height:1.5;">
+        Creates a git worktree with its own working directory and branch. The session works on an isolated copy &mdash; changes are merged back when done.
+      </div>
+    </div>
     <div class="edit-actions">
       <button class="btn" onclick="closeCreate()">Cancel</button>
       <button class="btn primary" onclick="submitCreate()">Create</button>
@@ -8346,6 +8788,7 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
     <div style="display:flex;align-items:center;gap:10px;min-width:0;">
       <h2 id="peek-title" style="margin:0;font-size:1.05rem;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">peek</h2>
       <span id="peek-session-status"></span>
+      <span id="peek-model-badge" style="font-size:0.75rem;padding:2px 8px;border-radius:9999px;background:rgba(255,255,255,0.06);color:var(--dim);border:1px solid var(--border);white-space:nowrap;"></span>
     </div>
     <div style="display:flex;gap:8px;align-items:center;">
       <div class="peek-find-wrap" id="peek-search-wrap">
@@ -8385,24 +8828,7 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
     <div class="peek-cmd-bar">
       <button class="peek-cmd-toggle" id="peek-cmd-toggle" onclick="togglePeekCmd()">&#x25BC; Send command</button>
       <div class="peek-cmd-row open" id="peek-cmd-row" style="flex-wrap:wrap;">
-        <div class="chips" style="width:100%;margin:0;">
-          <div class="chip" onclick="peekQuickSend('continue')">continue</div>
-          <div class="chip" onclick="peekQuickKeys('Enter')">Enter</div>
-          <div class="chip" onclick="peekQuickKeys('Up')">&#x2191;</div>
-          <div class="chip" onclick="peekQuickKeys('Down')">&#x2193;</div>
-          <div class="chip" onclick="gitPush(peekSession,event)">&#x2B06; Push</div>
-          <div class="chip" onclick="peekQuickSend('/status')">/status</div>
-          <div class="chip" onclick="peekQuickSend('/model')">/model</div>
-          <div class="chip" onclick="peekQuickSend('/mcp')">/mcp</div>
-          <div class="chip danger" onclick="peekQuickKeys('C-c')">Ctrl+C</div>
-          <div class="chip" onclick="peekQuickKeys('BTab')">Shift+Tab</div>
-          <div class="chip" onclick="peekQuickKeys('C-o')">Ctrl+O</div>
-          <div class="chip" onclick="peekQuickSend('/clear')">/clear</div>
-          <div class="chip" onclick="peekQuickSend('/compact')">/compact</div>
-          <div class="chip" onclick="peekDownloadLog()" title="Download terminal log">&#128196; Log</div>
-          <div class="chip" onclick="peekShowTranscripts()" title="Conversation transcript backups">&#128190; Transcripts</div>
-          <div class="chip" onclick="peekQuickKeys('Escape')">Esc</div>
-        </div>
+        <div class="chips" style="width:100%;margin:0;" id="peek-chips"></div>
         <!-- Attachment chips -->
         <div class="peek-attach-bar" id="peek-attach-bar"></div>
         <!-- Input row -->
@@ -8417,7 +8843,6 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
         <input type="file" id="peek-file-input" multiple
           style="display:none" onchange="handlePeekFileInput(event)">
         <label for="peek-file-input" class="peek-attach-btn" title="Attach file">&#128206;</label>
-        <button id="peek-mic-btn" class="peek-attach-btn" title="Dictate" onclick="toggleMic()" style="display:none;">&#127908;</button>
         <button class="btn primary" onclick="sendPeekCmd()">Send</button>
       </div>
       <!-- Drag-over hint (shown by CSS when drag-over class is on peek-overlay) -->
@@ -8529,14 +8954,47 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
 <div id="about-overlay" class="queue-overlay" onclick="if(event.target===this)this.classList.remove('active')">
   <div class="queue-box" style="max-width:340px;">
     <div style="text-align:center;">
-      <h3 style="margin:0 0 4px;">amux</h3>
-      <div style="color:var(--dim);font-size:0.8rem;">Claude Code Multiplexer</div>
+      <div id="about-brand-preview" style="margin-bottom:4px;"></div>
+      <h3 id="about-brand-name" style="margin:0 0 4px;">amux</h3>
+      <div id="about-brand-tagline" style="color:var(--dim);font-size:0.8rem;">Claude Code Multiplexer</div>
       <div style="color:var(--dim);font-size:0.7rem;font-family:monospace;margin-top:2px;"><script>document.write(location.host)</script></div>
       <div style="margin:8px 0 4px;font-size:0.95rem;font-weight:600;cursor:pointer;" onclick="forceUpdate()" title="Tap to force update">v0.6.0 &#x21BB;</div>
       <div id="update-status" style="color:var(--dim);font-size:0.75rem;min-height:1.2em;"></div>
       <button id="pull-btn" class="btn" onclick="pullFromRemote(this)" style="margin-top:6px;font-size:0.72rem;padding:4px 12px;">&#x2B07; Pull from remote</button>
       <div id="pull-status" style="color:var(--dim);font-size:0.7rem;font-family:monospace;margin-top:4px;min-height:1.2em;white-space:pre-wrap;max-height:60px;overflow-y:auto;"></div>
       <script>if(window._cloudEmail){var _pb=document.getElementById('pull-btn');if(_pb)_pb.style.display='none';}</script>
+    </div>
+    <div id="branding-editor" style="margin-top:12px;border-top:1px solid var(--border);padding-top:12px;">
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px;">
+        <div style="font-size:0.8rem;font-weight:600;">Branding</div>
+        <button class="btn" style="font-size:0.65rem;padding:2px 8px;color:var(--dim);" onclick="resetBranding()">Reset</button>
+      </div>
+      <div style="display:flex;flex-direction:column;gap:6px;">
+        <input id="brand-name-input" class="search-input" type="text" placeholder="App name (default: amux)" style="width:100%;font-size:0.75rem;padding:6px 8px;box-sizing:border-box;">
+        <input id="brand-tagline-input" class="search-input" type="text" placeholder="Tagline (default: Claude Code Multiplexer)" style="width:100%;font-size:0.75rem;padding:6px 8px;box-sizing:border-box;">
+        <div style="display:flex;gap:6px;align-items:center;">
+          <label style="font-size:0.72rem;color:var(--dim);flex-shrink:0;">Accent</label>
+          <input id="brand-color-input" type="color" value="#3fb950" style="width:32px;height:24px;padding:0;border:1px solid var(--border);border-radius:4px;background:transparent;cursor:pointer;">
+          <span id="brand-color-hex" style="font-size:0.7rem;font-family:monospace;color:var(--dim);">#3fb950</span>
+        </div>
+        <div style="display:flex;gap:6px;">
+          <div style="flex:1;">
+            <label style="font-size:0.72rem;color:var(--dim);display:block;margin-bottom:2px;">Icon (square)</label>
+            <div id="brand-icon-drop" onclick="document.getElementById('brand-icon-file').click()" style="border:1px dashed var(--border);border-radius:6px;padding:8px;text-align:center;cursor:pointer;font-size:0.7rem;color:var(--dim);min-height:40px;display:flex;align-items:center;justify-content:center;">
+              <span id="brand-icon-label">Drop or tap</span>
+            </div>
+            <input id="brand-icon-file" type="file" accept="image/*" style="display:none;" onchange="brandFileSelected('icon',this)">
+          </div>
+          <div style="flex:1;">
+            <label style="font-size:0.72rem;color:var(--dim);display:block;margin-bottom:2px;">Logo (wide)</label>
+            <div id="brand-logo-drop" onclick="document.getElementById('brand-logo-file').click()" style="border:1px dashed var(--border);border-radius:6px;padding:8px;text-align:center;cursor:pointer;font-size:0.7rem;color:var(--dim);min-height:40px;display:flex;align-items:center;justify-content:center;">
+              <span id="brand-logo-label">Drop or tap</span>
+            </div>
+            <input id="brand-logo-file" type="file" accept="image/*" style="display:none;" onchange="brandFileSelected('logo',this)">
+          </div>
+        </div>
+        <button class="btn" style="font-size:0.72rem;padding:4px 12px;background:var(--accent);color:#000;font-weight:600;margin-top:2px;" onclick="saveBranding()">Save branding</button>
+      </div>
     </div>
     <div id="daily-stats" style="margin-top:12px;border-top:1px solid var(--border);padding-top:12px;">
       <div style="color:var(--dim);font-size:0.75rem;text-align:center;">Loading token stats...</div>
@@ -8773,9 +9231,13 @@ let _gatewayOrgs = [];
 async function _initIdentity() {
   try {
     const r = await fetch('/api/identity');
-    if (r.status === 401 && location.hostname !== 'localhost' && !location.hostname.startsWith('127.')) {
-      // Cloud: session expired or not logged in — redirect to login
-      window.location.replace('/api/cloud-logout');
+    if (r.status === 401) {
+      // 401 means we're behind the cloud gateway (local server never returns 401 here).
+      // Redirect to login — but not on self-hosted Tailscale/LAN hosts where 401 could
+      // be a transient network issue.
+      if (location.hostname.endsWith('.amux.io')) {
+        window.location.replace('/api/cloud-logout');
+      }
       return;
     }
     if (!r.ok) return;
@@ -9582,6 +10044,13 @@ function updatePeekStatus() {
   else if (s.status === 'idle')    badge = '<span class="status-badge idle">idle</span>';
   else if (!s.running)             badge = '<span class="status-badge" style="background:rgba(255,255,255,0.06);color:var(--dim);border:1px solid var(--border);">stopped</span>';
   el.innerHTML = badge;
+  // Model badge
+  const mb = document.getElementById('peek-model-badge');
+  if (mb) {
+    const flagModel = (s.flags || '').match(/--model\s+(\S+)/);
+    const model = s.active_model || (flagModel ? flagModel[1] : '') || 'sonnet';
+    mb.textContent = model;
+  }
 }
 
 function render() {
@@ -9736,22 +10205,7 @@ function render() {
         ${s.preview_lines && s.preview_lines.length ? `<div class="card-preview-lines" onclick="event.stopPropagation();openPeek('${s.name}')" style="cursor:pointer;">${rewriteLocalhostUrls(s.preview_lines.map(l => esc(l)).join('\n'))}</div>` : ''}
         <div class="card-stats" id="stats-${s.name}"></div>
         ${s.running ? `
-        <div class="chips">
-          <div class="chip" onclick="doSend('${s.name}','continue')">continue</div>
-          <div class="chip" onclick="doKeys('${s.name}','Enter')">Enter</div>
-          <div class="chip" onclick="doKeys('${s.name}','Up')">&#x2191;</div>
-          <div class="chip" onclick="doKeys('${s.name}','Down')">&#x2193;</div>
-          <div class="chip" onclick="gitPush('${s.name}',event)">&#x2B06; Push</div>
-          <div class="chip" onclick="chipToInput('${s.name}','/status')">/status</div>
-          <div class="chip" onclick="chipToInput('${s.name}','/model')">/model</div>
-          <div class="chip" onclick="chipToInput('${s.name}','/mcp')">/mcp</div>
-          <div class="chip danger" onclick="doKeys('${s.name}','C-c')">Ctrl+C</div>
-          <div class="chip" onclick="doKeys('${s.name}','BTab')">Shift+Tab</div>
-          <div class="chip" onclick="doKeys('${s.name}','C-o')">Ctrl+O</div>
-          <div class="chip" onclick="chipToInput('${s.name}','/clear')">/clear</div>
-          <div class="chip" onclick="chipToInput('${s.name}','/compact')">/compact</div>
-          <div class="chip" onclick="doKeys('${s.name}','Escape')">Esc</div>
-        </div>
+        <div class="chips" id="card-chips-${s.name}"></div>
         <div class="send-row" style="position:relative;">
           <div id="card-ac-${s.name}" class="ac-list slash-ac"></div>
           <textarea class="send-input" id="input-${s.name}" rows="1"
@@ -9779,6 +10233,12 @@ function render() {
     if (focusedId) { const inp = document.getElementById(focusedId); if (inp) { inp.focus({ preventScroll: true }); const d = savedInputs[focusedId]; if (d && inp.tagName === 'TEXTAREA') { inp.selectionStart = d.start; inp.selectionEnd = d.end; } } }
     _renderArchivedSection();
     requestAnimationFrame(initSortable);
+    requestAnimationFrame(() => {
+      document.querySelectorAll('.chips[id^="card-chips-"]').forEach(el => {
+        const name = el.id.replace('card-chips-', '');
+        if (name) renderChips(el, name, false);
+      });
+    });
     return;
   }
 
@@ -9867,6 +10327,14 @@ function render() {
   }
 
   _renderArchivedSection();
+
+  // Hydrate customizable chip bars on all session cards
+  requestAnimationFrame(() => {
+    document.querySelectorAll('.chips[id^="card-chips-"]').forEach(el => {
+      const name = el.id.replace('card-chips-', '');
+      if (name) renderChips(el, name, false);
+    });
+  });
 }
 
 
@@ -10112,6 +10580,7 @@ const ALL_TABS = [
   { id: 'map',           label: 'Map' },
   { id: 'metrics',       label: 'Metrics' },
   { id: 'torrents',      label: 'Torrents' },
+  { id: 'terminal',      label: 'Terminal' },
 ];
 
 let hiddenTabs = (function() {
@@ -10120,7 +10589,7 @@ let hiddenTabs = (function() {
     if (s !== null) return new Set(JSON.parse(s));
   } catch(e) {}
   // Default visible tabs: sessions, files, scheduler, board, workspace, notes
-  return new Set(['logs','browser','metrics','crm','torrents']);
+  return new Set(['logs','browser','metrics','crm','torrents','terminal']);
 })();
 
 let tabOrder = (function() {
@@ -10178,23 +10647,44 @@ function _renderTabCustomizerMenu() {
   if (!menu) return;
   // Render in tabOrder order
   const orderedTabs = tabOrder.map(id => ALL_TABS.find(t => t.id === id)).filter(Boolean);
-  menu.innerHTML = orderedTabs.map(t => {
+  let html = orderedTabs.map(t => {
     const checked = !hiddenTabs.has(t.id);
     const req = t.required ? ' required' : '';
     const disabled = t.required ? ' disabled' : '';
     return `<label class="tab-customizer-item${req}" data-tab-id="${t.id}" onclick="event.stopPropagation()">
-      <span class="tab-drag-handle" title="Drag to reorder" style="cursor:grab;color:var(--dim);padding:0 4px 0 0;font-size:0.8rem;">⠿</span>
+      <span class="tab-drag-handle" title="Drag to reorder" style="cursor:grab;color:var(--dim);padding:0 4px 0 0;font-size:0.8rem;">&#x2807;</span>
       <input type="checkbox" ${checked ? 'checked' : ''}${disabled} onchange="toggleTabVisibility('${t.id}',this.checked)">
       ${t.label}
     </label>`;
   }).join('');
-  // Init Sortable on menu for drag-to-reorder
+  // Presets section
+  html += '<div class="tab-preset-section" onclick="event.stopPropagation()" style="border-top:1px solid var(--border);margin-top:6px;padding-top:6px;">';
+  html += '<div style="display:flex;align-items:center;justify-content:space-between;padding:2px 0;">';
+  html += '<span style="font-size:0.75rem;font-weight:600;color:var(--dim);text-transform:uppercase;letter-spacing:0.05em;">Presets</span>';
+  html += '<button onclick="saveLayoutPreset()" style="font-size:0.75rem;color:var(--accent);background:none;border:none;cursor:pointer;padding:2px 4px;">+ Save current</button>';
+  html += '</div>';
+  html += '<div id="preset-list" style="font-size:0.82rem;"></div>';
+  html += '</div>';
+  menu.innerHTML = html;
+  // Load presets
+  fetch('/api/layout-presets').then(r=>r.json()).then(presets => {
+    const list = document.getElementById('preset-list');
+    if (!list) return;
+    if (!presets.length) { list.innerHTML = '<div style="color:var(--muted);font-size:0.78rem;padding:4px 0;">No saved presets</div>'; return; }
+    list.innerHTML = presets.map(p => `<div style="display:flex;align-items:center;gap:4px;padding:3px 0;">
+      <button onclick="loadLayoutPreset('${p.name.replace(/'/g,"\\'")}')" style="flex:1;text-align:left;background:none;border:none;cursor:pointer;color:var(--text);font-size:0.82rem;padding:2px 0;">${p.name}</button>
+      <button onclick="shareLayoutPreset('${p.name.replace(/'/g,"\\'")}')" title="Copy share link" style="background:none;border:none;cursor:pointer;color:var(--dim);font-size:0.72rem;padding:2px;">&#x1F517;</button>
+      <button onclick="deleteLayoutPreset('${p.name.replace(/'/g,"\\'")}')" title="Delete" style="background:none;border:none;cursor:pointer;color:var(--dim);font-size:0.72rem;padding:2px;">&times;</button>
+    </div>`).join('');
+  }).catch(()=>{});
+  // Init Sortable on menu for drag-to-reorder (only on tab items, not preset section)
   if (window.Sortable) {
     Sortable.create(menu, {
       handle: '.tab-drag-handle',
+      draggable: '.tab-customizer-item',
       animation: 100,
       onEnd(evt) {
-        const ids = [...menu.querySelectorAll('[data-tab-id]')].map(el => el.dataset.tabId);
+        const ids = [...menu.querySelectorAll('.tab-customizer-item[data-tab-id]')].map(el => el.dataset.tabId);
         tabOrder = ids;
         _saveTabOrder();
         _applyTabVisibility();
@@ -10218,6 +10708,67 @@ function toggleTabVisibility(id, show) {
   _applyTabVisibility();
   _renderTabCustomizerMenu();
 }
+
+// ── Layout presets (save/load/share tab configuration) ──
+async function saveLayoutPreset() {
+  const name = prompt('Preset name:');
+  if (!name) return;
+  await fetch('/api/layout-presets', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({name, hidden: [...hiddenTabs], tab_order: tabOrder})
+  });
+  _renderTabCustomizerMenu();
+}
+
+async function loadLayoutPreset(name) {
+  const r = await fetch('/api/layout-presets');
+  const presets = await r.json();
+  const p = presets.find(x => x.name === name);
+  if (!p) return;
+  hiddenTabs = new Set(p.hidden);
+  tabOrder = p.tab_order.length ? p.tab_order : ALL_TABS.map(t => t.id);
+  _saveHiddenTabs();
+  _saveTabOrder();
+  _applyTabVisibility();
+  _renderTabCustomizerMenu();
+}
+
+async function deleteLayoutPreset(name) {
+  if (!confirm('Delete preset "' + name + '"?')) return;
+  await fetch('/api/layout-presets/' + encodeURIComponent(name), {method:'DELETE'});
+  _renderTabCustomizerMenu();
+}
+
+async function shareLayoutPreset(name) {
+  const r = await fetch('/api/layout-presets');
+  const presets = await r.json();
+  const p = presets.find(x => x.name === name);
+  if (!p) return;
+  const data = btoa(JSON.stringify({hidden: p.hidden, tab_order: p.tab_order}));
+  const url = location.origin + '/?layout=' + data;
+  await navigator.clipboard.writeText(url);
+  showToast('Layout link copied to clipboard');
+}
+
+// Apply layout from URL parameter on load
+(function() {
+  const params = new URLSearchParams(location.search);
+  const layoutData = params.get('layout');
+  if (layoutData) {
+    try {
+      const p = JSON.parse(atob(layoutData));
+      if (p.hidden) hiddenTabs = new Set(p.hidden);
+      if (p.tab_order) tabOrder = p.tab_order;
+      _saveHiddenTabs();
+      _saveTabOrder();
+      // Clean URL
+      const url = new URL(location);
+      url.searchParams.delete('layout');
+      history.replaceState(null, '', url);
+    } catch(e) {}
+  }
+})();
 
 function toggleArchived() {
   archivedExpanded = !archivedExpanded;
@@ -10705,10 +11256,38 @@ async function doSend(name, text) {
     const author = _cloudEmail ? ` ${_cloudEmail}` : '';
     payload = `[${ts}${author}] ${text}`;
   }
-  await apiCall(API + '/api/sessions/' + name + '/send', {
-    method: 'POST', headers: {'Content-Type':'application/json'},
-    body: JSON.stringify({text: payload})
-  });
+  // Use direct fetch (not apiCall) so we can handle 409 specifically
+  try {
+    const r = await fetch(API + '/api/sessions/' + encodeURIComponent(name) + '/send', {
+      method: 'POST', headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({text: payload})
+    });
+    if (r.ok) return;
+    if (r.status === 409) {
+      const d = await r.json().catch(() => ({}));
+      const msg = d.message || 'not running';
+      if (msg === 'not running') {
+        const start = await showConfirm(
+          `Session "${name}" is not running.\n\nStart it and resend?`, 'Start & Send', false);
+        if (start) {
+          await fetch(API + '/api/sessions/' + encodeURIComponent(name) + '/start', { method: 'POST' });
+          showToast('Starting ' + name + '...');
+          // Wait for session to be ready, then retry send
+          setTimeout(() => doSend(name, text), 3000);
+        }
+      } else {
+        showToast('Send failed: ' + msg);
+      }
+      return;
+    }
+    showToast('Send error: ' + r.status);
+  } catch(e) {
+    // Offline — queue it
+    _queueOp(API + '/api/sessions/' + encodeURIComponent(name) + '/send', {
+      method: 'POST', headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({text: payload})
+    });
+  }
 }
 
 async function doKeys(name, keys) {
@@ -10825,7 +11404,8 @@ function _renderPeekGit(d) {
   // Header — show session branch if set, otherwise git-detected branch
   const displayBranch = d.session_branch || d.branch;
   document.getElementById('peek-git-branch').textContent = '⎇ ' + displayBranch;
-  document.getElementById('peek-git-worktree-badge').style.display = 'none';
+  const wSess = sessions.find(s => s.name === peekSession);
+  document.getElementById('peek-git-worktree-badge').style.display = (wSess && wSess.worktree) ? '' : 'none';
   const unpushed = d.unpushed || 0;
   document.getElementById('peek-git-push-btn').textContent = unpushed ? `Push (${unpushed})` : 'Push';
   const prBtn = document.getElementById('peek-git-pr-btn');
@@ -11642,93 +12222,6 @@ function handlePeekFileInput(e) {
   e.target.value = '';
 }
 
-// ── Microphone / transcription ──
-let _micRecorder = null;
-let _micChunks = [];
-let _micActive = false;
-
-async function _checkTranscription() {
-  if (!window.isSecureContext || !navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) return;
-  try {
-    const r = await fetch(API + '/api/transcribe');
-    const d = await r.json();
-    if (d.available) document.getElementById('peek-mic-btn').style.display = '';
-  } catch(e) {}
-}
-
-function _bufToB64(buf) {
-  const bytes = new Uint8Array(buf);
-  let bin = '';
-  const chunk = 8192;
-  for (let i = 0; i < bytes.length; i += chunk)
-    bin += String.fromCharCode(...bytes.subarray(i, i + chunk));
-  return btoa(bin);
-}
-
-async function toggleMic() {
-  const btn = document.getElementById('peek-mic-btn');
-  if (_micActive) {
-    _micRecorder && _micRecorder.stop();
-    return;
-  }
-  try {
-    const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-    _micChunks = [];
-    _micActive = true;
-    btn.textContent = '\u23F9';
-    btn.classList.add('mic-active');
-    _micRecorder = new MediaRecorder(stream);
-    _micRecorder.ondataavailable = e => { if (e.data.size > 0) _micChunks.push(e.data); };
-    _micRecorder.onstop = async () => {
-      _micActive = false;
-      btn.classList.remove('mic-active');
-      stream.getTracks().forEach(t => t.stop());
-      btn.textContent = '\u23F3';
-      try {
-        const blob = new Blob(_micChunks, { type: _micRecorder.mimeType || 'audio/webm' });
-        const b64 = _bufToB64(await blob.arrayBuffer());
-        const r = await fetch(API + '/api/transcribe', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ data: b64, mime: blob.type }),
-        });
-        const d = await r.json();
-        if (d.text) {
-          const inp = document.getElementById('peek-cmd-input');
-          inp.value = (inp.value ? inp.value + ' ' : '') + d.text;
-          autoGrow(inp);
-          inp.focus();
-        } else {
-          const msg = 'Transcription failed: ' + (d.error || 'unknown');
-          showToast(msg);
-        }
-      } catch(e) {
-        showToast('Transcription error: ' + e.message);
-      } finally {
-        btn.textContent = '\u{1F3A4}';
-      }
-    };
-    _micRecorder.start();
-  } catch(e) {
-    _micActive = false;
-    btn.classList.remove('mic-active');
-    btn.textContent = '\u{1F3A4}';
-    if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
-      const isPwa = window.matchMedia('(display-mode: standalone)').matches || navigator.standalone;
-      if (isPwa) {
-        showToast('Mic unavailable in PWA — open in Safari and try again, or update to iOS 16.4+');
-      } else {
-        showToast('Mic unavailable — requires HTTPS or localhost');
-      }
-    } else if (e.name === 'NotAllowedError' || e.name === 'PermissionDeniedError') {
-      showToast('Microphone blocked — System Settings → Privacy & Security → Microphone → allow Safari');
-    } else if (e.name === 'NotFoundError' || e.name === 'DevicesNotFoundError') {
-      showToast('No microphone found');
-    } else {
-      showToast('Mic error: ' + (e.message || e.name || 'unknown'));
-    }
-  }
-}
 
 let _slashAcSuppressNext = false;
 function handlePeekPaste(e) {
@@ -11963,6 +12456,237 @@ const SLASH_COMMANDS = [
   { cmd: '/amux', desc: 'Interact with amux — board, memory, sessions' },
   { cmd: '/amux-board', desc: 'Add a task or note to the board' },
 ];
+
+// ── Customizable chip bar ──
+// Each chip: { id, label, action, value, danger? }
+// action: 'send' (text), 'keys' (keystroke), 'slash' (populate input), 'special' (named fn)
+const DEFAULT_CHIPS = [
+  { id: 'continue', label: 'continue', action: 'send', value: 'continue' },
+  { id: 'enter', label: 'Enter', action: 'keys', value: 'Enter' },
+  { id: 'up', label: '\u2191', action: 'keys', value: 'Up' },
+  { id: 'down', label: '\u2193', action: 'keys', value: 'Down' },
+  { id: 'push', label: '\u2B06 Push', action: 'special', value: 'gitPush' },
+  { id: 'status', label: '/status', action: 'slash', value: '/status' },
+  { id: 'model', label: '/model', action: 'slash', value: '/model' },
+  { id: 'mcp', label: '/mcp', action: 'slash', value: '/mcp' },
+  { id: 'ctrlc', label: 'Ctrl+C', action: 'keys', value: 'C-c', danger: true },
+  { id: 'ctrlo', label: 'Ctrl+O', action: 'keys', value: 'C-o' },
+  { id: 'clear', label: '/clear', action: 'slash', value: '/clear' },
+  { id: 'compact', label: '/compact', action: 'slash', value: '/compact' },
+  { id: 'esc', label: 'Esc', action: 'keys', value: 'Escape' },
+];
+
+// All possible chips the user can add
+const ALL_CHIPS = [
+  // Built-in actions
+  { section: 'Actions', items: [
+    { id: 'continue', label: 'continue', action: 'send', value: 'continue', desc: 'Send "continue"' },
+    { id: 'enter', label: 'Enter', action: 'keys', value: 'Enter', desc: 'Press Enter' },
+    { id: 'up', label: '\u2191', action: 'keys', value: 'Up', desc: 'Arrow Up' },
+    { id: 'down', label: '\u2193', action: 'keys', value: 'Down', desc: 'Arrow Down' },
+    { id: 'push', label: '\u2B06 Push', action: 'special', value: 'gitPush', desc: 'Git push' },
+    { id: 'ctrlc', label: 'Ctrl+C', action: 'keys', value: 'C-c', desc: 'Interrupt', danger: true },
+    { id: 'ctrlo', label: 'Ctrl+O', action: 'keys', value: 'C-o', desc: 'Accept & continue' },
+    { id: 'esc', label: 'Esc', action: 'keys', value: 'Escape', desc: 'Escape' },
+    { id: 'tab', label: 'Tab', action: 'keys', value: 'Tab', desc: 'Tab key' },
+    { id: 'shifttab', label: 'Shift+Tab', action: 'keys', value: 'BTab', desc: 'Shift+Tab (accept suggestion)' },
+    { id: 'yes', label: 'Yes', action: 'send', value: 'yes', desc: 'Send "yes"' },
+    { id: 'no', label: 'No', action: 'send', value: 'no', desc: 'Send "no"' },
+    { id: 'log', label: '\uD83D\uDCC4 Log', action: 'special', value: 'downloadLog', desc: 'Download terminal log' },
+    { id: 'transcripts', label: '\uD83D\uDCBE Transcripts', action: 'special', value: 'showTranscripts', desc: 'Conversation transcripts' },
+  ]},
+];
+// Add slash commands section from SLASH_COMMANDS
+ALL_CHIPS.push({
+  section: 'Slash Commands',
+  items: SLASH_COMMANDS.map(c => ({
+    id: c.cmd.slice(1), label: c.cmd, action: 'slash', value: c.cmd, desc: c.desc
+  }))
+});
+
+let _chipEditing = false;
+let _chipDragIdx = -1;
+
+function _loadChips() {
+  try {
+    const raw = localStorage.getItem('amux_chips');
+    if (raw) return JSON.parse(raw);
+  } catch(e) {}
+  return null;
+}
+function _saveChips(chips) {
+  localStorage.setItem('amux_chips', JSON.stringify(chips));
+}
+function _getChips() {
+  return _loadChips() || DEFAULT_CHIPS.map(c => ({...c}));
+}
+
+function _chipAction(chip, sessionName, isPeek) {
+  if (chip.action === 'send') {
+    if (isPeek) peekQuickSend(chip.value);
+    else doSend(sessionName, chip.value);
+  } else if (chip.action === 'keys') {
+    if (isPeek) peekQuickKeys(chip.value);
+    else doKeys(sessionName, chip.value);
+  } else if (chip.action === 'slash') {
+    if (isPeek) {
+      const inp = document.getElementById('peek-cmd-input');
+      if (inp) { inp.value = chip.value; inp.focus({ preventScroll: true }); autoGrow(inp); slashAcUpdate(); }
+    } else {
+      chipToInput(sessionName, chip.value);
+    }
+  } else if (chip.action === 'special') {
+    if (chip.value === 'gitPush') gitPush(isPeek ? peekSession : sessionName, event);
+    else if (chip.value === 'downloadLog' && isPeek) peekDownloadLog();
+    else if (chip.value === 'showTranscripts' && isPeek) peekShowTranscripts();
+  }
+}
+
+function renderChips(container, sessionName, isPeek) {
+  const chips = _getChips();
+  let html = '';
+  chips.forEach((chip, i) => {
+    const cls = chip.danger ? 'chip danger' : 'chip';
+    const drag = _chipEditing ? 'draggable="true"' : '';
+    html += '<div class="' + cls + '" ' + drag + ' data-chip-idx="' + i + '"'
+      + ' onclick="_chipAction(_getChips()[' + i + '],\'' + esc(sessionName || '') + '\',' + !!isPeek + ')">'
+      + esc(chip.label)
+      + (_chipEditing ? '<span class="chip-remove-btn" onclick="event.stopPropagation();removeChip(' + i + ')">\u00D7</span>' : '')
+      + '</div>';
+  });
+  // Add button
+  html += '<div class="chip chip-add" onclick="openChipPicker()">+</div>';
+  // Edit toggle
+  html += '<div class="chip chip-edit-toggle' + (_chipEditing ? ' active' : '') + '" onclick="toggleChipEdit()">'
+    + (_chipEditing ? '\u2713' : '\u270E') + '</div>';
+  container.innerHTML = html;
+  if (_chipEditing) {
+    container.classList.add('editing');
+    _setupChipDrag(container, sessionName, isPeek);
+  } else {
+    container.classList.remove('editing');
+  }
+}
+
+function _setupChipDrag(container) {
+  const draggables = container.querySelectorAll('.chip[draggable]');
+  draggables.forEach(el => {
+    el.addEventListener('dragstart', e => {
+      _chipDragIdx = parseInt(el.dataset.chipIdx);
+      el.classList.add('dragging');
+      e.dataTransfer.effectAllowed = 'move';
+    });
+    el.addEventListener('dragend', () => {
+      el.classList.remove('dragging');
+      _chipDragIdx = -1;
+    });
+    el.addEventListener('dragover', e => {
+      e.preventDefault();
+      e.dataTransfer.dropEffect = 'move';
+    });
+    el.addEventListener('drop', e => {
+      e.preventDefault();
+      const toIdx = parseInt(el.dataset.chipIdx);
+      if (_chipDragIdx < 0 || _chipDragIdx === toIdx) return;
+      const chips = _getChips();
+      const [moved] = chips.splice(_chipDragIdx, 1);
+      chips.splice(toIdx, 0, moved);
+      _saveChips(chips);
+      refreshAllChipBars();
+    });
+  });
+}
+
+function toggleChipEdit() {
+  _chipEditing = !_chipEditing;
+  refreshAllChipBars();
+}
+
+function removeChip(idx) {
+  const chips = _getChips();
+  chips.splice(idx, 1);
+  _saveChips(chips);
+  refreshAllChipBars();
+}
+
+function addChip(chip) {
+  const chips = _getChips();
+  // Don't add if already present with same id
+  if (chips.find(c => c.id === chip.id)) return;
+  chips.push({ id: chip.id, label: chip.label, action: chip.action, value: chip.value, danger: chip.danger || false });
+  _saveChips(chips);
+  refreshAllChipBars();
+}
+
+function openChipPicker() {
+  const existing = _getChips();
+  const existingIds = new Set(existing.map(c => c.id));
+  let html = '<div class="chip-picker-overlay" onclick="if(event.target===this)closeChipPicker()">'
+    + '<div class="chip-picker">'
+    + '<div class="chip-picker-header"><input id="chip-picker-search" placeholder="Search commands..." oninput="filterChipPicker()"></div>'
+    + '<div class="chip-picker-body" id="chip-picker-body">';
+  ALL_CHIPS.forEach(sec => {
+    html += '<div class="chip-picker-section">' + esc(sec.section) + '</div>';
+    sec.items.forEach(item => {
+      const added = existingIds.has(item.id);
+      html += '<div class="chip-picker-item' + (added ? ' added' : '') + '" data-search="' + esc((item.label + ' ' + item.desc + ' ' + item.value).toLowerCase()) + '"'
+        + ' onclick="' + (added ? '' : 'addChipFromPicker(this)') + '"'
+        + ' data-chip=\'' + esc(JSON.stringify({id:item.id,label:item.label,action:item.action,value:item.value,danger:item.danger||false})) + '\'>'
+        + '<span>' + esc(item.label) + '</span>'
+        + '<span class="cpd">' + esc(item.desc || '') + '</span>'
+        + (added ? '<span style="color:var(--dim);font-size:0.75rem;">\u2713</span>' : '')
+        + '</div>';
+    });
+  });
+  html += '</div></div></div>';
+  const div = document.createElement('div');
+  div.id = 'chip-picker-wrap';
+  div.innerHTML = html;
+  document.body.appendChild(div);
+  setTimeout(() => document.getElementById('chip-picker-search')?.focus(), 50);
+}
+
+function closeChipPicker() {
+  document.getElementById('chip-picker-wrap')?.remove();
+}
+
+function filterChipPicker() {
+  const q = (document.getElementById('chip-picker-search')?.value || '').toLowerCase();
+  document.querySelectorAll('.chip-picker-item').forEach(el => {
+    el.style.display = el.dataset.search.includes(q) ? '' : 'none';
+  });
+  // Hide section headers with no visible items
+  document.querySelectorAll('.chip-picker-section').forEach(sec => {
+    let next = sec.nextElementSibling;
+    let anyVisible = false;
+    while (next && !next.classList.contains('chip-picker-section')) {
+      if (next.style.display !== 'none') anyVisible = true;
+      next = next.nextElementSibling;
+    }
+    sec.style.display = anyVisible ? '' : 'none';
+  });
+}
+
+function addChipFromPicker(el) {
+  try {
+    const chip = JSON.parse(el.dataset.chip);
+    addChip(chip);
+    closeChipPicker();
+  } catch(e) {}
+}
+
+function refreshAllChipBars() {
+  // Refresh peek chip bar
+  const peekChips = document.querySelector('#peek-cmd-row > .chips');
+  if (peekChips) renderChips(peekChips, '', true);
+  // Refresh all card chip bars
+  document.querySelectorAll('.chips[id^="card-chips-"]').forEach(el => {
+    const name = el.id.replace('card-chips-', '');
+    if (name) renderChips(el, name, false);
+  });
+}
+// Initialize peek chip bar now that renderChips is defined
+(function(){ var c = document.getElementById('peek-chips'); if (c) renderChips(c, '', true); })();
 let slashAcItems = [];
 let slashAcSelected = -1;
 
@@ -13214,6 +13938,7 @@ async function doConnect(tmuxName) {
 
 // ── Create session ──
 let _createBranchEdited = false;  // track if user manually changed branch name
+let _createDirIsGit = false;     // track if current dir is a git repo
 
 function openCreate() {
   document.getElementById('create-name').value = '';
@@ -13230,6 +13955,11 @@ function openCreate() {
   document.getElementById('ac-list').innerHTML = '';
   document.getElementById('ac-list').classList.remove('open');
   _createBranchEdited = false;
+  _createDirIsGit = false;
+  // Reset worktree
+  document.getElementById('create-worktree-enabled').checked = false;
+  document.getElementById('create-worktree-field').style.display = 'none';
+  document.getElementById('create-worktree-info').style.display = 'none';
   // Reset template state — section collapsed by default
   _selectedTemplate = null;
   document.getElementById('tmpl-section-body').style.display = 'none';
@@ -13237,6 +13967,9 @@ function openCreate() {
   document.getElementById('tmpl-selected-badge').style.display = 'none';
   document.getElementById('tmpl-selected-wrap').style.display = 'none';
   document.getElementById('create-overlay').classList.add('active');
+  // Check git for default dir
+  const defaultDir = document.getElementById('create-dir').value;
+  if (defaultDir) _checkDirGit(defaultDir);
   setTimeout(() => document.getElementById('create-name').focus({ preventScroll: true }), 100);
 }
 function closeCreate() {
@@ -13383,6 +14116,31 @@ function _toggleCreateBranch(on) {
     setTimeout(() => inp.focus({preventScroll: true}), 50);
   }
 }
+function _toggleWorktree(on) {
+  document.getElementById('create-worktree-info').style.display = on ? '' : 'none';
+  if (on) {
+    // Worktree implies branch — enable and lock branch checkbox
+    document.getElementById('create-branch-enabled').checked = true;
+    _toggleCreateBranch(true);
+  }
+}
+let _gitCheckTimer = null;
+async function _checkDirGit(dir) {
+  if (!dir) { _createDirIsGit = false; document.getElementById('create-worktree-field').style.display = 'none'; return; }
+  try {
+    const r = await fetch(API + '/api/git-check?dir=' + encodeURIComponent(dir));
+    const d = await r.json();
+    _createDirIsGit = !!d.is_git;
+    document.getElementById('create-worktree-field').style.display = _createDirIsGit ? '' : 'none';
+    if (!_createDirIsGit) {
+      document.getElementById('create-worktree-enabled').checked = false;
+      document.getElementById('create-worktree-info').style.display = 'none';
+    }
+  } catch(e) {
+    _createDirIsGit = false;
+    document.getElementById('create-worktree-field').style.display = 'none';
+  }
+}
 async function _suggestBranch() {
   const name = document.getElementById('create-name').value.trim();
   const dir = document.getElementById('create-dir').value.trim();
@@ -13414,6 +14172,7 @@ async function submitCreate() {
   const prompt = typedPrompt || (_selectedTemplate && _selectedTemplate.initial_prompt ? _selectedTemplate.initial_prompt : '');
   const branchEnabled = document.getElementById('create-branch-enabled').checked;
   const branch = branchEnabled ? document.getElementById('create-branch').value.trim() : '';
+  const worktreeEnabled = document.getElementById('create-worktree-enabled').checked && _createDirIsGit;
   if (!name) { document.getElementById('create-name').focus({ preventScroll: true }); return; }
   closeCreate();
 
@@ -13426,9 +14185,11 @@ async function submitCreate() {
   }
 
   // Online: create immediately, optionally queue prompt
+  const createBody = { name, dir, creator: _getDeviceName() };
+  if (worktreeEnabled) createBody.worktree = true;
   const r = await apiCall(API + '/api/sessions', {
     method: 'POST', headers: {'Content-Type':'application/json'},
-    body: JSON.stringify({ name, dir, creator: _getDeviceName() })
+    body: JSON.stringify(createBody)
   });
   if (r && r.ok) {
     if (dir) _addRecentDir(dir);
@@ -14215,6 +14976,7 @@ let activeView = 'sessions';
 let boardItems = [];
 let boardStatuses = [{id:'backlog',label:'Backlog'},{id:'todo',label:'To Do'},{id:'doing',label:'In Progress'},{id:'done',label:'Done'},{id:'discarded',label:'Discarded'}];
 let _boardSortables = [];
+let _boardColSortable = null;
 let boardTimer = null;
 let schedules = [];
 let _schedEditId = null;
@@ -14227,6 +14989,7 @@ let boardFilterSession = null;
 let boardSearchQuery = '';
 let _boardDragId = null;
 let boardViewMode = localStorage.getItem('amux_board_view') || 'session';
+let boardOwnerFilter = localStorage.getItem('amux_board_owner') || 'human';
 let _sessionGroupCollapsed = JSON.parse(localStorage.getItem('amux_board_collapsed') || '{}');
 let _tagGroupCollapsed = JSON.parse(localStorage.getItem('amux_status_collapsed') || '{}');
 let _collapsedCols = new Set(JSON.parse(localStorage.getItem('amux_col_collapsed') || '[]'));
@@ -14286,6 +15049,7 @@ function switchView(view) {
   document.getElementById('map-view').style.display = view === 'map' ? 'flex' : 'none';
   document.getElementById('metrics-view').style.display = view === 'metrics' ? 'flex' : 'none';
   document.getElementById('torrents-view').style.display = view === 'torrents' ? 'flex' : 'none';
+  document.getElementById('terminal-view').style.display = view === 'terminal' ? 'flex' : 'none';
   document.getElementById('tab-sessions').classList.toggle('active', view === 'sessions');
   document.getElementById('tab-board').classList.toggle('active', view === 'board');
   document.getElementById('tab-notifications').classList.toggle('active', view === 'notifications');
@@ -14297,7 +15061,9 @@ function switchView(view) {
   document.getElementById('tab-map').classList.toggle('active', view === 'map');
   document.getElementById('tab-metrics').classList.toggle('active', view === 'metrics');
   document.getElementById('tab-torrents').classList.toggle('active', view === 'torrents');
+  document.getElementById('tab-terminal').classList.toggle('active', view === 'terminal');
   if (view === 'torrents') _torrentLoad();
+  if (view === 'terminal') _termInit();
   if (view === 'crm') { _crmDirty = false; _crmLoad(); _crmApplySidebarState(); } // always refresh on tab switch
   if (view === 'map') { _mapLoad(); _mapInit(); }
   if (view === 'metrics') { _metricsLoad(); _metricsApplySidebarState(); } // always refresh on tab switch
@@ -14343,10 +15109,15 @@ let _mapEditingPin = null;
 let _mapEditingTag = null;
 
 function _mapLoad() {
-  // Load from server; fall back to localStorage for offline resilience
+  // Load from localStorage immediately for instant render
+  try { var cp = localStorage.getItem('amux_map_pins'); if (cp) _mapPins = JSON.parse(cp); } catch(e) {}
+  try { var ct = localStorage.getItem('amux_map_tags'); if (ct) _mapTags = JSON.parse(ct); } catch(e) {}
+  try { var cs = localStorage.getItem('amux_map_settings'); if (cs) _mapSettings = Object.assign(_mapSettings, JSON.parse(cs)); } catch(e) {}
+  if (_mapPins.length || _mapTags.length) { _mapRenderTags(); _mapRenderPins(); _mapRenderMarkers(); }
+  // Then fetch fresh from server
   fetch(API + '/api/map').then(function(r) { return r.ok ? r.json() : null; }).then(function(data) {
     if (!data) return;
-    const firstLoad = _mapPins.length === 0;
+    var firstLoad = _mapPins.length === 0;
     var needsSave = false;
     _mapPins = (data.pins || []).map(function(pin, i) {
       if (!pin.id) { pin.id = 'pin_' + Date.now() + '_' + i; needsSave = true; }
@@ -14356,10 +15127,15 @@ function _mapLoad() {
     _mapTags = data.tags || [];
     _mapSettings = Object.assign(_mapSettings, data.settings || {});
     _mapGoogleKey = (data.settings || {}).googleMapsKey || '';
+    // Cache for offline
+    try {
+      localStorage.setItem('amux_map_pins', JSON.stringify(_mapPins));
+      localStorage.setItem('amux_map_tags', JSON.stringify(_mapTags));
+      localStorage.setItem('amux_map_settings', JSON.stringify(_mapSettings));
+    } catch(e) {}
     _mapRenderTags();
     _mapRenderPins();
     _mapRenderMarkers();
-    // On first load with pins, fit map to show all of them
     if (firstLoad && _map && _mapPins.length > 0) {
       var coords = _mapPins.filter(function(p) {
         return !isNaN(parseFloat(p.lat)) && !isNaN(parseFloat(p.lng));
@@ -14368,24 +15144,23 @@ function _mapLoad() {
       else if (coords.length > 1) { _map.fitBounds(coords, { padding: [40, 40], maxZoom: 15 }); }
     }
   }).catch(function() {
-    // offline fallback
-    try { _mapPins = JSON.parse(localStorage.getItem('amux_map_pins') || '[]'); } catch(e) { _mapPins = []; }
-    try { _mapTags = JSON.parse(localStorage.getItem('amux_map_tags') || '[]'); } catch(e) { _mapTags = []; }
-    try { var s = localStorage.getItem('amux_map_settings'); if (s) _mapSettings = Object.assign(_mapSettings, JSON.parse(s)); } catch(e) {}
+    // Already loaded from cache above; render if not done
+    if (_mapPins.length || _mapTags.length) { _mapRenderTags(); _mapRenderPins(); _mapRenderMarkers(); }
   });
 }
 
 function _mapSave() {
-  var payload = { pins: _mapPins, tags: _mapTags, settings: _mapSettings };
-  fetch(API + '/api/map', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(payload)
-  }).catch(function() {
-    // offline fallback
+  // Always cache locally for offline resilience
+  try {
     localStorage.setItem('amux_map_pins', JSON.stringify(_mapPins));
     localStorage.setItem('amux_map_tags', JSON.stringify(_mapTags));
     localStorage.setItem('amux_map_settings', JSON.stringify(_mapSettings));
+  } catch(e) {}
+  var payload = { pins: _mapPins, tags: _mapTags, settings: _mapSettings };
+  apiCall(API + '/api/map', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload)
   });
 }
 
@@ -14447,7 +15222,14 @@ function _mapVisiblePins() {
     if (_mapFilterTags.size > 0 && !(pin.tags && pin.tags.some(function(t) { return _mapFilterTags.has(t); }))) return false;
     if (_mapSearchQ) {
       const q = _mapSearchQ;
-      if (!(pin.name||'').toLowerCase().includes(q) && !(pin.desc||'').toLowerCase().includes(q)) return false;
+      const nameMatch = (pin.name||'').toLowerCase().includes(q);
+      const descMatch = (pin.desc||'').toLowerCase().includes(q);
+      const notesMatch = (pin.notes||'').toLowerCase().includes(q);
+      const tagMatch = (pin.tags||[]).some(function(tid) {
+        const tag = _mapTags.find(function(t) { return t.id === tid; });
+        return tag && tag.name.toLowerCase().includes(q);
+      });
+      if (!nameMatch && !descMatch && !notesMatch && !tagMatch) return false;
     }
     return true;
   });
@@ -14497,12 +15279,14 @@ function _mapRenderPins() {
       const tag = _mapTags.find(function(t) { return t.id === tid; });
       return tag ? '<span class="map-pin-tag" style="background:' + tag.color + ';color:#fff;border-color:' + tag.color + '">' + escHtml(tag.name) + '</span>' : '';
     }).join('');
+    const preview = pin.desc || pin.notes || '';
+    const hasNotes = !!(pin.notes);
     return '<div class="map-pin-item" onclick="_mapFlyToPin(\x27' + pin.id + '\x27)" ondblclick="_mapOpenPinModal(\x27' + pin.id + '\x27)">' +
       '<div class="map-pin-dot" style="background:' + color + '"></div>' +
       '<div class="map-pin-info">' +
-        '<div class="map-pin-name">' + escHtml(pin.name||'Unnamed') + '</div>' +
+        '<div class="map-pin-name">' + escHtml(pin.name||'Unnamed') + (hasNotes ? ' <span style="font-size:0.68rem;color:var(--dim);font-weight:400;">\uD83D\uDCDD</span>' : '') + '</div>' +
         (tagChips ? '<div class="map-pin-tagrow">' + tagChips + '</div>' : '') +
-        (pin.desc ? '<div class="map-pin-desc">' + escHtml(pin.desc.substring(0,70)) + (pin.desc.length>70?'\u2026':'') + '</div>' : '') +
+        (preview ? '<div class="map-pin-desc">' + escHtml(preview.substring(0,80)) + (preview.length>80?'\u2026':'') + '</div>' : '') +
       '</div>' +
       '<button class="map-pin-edit-btn" onclick="event.stopPropagation();_mapOpenPinModal(\x27' + pin.id + '\x27)" title="Edit">&#x270F;</button>' +
     '</div>';
@@ -14520,10 +15304,12 @@ function _mapRenderMarkers() {
       const tag = _mapTags.find(function(t) { return t.id === tid; });
       return tag ? '<span style="display:inline-block;padding:1px 7px;border-radius:8px;font-size:11px;font-weight:500;background:' + tag.color + ';color:#fff;">' + escHtml(tag.name) + '</span>' : '';
     }).join(' ');
+    const notesPreview = pin.notes ? (pin.notes.length > 150 ? pin.notes.substring(0, 150) + '\u2026' : pin.notes) : '';
     marker.bindPopup(
-      '<div style="min-width:140px;font-family:inherit;font-size:13px">' +
+      '<div style="min-width:160px;max-width:280px;font-family:inherit;font-size:13px">' +
         '<div style="font-weight:600;margin-bottom:4px">' + escHtml(pin.name||'Unnamed') + '</div>' +
         (pin.desc ? '<div style="font-size:12px;color:#888;margin-bottom:4px">' + escHtml(pin.desc) + '</div>' : '') +
+        (notesPreview ? '<div style="font-size:11.5px;color:#aaa;margin-bottom:4px;white-space:pre-wrap;line-height:1.4;border-left:2px solid #444;padding-left:6px;">' + escHtml(notesPreview) + '</div>' : '') +
         (tagChips ? '<div style="margin-bottom:4px">' + tagChips + '</div>' : '') +
         '<div style="font-size:11px;color:#999;margin-bottom:6px">' + parseFloat(pin.lat).toFixed(5) + ', ' + parseFloat(pin.lng).toFixed(5) + ' \u2022 <a href="' + _mapGeoMapsUrl(pin.lat, pin.lng, pin.name) + '" target="_blank" rel="noopener" style="color:var(--accent,#58a6ff);text-decoration:none">Google Maps \u2197</a></div>' +
         '<button onclick="_mapOpenPinModal(\x27' + pin.id + '\x27)" style="padding:2px 8px;font-size:12px;cursor:pointer;border:1px solid #aaa;border-radius:4px;background:transparent;color:inherit">Edit</button>' +
@@ -14597,6 +15383,7 @@ function _mapOpenPinModal(id, latlng) {
   document.getElementById('map-pin-modal-title').textContent = pin ? 'Edit Pin' : 'Add Pin';
   document.getElementById('map-pin-name').value = pin ? (pin.name||'') : '';
   document.getElementById('map-pin-desc').value = pin ? (pin.desc||'') : '';
+  document.getElementById('map-pin-notes').value = pin ? (pin.notes||'') : '';
   document.getElementById('map-pin-lat').value = pin ? pin.lat : (latlng ? latlng.lat.toFixed(6) : '');
   document.getElementById('map-pin-lng').value = pin ? pin.lng : (latlng ? latlng.lng.toFixed(6) : '');
   const hint = document.getElementById('map-pin-coords-hint');
@@ -14652,6 +15439,7 @@ function _mapClosePinModal() {
 function _mapSavePin() {
   const name = document.getElementById('map-pin-name').value.trim();
   const desc = document.getElementById('map-pin-desc').value.trim();
+  const notes = document.getElementById('map-pin-notes').value.trim();
   const lat = parseFloat(document.getElementById('map-pin-lat').value);
   const lng = parseFloat(document.getElementById('map-pin-lng').value);
   if (!name) { document.getElementById('map-pin-name').focus(); return; }
@@ -14659,9 +15447,9 @@ function _mapSavePin() {
   const tags = Array.from(document.querySelectorAll('#map-pin-tags-row input[type=checkbox]:checked')).map(function(cb) { return cb.value; });
   if (_mapEditingPin) {
     const pin = _mapPins.find(function(p) { return p.id === _mapEditingPin; });
-    if (pin) { pin.name=name; pin.desc=desc; pin.lat=lat; pin.lng=lng; pin.tags=tags; }
+    if (pin) { pin.name=name; pin.desc=desc; pin.notes=notes; pin.lat=lat; pin.lng=lng; pin.tags=tags; }
   } else {
-    _mapPins.push({ id: 'pin_'+Date.now(), name: name, desc: desc, lat: lat, lng: lng, tags: tags, createdAt: Date.now() });
+    _mapPins.push({ id: 'pin_'+Date.now(), name: name, desc: desc, notes: notes, lat: lat, lng: lng, tags: tags, createdAt: Date.now() });
   }
   _mapSave(); _mapClosePinModal(); _mapRenderPins(); _mapRenderMarkers();
 }
@@ -15196,16 +15984,20 @@ function _stopLogsTimer() {
 async function fetchSchedules() {
   try {
     const r = await fetch(API + '/api/schedules');
-    if (r.ok) { schedules = await r.json(); }
-  } catch(e) {}
+    if (r.ok) { schedules = await r.json(); try { localStorage.setItem('amux_schedules_cache', JSON.stringify(schedules)); } catch(e) {} }
+  } catch(e) {
+    try { var c = localStorage.getItem('amux_schedules_cache'); if (c) schedules = JSON.parse(c); } catch(e2) {}
+  }
 }
 
 let _schedulerRuns = [];
 async function fetchSchedulerRuns() {
   try {
     const r = await fetch(API + '/api/schedules/runs');
-    if (r.ok) _schedulerRuns = await r.json();
-  } catch(e) {}
+    if (r.ok) { _schedulerRuns = await r.json(); try { localStorage.setItem('amux_sched_runs_cache', JSON.stringify(_schedulerRuns)); } catch(e) {} }
+  } catch(e) {
+    try { var c = localStorage.getItem('amux_sched_runs_cache'); if (c) _schedulerRuns = JSON.parse(c); } catch(e2) {}
+  }
 }
 
 function renderScheduler() {
@@ -15275,7 +16067,7 @@ function renderScheduler() {
 }
 
 async function toggleSchedEnabled(id, enabled) {
-  await fetch(API + '/api/schedules/' + id, {
+  await apiCall(API + '/api/schedules/' + id, {
     method: 'PATCH', headers: {'Content-Type':'application/json'},
     body: JSON.stringify({ enabled: enabled ? 1 : 0 })
   });
@@ -15507,6 +16299,12 @@ function setBoardView(mode) {
   renderBoard();
 }
 
+function setBoardOwner(type) {
+  boardOwnerFilter = type;
+  localStorage.setItem('amux_board_owner', type);
+  renderBoard();
+}
+
 function toggleSessionGroup(name) {
   _sessionGroupCollapsed[name] = !_sessionGroupCollapsed[name];
   localStorage.setItem('amux_board_collapsed', JSON.stringify(_sessionGroupCollapsed));
@@ -15539,7 +16337,8 @@ async function _togglePin(id) {
   const item = boardItems.find(i => i.id === id);
   if (!item) return;
   const newVal = item.pinned ? 0 : 1;
-  await fetch(API + '/api/board/' + id, {
+  item.pinned = newVal; // optimistic update
+  await apiCall(API + '/api/board/' + id, {
     method: 'PATCH', headers: {'Content-Type': 'application/json'},
     body: JSON.stringify({ pinned: newVal }),
   });
@@ -15618,7 +16417,10 @@ function _renderBoardBySession(visible, container) {
   container.innerHTML = html;
 }
 
+let _boardRenderPending = false;
 function renderBoard() {
+  // Skip re-render while a drag is in progress — queue it for when drag ends
+  if (document.body.classList.contains('board-dragging')) { _boardRenderPending = true; return; }
   renderBoardFilters();
   const container = document.getElementById('board-columns');
 
@@ -15627,8 +16429,12 @@ function renderBoard() {
   var bvC = document.getElementById('bv-status');
   if (bvS) bvS.classList.toggle('active', boardViewMode === 'session');
   if (bvC) bvC.classList.toggle('active', boardViewMode === 'status');
+  var boH = document.getElementById('bo-human');
+  var boA = document.getElementById('bo-agent');
+  if (boH) boH.classList.toggle('active', boardOwnerFilter === 'human');
+  if (boA) boA.classList.toggle('active', boardOwnerFilter === 'agent');
 
-  let visible = boardItems;
+  let visible = boardItems.filter(i => boardOwnerFilter === 'agent' ? i.owner_type === 'agent' : i.owner_type !== 'agent');
   if (boardFilterTag) visible = visible.filter(i => (i.tags || []).includes(boardFilterTag));
   if (boardFilterSession) visible = visible.filter(i => i.session === boardFilterSession);
   if (boardSearchQuery) {
@@ -15708,6 +16514,37 @@ function renderBoard() {
   if (typeof Sortable !== 'undefined') {
     _boardSortables.forEach(s => { try { s.destroy(); } catch(e) {} });
     _boardSortables = [];
+    // Column reorder Sortable — drag columns by their header
+    if (_boardColSortable) { try { _boardColSortable.destroy(); } catch(e) {} }
+    _boardColSortable = Sortable.create(container, {
+      animation: 150,
+      handle: '.board-col-header',
+      draggable: '.board-col',
+      ghostClass: 'sortable-ghost',
+      chosenClass: 'sortable-chosen',
+      filter: '.board-add-col-btn',
+      preventOnFilter: false,
+      onStart: function() { document.body.classList.add('board-dragging'); },
+      onEnd: function(evt) {
+        document.body.classList.remove('board-dragging');
+        // Read new order from DOM
+        const order = [...container.querySelectorAll('.board-col')].map(el => el.dataset.col);
+        // Update boardStatuses to match new order
+        const statusMap = {};
+        boardStatuses.forEach(s => { statusMap[s.id] = s; });
+        boardStatuses = order.filter(id => statusMap[id]).map(id => statusMap[id]);
+        // Cache locally so order survives before next fetchBoard()
+        lastStatusesJSON = JSON.stringify(boardStatuses);
+        _idb.putStatuses(boardStatuses);
+        // Persist to server
+        apiCall(API + '/api/board/statuses/reorder', {
+          method: 'PUT',
+          headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify({ order: order })
+        });
+        if (_boardRenderPending) { _boardRenderPending = false; renderBoard(); }
+      }
+    });
     container.querySelectorAll('.board-col').forEach(colEl => {
       _boardSortables.push(Sortable.create(colEl, {
         group: 'board',
@@ -15728,9 +16565,12 @@ function renderBoard() {
           document.body.classList.remove('board-dragging');
           const id = evt.item.dataset.id;
           const newStatus = evt.to.dataset.col;
-          if (!id || !newStatus) return;
-          const item = boardItems.find(i => i.id === id);
-          if (item && item.status !== newStatus) moveBoardItem(id, newStatus);
+          if (id && newStatus) {
+            const item = boardItems.find(i => i.id === id);
+            if (item && item.status !== newStatus) moveBoardItem(id, newStatus);
+          }
+          // Flush any renderBoard() calls that were deferred during the drag
+          if (_boardRenderPending) { _boardRenderPending = false; renderBoard(); }
         }
       }));
     });
@@ -15877,8 +16717,8 @@ async function saveSchedModal() {
                     schedule_expr: schedExpr || null };
   const url = _schedEditId ? API + '/api/schedules/' + _schedEditId : API + '/api/schedules';
   const method = _schedEditId ? 'PATCH' : 'POST';
-  const r = await fetch(url, { method, headers: {'Content-Type':'application/json'}, body: JSON.stringify(payload) });
-  if (r.ok) {
+  const r = await apiCall(url, { method, headers: {'Content-Type':'application/json'}, body: JSON.stringify(payload) });
+  if (r) {
     await fetchSchedules();
     renderCalendar();
     renderScheduler();
@@ -15887,7 +16727,7 @@ async function saveSchedModal() {
 }
 async function deleteSchedule(id) {
   if (!confirm('Delete this schedule?')) return;
-  await fetch(API + '/api/schedules/' + id, { method: 'DELETE' });
+  await apiCall(API + '/api/schedules/' + id, { method: 'DELETE' });
   await fetchSchedules();
   renderCalendar();
   renderScheduler();
@@ -16568,7 +17408,9 @@ function enterGridMode() {
   const ref = tabBar || document.querySelector('.header-row');
   if (ref) {
     const rect = ref.getBoundingClientRect();
-    view.style.top = rect.bottom + 'px';
+    // Add computed marginBottom to close the gap between tab bar and grid
+    const marginBottom = parseFloat(getComputedStyle(ref).marginBottom) || 0;
+    view.style.top = (rect.bottom + marginBottom) + 'px';
   }
   view.classList.add('active');
   // Mark Grid tab as active, deactivate others
@@ -16604,6 +17446,11 @@ function exitGridMode() {
   // Save current layout, then pause timers — keep grid alive to avoid re-init bugs
   _gridSaveLayout();
   Object.values(_gridPanes).forEach(p => { if (p.timer) { clearInterval(p.timer); p.timer = null; } });
+  // Flush pending note saves
+  Object.keys(_notePanes).forEach(nid => {
+    const pane = _notePanes[nid];
+    if (pane.saveTimer) { clearTimeout(pane.saveTimer); pane.saveTimer = null; _saveNotePaneContent(nid); }
+  });
   document.getElementById('grid-view').classList.remove('active');
   document.getElementById('tab-grid').classList.remove('active');
   document.getElementById('tab-' + (activeView || 'sessions')).classList.add('active');
@@ -16708,8 +17555,13 @@ function _gridRestoreLayout() {
   try {
     const saved = JSON.parse(localStorage.getItem('amux_grid_layout') || '[]');
     saved.forEach(item => {
-      if (item.id && (sessions || []).find(s => s.name === item.id))
+      if (!item.id) return;
+      const notePath = _notePathFromId(item.id);
+      if (notePath) {
+        wsAddNotePane(notePath, item.x, item.y, item.w, item.h);
+      } else if ((sessions || []).find(s => s.name === item.id)) {
         addGridPane(item.id, item.x, item.y, item.w, item.h);
+      }
     });
   } catch(e) {}
 }
@@ -16782,18 +17634,28 @@ function wsSaveProfileConfirm() {
 
 function wsClearWorkspace() {
   Object.keys(_gridPanes).slice().forEach(n => removeGridPane(n));
+  Object.keys(_notePanes).slice().forEach(nid => {
+    const path = _notePathFromId(nid);
+    if (path) wsRemoveNotePane(path);
+  });
 }
 
 function wsLoadProfile(name) {
   const profiles = _wsLoadProfiles();
   const layout = profiles[name];
   if (!layout) return;
-  // Clear current panes
+  // Clear current panes (sessions + notes)
   Object.keys(_gridPanes).forEach(n => removeGridPane(n));
+  Object.keys(_notePanes).slice().forEach(nid => { const p = _notePathFromId(nid); if (p) wsRemoveNotePane(p); });
   // Load profile panes
   layout.forEach(item => {
-    if (item.id && (sessions || []).find(s => s.name === item.id))
+    if (!item.id) return;
+    const notePath = _notePathFromId(item.id);
+    if (notePath) {
+      wsAddNotePane(notePath, item.x, item.y, item.w, item.h);
+    } else if ((sessions || []).find(s => s.name === item.id)) {
       addGridPane(item.id, item.x, item.y, item.w, item.h);
+    }
   });
   _wsRenderProfileBar();
 }
@@ -16839,14 +17701,14 @@ function _wsClosePresetMenu(e) {
 function wsApplyPreset(preset) {
   document.getElementById('ws-preset-menu')?.classList.remove('open');
   if (!_grid) return;
-  // Get active pane names (or all sessions if none open)
+  // Get active session pane names (or all sessions if none open)
   let names = Object.keys(_gridPanes);
   if (!names.length) {
     names = (sessions || []).map(s => s.name);
   }
   if (!names.length) return;
 
-  // Clear existing panes
+  // Clear existing session panes (keep note panes)
   Object.keys(_gridPanes).slice().forEach(n => removeGridPane(n));
 
   // Calculate layout positions
@@ -16910,6 +17772,202 @@ function _wsCalcPreset(preset, count) {
   return items;
 }
 
+// ═══════ NOTE PANES IN WORKSPACE ═══════
+let _notePanes = {}; // "note:path" → { widget, quill, path, saveTimer }
+
+function _noteIdFromPath(path) {
+  return 'note:' + path;
+}
+
+function _notePathFromId(id) {
+  return id.startsWith('note:') ? id.slice(5) : null;
+}
+
+async function wsToggleNoteMenu() {
+  const menu = document.getElementById('ws-note-menu');
+  if (menu.classList.contains('open')) { menu.classList.remove('open'); return; }
+  // Fetch notes list
+  let notes = [];
+  try {
+    notes = await fetch(API + '/api/notes').then(r => r.json());
+  } catch(e) {
+    // Try cache
+    try { notes = JSON.parse(localStorage.getItem('amux_notes_cache') || '[]'); } catch(e2) {}
+  }
+  let html = '<button class="ws-note-menu-new" onclick="wsAddNewNotePane()">+ New note</button>';
+  notes.forEach(n => {
+    const p = n.path || n.name;
+    const title = n.name || p.replace(/\.md$/, '').split('/').pop();
+    const nid = _noteIdFromPath(p);
+    const already = !!_notePanes[nid];
+    html += '<button onclick="wsAddNotePane(\'' + p.replace(/'/g, "\\'") + '\')"' +
+      (already ? ' style="opacity:0.4;" disabled' : '') + '>' + esc(title) + '</button>';
+  });
+  menu.innerHTML = html;
+  menu.classList.add('open');
+  // Close on outside click
+  setTimeout(() => document.addEventListener('click', _wsCloseNoteMenu, { once: true }), 0);
+}
+
+function _wsCloseNoteMenu(e) {
+  const menu = document.getElementById('ws-note-menu');
+  if (menu) menu.classList.remove('open');
+}
+
+async function wsAddNewNotePane() {
+  document.getElementById('ws-note-menu')?.classList.remove('open');
+  // Create a new note via API
+  const ts = Date.now();
+  const slug = 'note-' + ts;
+  try {
+    await fetch(API + '/api/notes/' + slug, {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({ content: '<h1>Untitled</h1><p><br></p>' })
+    });
+  } catch(e) {}
+  wsAddNotePane(slug + '.md');
+}
+
+function wsAddNotePane(path, x, y, w, h) {
+  if (!_grid) return;
+  const nid = _noteIdFromPath(path);
+  if (_notePanes[nid]) return;
+  const sid = _gpSafeId(nid);
+  const title = path.replace(/\.md$/, '').split('/').pop();
+  const safePath = path.replace(/\\/g, '\\\\').replace(/'/g, "\\'");
+
+  const content =
+    '<div class="gp-header" style="background:var(--card);">' +
+      '<span style="font-size:0.75rem;margin-right:4px;">&#x1F4DD;</span>' +
+      '<span class="gp-title" id="' + sid + '-title">' + esc(title) + '</span>' +
+      '<button class="gp-peek-btn" onclick="wsOpenNoteInTab(\'' + safePath + '\');event.stopPropagation();" title="Open in Notes tab">&#x2197;</button>' +
+      '<button class="gp-close" onclick="wsRemoveNotePane(\'' + safePath + '\')">&#x2715;</button>' +
+    '</div>' +
+    '<div class="gp-note-body" id="' + sid + '-body">' +
+      '<div id="' + sid + '-editor"></div>' +
+    '</div>' +
+    '<div class="gp-note-status" id="' + sid + '-status"></div>';
+
+  const widget = _grid.addWidget({ id: nid, x, y, w: w || 4, h: h || 7, content });
+  _notePanes[nid] = { widget, quill: null, path, saveTimer: null };
+
+  // Init Quill in the pane
+  setTimeout(() => _initNotePaneQuill(nid), 50);
+  _gridSaveLayout();
+}
+
+function _initNotePaneQuill(nid) {
+  const pane = _notePanes[nid];
+  if (!pane) return;
+  const sid = _gpSafeId(nid);
+  const editorEl = document.getElementById(sid + '-editor');
+  if (!editorEl) return;
+
+  const q = new Quill('#' + sid + '-editor', {
+    theme: 'snow',
+    modules: {
+      toolbar: [
+        [{ header: [1, 2, 3, false] }],
+        ['bold', 'italic', 'underline', 'strike'],
+        ['blockquote', 'code-block'],
+        [{ list: 'ordered' }, { list: 'bullet' }, { list: 'check' }],
+        ['link'], ['clean']
+      ]
+    },
+    placeholder: 'Write your note\u2026'
+  });
+  pane.quill = q;
+
+  // Load content
+  _loadNotePaneContent(nid);
+
+  // Auto-save on edit
+  q.on('text-change', (delta, old, source) => {
+    if (source === 'api') return;
+    // Update title from H1
+    const first = q.root.firstElementChild;
+    if (first && first.tagName === 'H1') {
+      const titleEl = document.getElementById(sid + '-title');
+      if (titleEl) titleEl.textContent = first.textContent.trim() || 'Untitled';
+    }
+    // Debounced save
+    if (pane.saveTimer) clearTimeout(pane.saveTimer);
+    pane.saveTimer = setTimeout(() => _saveNotePaneContent(nid), 800);
+  });
+}
+
+async function _loadNotePaneContent(nid) {
+  const pane = _notePanes[nid];
+  if (!pane || !pane.quill) return;
+  const sid = _gpSafeId(nid);
+  const statusEl = document.getElementById(sid + '-status');
+  const pathKey = pane.path.replace(/\.md$/, '').split('/').map(encodeURIComponent).join('/');
+
+  let data;
+  try {
+    data = await fetch(API + '/api/notes/' + pathKey).then(r => r.json());
+    // Cache
+    _idb.set('amux_note_' + pane.path, JSON.stringify(data));
+  } catch(e) {
+    // Try IDB cache
+    try {
+      const cached = await _idb.get('amux_note_' + pane.path);
+      if (cached) data = JSON.parse(cached);
+    } catch(e2) {}
+  }
+  if (!data) { if (statusEl) statusEl.textContent = 'Could not load note'; return; }
+
+  const isHtml = /<[a-z][\s\S]*>/i.test(data.content);
+  if (isHtml) {
+    pane.quill.root.innerHTML = data.content || '';
+  } else {
+    pane.quill.setText(data.content || '');
+  }
+  // Update title
+  const first = pane.quill.root.firstElementChild;
+  if (first && first.tagName === 'H1') {
+    const titleEl = document.getElementById(sid + '-title');
+    if (titleEl) titleEl.textContent = first.textContent.trim() || 'Untitled';
+  }
+}
+
+async function _saveNotePaneContent(nid) {
+  const pane = _notePanes[nid];
+  if (!pane || !pane.quill) return;
+  const sid = _gpSafeId(nid);
+  const statusEl = document.getElementById(sid + '-status');
+  const content = pane.quill.root.innerHTML === '<p><br></p>' ? '' : pane.quill.root.innerHTML;
+  const pathKey = pane.path.replace(/\.md$/, '').split('/').map(encodeURIComponent).join('/');
+
+  const result = await apiCall(API + '/api/notes/' + pathKey, {
+    method: 'POST', headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({ content })
+  });
+  if (statusEl) {
+    statusEl.textContent = result ? '\u2713 Saved' : 'Queued';
+    setTimeout(() => { if (statusEl) statusEl.textContent = ''; }, 1500);
+  }
+  // Update IDB cache
+  _idb.set('amux_note_' + pane.path, JSON.stringify({ path: pane.path, content }));
+}
+
+function wsRemoveNotePane(path) {
+  const nid = _noteIdFromPath(path);
+  const pane = _notePanes[nid];
+  if (!pane || !_grid) return;
+  // Flush pending save
+  if (pane.saveTimer) { clearTimeout(pane.saveTimer); _saveNotePaneContent(nid); }
+  try { _grid.removeWidget(pane.widget); } catch(e) {}
+  delete _notePanes[nid];
+  _gridSaveLayout();
+}
+
+function wsOpenNoteInTab(path) {
+  // Switch to notes tab and open this note
+  switchView('notes');
+  setTimeout(() => _notesOpen(path), 200);
+}
+
 function gpDoKeys(name, keys) { doKeys(name, keys); }
 
 function gpChipToInput(name, text) {
@@ -16960,6 +18018,11 @@ const _cachedBoard = localStorage.getItem('amux_board_cache');
 if (_cachedBoard) {
   try { boardItems = JSON.parse(_cachedBoard); lastBoardJSON = _cachedBoard; } catch(e) {}
 }
+// Load cached notes list from localStorage
+const _cachedNotes = localStorage.getItem('amux_notes_cache');
+if (_cachedNotes) {
+  try { _notesAllNotes = JSON.parse(_cachedNotes); } catch(e) {}
+}
 if (sessions.length || drafts.length) render();
 updateConnectionStatus();
 
@@ -17006,13 +18069,17 @@ const _idb = (() => {
       req.onsuccess = () => resolve(req.result);
       req.onerror = () => resolve(null);
     })).catch(() => null),
+    del: (key) => open().then(d => {
+      const tx = d.transaction('kv', 'readwrite');
+      tx.objectStore('kv').delete(key);
+    }).catch(() => {}),
     // Apply delta: upsert live items, remove soft-deleted ones from local mirror
     applyIssueDelta: (issues) => _txw('issues', os => {
       issues.forEach(item => { if (item.deleted) os.delete(item.id); else os.put(item); });
     }),
-    // Replace all statuses in local mirror
+    // Replace all statuses in local mirror (with position for ordering)
     putStatuses: (statuses) => _txw('statuses', os => {
-      os.clear(); statuses.forEach(s => os.put(s));
+      os.clear(); statuses.forEach((s, i) => os.put({ ...s, _pos: i }));
     }),
     // Read all items from a store
     getAll: (store) => open().then(d => new Promise((resolve) => {
@@ -17036,6 +18103,15 @@ const _idb = (() => {
   };
 })();
 
+// IDB fallback: restore statuses from IndexedDB (preserves column order across reloads)
+_idb.getAll('statuses').then(items => {
+  if (items && items.length) {
+    items.sort((a, b) => (a._pos || 0) - (b._pos || 0));
+    boardStatuses = items.map(s => ({ id: s.id, label: s.label }));
+    lastStatusesJSON = JSON.stringify(boardStatuses);
+    if (activeView === 'board') renderBoard();
+  }
+});
 // IDB fallback: if localStorage was purged (iOS), restore from IndexedDB
 if (!boardItems.length) {
   _idb.getAll('issues').then(items => {
@@ -17202,7 +18278,7 @@ function enablePollingFallback() {
 // Start SSE (falls back to polling on failure)
 connectSSE();
 _updateNotifBtn();
-_checkTranscription();
+loadBranding();
 
 // Register service worker for offline asset caching
 if ('serviceWorker' in navigator) {
@@ -17465,6 +18541,150 @@ async function resetTokenStats() {
   }).catch(() => showToast('Reset failed'));
 }
 
+// ═══════ BRANDING ═══════
+let _brandData = {};
+let _brandIconB64 = null, _brandLogoB64 = null;
+
+async function loadBranding() {
+  try {
+    const r = await fetch(API + '/api/branding');
+    const d = await r.json();
+    _brandData = d;
+    applyBranding(d);
+  } catch(e) {}
+}
+
+function applyBranding(d) {
+  const name = d.name || 'amux';
+  const tagline = d.tagline || 'Claude Code Multiplexer';
+  const color = d.color || '#3fb950';
+  // Header
+  const nameEl = document.getElementById('brand-name-header');
+  if (nameEl) nameEl.textContent = name;
+  const iconEl = document.getElementById('brand-icon-header');
+  if (iconEl) {
+    if (d.icon_url) {
+      iconEl.innerHTML = '<img src="' + esc(API + d.icon_url) + '" style="width:22px;height:22px;border-radius:4px;object-fit:cover;">';
+    } else {
+      iconEl.innerHTML = '';
+    }
+  }
+  // Page title
+  document.title = name;
+  // About overlay
+  const aboutName = document.getElementById('about-brand-name');
+  if (aboutName) aboutName.textContent = name;
+  const aboutTag = document.getElementById('about-brand-tagline');
+  if (aboutTag) aboutTag.textContent = tagline;
+  const aboutPreview = document.getElementById('about-brand-preview');
+  if (aboutPreview) {
+    if (d.logo_url) {
+      aboutPreview.innerHTML = '<img src="' + esc(API + d.logo_url) + '" style="max-width:180px;max-height:48px;border-radius:4px;margin-bottom:4px;">';
+    } else if (d.icon_url) {
+      aboutPreview.innerHTML = '<img src="' + esc(API + d.icon_url) + '" style="width:48px;height:48px;border-radius:8px;margin-bottom:4px;">';
+    } else {
+      aboutPreview.innerHTML = '';
+    }
+  }
+  // Accent color
+  document.documentElement.style.setProperty('--green', color);
+  document.documentElement.style.setProperty('--accent', color);
+  // Favicon
+  if (d.icon_url) {
+    let fav = document.querySelector('link[rel="icon"]');
+    if (fav) fav.href = API + d.icon_url;
+    let apple = document.querySelector('link[rel="apple-touch-icon"]');
+    if (apple) apple.href = API + d.icon_url;
+  }
+  // Populate editor fields
+  const ni = document.getElementById('brand-name-input');
+  if (ni) ni.value = d.name || '';
+  const ti = document.getElementById('brand-tagline-input');
+  if (ti) ti.value = d.tagline || '';
+  const ci = document.getElementById('brand-color-input');
+  if (ci) { ci.value = color; document.getElementById('brand-color-hex').textContent = color; }
+  // Preview uploaded images in editor
+  const iconDrop = document.getElementById('brand-icon-label');
+  if (iconDrop) iconDrop.textContent = d.icon_url ? 'Uploaded' : 'Drop or tap';
+  const logoDrop = document.getElementById('brand-logo-label');
+  if (logoDrop) logoDrop.textContent = d.logo_url ? 'Uploaded' : 'Drop or tap';
+}
+
+function brandFileSelected(type, input) {
+  const file = input.files[0];
+  if (!file) return;
+  const reader = new FileReader();
+  reader.onload = () => {
+    if (type === 'icon') { _brandIconB64 = reader.result; }
+    else { _brandLogoB64 = reader.result; }
+    document.getElementById('brand-' + type + '-label').textContent = file.name;
+    // Show preview
+    const drop = document.getElementById('brand-' + type + '-drop');
+    drop.innerHTML = '<img src="' + reader.result + '" style="max-width:100%;max-height:40px;border-radius:4px;">';
+  };
+  reader.readAsDataURL(file);
+}
+
+async function saveBranding() {
+  const body = {};
+  const name = document.getElementById('brand-name-input').value.trim();
+  const tagline = document.getElementById('brand-tagline-input').value.trim();
+  const color = document.getElementById('brand-color-input').value;
+  if (name) body.name = name;
+  if (tagline) body.tagline = tagline;
+  if (color && color !== '#3fb950') body.color = color;
+  // Include empty strings to clear values
+  if (!name && _brandData.name) body.name = '';
+  if (!tagline && _brandData.tagline) body.tagline = '';
+  if (_brandIconB64) body.icon = _brandIconB64;
+  if (_brandLogoB64) body.logo = _brandLogoB64;
+  try {
+    const r = await fetch(API + '/api/branding', { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(body) });
+    if (!r.ok) { const d = await r.json(); showToast(d.error || 'Save failed'); return; }
+    _brandIconB64 = null; _brandLogoB64 = null;
+    showToast('Branding saved');
+    loadBranding();
+  } catch(e) { showToast('Save failed'); }
+}
+
+async function resetBranding() {
+  if (!await showConfirm('Reset branding to defaults?', 'Reset', true)) return;
+  try {
+    await fetch(API + '/api/branding', { method: 'DELETE' });
+    _brandIconB64 = null; _brandLogoB64 = null;
+    _brandData = {};
+    applyBranding({});
+    showToast('Branding reset');
+  } catch(e) { showToast('Reset failed'); }
+}
+
+// Branding editor: color preview + drag-and-drop
+document.addEventListener('DOMContentLoaded', () => {
+  const ci = document.getElementById('brand-color-input');
+  if (ci) ci.addEventListener('input', () => {
+    document.getElementById('brand-color-hex').textContent = ci.value;
+  });
+  // Drag-and-drop for icon/logo
+  ['icon', 'logo'].forEach(type => {
+    const drop = document.getElementById('brand-' + type + '-drop');
+    if (!drop) return;
+    drop.addEventListener('dragover', e => { e.preventDefault(); drop.style.borderColor = 'var(--accent)'; });
+    drop.addEventListener('dragleave', () => { drop.style.borderColor = 'var(--border)'; });
+    drop.addEventListener('drop', e => {
+      e.preventDefault(); drop.style.borderColor = 'var(--border)';
+      const file = e.dataTransfer.files[0];
+      if (!file || !file.type.startsWith('image/')) return;
+      const reader = new FileReader();
+      reader.onload = () => {
+        if (type === 'icon') _brandIconB64 = reader.result;
+        else _brandLogoB64 = reader.result;
+        drop.innerHTML = '<img src="' + reader.result + '" style="max-width:100%;max-height:40px;border-radius:4px;">';
+      };
+      reader.readAsDataURL(file);
+    });
+  });
+});
+
 // ═══════ SERVER SWITCHER ═══════
 function _getSavedServers() {
   try { return JSON.parse(localStorage.getItem('amux_servers') || '[]'); } catch(e) { return []; }
@@ -17606,10 +18826,12 @@ function _switchServerUrl(idx, evt) {
   const url = s.url.replace(/\/+$/, '') + '/?_sync=' + encodeURIComponent(payload);
   // Same-origin: navigate in place. Cross-origin: open new tab so PWA stays accessible
   // if the destination is unreachable from this device (e.g. localhost from mobile).
+  // In native iOS WKWebView, window.open is blocked — always navigate in place.
   try {
     const destOrigin = new URL(url).origin;
-    if (destOrigin === location.origin) { location.href = url; }
-    else { window.open(url, '_blank'); }
+    const isNativeApp = window.navigator.standalone || /AmuxApp/.test(navigator.userAgent) || !window.open;
+    if (destOrigin === location.origin || isNativeApp) { location.href = url; }
+    else { window.open(url, '_blank') || (location.href = url); }
   } catch(e) { location.href = url; }
 }
 
@@ -17629,10 +18851,12 @@ function switchServer(idx) {
   }));
   const url = s.url + '/?_sync=' + encodeURIComponent(payload);
   // Same-origin: navigate in place. Cross-origin: open new tab to keep current PWA accessible.
+  // In native iOS WKWebView, window.open is blocked — always navigate in place.
   try {
     const destOrigin = new URL(url).origin;
-    if (destOrigin === location.origin) { location.href = url; }
-    else { window.open(url, '_blank'); }
+    const isNativeApp = window.navigator.standalone || /AmuxApp/.test(navigator.userAgent) || !window.open;
+    if (destOrigin === location.origin || isNativeApp) { location.href = url; }
+    else { window.open(url, '_blank') || (location.href = url); }
   } catch(e) { location.href = url; }
 }
 
@@ -18852,39 +20076,66 @@ let _vpHideTimer = null;
 
 function _vpPosKey(url) { return 'amux_vp_pos_' + url; }
 
+function _vpMimeFromUrl(url) {
+  const ext = url.split('?')[0].split('.').pop().toLowerCase();
+  const map = { mp4:'video/mp4', m4v:'video/mp4', mov:'video/quicktime', webm:'video/webm', mkv:'video/x-matroska', avi:'video/x-msvideo' };
+  return map[ext] || 'video/mp4';
+}
+
 function _playVideoUrl(url, title) {
   const v = document.getElementById('video-player');
+  const status = document.getElementById('vp-status');
+
   v.src = url;
   v._vpUrl = url;
+
   document.getElementById('vp-title').textContent = title || url.split('/').pop();
   document.getElementById('video-overlay').style.display = 'flex';
+
+  // Show loading state
+  status.style.display = 'flex';
+  status.textContent = 'Loading...';
+
+  // Show AirPlay button if Safari supports it
+  const airBtn = document.getElementById('vp-airplay');
+  if (airBtn) airBtn.style.display = (v.webkitShowPlaybackTargetPicker) ? '' : 'none';
+  // Show PiP button if supported
+  const pipBtn = document.getElementById('vp-pip');
+  if (pipBtn) pipBtn.style.display = (document.pictureInPictureEnabled || v.webkitSupportsPresentationMode) ? '' : 'none';
+
   const key = _vpPosKey(url);
-  const raw = localStorage.getItem(key);
-  const saved = parseFloat(raw);
-  console.log('[VP] _playVideoUrl url=' + url);
-  console.log('[VP] _playVideoUrl posKey=' + key);
-  console.log('[VP] _playVideoUrl raw saved=' + raw + ', parsed=' + saved);
+  const saved = parseFloat(localStorage.getItem(key));
   if (saved > 0) {
-    const doSeek = () => {
-      console.log('[VP] loadedmetadata fired, seeking to ' + saved + ' (readyState=' + v.readyState + ')');
-      v.currentTime = saved;
-      v.removeEventListener('loadedmetadata', doSeek);
-    };
-    if (v.readyState >= 1) {
-      console.log('[VP] readyState already ' + v.readyState + ', seeking immediately to ' + saved);
-      v.currentTime = saved;
-    } else {
-      console.log('[VP] readyState=' + v.readyState + ', waiting for loadedmetadata');
-      v.addEventListener('loadedmetadata', doSeek);
-    }
-  } else {
-    console.log('[VP] no saved position, starting from 0');
+    const doSeek = () => { v.currentTime = saved; v.removeEventListener('loadedmetadata', doSeek); };
+    if (v.readyState >= 1) v.currentTime = saved;
+    else v.addEventListener('loadedmetadata', doSeek);
   }
+
+  // Hide loading when playback is ready
+  const hideLoading = () => { status.style.display = 'none'; v.removeEventListener('canplay', hideLoading); v.removeEventListener('playing', hideLoading); };
+  v.addEventListener('canplay', hideLoading);
+  v.addEventListener('playing', hideLoading);
+  // Fallback: if already ready, hide immediately
+  if (v.readyState >= 3) hideLoading();
+
+  // Error handling
+  v.onerror = () => {
+    const err = v.error;
+    let msg = 'Cannot play this video';
+    if (err) {
+      if (err.code === 4) msg = 'Format not supported by this browser';
+      else if (err.code === 2) msg = 'Network error loading video';
+      else if (err.code === 3) msg = 'Video decode error';
+    }
+    status.style.display = 'flex';
+    status.textContent = msg;
+  };
+
   v.play().catch(() => {});
   _vpStartLoop();
   _vpShowControls();
-  v.onpause = () => { console.log('[VP] onpause, saving pos'); _vpSavePos(v); };
-  v.onseeked = () => { console.log('[VP] onseeked, saving pos'); _vpSavePos(v); };
+  v.onpause = () => _vpSavePos(v);
+  v.onseeked = () => _vpSavePos(v);
 }
 
 function _playVideo(gid, encodedPath) {
@@ -18894,28 +20145,23 @@ function _playVideo(gid, encodedPath) {
 }
 
 function _vpSavePos(v) {
-  if (!v._vpUrl || !v.currentTime) {
-    console.log('[VP] _vpSavePos skip: url=' + !!v._vpUrl + ' currentTime=' + v.currentTime);
-    return;
-  }
-  // Clear saved pos if near the end (within 10s)
+  if (!v._vpUrl || !v.currentTime) return;
   if (v.duration && v.currentTime > v.duration - 10) {
-    console.log('[VP] _vpSavePos near-end, clearing (' + v.currentTime.toFixed(1) + '/' + v.duration.toFixed(1) + ')');
     localStorage.removeItem(_vpPosKey(v._vpUrl));
   } else {
-    console.log('[VP] _vpSavePos saving ' + v.currentTime.toFixed(1) + 's for ' + v._vpUrl.slice(-40));
     localStorage.setItem(_vpPosKey(v._vpUrl), String(v.currentTime));
   }
 }
 
 function _closeVideo() {
   const v = document.getElementById('video-player');
-  console.log('[VP] _closeVideo: url=' + !!v._vpUrl + ' currentTime=' + (v.currentTime||0).toFixed(1));
   _vpSavePos(v);
   v.pause();
   v.removeAttribute('src');
   v._vpUrl = null;
+  v.onerror = null;
   v.load();
+  document.getElementById('vp-status').style.display = 'none';
   document.getElementById('video-overlay').style.display = 'none';
   if (_vpRAF) { cancelAnimationFrame(_vpRAF); _vpRAF = null; }
 }
@@ -18931,7 +20177,7 @@ function _vpFmtTime(s) {
 function _vpStartLoop() {
   function update() {
     const v = document.getElementById('video-player');
-    if (!v || !v.src) return;
+    if (!v || !v._vpUrl) return;
     const dur = v.duration || 0;
     const cur = v.currentTime || 0;
     // Played bar
@@ -18997,10 +20243,25 @@ function _vpSetVolume(val) {
 }
 
 function _vpFullscreen() {
-  const el = document.getElementById('video-player');
+  const container = document.getElementById('vp-container');
+  const v = document.getElementById('video-player');
+  // iOS Safari: use webkitEnterFullscreen on the video element
+  if (v.webkitEnterFullscreen) { v.webkitEnterFullscreen(); return; }
+  const el = container || v;
   if (el.requestFullscreen) el.requestFullscreen();
   else if (el.webkitRequestFullscreen) el.webkitRequestFullscreen();
-  else if (el.webkitEnterFullscreen) el.webkitEnterFullscreen(); // iOS
+}
+
+function _vpAirPlay() {
+  const v = document.getElementById('video-player');
+  if (v.webkitShowPlaybackTargetPicker) v.webkitShowPlaybackTargetPicker();
+}
+
+function _vpPiP() {
+  const v = document.getElementById('video-player');
+  if (document.pictureInPictureElement) { document.exitPictureInPicture().catch(() => {}); return; }
+  if (v.requestPictureInPicture) v.requestPictureInPicture().catch(() => {});
+  else if (v.webkitSupportsPresentationMode) v.webkitSetPresentationMode(v.webkitPresentationMode === 'picture-in-picture' ? 'inline' : 'picture-in-picture');
 }
 
 function _vpShowControls() {
@@ -19013,13 +20274,37 @@ function _vpShowControls() {
   }, 3000);
 }
 
-// Click video to toggle play, mousemove to show controls
+// Click/tap video to toggle play, mousemove/touchstart to show controls
 document.getElementById('video-player').addEventListener('click', e => { e.stopPropagation(); _vpTogglePlay(); });
 document.getElementById('vp-container').addEventListener('mousemove', _vpShowControls);
+document.getElementById('vp-container').addEventListener('touchstart', _vpShowControls, { passive: true });
+
+// Touch seek on progress bar
+(function() {
+  const bar = document.getElementById('vp-progress-wrap');
+  if (!bar) return;
+  function touchSeek(e) {
+    e.preventDefault();
+    const touch = e.touches[0];
+    const rect = bar.getBoundingClientRect();
+    const pct = Math.max(0, Math.min(1, (touch.clientX - rect.left) / rect.width));
+    const v = document.getElementById('video-player');
+    if (v.duration) v.currentTime = pct * v.duration;
+  }
+  bar.addEventListener('touchstart', touchSeek, { passive: false });
+  bar.addEventListener('touchmove', touchSeek, { passive: false });
+})();
+
+// Hide volume slider on mobile (iOS ignores programmatic volume)
+if ('ontouchstart' in window) {
+  const vw = document.getElementById('vp-volume-wrap');
+  if (vw) vw.style.display = 'none';
+}
+
 // Keyboard controls
 document.getElementById('video-overlay').addEventListener('keydown', e => {
   const v = document.getElementById('video-player');
-  if (!v || !v.src) return;
+  if (!v || !v._vpUrl) return;
   if (e.key === ' ' || e.key === 'k') { e.preventDefault(); _vpTogglePlay(); }
   if (e.key === 'ArrowLeft') { e.preventDefault(); v.currentTime = Math.max(0, v.currentTime - 10); }
   if (e.key === 'ArrowRight') { e.preventDefault(); v.currentTime = Math.min(v.duration || 0, v.currentTime + 10); }
@@ -19032,6 +20317,213 @@ document.getElementById('video-overlay').addEventListener('keydown', e => {
 
 // Enter key in magnet input
 document.getElementById('torrent-magnet').addEventListener('keydown', e => { if (e.key === 'Enter') _torrentAdd(); });
+
+// ── Terminal tab ──────────────────────────────────────────────────────────────
+let _term = null;       // xterm.js Terminal instance
+let _termFit = null;    // FitAddon
+let _termId = null;     // server PTY session id
+let _termPoll = null;   // polling interval
+let _termInited = false;
+
+function _termInit() {
+  if (_termInited) {
+    if (_term && _termFit) setTimeout(() => _termFit.fit(), 50);
+    return;
+  }
+  _termInited = true;
+  // Load saved font size
+  const savedSize = localStorage.getItem('amux_term_fontsize');
+  if (savedSize) document.getElementById('term-fontsize').value = savedSize;
+  // Set default host to amux connection hostname (for SSH)
+  const hostInput = document.getElementById('term-host');
+  const h = location.hostname;
+  if (h && h !== 'localhost' && h !== '127.0.0.1') {
+    hostInput.placeholder = h;
+    hostInput.value = h;
+  }
+  // Load saved hosts into dropdown
+  const savedHosts = JSON.parse(localStorage.getItem('amux_term_hosts') || '[]');
+  const sel = document.getElementById('term-profile');
+  savedHosts.forEach(h => {
+    const opt = document.createElement('option');
+    opt.value = h; opt.textContent = h;
+    sel.appendChild(opt);
+  });
+}
+
+async function _termConnect() {
+  const hostInput = document.getElementById('term-host').value.trim();
+  const profileSel = document.getElementById('term-profile');
+  const host = hostInput || (profileSel.value === 'local' ? '' : profileSel.value);
+
+  // Save to recent hosts
+  if (host) {
+    let hosts = JSON.parse(localStorage.getItem('amux_term_hosts') || '[]');
+    hosts = hosts.filter(h => h !== host);
+    hosts.unshift(host);
+    hosts = hosts.slice(0, 20);
+    localStorage.setItem('amux_term_hosts', JSON.stringify(hosts));
+    // Add to dropdown if not there
+    const sel = document.getElementById('term-profile');
+    if (!Array.from(sel.options).some(o => o.value === host)) {
+      const opt = document.createElement('option');
+      opt.value = host; opt.textContent = host;
+      sel.appendChild(opt);
+    }
+  }
+
+  // Create PTY on server
+  const fontSize = parseInt(document.getElementById('term-fontsize').value) || 14;
+  const container = document.getElementById('term-container');
+
+  // Remove placeholder
+  const ph = document.getElementById('term-placeholder');
+  if (ph) ph.remove();
+
+  // Destroy old terminal if exists
+  if (_term) {
+    _term.dispose();
+    _term = null;
+  }
+  if (_termPoll) { clearInterval(_termPoll); _termPoll = null; }
+  if (_termId) {
+    fetch(API + '/api/terminal/' + _termId, { method: 'DELETE' }).catch(() => {});
+    _termId = null;
+  }
+
+  // Create xterm.js instance
+  _term = new Terminal({
+    cursorBlink: true,
+    cursorStyle: 'block',
+    fontSize: fontSize,
+    fontFamily: "'JetBrains Mono', 'Menlo', 'Monaco', 'Courier New', monospace",
+    theme: {
+      background: '#0d1117',
+      foreground: '#c9d1d9',
+      cursor: '#58a6ff',
+      cursorAccent: '#0d1117',
+      selectionBackground: 'rgba(56,139,253,0.3)',
+      black: '#484f58',   red: '#ff7b72',    green: '#3fb950',  yellow: '#d29922',
+      blue: '#58a6ff',    magenta: '#bc8cff', cyan: '#39d353',   white: '#b1bac4',
+      brightBlack: '#6e7681', brightRed: '#ffa198', brightGreen: '#56d364', brightYellow: '#e3b341',
+      brightBlue: '#79c0ff',  brightMagenta: '#d2a8ff', brightCyan: '#56d364', brightWhite: '#f0f6fc',
+    },
+    scrollback: 10000,
+    allowProposedApi: true,
+    macOptionIsMeta: true,
+    macOptionClickForcesSelection: true,
+    rightClickSelectsWord: true,
+    allowTransparency: false,
+  });
+
+  _termFit = new FitAddon.FitAddon();
+  _term.loadAddon(_termFit);
+  _term.loadAddon(new WebLinksAddon.WebLinksAddon());
+
+  _term.open(container);
+  _termFit.fit();
+
+  const dims = _termFit.proposeDimensions();
+  const cols = dims ? dims.cols : 120;
+  const rows = dims ? dims.rows : 40;
+
+  document.getElementById('term-status').textContent = host ? 'Connecting to ' + host + '...' : 'Starting local shell...';
+
+  try {
+    const r = await fetch(API + '/api/terminal/create', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ host, cols, rows }),
+    });
+    const data = await r.json();
+    if (data.error) {
+      _term.writeln('\r\n\x1b[31mError: ' + data.error + '\x1b[0m');
+      document.getElementById('term-status').textContent = 'Error';
+      return;
+    }
+    _termId = data.id;
+  } catch (e) {
+    _term.writeln('\r\n\x1b[31mFailed to create terminal: ' + e.message + '\x1b[0m');
+    document.getElementById('term-status').textContent = 'Error';
+    return;
+  }
+
+  document.getElementById('term-status').textContent = host ? 'Connected: ' + host : 'Local shell';
+  document.getElementById('term-connect-btn').style.display = 'none';
+  document.getElementById('term-disconnect-btn').style.display = '';
+
+  // Send keyboard input to server
+  _term.onData(data => {
+    if (!_termId) return;
+    fetch(API + '/api/terminal/' + _termId + '/input', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ data: btoa(unescape(encodeURIComponent(data))) }),
+    }).catch(() => {});
+  });
+
+  // Handle resize
+  _term.onResize(({ cols, rows }) => {
+    if (!_termId) return;
+    fetch(API + '/api/terminal/' + _termId + '/resize', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ cols, rows }),
+    }).catch(() => {});
+  });
+
+  // Poll for output
+  _termPoll = setInterval(async () => {
+    if (!_termId) return;
+    try {
+      const r = await fetch(API + '/api/terminal/' + _termId + '/output');
+      const d = await r.json();
+      if (d.data) {
+        const bytes = Uint8Array.from(atob(d.data), c => c.charCodeAt(0));
+        _term.write(bytes);
+      }
+      if (!d.alive) {
+        _term.writeln('\r\n\x1b[33m[Process exited]\x1b[0m');
+        document.getElementById('term-status').textContent = 'Disconnected';
+        clearInterval(_termPoll);
+        _termPoll = null;
+        document.getElementById('term-connect-btn').style.display = '';
+        document.getElementById('term-disconnect-btn').style.display = 'none';
+      }
+    } catch (e) {}
+  }, 50);
+
+  _term.focus();
+}
+
+function _termDisconnect() {
+  if (_termPoll) { clearInterval(_termPoll); _termPoll = null; }
+  if (_termId) {
+    fetch(API + '/api/terminal/' + _termId, { method: 'DELETE' }).catch(() => {});
+    _termId = null;
+  }
+  if (_term) {
+    _term.writeln('\r\n\x1b[33m[Disconnected]\x1b[0m');
+  }
+  document.getElementById('term-status').textContent = 'Disconnected';
+  document.getElementById('term-connect-btn').style.display = '';
+  document.getElementById('term-disconnect-btn').style.display = 'none';
+}
+
+function _termSetFontSize(size) {
+  localStorage.setItem('amux_term_fontsize', size);
+  if (_term) {
+    _term.options.fontSize = parseInt(size);
+    if (_termFit) _termFit.fit();
+  }
+}
+
+// Refit terminal on window resize
+window.addEventListener('resize', () => {
+  if (_term && _termFit && activeView === 'terminal') {
+    _termFit.fit();
+  }
+});
 
 // ── Notes tab ─────────────────────────────────────────────────────────────────
 let _notesActive = null; // { path, title }
@@ -19215,8 +20707,24 @@ function _notesInitQuill() {
 }
 
 async function _notesLoad() {
-  const r = await fetch(API + '/api/notes');
-  const fresh = await r.json();
+  let fresh;
+  try {
+    const r = await fetch(API + '/api/notes');
+    fresh = await r.json();
+    // Cache the list
+    localStorage.setItem('amux_notes_cache', JSON.stringify(fresh));
+    _idb.set('amux_notes_cache', JSON.stringify(fresh));
+  } catch(e) {
+    // Offline — load from cache
+    const cached = localStorage.getItem('amux_notes_cache');
+    if (!cached) {
+      const idbVal = await _idb.get('amux_notes_cache').catch(() => null);
+      if (idbVal) { localStorage.setItem('amux_notes_cache', idbVal); fresh = JSON.parse(idbVal); }
+    } else {
+      fresh = JSON.parse(cached);
+    }
+    if (!fresh) { _notesShowEmpty(); return; }
+  }
   // Preserve local titles — client may be ahead of server (unsaved debounce)
   if (_notesAllNotes.length) {
     const localTitles = new Map(_notesAllNotes.map(n => [n.path, n.name]));
@@ -19455,15 +20963,21 @@ async function _notesOpen(path) {
   if (_quill) { _quill.setText(''); _quill.root.style.opacity = '0.3'; }
   document.getElementById('notes-save-status').textContent = '';
 
-  let r;
+  let data;
+  const noteCacheKey = 'amux_note_' + path;
   try {
-    r = await fetch(API + '/api/notes/' + path.replace(/\.md$/, '').split('/').map(encodeURIComponent).join('/'), { signal });
+    const r = await fetch(API + '/api/notes/' + path.replace(/\.md$/, '').split('/').map(encodeURIComponent).join('/'), { signal });
+    if (!r.ok) throw new Error('not ok');
+    data = await r.json();
+    // Cache to IDB for offline access
+    _idb.set(noteCacheKey, JSON.stringify(data));
   } catch(e) {
     if (e.name === 'AbortError') return; // superseded by a newer click
-    return;
+    // Offline — try IDB cache
+    const cached = await _idb.get(noteCacheKey).catch(() => null);
+    if (cached) { data = JSON.parse(cached); }
+    else return;
   }
-  if (!r.ok) return;
-  const data = await r.json();
 
   _notesActive = { path: data.path };
   _notesRawContent = data.content || '';
@@ -19588,6 +21102,8 @@ async function _notesSave() {
   }
   statusEl.textContent = '✓ Saved';
   setTimeout(() => { statusEl.textContent = ''; }, 1500);
+  // Update IDB cache with fresh content
+  _idb.set('amux_note_' + _notesActive.path, JSON.stringify({ path: _notesActive.path, content }));
   // Update in-memory list and patch the DOM item in place (no full re-render)
   const saved = _notesAllNotes.find(n => n.path === _notesActive.path);
   if (saved) {
@@ -19626,7 +21142,9 @@ async function _notesDelete() {
   }
   const pathKey = _notesActive.path.replace(/\.md$/, '');
   if (localStorage.getItem('amux_last_note') === _notesActive.path) localStorage.removeItem('amux_last_note');
+  _idb.del('amux_note_' + _notesActive.path);
   _notesAllNotes = _notesAllNotes.filter(n => n.path !== _notesActive.path);
+  localStorage.setItem('amux_notes_cache', JSON.stringify(_notesAllNotes));
   document.querySelector(`#notes-list .notes-list-item[data-path="${_notesActive.path}"]`)?.remove();
   _notesActive = null;
   await apiCall(API + '/api/notes/' + pathKey.split('/').map(encodeURIComponent).join('/'), { method: 'DELETE' });
@@ -19720,8 +21238,16 @@ function _crmApplySidebarState() {
 }
 
 async function _crmLoad() {
-  const r = await fetch(API + '/api/crm/contacts');
-  _crmContacts = await r.json();
+  try {
+    const r = await fetch(API + '/api/crm/contacts');
+    if (r.ok) {
+      _crmContacts = await r.json();
+      try { localStorage.setItem('amux_crm_cache', JSON.stringify(_crmContacts)); } catch(e) {}
+    }
+  } catch(e) {
+    // offline fallback
+    try { var c = localStorage.getItem('amux_crm_cache'); if (c) _crmContacts = JSON.parse(c); } catch(e2) {}
+  }
   _crmRenderList(_crmContacts);
   _crmRenderQueue(_crmContacts);
 }
@@ -19816,17 +21342,25 @@ async function _crmOpenContact(id) {
   // Cancel any in-flight fetch
   if (_crmOpenAbort) _crmOpenAbort.abort();
   _crmOpenAbort = new AbortController();
-  let r;
+  let data;
   try {
-    r = await fetch(API + '/api/crm/contacts/' + encodeURIComponent(id), { signal: _crmOpenAbort.signal });
+    const r = await fetch(API + '/api/crm/contacts/' + encodeURIComponent(id), { signal: _crmOpenAbort.signal });
+    if (!r.ok) throw new Error('not ok');
+    data = await r.json();
+    // Cache for offline
+    _idb.set('amux_crm_' + id, JSON.stringify(data));
   } catch(e) {
     if (e.name === 'AbortError') return;
-    form.style.opacity = '';
-    return;
+    // Try IDB cache
+    try { var cached = await _idb.get('amux_crm_' + id); if (cached) data = JSON.parse(cached); } catch(e2) {}
+    if (!data) {
+      // Try in-memory list as last resort
+      data = _crmContacts.find(function(c) { return c.id === id; });
+    }
+    if (!data) { form.style.opacity = ''; return; }
   }
-  if (!r.ok) { form.style.opacity = ''; return; }
   form.style.opacity = '';
-  _crmRenderDetail(await r.json());
+  _crmRenderDetail(data);
 }
 
 const _CRM_TRASH_SVG = '<svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/><path d="M10 11v6M14 11v6"/><path d="M9 6V4a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2"/></svg>';
@@ -20499,6 +22033,9 @@ async function _gmailSubmitCode(account) {
 <script src="https://cdn.jsdelivr.net/npm/quilljs-markdown@latest/dist/quilljs-markdown.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/gridstack@7/dist/gridstack-all.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/@xterm/xterm@5.5.0/lib/xterm.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/@xterm/addon-fit@0.10.0/lib/addon-fit.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/@xterm/addon-web-links@0.11.0/lib/addon-web-links.min.js"></script>
 <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
 <div id="grid-view">
   <div class="grid-toolbar">
@@ -20510,6 +22047,10 @@ async function _gmailSubmitCode(account) {
         onkeydown="if(event.key==='Enter'){wsSaveProfileConfirm();event.preventDefault();}if(event.key==='Escape'){wsHideSaveInput();}">
       <button id="ws-save-btn" class="btn" onclick="wsShowSaveInput()" style="font-size:0.75rem;padding:4px 10px;" title="Save current layout as a profile">&#x2B; Save</button>
       <button id="ws-save-ok" class="btn" onclick="wsSaveProfileConfirm()" style="display:none;font-size:0.75rem;padding:4px 10px;background:var(--green);color:#fff;border-color:var(--green);">&#x2713;</button>
+    </div>
+    <div class="ws-note-dropdown" id="ws-note-dropdown">
+      <button class="ws-preset-btn" onclick="wsToggleNoteMenu()" title="Add a note pane">&#x1F4DD; Note</button>
+      <div class="ws-note-menu" id="ws-note-menu"></div>
     </div>
     <div class="ws-preset-dropdown" id="ws-preset-dropdown">
       <button class="ws-preset-btn" onclick="wsTogglePresetMenu()" title="Apply a layout preset">&#x25A6; Layout</button>
@@ -21077,7 +22618,19 @@ class CCHandler(BaseHTTPRequestHandler):
         length = int(self.headers.get("Content-Length", 0))
         if length == 0:
             return {}
-        return json.loads(self.rfile.read(length))
+        raw = self.rfile.read(length)
+        try:
+            return json.loads(raw)
+        except json.JSONDecodeError:
+            # Fix invalid JSON escape sequences — common when AI agents send
+            # text containing literal backslashes (paths, regex, etc.).
+            # Valid JSON escapes: \", \\, \/, \b, \f, \n, \r, \t, \uXXXX
+            # Anything else (e.g. \U, \x, \a, \p, \u without 4 hex digits)
+            # is invalid — escape the backslash so json.loads succeeds.
+            import re
+            text = raw.decode("utf-8", errors="replace")
+            fixed = re.sub(r'\\(?!["\\/bfnrt]|u[0-9a-fA-F]{4})', r'\\\\', text)
+            return json.loads(fixed)
 
     def _route(self, method: str):
         global _server_request_count
@@ -21380,10 +22933,32 @@ class CCHandler(BaseHTTPRequestHandler):
 
         # PWA assets
         if method == "GET" and path == "/manifest.json":
-            return self._raw(PWA_MANIFEST.encode(), "application/manifest+json", cache=True)
+            # Serve dynamic manifest with custom branding if set
+            manifest = json.loads(PWA_MANIFEST)
+            try:
+                db = get_db()
+                bname = db.execute("SELECT value FROM prefs WHERE key='brand_name'").fetchone()
+                btag = db.execute("SELECT value FROM prefs WHERE key='brand_tagline'").fetchone()
+                bcolor = db.execute("SELECT value FROM prefs WHERE key='brand_color'").fetchone()
+                if bname:
+                    manifest["short_name"] = bname["value"]
+                    manifest["name"] = f"{bname['value']} — {btag['value']}" if btag else bname["value"]
+                if bcolor:
+                    manifest["theme_color"] = bcolor["value"]
+            except Exception:
+                pass
+            return self._raw(json.dumps(manifest).encode(), "application/manifest+json", cache=True)
         if method == "GET" and path == "/sw.js":
             return self._raw(SERVICE_WORKER.encode(), "application/javascript")
         if method == "GET" and path in ("/icon.svg", "/icon.png", "/icon-192.png", "/icon-512.png"):
+            # Serve custom branding icon if available
+            for ext in (".png", ".jpg", ".svg", ".webp"):
+                brand_icon = CC_BRANDING / f"icon{ext}"
+                if brand_icon.exists():
+                    ct = {".png": "image/png", ".jpg": "image/jpeg",
+                          ".svg": "image/svg+xml", ".webp": "image/webp"}[ext]
+                    return self._raw(brand_icon.read_bytes(), ct, cache=True)
+            # Fall back to default icon
             icon_path = Path(__file__).resolve().parent / path.lstrip("/")
             if icon_path.exists():
                 ct = "image/svg+xml" if path.endswith(".svg") else "image/png"
@@ -21804,6 +23379,90 @@ class CCHandler(BaseHTTPRequestHandler):
             db.execute("INSERT INTO prefs (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value=?", (key, value, value))
             db.commit()
             return self._json({"ok": True, "key": key, "value": value})
+
+        # ── Branding / white-label API ──
+        if path == "/api/branding":
+            if method == "GET":
+                db = get_db()
+                rows = db.execute("SELECT key, value FROM prefs WHERE key LIKE 'brand_%'").fetchall()
+                result = {r["key"].replace("brand_", ""): r["value"] for r in rows}
+                # Check for custom images
+                for asset in ("icon", "logo"):
+                    for ext in (".png", ".jpg", ".jpeg", ".svg", ".webp"):
+                        p = CC_BRANDING / f"{asset}{ext}"
+                        if p.exists():
+                            result[f"{asset}_url"] = f"/api/branding/{asset}{ext}"
+                            break
+                return self._json(result)
+
+            if method == "POST":
+                body = self._read_body()
+                db = get_db()
+                saved = {}
+                # Save text prefs
+                for key in ("name", "tagline", "color"):
+                    val = body.get(key)
+                    if val is not None:
+                        db.execute("INSERT INTO prefs (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value=?",
+                                   (f"brand_{key}", str(val), str(val)))
+                        saved[key] = str(val)
+                db.commit()
+                # Save image assets (base64-encoded)
+                for asset in ("icon", "logo"):
+                    b64 = body.get(asset)
+                    if not b64:
+                        continue
+                    # Accept data URL or raw base64
+                    if "," in b64:
+                        b64 = b64.split(",", 1)[1]
+                    try:
+                        data = base64.b64decode(b64)
+                    except Exception:
+                        return self._json({"error": f"invalid base64 for {asset}"}, 400)
+                    if len(data) > 5 * 1024 * 1024:
+                        return self._json({"error": f"{asset} too large (max 5 MB)"}, 400)
+                    # Detect format from magic bytes
+                    if data[:8] == b'\x89PNG\r\n\x1a\n':
+                        ext = ".png"
+                    elif data[:2] == b'\xff\xd8':
+                        ext = ".jpg"
+                    elif data[:4] == b'RIFF' and len(data) > 12 and data[8:12] == b'WEBP':
+                        ext = ".webp"
+                    elif b'<svg' in data[:500]:
+                        ext = ".svg"
+                    else:
+                        return self._json({"error": f"{asset} must be PNG, JPEG, WebP, or SVG"}, 400)
+                    # Remove old assets for this type
+                    for old in CC_BRANDING.glob(f"{asset}.*"):
+                        old.unlink()
+                    dest = CC_BRANDING / f"{asset}{ext}"
+                    dest.write_bytes(data)
+                    saved[f"{asset}_url"] = f"/api/branding/{asset}{ext}"
+                return self._json({"ok": True, **saved})
+
+            if method == "DELETE":
+                db = get_db()
+                db.execute("DELETE FROM prefs WHERE key LIKE 'brand_%'")
+                db.commit()
+                for f in CC_BRANDING.iterdir():
+                    try:
+                        f.unlink()
+                    except Exception:
+                        pass
+                return self._json({"ok": True})
+
+        # Serve branding assets
+        if method == "GET" and path.startswith("/api/branding/"):
+            fname = path[len("/api/branding/"):]
+            if "/" in fname or "\\" in fname or fname.startswith("."):
+                return self._json({"error": "not found"}, 404)
+            fpath = CC_BRANDING / fname
+            if not fpath.exists():
+                return self._json({"error": "not found"}, 404)
+            ext = fpath.suffix.lower()
+            ct = {".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg",
+                  ".svg": "image/svg+xml", ".webp": "image/webp"}.get(ext, "application/octet-stream")
+            return self._raw(fpath.read_bytes(), ct, cache=True)
 
         # GET /api/logs — query structured event logs (SQLite + in-memory ring merged)
         if method == "GET" and path == "/api/logs":
@@ -22286,59 +23945,6 @@ class CCHandler(BaseHTTPRequestHandler):
                     pass
             return self._json({"path": str(save_path), "name": filename, "url": f"/api/uploads/{save_name}"})
 
-        # ── Transcription (OpenAI Whisper) ──
-        if path == "/api/transcribe":
-            key = os.environ.get("OPENAI_API_KEY", "")
-            if method == "GET":
-                return self._json({"available": bool(key)})
-            if method == "POST":
-                if not key:
-                    return self._json({"error": "transcription not configured"}, 503)
-                body = self._read_body()
-                audio_b64 = body.get("data", "")
-                mime = body.get("mime", "audio/webm")
-                ext = "webm" if "webm" in mime else "wav" if "wav" in mime else "m4a" if "m4a" in mime or "mp4" in mime else "webm"
-                try:
-                    audio_data = base64.b64decode(audio_b64)
-                except Exception:
-                    return self._json({"error": "invalid base64"}, 400)
-                boundary = uuid.uuid4().hex
-                parts = [
-                    (f'--{boundary}\r\nContent-Disposition: form-data; name="model"\r\n\r\nwhisper-1').encode(),
-                    (f'--{boundary}\r\nContent-Disposition: form-data; name="file"; filename="audio.{ext}"\r\nContent-Type: {mime}\r\n\r\n').encode() + audio_data,
-                    (f'--{boundary}--').encode(),
-                ]
-                multipart = b"\r\n".join(parts)
-                import urllib.request as _urq
-                import urllib.error as _urqe
-                req = _urq.Request(
-                    "https://api.openai.com/v1/audio/transcriptions",
-                    data=multipart,
-                    headers={
-                        "Authorization": f"Bearer {key}",
-                        "Content-Type": f"multipart/form-data; boundary={boundary}",
-                    },
-                )
-                try:
-                    import ssl as _ssl
-                    try:
-                        import certifi as _certifi
-                        _ssl_ctx = _ssl.create_default_context(cafile=_certifi.where())
-                    except ImportError:
-                        _ssl_ctx = _ssl.create_default_context()
-                    with _urq.urlopen(req, timeout=30, context=_ssl_ctx) as r:
-                        result = json.loads(r.read())
-                    return self._json({"text": result.get("text", "")})
-                except _urqe.HTTPError as e:
-                    try:
-                        err_body = json.loads(e.read().decode("utf-8", errors="replace"))
-                        err_msg = err_body.get("error", {}).get("message", str(e))
-                    except Exception:
-                        err_msg = str(e)
-                    _log_event("transcribe", "error", detail=f"HTTP {e.code}: {err_msg}", level="warn")
-                    return self._json({"error": err_msg}, e.code)
-                except Exception as e:
-                    return self._json({"error": str(e)}, 500)
 
         # ── Serve uploaded files ──
         if method == "GET" and path.startswith("/api/uploads/"):
@@ -22425,6 +24031,17 @@ class CCHandler(BaseHTTPRequestHandler):
                 ).fetchone()[0]
                 _push_ical_bg()
                 return self._json({"ok": True, "remaining": remaining})
+
+            # PUT /api/board/statuses/reorder — reorder columns
+            if path == "/api/board/statuses/reorder" and method == "PUT":
+                body = self._read_body()
+                order = body.get("order", [])
+                if not order or not isinstance(order, list):
+                    return self._json({"error": "missing order"}, 400)
+                for pos, sid in enumerate(order):
+                    db.execute("UPDATE statuses SET position = ? WHERE id = ?", (pos, sid))
+                db.commit()
+                return self._json({"ok": True})
 
             # GET /api/board/statuses
             if path == "/api/board/statuses":
@@ -22948,6 +24565,18 @@ class CCHandler(BaseHTTPRequestHandler):
             except Exception:
                 return self._json({"suggestions": fallback})
 
+        if method == "GET" and path == "/api/git-check":
+            d = qs.get("dir", [""])[0]
+            if not d:
+                return self._json({"is_git": False})
+            try:
+                r = subprocess.run(
+                    ["git", "-C", d, "rev-parse", "--is-inside-work-tree"],
+                    capture_output=True, text=True, timeout=3)
+                return self._json({"is_git": r.returncode == 0 and r.stdout.strip() == "true"})
+            except Exception:
+                return self._json({"is_git": False})
+
         if method == "POST" and path == "/api/sessions":
             body = self._read_body()
             name = body.get("name", "").strip()
@@ -22968,9 +24597,43 @@ class CCHandler(BaseHTTPRequestHandler):
                 return self._json({"error": f"session '{name}' already exists"}, 409)
             CC_SESSIONS.mkdir(parents=True, exist_ok=True)
             cfg = {}
+            use_worktree = bool(body.get("worktree", False))
+            worktree_path = ""
             if dir_path:
-                Path(dir_path).expanduser().mkdir(parents=True, exist_ok=True)
-                cfg["CC_DIR"] = dir_path
+                resolved = str(Path(dir_path).expanduser().resolve())
+                if use_worktree:
+                    # Verify dir is a git repo
+                    git_check = subprocess.run(
+                        ["git", "-C", resolved, "rev-parse", "--is-inside-work-tree"],
+                        capture_output=True, text=True, timeout=3)
+                    if git_check.returncode != 0:
+                        return self._json({"error": "directory is not a git repo — cannot create worktree"}, 400)
+                    # Get repo root for worktree placement
+                    root_r = subprocess.run(
+                        ["git", "-C", resolved, "rev-parse", "--show-toplevel"],
+                        capture_output=True, text=True, timeout=3)
+                    repo_root = root_r.stdout.strip() if root_r.returncode == 0 else resolved
+                    wt_dir = os.path.join(repo_root, ".worktrees", name)
+                    branch_name = f"session/{name}"
+                    # Create the worktree with a new branch
+                    wt_r = subprocess.run(
+                        ["git", "-C", repo_root, "worktree", "add", wt_dir, "-b", branch_name],
+                        capture_output=True, text=True, timeout=15)
+                    if wt_r.returncode != 0:
+                        # Branch may already exist — try without -b
+                        wt_r = subprocess.run(
+                            ["git", "-C", repo_root, "worktree", "add", wt_dir, branch_name],
+                            capture_output=True, text=True, timeout=15)
+                        if wt_r.returncode != 0:
+                            return self._json({"error": f"worktree creation failed: {(wt_r.stderr or wt_r.stdout).strip()}"}, 500)
+                    worktree_path = wt_dir
+                    cfg["CC_DIR"] = wt_dir
+                    cfg["CC_WORKTREE"] = "1"
+                    cfg["CC_WORKTREE_REPO"] = repo_root
+                    cfg["CC_BRANCH"] = branch_name
+                else:
+                    Path(dir_path).expanduser().mkdir(parents=True, exist_ok=True)
+                    cfg["CC_DIR"] = dir_path
             desc = body.get("desc", "").strip()
             if desc:
                 cfg["CC_DESC"] = desc
@@ -22987,9 +24650,14 @@ class CCHandler(BaseHTTPRequestHandler):
                 "creator": creator,
                 "start_count": 0,
             })
-            if dir_path:
-                _ensure_memory(name, dir_path)
-            return self._json({"ok": True, "message": f"created {name}"})
+            effective_dir = worktree_path or dir_path
+            if effective_dir:
+                _ensure_memory(name, effective_dir)
+            resp = {"ok": True, "message": f"created {name}"}
+            if worktree_path:
+                resp["worktree"] = worktree_path
+                resp["branch"] = cfg.get("CC_BRANCH", "")
+            return self._json(resp)
 
         # GET /api/sessions/self?session=<name> — convenience for a session to look itself up
         if method == "GET" and path == "/api/sessions/self":
@@ -23265,6 +24933,33 @@ end tell
                             has_key_in_env = True
                         break
             return self._json({"email": email, "is_cloud": bool(email), "has_api_key": has_key_in_env})
+
+        # ── Layout presets ────────────────────────────────────────────────────
+        if path == "/api/layout-presets":
+            db = get_db()
+            if method == "GET":
+                rows = db.execute("SELECT name, hidden, tab_order, created_at FROM layout_presets ORDER BY created_at DESC").fetchall()
+                return self._json([{"name": r["name"], "hidden": json.loads(r["hidden"]), "tab_order": json.loads(r["tab_order"]), "created_at": r["created_at"]} for r in rows])
+            if method == "POST":
+                body = self._read_body()
+                name = body.get("name", "").strip()
+                if not name:
+                    return self._json({"error": "name is required"}, 400)
+                hidden = json.dumps(body.get("hidden", []))
+                tab_order = json.dumps(body.get("tab_order", []))
+                db.execute(
+                    "INSERT OR REPLACE INTO layout_presets (name, hidden, tab_order, created_at) VALUES (?,?,?,?)",
+                    (name, hidden, tab_order, int(time.time())))
+                db.commit()
+                return self._json({"ok": True, "name": name}, 201)
+        if path.startswith("/api/layout-presets/") and method == "DELETE":
+            name = path[len("/api/layout-presets/"):]
+            from urllib.parse import unquote
+            name = unquote(name)
+            db = get_db()
+            db.execute("DELETE FROM layout_presets WHERE name=?", (name,))
+            db.commit()
+            return self._json({"ok": True})
 
         # ── Settings env (ANTHROPIC_API_KEY etc.) ─────────────────────────────
         if path == "/api/settings/env":
@@ -23605,41 +25300,209 @@ p{{color:#888;margin:12px 0 28px;font-size:0.9rem;line-height:1.5}}
 
             return self._json({"error": "not found"}, 404)
 
-        # ── Browser automation (/api/browser/*) ───────────────────────────────
+        # ── Terminal / PTY (/api/terminal/*) ──────────────────────────────────
+        if path.startswith("/api/terminal"):
+
+            # POST /api/terminal/create  {"host":"user@host","cols":120,"rows":40}
+            if method == "POST" and path == "/api/terminal/create":
+                body = self._read_body()
+                host = body.get("host", "")
+                cols = int(body.get("cols", 120))
+                rows = int(body.get("rows", 40))
+                try:
+                    result = _term_create(host=host, cols=cols, rows=rows)
+                    return self._json(result, 201)
+                except Exception as e:
+                    return self._json({"error": str(e)}, 500)
+
+            # POST /api/terminal/<id>/input  {"data":"base64-encoded-input"}
+            m_term = re.match(r"^/api/terminal/([^/]+)/input$", path)
+            if method == "POST" and m_term:
+                tid = m_term.group(1)
+                body = self._read_body()
+                raw = body.get("data", "")
+                try:
+                    data = base64.b64decode(raw)
+                except Exception:
+                    data = raw.encode("utf-8", errors="replace")
+                _term_write(tid, data)
+                return self._json({"ok": True})
+
+            # GET /api/terminal/<id>/output
+            m_term = re.match(r"^/api/terminal/([^/]+)/output$", path)
+            if method == "GET" and m_term:
+                tid = m_term.group(1)
+                data = _term_read(tid)
+                alive = _term_alive(tid)
+                return self._json({
+                    "data": base64.b64encode(data).decode() if data else "",
+                    "alive": alive,
+                })
+
+            # POST /api/terminal/<id>/resize  {"cols":120,"rows":40}
+            m_term = re.match(r"^/api/terminal/([^/]+)/resize$", path)
+            if method == "POST" and m_term:
+                tid = m_term.group(1)
+                body = self._read_body()
+                _term_resize(tid, int(body.get("cols", 120)), int(body.get("rows", 40)))
+                return self._json({"ok": True})
+
+            # DELETE /api/terminal/<id>
+            m_term = re.match(r"^/api/terminal/([^/]+)$", path)
+            if method == "DELETE" and m_term:
+                tid = m_term.group(1)
+                _term_destroy(tid)
+                return self._json({"ok": True})
+
+            # GET /api/terminal/sessions
+            if method == "GET" and path == "/api/terminal/sessions":
+                with _term_lock:
+                    sessions = []
+                    for tid, t in _terminals.items():
+                        sessions.append({
+                            "id": tid, "host": t["host"],
+                            "created": t["created"],
+                            "cols": t["cols"], "rows": t["rows"],
+                            "alive": _term_alive(tid),
+                        })
+                return self._json(sessions)
+
+            return self._json({"error": "terminal route not found"}, 404)
+
+        # ── Browser automation (/api/browser/*) — powered by browser-use CLI ──
         if path.startswith("/api/browser"):
 
             # GET /api/browser/profiles
             if method == "GET" and path == "/api/browser/profiles":
-                return self._json({"profiles": _pw_list_profiles()})
+                return self._json({"profiles": _bu_list_profiles()})
 
-            # GET /api/browser/search?q=...&profile=google
+            # POST /api/browser/start  {"url":"...","session":"...","profile":"..."}
+            if method == "POST" and path == "/api/browser/start":
+                body = self._read_body()
+                url = body.get("url", "about:blank")
+                session = body.get("session", "amux")
+                profile = body.get("profile")
+                args = []
+                if profile:
+                    args += ["-b", "real", "--profile", profile]
+                args += ["open", url]
+                return self._json(_bu_call(args, session=session, timeout_s=30))
+
+            # POST /api/browser/navigate  {"url":"...","session":"..."}
+            if method == "POST" and path == "/api/browser/navigate":
+                body = self._read_body()
+                url = body.get("url", "")
+                if not url:
+                    return self._json({"error": "url required"}, 400)
+                session = body.get("session", "amux")
+                return self._json(_bu_call(["open", url], session=session))
+
+            # GET /api/browser/screenshot?session=amux&url=...
+            if method == "GET" and path == "/api/browser/screenshot":
+                session = (qs.get("session", ["amux"])[0] if isinstance(qs.get("session"), list)
+                           else qs.get("session", "amux"))
+                url_param = (qs.get("url", [""])[0] if isinstance(qs.get("url"), list)
+                             else qs.get("url", ""))
+                if url_param:
+                    _bu_call(["open", url_param], session=session, timeout_s=20)
+                    import time as _t; _t.sleep(2)
+                return self._json(_bu_screenshot(session=session))
+
+            # GET /api/browser/state?session=amux
+            if method == "GET" and path == "/api/browser/state":
+                session = (qs.get("session", ["amux"])[0] if isinstance(qs.get("session"), list)
+                           else qs.get("session", "amux"))
+                return self._json(_bu_call(["state"], session=session))
+
+            # POST /api/browser/action  {"action":"click|type|key|scroll|eval","session":"...","..."}
+            if method == "POST" and path == "/api/browser/action":
+                body = self._read_body()
+                action = body.get("action", "")
+                session = body.get("session", "amux")
+                if action == "click":
+                    x, y = body.get("x"), body.get("y")
+                    index = body.get("index")
+                    if index is not None:
+                        return self._json(_bu_call(["click", str(index)], session=session))
+                    elif x is not None and y is not None:
+                        return self._json(_bu_call(["click", str(x), str(y)], session=session))
+                    return self._json({"error": "click needs index or x,y"}, 400)
+                elif action == "type":
+                    text = body.get("text", "")
+                    return self._json(_bu_call(["type", text], session=session))
+                elif action == "input":
+                    index = body.get("index")
+                    text = body.get("text", "")
+                    if index is None:
+                        return self._json({"error": "input needs index and text"}, 400)
+                    return self._json(_bu_call(["input", str(index), text], session=session))
+                elif action == "key":
+                    key = body.get("key", "")
+                    return self._json(_bu_call(["keys", key], session=session))
+                elif action == "scroll":
+                    direction = "down" if body.get("dy", 500) > 0 else "up"
+                    amount = abs(body.get("dy", 500))
+                    return self._json(_bu_call(["scroll", direction, "--amount", str(amount)], session=session))
+                elif action == "eval":
+                    script = body.get("script", "")
+                    if not script:
+                        return self._json({"error": "script required"}, 400)
+                    return self._json(_bu_call(["eval", script], session=session))
+                elif action == "wait":
+                    selector = body.get("selector", "")
+                    text = body.get("text", "")
+                    timeout = str(body.get("timeout", 5000))
+                    if selector:
+                        return self._json(_bu_call(["wait", "selector", selector, "--timeout", timeout], session=session))
+                    elif text:
+                        return self._json(_bu_call(["wait", "text", text, "--timeout", timeout], session=session))
+                    return self._json({"error": "wait needs selector or text"}, 400)
+                elif action == "extract":
+                    return self._json(_bu_call(["state"], session=session))
+                elif action == "back":
+                    return self._json(_bu_call(["back"], session=session))
+                return self._json({"error": f"unknown action: {action}"}, 400)
+
+            # GET /api/browser/search?q=...
             if method == "GET" and path == "/api/browser/search":
-                q = qs.get("q", [""])[0] if isinstance(qs.get("q"), list) else qs.get("q", "")
-                prof = qs.get("profile", ["google"])[0] if isinstance(qs.get("profile"), list) else qs.get("profile", "google")
+                q = (qs.get("q", [""])[0] if isinstance(qs.get("q"), list)
+                     else qs.get("q", ""))
                 if not q:
                     return self._json({"error": "q required"}, 400)
-                result = _browser_call({"cmd": "search", "q": q, "profile": prof}, timeout_s=45)
-                status = 429 if "CAPTCHA" in result.get("error", "") else 200
-                return self._json(result, status)
+                session = "search"
+                _bu_call(["open", f"https://www.google.com/search?q={q}"], session=session, timeout_s=20)
+                import time as _t; _t.sleep(2)
+                result = _bu_call(["eval", """
+                    Array.from(document.querySelectorAll('div.g')).slice(0,8).map(el => ({
+                        title: (el.querySelector('h3') || {}).textContent || '',
+                        url: (el.querySelector('a') || {}).href || '',
+                        snippet: (el.querySelector('.VwiC3b, [data-sncf]') || {}).textContent || ''
+                    })).filter(r => r.title)
+                """], session=session)
+                if result.get("success") and result.get("data", {}).get("result"):
+                    return self._json({"results": result["data"]["result"]})
+                return self._json(result)
 
-            # POST /api/browser/login  {"url":"...","username":"...","password":"...","profile":"name"}
-            if method == "POST" and path == "/api/browser/login":
+            # POST /api/browser/stop  {"session":"..."}
+            if method == "POST" and path == "/api/browser/stop":
                 body = self._read_body()
-                if not body.get("url") or not body.get("profile"):
-                    return self._json({"error": "url and profile are required"}, 400)
-                return self._json(_browser_call({
-                    "cmd": "login",
-                    "url": body["url"],
-                    "username": body.get("username", ""),
-                    "password": body.get("password", ""),
-                    "profile": body["profile"],
-                }, timeout_s=45))
+                session = body.get("session", "amux")
+                return self._json(_bu_call(["close"], session=session, timeout_s=10))
 
-            # GET /api/browser/screenshot?profile=NAME&url=https://...
-            if method == "GET" and path == "/api/browser/screenshot":
-                prof = qs.get("profile", ["default"])[0] if isinstance(qs.get("profile"), list) else qs.get("profile", "default")
-                url_param = qs.get("url", [""])[0] if isinstance(qs.get("url"), list) else qs.get("url", "")
-                return self._json(_browser_call({"cmd": "screenshot", "profile": prof, "url": url_param or None}))
+            # GET /api/browser/sessions
+            if method == "GET" and path == "/api/browser/sessions":
+                try:
+                    r = subprocess.run([_BROWSER_USE_BIN, "sessions"],
+                                       capture_output=True, text=True, timeout=5)
+                    sessions = []
+                    for line in r.stdout.strip().splitlines():
+                        line = line.strip()
+                        if ":" in line:
+                            name, status = line.split(":", 1)
+                            sessions.append({"name": name.strip(), "status": status.strip()})
+                    return self._json({"sessions": sessions})
+                except Exception as e:
+                    return self._json({"error": str(e)}, 500)
 
             return self._json({"error": "browser route not found"}, 404)
 
@@ -23804,6 +25667,7 @@ p{{color:#888;margin:12px 0 28px;font-size:0.9rem;line-height:1.5}}
                 ok, msg = send_text(name, text)
                 if ok:
                     _update_meta(name, last_send=int(time.time()), last_send_text=text[:200])
+                    _session_prev_status[name] = "active"  # seed for idle detection
                     _summarize_task_bg(name, text)
                 # 409 = session exists but is not running (user-caused, not a server error)
                 code = 200 if ok else (409 if msg == "not running" else 500)
@@ -23909,6 +25773,8 @@ p{{color:#888;margin:12px 0 28px;font-size:0.9rem;line-height:1.5}}
                 return self._json({"ok": ok, "message": msg, "resumed": bool(meta.get("cc_conversation_id"))}, 200 if ok else 500)
             if action == "stop":
                 ok, msg = stop_session(name)
+                if ok:
+                    threading.Thread(target=_complete_session_board_issue, args=(name,), daemon=True).start()
                 return self._json({"ok": ok, "message": msg}, 200 if ok else 500)
             if action == "clear":
                 try:
@@ -24024,8 +25890,18 @@ p{{color:#888;margin:12px 0 28px;font-size:0.9rem;line-height:1.5}}
             if action == "delete":
                 if is_running(name):
                     stop_session(name)
-                # Clean up session branch if one was created
                 cfg_del = parse_env_file(env_file) if env_file.exists() else {}
+                # Clean up worktree if this session used one
+                if cfg_del.get("CC_WORKTREE") == "1":
+                    wt_repo = cfg_del.get("CC_WORKTREE_REPO", "")
+                    wt_dir = cfg_del.get("CC_DIR", "")
+                    if wt_repo and wt_dir:
+                        try:
+                            subprocess.run(
+                                ["git", "-C", wt_repo, "worktree", "remove", "--force", wt_dir],
+                                capture_output=True, text=True, timeout=15)
+                        except Exception:
+                            pass  # best-effort cleanup
                 # Branch is intentionally kept — user manages branches via git
                 env_file.unlink(missing_ok=True)
                 (CC_MEMORY / f"{name}.md").unlink(missing_ok=True)

@@ -22,7 +22,10 @@ struct WebView: UIViewRepresentable {
         webView.navigationDelegate = context.coordinator
         webView.uiDelegate = context.coordinator
         webView.allowsBackForwardNavigationGestures = true
+        webView.customUserAgent = (webView.value(forKey: "userAgent") as? String ?? "") + " AmuxApp"
         webView.scrollView.contentInsetAdjustmentBehavior = .automatic
+        webView.isOpaque = false
+        webView.backgroundColor = UIColor(red: 0.051, green: 0.067, blue: 0.09, alpha: 1) // #0d1117
 
         // Pull-to-refresh
         let refresh = UIRefreshControl()
@@ -115,6 +118,15 @@ struct WebView: UIViewRepresentable {
             session.prefersEphemeralWebBrowserSession = false
             authSession = session
             session.start()
+        }
+
+        // Handle window.open — navigate in same webview instead of dropping
+        func webView(_ webView: WKWebView, createWebViewWith configuration: WKWebViewConfiguration,
+                     for navigationAction: WKNavigationAction, windowFeatures: WKWindowFeatures) -> WKWebView? {
+            if let url = navigationAction.request.url {
+                webView.load(URLRequest(url: url))
+            }
+            return nil
         }
 
         func webView(_ webView: WKWebView, didStartProvisionalNavigation navigation: WKNavigation!) {

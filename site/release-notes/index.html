@@ -153,31 +153,7 @@
   line-height: 1.7;
   margin-bottom: 1rem;
 }
-.rn-video-wrap {
-  border-radius: 8px;
-  overflow: hidden;
-  border: 1px solid var(--border);
-  margin-top: 0.75rem;
-}
-.rn-video-wrap video {
-  width: 100%;
-  display: block;
-}
-.rn-video-placeholder {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  gap: 0.5rem;
-  padding: 2rem;
-  background: var(--surface);
-  border-radius: 8px;
-  color: var(--muted);
-  font-size: 0.85rem;
-  margin-top: 0.75rem;
-}
-.rn-video-placeholder svg {
-  opacity: 0.4;
-}
+
 @media (max-width: 640px) {
   .rn-commit { display: none; }
   .rn-entry-title { font-size: 1rem; }
@@ -210,7 +186,6 @@
   <div id="rn-list"><div class="rn-spinner">Loading&hellip;</div></div>
 </div>
 <script>
-var GH_RAW = 'https://raw.githubusercontent.com/mixpeek/amux/main/docs/release-notes/videos/';
 var GH_COMMIT = 'https://github.com/mixpeek/amux/commit/';
 
 function typeBadge(type) {
@@ -220,9 +195,7 @@ function typeBadge(type) {
 
 function renderEntry(n) {
   var tags = (n.tags || []).map(function(t) { return '<span class="rn-tag">' + t + '</span>'; }).join('');
-  var video = n.video
-    ? '<div class="rn-video-wrap"><video controls preload="none"><source src="' + GH_RAW + n.video + '" type="video/mp4"></video></div>'
-    : '<div class="rn-video-placeholder"><svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><polygon points="5 3 19 12 5 21 5 3"/></svg><span>Video coming soon</span></div>';
+  var video = '';
   return '<article class="rn-entry">' +
     '<div class="rn-entry-meta">' +
       '<span class="rn-date">' + (n.date || '') + '</span>' +

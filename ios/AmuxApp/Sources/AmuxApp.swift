@@ -6,13 +6,16 @@ struct AmuxApp: App {
 
     var body: some Scene {
         WindowGroup {
-            if serverManager.serverURL == nil {
-                ServerPickerView()
-                    .environmentObject(serverManager)
-            } else {
-                ContentView()
-                    .environmentObject(serverManager)
+            Group {
+                if serverManager.hasServer {
+                    ContentView()
+                        .environmentObject(serverManager)
+                } else {
+                    ServerPickerView()
+                        .environmentObject(serverManager)
+                }
             }
+            .preferredColorScheme(.dark)
         }
     }
 }

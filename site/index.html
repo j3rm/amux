@@ -599,6 +599,7 @@ html[data-theme="dark"] .cta-pill-primary:hover { opacity: 0.85; }
   border-radius: 10px; overflow: hidden; margin-top: 2.5rem; text-align: left;
 }
 @media (max-width: 640px) { .waitlist-features { grid-template-columns: 1fr; } }
+@media (max-width: 640px) { #white-label [style*="grid-template-columns"] { grid-template-columns: 1fr !important; } }
 .wf-item { background: var(--bg); padding: 1.2rem; }
 .wf-label { font-size: 0.65rem; color: var(--muted); letter-spacing: 0.06em; text-transform: uppercase; margin-bottom: 0.3rem; font-family: var(--sans); }
 .wf-val { font-size: 0.9rem; color: var(--text); font-weight: 600; font-family: var(--sans); }
@@ -734,35 +735,8 @@ html[data-theme="dark"] .cta-pill-primary:hover { opacity: 0.85; }
 .ios-modal-close:hover { color: var(--text); background: var(--border); }
 .ios-modal-icon { font-size: 2rem; margin-bottom: 0.6rem; }
 .ios-modal-title { font-size: 1.15rem; font-weight: 700; margin-bottom: 0.4rem; color: var(--text); }
-.ios-modal-sub { font-size: 0.88rem; color: var(--dim); margin-bottom: 1.4rem; line-height: 1.5; }
-.ios-pwa-steps {
-  background: var(--surface); border: 1px solid var(--border); border-radius: 10px;
-  padding: 1rem 1.1rem; margin-bottom: 1.5rem; display: flex; flex-direction: column; gap: 0.6rem;
-}
-.ios-pwa-step { display: flex; align-items: flex-start; gap: 0.7rem; font-size: 0.85rem; color: var(--dim); line-height: 1.45; }
-.ios-pwa-step-num {
-  flex-shrink: 0; width: 20px; height: 20px; border-radius: 50%;
-  background: var(--accent); color: #fff; font-size: 0.7rem; font-weight: 700;
-  display: flex; align-items: center; justify-content: center; margin-top: 1px;
-}
-.ios-pwa-step code { background: var(--border); border-radius: 4px; padding: 1px 5px; font-size: 0.82rem; color: var(--text); font-family: var(--mono); }
-.ios-notify-label { font-size: 0.78rem; font-weight: 600; color: var(--dim); text-transform: uppercase; letter-spacing: 0.05em; margin-bottom: 0.5rem; }
-.ios-notify-form { display: flex; gap: 8px; }
-.ios-notify-input {
-  flex: 1; padding: 9px 12px; border-radius: 8px; border: 1px solid var(--border);
-  background: var(--surface); color: var(--text); font-size: 0.88rem; font-family: var(--sans);
-}
-.ios-notify-input:focus { outline: none; border-color: var(--accent); }
-.ios-notify-btn {
-  padding: 9px 16px; border-radius: 8px; border: none; background: var(--accent);
-  color: #fff; font-size: 0.85rem; font-weight: 600; cursor: pointer; white-space: nowrap;
-}
-.ios-notify-btn:hover { opacity: 0.85; }
-.ios-notify-btn:disabled { opacity: 0.5; cursor: not-allowed; }
-.ios-notify-success { font-size: 0.85rem; color: var(--green); margin-top: 0.5rem; display: none; }
-.ios-notify-error { font-size: 0.82rem; color: var(--red); margin-top: 0.4rem; display: none; }
+.ios-modal-sub { font-size: 0.88rem; color: var(--dim); margin-bottom: 0.4rem; line-height: 1.5; }
 @media (max-width: 480px) {
-  .ios-notify-form { flex-direction: column; }
   .ios-modal { padding: 1.5rem; }
 }
 </style>
@@ -783,9 +757,13 @@ html[data-theme="dark"] .cta-pill-primary:hover { opacity: 0.85; }
       <svg width="15" height="15" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0016 8c0-4.42-3.58-8-8-8z"/></svg>
       <span class="nav-gh-stars" id="nav-star-count">GitHub</span>
     </a>
-    <a href="#" class="nav-cta-pill" onclick="openIosModal();return false;">
+    <a href="https://cloud.amux.io" class="nav-cta-pill">
+      <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M18 10h-1.26A8 8 0 1 0 9 20h9a5 5 0 0 0 0-10z"/></svg>
+      Cloud
+    </a>
+    <a href="https://apps.apple.com/us/app/amux-agent-multiplexer/id6760410435" class="nav-cta-pill" target="_blank" rel="noopener">
       <svg width="13" height="13" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M18.71 19.5c-.83 1.24-1.71 2.45-3.05 2.47-1.34.03-1.77-.79-3.29-.79-1.53 0-2 .77-3.27.82-1.31.05-2.3-1.32-3.14-2.53C4.25 17 2.94 12.45 4.7 9.39c.87-1.52 2.43-2.48 4.12-2.51 1.28-.02 2.5.87 3.29.87.78 0 2.26-1.07 3.8-.91.65.03 2.47.26 3.64 1.98-.09.06-2.17 1.28-2.15 3.81.03 3.02 2.65 4.03 2.68 4.04-.03.07-.42 1.44-1.38 2.83M13 3.5c.73-.83 1.94-1.46 2.94-1.5.13 1.17-.34 2.35-1.04 3.19-.69.85-1.83 1.51-2.95 1.42-.15-1.15.41-2.35 1.05-3.11z"/></svg>
-      Get iOS App
+      iOS App
     </a>
     <button class="theme-toggle" id="theme-toggle" aria-label="Toggle dark mode"><span class="icon-sun">&#9788;</span><span class="icon-moon">&#9790;</span></button>
   </div>
@@ -804,7 +782,7 @@ html[data-theme="dark"] .cta-pill-primary:hover { opacity: 0.85; }
       <svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0016 8c0-4.42-3.58-8-8-8z"/></svg>
       View on GitHub
     </a>
-    <a class="cta-pill" href="#" onclick="openIosModal();return false;">
+    <a class="cta-pill" href="https://apps.apple.com/us/app/amux-agent-multiplexer/id6760410435" target="_blank" rel="noopener">
       <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M18.71 19.5c-.83 1.24-1.71 2.45-3.05 2.47-1.34.03-1.77-.79-3.29-.79-1.53 0-2 .77-3.27.82-1.31.05-2.3-1.32-3.14-2.53C4.25 17 2.94 12.45 4.7 9.39c.87-1.52 2.43-2.48 4.12-2.51 1.28-.02 2.5.87 3.29.87.78 0 2.26-1.07 3.8-.91.65.03 2.47.26 3.64 1.98-.09.06-2.17 1.28-2.15 3.81.03 3.02 2.65 4.03 2.68 4.04-.03.07-.42 1.44-1.38 2.83M13 3.5c.73-.83 1.94-1.46 2.94-1.5.13 1.17-.34 2.35-1.04 3.19-.69.85-1.83 1.51-2.95 1.42-.15-1.15.41-2.35 1.05-3.11z"/></svg>
       Get iOS App
     </a>
@@ -909,6 +887,38 @@ html[data-theme="dark"] .cta-pill-primary:hover { opacity: 0.85; }
 
 <hr class="divider">
 
+<!-- WHITE-LABEL -->
+<div class="section reveal" id="white-label">
+  <div class="section-label" style="color:var(--green);">New</div>
+  <div class="section-title">White-label it. Make it yours.</div>
+  <div class="section-desc">Replace every trace of amux with your own brand &mdash; name, icon, logo, and accent color. One click, server-side, synced to every connected client.</div>
+  <div style="border:1px solid var(--border);border-radius:12px;overflow:hidden;margin-top:1.5rem;">
+    <div style="display:grid;grid-template-columns:1fr 1fr;gap:0;">
+      <div style="padding:1.5rem 1.8rem;border-right:1px solid var(--border);border-bottom:1px solid var(--border);">
+        <div style="font-weight:600;font-size:0.92rem;margin-bottom:0.4rem;">Custom name &amp; tagline</div>
+        <div style="color:var(--dim);font-size:0.84rem;line-height:1.5;">Replace &ldquo;amux&rdquo; everywhere &mdash; header, page title, PWA manifest, About panel. Your team sees your brand, not ours.</div>
+      </div>
+      <div style="padding:1.5rem 1.8rem;border-bottom:1px solid var(--border);">
+        <div style="font-weight:600;font-size:0.92rem;margin-bottom:0.4rem;">Icon &amp; logo upload</div>
+        <div style="color:var(--dim);font-size:0.84rem;line-height:1.5;">Upload a square icon (favicon, PWA, home screen) and a wide logo (About panel). Drag-and-drop or file picker. PNG, JPEG, SVG, WebP.</div>
+      </div>
+      <div style="padding:1.5rem 1.8rem;border-right:1px solid var(--border);">
+        <div style="font-weight:600;font-size:0.92rem;margin-bottom:0.4rem;">Accent color</div>
+        <div style="color:var(--dim);font-size:0.84rem;line-height:1.5;">Pick any color &mdash; buttons, tags, status indicators, and the entire UI theme update instantly across all tabs and devices.</div>
+      </div>
+      <div style="padding:1.5rem 1.8rem;">
+        <div style="font-weight:600;font-size:0.92rem;margin-bottom:0.4rem;">Server-side, synced everywhere</div>
+        <div style="color:var(--dim);font-size:0.84rem;line-height:1.5;">Branding is stored on the server and served to every client &mdash; desktop browser, mobile PWA, iOS app. Set it once, done.</div>
+      </div>
+    </div>
+  </div>
+  <div style="text-align:center;margin-top:1rem;">
+    <span style="font-family:var(--mono);font-size:0.78rem;color:var(--dim);">API: <code style="background:var(--surface);padding:2px 8px;border-radius:4px;border:1px solid var(--border);font-size:0.82em;">GET/POST/DELETE /api/branding</code></span>
+  </div>
+</div>
+
+<hr class="divider">
+
 <!-- FEATURES -->
 <div class="section reveal" id="features">
   <div class="section-label">How it works</div>
@@ -921,6 +931,7 @@ html[data-theme="dark"] .cta-pill-primary:hover { opacity: 0.85; }
     <div class="feat-item"><strong>Mobile PWA</strong> <span>&mdash; installable on iOS and Android. Background Sync replays queued commands on reconnect. Manage your fleet from your phone.</span></div>
     <div class="feat-item"><strong>Single Python file, zero build step</strong> <span>&mdash; server + full dashboard as inline HTML/CSS/JS. Edit it; it restarts via <code>os.execv</code> on save. Only deps: <code>python3</code> and <code>tmux</code>.</span></div>
     <div class="feat-item"><strong>Status without hooks or patches</strong> <span>&mdash; parses ANSI-stripped tmux output to detect working / waiting / idle. No modifications to Claude Code.</span></div>
+    <div class="feat-item"><strong>White-label branding</strong> <span>&mdash; replace the name, icon, logo, and accent color. Stored server-side, synced to every connected client. <a href="#white-label" style="color:var(--green);">See details &uarr;</a></span></div>
   </div>
 </div>
 
@@ -944,8 +955,9 @@ html[data-theme="dark"] .cta-pill-primary:hover { opacity: 0.85; }
     <tbody>
       <tr><td class="row-label">Parallel agents</td><td class="has">Unlimited, isolated</td><td class="no">One per terminal</td><td class="partial">Limited or manual</td></tr>
       <tr><td class="row-label">Self-healing</td><td class="has">Watchdog auto-compacts + replays</td><td class="no">Crashes on context overflow</td><td class="partial">Basic restart only</td></tr>
-      <tr><td class="row-label">Mobile management</td><td class="has">PWA with offline queue</td><td class="no">Terminal only</td><td class="no">Not available</td></tr>
+      <tr><td class="row-label">Mobile management</td><td class="has">Native iOS app + PWA</td><td class="no">Terminal only</td><td class="no">Not available</td></tr>
       <tr><td class="row-label">Agent coordination</td><td class="has">REST API + atomic task claiming</td><td class="no">None</td><td class="partial">Shared filesystem at best</td></tr>
+      <tr><td class="row-label">White-label</td><td class="has">Full branding: name, icon, logo, colors</td><td class="no">Not available</td><td class="no">Not available</td></tr>
       <tr><td class="row-label">Setup</td><td class="has">git clone + ./install.sh, 0 deps</td><td class="has">pip install</td><td class="partial">Docker, config, API keys</td></tr>
     </tbody>
   </table>
@@ -1124,23 +1136,26 @@ if (demoBtn) demoBtn.addEventListener('click', function() {
 function closeLightbox() { lb.classList.remove('open'); vid.pause(); }
 document.addEventListener('keydown', function(e) { if (e.key === 'Escape') closeLightbox(); });
 
-// Cloud waitlist
-document.getElementById('waitlist-email').addEventListener('keydown', function(e) {
-  if (e.key === 'Enter') submitWaitlist();
-});
+// Cloud waitlist (only if elements exist)
+var _wlEmail = document.getElementById('waitlist-email');
+if (_wlEmail) {
+  _wlEmail.addEventListener('keydown', function(e) {
+    if (e.key === 'Enter') submitWaitlist();
+  });
+}
 function submitWaitlist() {
   var emailEl = document.getElementById('waitlist-email');
   var btn = document.getElementById('waitlist-btn');
   var success = document.getElementById('waitlist-success');
   var error = document.getElementById('waitlist-error');
+  if (!emailEl || !btn) return;
   var email = emailEl.value.trim();
   if (!email || email.indexOf('@') === -1) {
-    error.textContent = 'Please enter a valid email address.';
-    error.style.display = 'block';
+    if (error) { error.textContent = 'Please enter a valid email address.'; error.style.display = 'block'; }
     return;
   }
   btn.disabled = true;
-  error.style.display = 'none';
+  if (error) error.style.display = 'none';
   fetch('https://formspree.io/f/xgolboon', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', 'Accept': 'application/json' },
@@ -1148,14 +1163,14 @@ function submitWaitlist() {
   }).then(function(r) { return r.json().then(function(d) { return { ok: r.ok, d: d }; }); })
     .then(function(res) {
       if (res.ok) {
-        document.getElementById('waitlist-form').style.display = 'none';
-        success.style.display = 'block';
+        var form = document.getElementById('waitlist-form');
+        if (form) form.style.display = 'none';
+        if (success) success.style.display = 'block';
       } else {
         throw new Error((res.d.errors || [{}])[0].message || 'Request failed');
       }
     }).catch(function(e) {
-      error.textContent = e.message || 'Something went wrong. Please try again.';
-      error.style.display = 'block';
+      if (error) { error.textContent = e.message || 'Something went wrong. Please try again.'; error.style.display = 'block'; }
       btn.disabled = false;
     });
 }
@@ -1192,40 +1207,7 @@ document.addEventListener('keydown', function(e) { if (e.key === 'Escape') close
 document.addEventListener('DOMContentLoaded', function() {
   var backdrop = document.getElementById('ios-modal-backdrop');
   if (backdrop) backdrop.addEventListener('click', function(e) { if (e.target === this) closeIosModal(); });
-  var notifyEmail = document.getElementById('ios-notify-email');
-  if (notifyEmail) notifyEmail.addEventListener('keydown', function(e) { if (e.key === 'Enter') submitIosNotify(); });
 });
-function submitIosNotify() {
-  var emailEl = document.getElementById('ios-notify-email');
-  var btn = document.getElementById('ios-notify-btn');
-  var success = document.getElementById('ios-notify-success');
-  var error = document.getElementById('ios-notify-error');
-  var email = emailEl.value.trim();
-  if (!email || email.indexOf('@') === -1) {
-    error.textContent = 'Please enter a valid email address.';
-    error.style.display = 'block';
-    return;
-  }
-  btn.disabled = true;
-  error.style.display = 'none';
-  fetch('https://formspree.io/f/xgolboon', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json', 'Accept': 'application/json' },
-    body: JSON.stringify({ email: email, type: 'ios-notify' })
-  }).then(function(r) { return r.json().then(function(d) { return { ok: r.ok, d: d }; }); })
-    .then(function(res) {
-      if (res.ok) {
-        document.getElementById('ios-notify-form').style.display = 'none';
-        success.style.display = 'block';
-      } else {
-        throw new Error((res.d.errors || [{}])[0].message || 'Request failed');
-      }
-    }).catch(function(e) {
-      error.textContent = e.message || 'Something went wrong. Please try again.';
-      error.style.display = 'block';
-      btn.disabled = false;
-    });
-}
 
 // Theme toggle
 document.getElementById('theme-toggle').addEventListener('click', function() {
@@ -1246,30 +1228,12 @@ document.getElementById('theme-toggle').addEventListener('click', function() {
     <button class="ios-modal-close" onclick="closeIosModal()" aria-label="Close">&times;</button>
     <div class="ios-modal-icon">📱</div>
     <div class="ios-modal-title" id="ios-modal-title">amux on your phone</div>
-    <div class="ios-modal-sub">Install the PWA now — native iOS app coming soon.</div>
-    <div class="ios-pwa-steps">
-      <div class="ios-pwa-step">
-        <div class="ios-pwa-step-num">1</div>
-        <div>Open <strong>amux dashboard</strong> in Safari on your iPhone at your server's address (e.g. <code>https://192.168.x.x:8822</code>)</div>
-      </div>
-      <div class="ios-pwa-step">
-        <div class="ios-pwa-step-num">2</div>
-        <div>Tap the <strong>Share</strong> button <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" style="display:inline;vertical-align:middle"><path d="M4 12v8a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-8"/><polyline points="16 6 12 2 8 6"/><line x1="12" y1="2" x2="12" y2="15"/></svg> at the bottom of Safari</div>
-      </div>
-      <div class="ios-pwa-step">
-        <div class="ios-pwa-step-num">3</div>
-        <div>Select <strong>"Add to Home Screen"</strong> and tap <strong>Add</strong></div>
-      </div>
-    </div>
-    <div class="ios-notify-label">Notify me when the native iOS app launches</div>
-    <div id="ios-notify-form">
-      <div class="ios-notify-form">
-        <input class="ios-notify-input" id="ios-notify-email" type="email" placeholder="you@example.com" autocomplete="email">
-        <button class="ios-notify-btn" id="ios-notify-btn" onclick="submitIosNotify()">Notify me</button>
-      </div>
-      <div class="ios-notify-error" id="ios-notify-error"></div>
-    </div>
-    <div class="ios-notify-success" id="ios-notify-success">Got it — we'll let you know when it's live.</div>
+    <div class="ios-modal-sub">Download the native iOS app from the App Store.</div>
+    <a href="https://apps.apple.com/us/app/amux-agent-multiplexer/id6760410435" target="_blank" rel="noopener" style="display:inline-flex;align-items:center;gap:8px;background:var(--text);color:var(--bg);padding:10px 20px;border-radius:8px;font-size:0.95rem;font-weight:600;text-decoration:none;margin:0.8rem 0 1.2rem;">
+      <svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M18.71 19.5c-.83 1.24-1.71 2.45-3.05 2.47-1.34.03-1.77-.79-3.29-.79-1.53 0-2 .77-3.27.82-1.31.05-2.3-1.32-3.14-2.53C4.25 17 2.94 12.45 4.7 9.39c.87-1.52 2.43-2.48 4.12-2.51 1.28-.02 2.5.87 3.29.87.78 0 2.26-1.07 3.8-.91.65.03 2.47.26 3.64 1.98-.09.06-2.17 1.28-2.15 3.81.03 3.02 2.65 4.03 2.68 4.04-.03.07-.42 1.44-1.38 2.83M13 3.5c.73-.83 1.94-1.46 2.94-1.5.13 1.17-.34 2.35-1.04 3.19-.69.85-1.83 1.51-2.95 1.42-.15-1.15.41-2.35 1.05-3.11z"/></svg>
+      Download on the App Store
+    </a>
+    <div style="font-size:0.78rem;color:var(--dim);">Or install as a PWA: open your amux dashboard in Safari, tap Share, then "Add to Home Screen".</div>
   </div>
 </div>
 </body>
