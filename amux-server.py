@@ -26094,6 +26094,96 @@ _AUTO_UPDATE_BRANCH = os.environ.get("AMUX_AUTO_UPDATE_BRANCH", "main")
 _AUTO_UPDATE_INTERVAL = int(os.environ.get("AMUX_AUTO_UPDATE_INTERVAL", "60"))  # seconds
 
 
+def _board_watcher():
+    """Nudge idle sessions that have unread todo board items assigned to them.
+
+    Runs every 30s. For each session with todo items:
+      - idle   → send a one-line nudge so it picks up the task
+      - active → skip, retry next cycle
+      - waiting / not running → skip
+    Tracks which (session, item_id) pairs have already been nudged to avoid
+    spamming the same task repeatedly until it is claimed or status changes.
+    """
+    try:
+        db = get_db()
+        rows = db.execute(
+            "SELECT id, title, session FROM issues "
+            "WHERE status='todo' AND session IS NOT NULL AND session != '' AND deleted IS NULL"
+        ).fetchall()
+        if not rows:
+            return
+
+        # Group by session
+        by_session: dict[str, list] = {}
+        for row in rows:
+            s = row["session"]
+            by_session.setdefault(s, []).append(dict(row))
+
+        # Capture current pane output once per session (cheap — tmux capture-pane)
+        for session_name, items in by_session.items():
+            if not is_running(session_name):
+                continue
+            try:
+                r = subprocess.run(
+                    ["tmux", "capture-pane", "-p", "-t", tmux_target(session_name)],
+                    capture_output=True, text=True, timeout=5,
+                )
+                raw = r.stdout if r.returncode == 0 else ""
+            except Exception:
+                continue
+
+            status = _detect_claude_status(raw)
+            if status != "idle":
+                continue  # busy or waiting — retry next cycle
+
+            # Find items not yet nudged
+            already_nudged: set = _board_watcher._nudged  # type: ignore[attr-defined]
+            pending = [i for i in items if (session_name, i["id"]) not in already_nudged]
+            if not pending:
+                continue
+
+            # Send a single nudge listing all pending tasks
+            task_lines = "\n".join(f"- [{i['id']}] {i['title']}" for i in pending)
+            nudge = (
+                f"You have {len(pending)} task(s) waiting on the board assigned to you:\n"
+                f"{task_lines}\n"
+                f"Check the board and claim the next task when you are ready:\n"
+                f"curl -sk $AMUX_URL/api/board | python3 -c \""
+                f"import json,sys,os; s=os.getenv('AMUX_SESSION',''); "
+                f"[print(i['id'],i['title']) for i in json.load(sys.stdin) "
+                f"if i.get('session')==s and i['status']=='todo']\""
+            )
+            ok, _ = send_text(session_name, nudge)
+            if ok:
+                for i in pending:
+                    already_nudged.add((session_name, i["id"]))
+                slog(f"[board_watcher] nudged {session_name} with {len(pending)} task(s)")
+
+    except Exception as e:
+        slog(f"[board_watcher] error: {e}")
+
+
+# Track nudged (session, item_id) pairs — cleared when item leaves todo status
+_board_watcher._nudged = set()  # type: ignore[attr-defined]
+
+
+def _board_watcher_clear_nudged():
+    """Remove completed/claimed items from the nudge-tracking set so re-assignments work."""
+    try:
+        db = get_db()
+        active_ids = {
+            row["id"] for row in db.execute(
+                "SELECT id FROM issues WHERE status='todo' AND deleted IS NULL"
+            ).fetchall()
+        }
+        _board_watcher._nudged = {  # type: ignore[attr-defined]
+            (s, iid) for s, iid in _board_watcher._nudged  # type: ignore[attr-defined]
+            if iid in active_ids
+        }
+    except Exception:
+        pass
+
+
 def _cleanup_tmp():
     """Prune stale Claude Code sandbox files from /private/tmp to prevent disk full."""
     tmp_dir = Path(f"/private/tmp/claude-{os.getuid()}")
@@ -26620,6 +26710,8 @@ def main():
     schedule_job(_snapshot_loop,         interval=60,                   name="snapshot",    initial_delay=0)
     schedule_job(_refresh_token_cache,   interval=120,                  name="token_cache", initial_delay=5)
     schedule_job(_email_sync_job,        interval=_EMAIL_SYNC_INTERVAL, name="email_sync",  initial_delay=20)
+    schedule_job(_board_watcher,         interval=30,                   name="board_watcher", initial_delay=30)
+    schedule_job(_board_watcher_clear_nudged, interval=60,             name="board_watcher_gc", initial_delay=60)
     schedule_job(_cleanup_tmp,           interval=1800,                 name="tmp_cleanup", initial_delay=60)
     schedule_job(_auto_archive_idle,     interval=3600,                 name="auto_archive", initial_delay=300)
     schedule_job(_cleanup_old_transcripts, interval=86400,              name="transcript_cleanup", initial_delay=600)
