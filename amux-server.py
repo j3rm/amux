@@ -134,7 +134,7 @@ AUTH_TOKEN = _load_or_create_auth_token()
 _PUBLIC_PATHS = frozenset({"/", "/manifest.json", "/sw.js", "/icon.svg", "/icon.png",
                            "/icon-192.png", "/icon-512.png", "/ca", "/release-notes",
                            "/api/release-notes"})
-_PUBLIC_PREFIXES = ("/s/", "/api/share/", "/invite/")
+_PUBLIC_PREFIXES = ("/s/", "/api/share/", "/invite/", "/proxy/")
 
 CC_LOGS.mkdir(parents=True, exist_ok=True)
 CC_MEMORY.mkdir(parents=True, exist_ok=True)
