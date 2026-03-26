@@ -3274,6 +3274,11 @@ def list_sessions() -> list:
                 status = _detect_claude_status(raw)
             # Detect session becoming idle → auto-complete board issue
             prev = _session_prev_status.get(name)
+            if status == "waiting" and prev in ("active", ""):
+                threading.Thread(target=_send_pushover, args=(
+                    f"amux — {name} needs input",
+                    "Session is waiting for your response.",
+                ), daemon=True).start()
             if status == "idle" and prev in ("active", "waiting"):
                 threading.Thread(target=_complete_session_board_issue, args=(name,), daemon=True).start()
             elif status == "idle" and prev == "idle" and not running:
