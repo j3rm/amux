@@ -24315,16 +24315,27 @@ class CCHandler(BaseHTTPRequestHandler):
                 fwd = {k: v for k, v in self.headers.items() if k.lower() not in skip}
                 req = _ureq.Request(proxy_url, data=body, method=method, headers=fwd)
                 resp = _ureq.urlopen(req, timeout=30)
+                ct = resp.headers.get("Content-Type", "")
+                resp_body = resp.read()
+                # Inject <base> tag in HTML so all relative/absolute URLs route through the proxy
+                if "text/html" in ct:
+                    prefix = f"/proxy/{proxy_port}/"
+                    text = resp_body.decode("utf-8", errors="replace")
+                    base_tag = f'<base href="{prefix}">'
+                    if "<head>" in text:
+                        text = text.replace("<head>", f"<head>{base_tag}", 1)
+                    elif "<HEAD>" in text:
+                        text = text.replace("<HEAD>", f"<HEAD>{base_tag}", 1)
+                    else:
+                        text = base_tag + text
+                    resp_body = text.encode("utf-8")
                 self.send_response(resp.status)
                 for k, v in resp.headers.items():
-                    if k.lower() not in ("transfer-encoding",):
+                    if k.lower() not in ("transfer-encoding", "content-length"):
                         self.send_header(k, v)
+                self.send_header("Content-Length", str(len(resp_body)))
                 self.end_headers()
-                while True:
-                    chunk = resp.read(8192)
-                    if not chunk:
-                        break
-                    self.wfile.write(chunk)
+                self.wfile.write(resp_body)
             except Exception as e:
                 return self._json({"error": f"port {proxy_port} not reachable: {e}"}, 502)
             return
