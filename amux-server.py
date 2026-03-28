@@ -8446,6 +8446,12 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
       </div>
     </div>
   </div>
+  <!-- Quick-access bookmarks -->
+  <div id="files-bookmarks" style="padding:4px 10px;border-bottom:1px solid var(--border);flex-shrink:0;background:var(--card);display:flex;gap:6px;overflow-x:auto;scrollbar-width:none;align-items:center;">
+    <span style="font-size:0.7rem;color:var(--dim);white-space:nowrap;flex-shrink:0;">Quick:</span>
+    <div id="files-bookmarks-list" style="display:flex;gap:5px;flex-wrap:nowrap;"></div>
+    <button onclick="_filesAddBookmark()" style="background:none;border:1px dashed var(--border);border-radius:4px;color:var(--dim);font-size:0.7rem;padding:2px 6px;cursor:pointer;white-space:nowrap;flex-shrink:0;" title="Bookmark current folder">+</button>
+  </div>
   <!-- Search -->
   <div style="padding:5px 10px;border-bottom:1px solid var(--border);flex-shrink:0;background:var(--card);">
     <input id="files-search" type="search" placeholder="Search in this folder…" autocomplete="off"
@@ -13901,6 +13907,60 @@ function _fileTypeIcon(name, type) {
 let _filesPath = '/';
 let _filesCwd = '/';   // saved working directory (persisted on server)
 let _filesShowHidden = false;
+
+// ── File bookmarks (quick-access folders) ──
+const _FILES_HOME = window._AMUX_HOME || '/root';
+const _FILES_DEFAULT_BOOKMARKS = [
+  { label: '.amux', path: _FILES_HOME + '/.amux' },
+  { label: 'Home', path: _FILES_HOME },
+  { label: 'Downloads', path: _FILES_HOME + '/Downloads' },
+];
+
+function _filesGetBookmarks() {
+  try {
+    const raw = localStorage.getItem('amux_files_bookmarks');
+    if (raw) return JSON.parse(raw);
+  } catch(e) {}
+  return _FILES_DEFAULT_BOOKMARKS.map(b => ({...b}));
+}
+
+function _filesSaveBookmarks(bm) {
+  localStorage.setItem('amux_files_bookmarks', JSON.stringify(bm));
+}
+
+function _filesRenderBookmarks() {
+  const container = document.getElementById('files-bookmarks-list');
+  if (!container) return;
+  const bm = _filesGetBookmarks();
+  container.innerHTML = bm.map((b, i) =>
+    '<button onclick="loadFiles(\'' + esc(b.path) + '\')" oncontextmenu="event.preventDefault();_filesRemoveBookmark(' + i + ')" '
+    + 'style="background:var(--surface);border:1px solid var(--border);border-radius:5px;padding:3px 9px;font-size:0.73rem;color:var(--text);cursor:pointer;white-space:nowrap;flex-shrink:0;" '
+    + 'title="' + esc(b.path) + ' (right-click to remove)">'
+    + esc(b.label) + '</button>'
+  ).join('');
+}
+
+function _filesAddBookmark() {
+  const path = _filesPath || '/';
+  const label = path.split('/').filter(Boolean).pop() || '/';
+  const bm = _filesGetBookmarks();
+  if (bm.find(b => b.path === path)) { showToast('Already bookmarked'); return; }
+  bm.push({ label, path });
+  _filesSaveBookmarks(bm);
+  _filesRenderBookmarks();
+  showToast('Bookmarked ' + label);
+}
+
+function _filesRemoveBookmark(idx) {
+  const bm = _filesGetBookmarks();
+  const removed = bm.splice(idx, 1);
+  _filesSaveBookmarks(bm);
+  _filesRenderBookmarks();
+  if (removed[0]) showToast('Removed ' + removed[0].label);
+}
+
+// Render bookmarks on load
+document.addEventListener('DOMContentLoaded', _filesRenderBookmarks);
 
 let _exploreSession = null;  // set when explore overlay is opened from a session
 // Load saved working dir from server prefs
@@ -24392,7 +24452,8 @@ class CCHandler(BaseHTTPRequestHandler):
             page = DASHBOARD_HTML.replace(
                 "</head>",
                 f'<script>window._AMUX_S3_ICAL_URL={_json.dumps(_S3_CAL_URL)};'
-                f'window._AMUX_AUTH_TOKEN={_json.dumps(AUTH_TOKEN)};</script></head>',
+                f'window._AMUX_AUTH_TOKEN={_json.dumps(AUTH_TOKEN)};'
+                f'window._AMUX_HOME={_json.dumps(str(Path.home()))};</script></head>',
                 1,
             )
             return self._html(page)
