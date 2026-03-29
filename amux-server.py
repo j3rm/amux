@@ -26071,14 +26071,35 @@ class CCHandler(BaseHTTPRequestHandler):
                 return self._json({"error": "file not found"}, 404)
             if not _sh.which("ffmpeg"):
                 return self._json({"error": "ffmpeg not installed"}, 500)
-            # Stream ffmpeg output directly — remux (copy streams) first, works for h264/h265+aac in mkv
-            # Use -movflags frag_keyframe+empty_moov for streaming fragmented MP4 (no seek needed)
+            # Probe video codec to decide: remux (copy) vs full transcode
+            vcodec = "unknown"
+            acodec = "unknown"
+            if _sh.which("ffprobe"):
+                try:
+                    probe = _sp.run(["ffprobe", "-v", "quiet", "-select_streams", "v:0",
+                                     "-show_entries", "stream=codec_name", "-of", "csv=p=0", str(p)],
+                                    capture_output=True, text=True, timeout=10)
+                    vcodec = probe.stdout.strip().split("\n")[0] if probe.stdout.strip() else "unknown"
+                    aprobe = _sp.run(["ffprobe", "-v", "quiet", "-select_streams", "a:0",
+                                      "-show_entries", "stream=codec_name", "-of", "csv=p=0", str(p)],
+                                     capture_output=True, text=True, timeout=10)
+                    acodec = aprobe.stdout.strip().split("\n")[0] if aprobe.stdout.strip() else "unknown"
+                except Exception:
+                    pass
+            # H.264/H.265 can be remuxed into MP4; others need full transcode
+            copy_safe = vcodec in ("h264", "hevc", "mpeg4")
+            audio_copy_safe = acodec in ("aac", "mp3", "ac3", "eac3")
             cmd = [
                 "ffmpeg", "-i", str(p), "-f", "mp4",
-                "-c:v", "copy", "-c:a", "aac",  # copy video, transcode audio to aac if needed
+                "-c:v", "copy" if copy_safe else "libx264",
+                "-c:a", "copy" if audio_copy_safe else "aac",
                 "-movflags", "frag_keyframe+empty_moov+default_base_moof",
-                "-loglevel", "error", "-y", "pipe:1"
             ]
+            if not copy_safe:
+                cmd += ["-preset", "fast", "-crf", "23"]
+            cmd += ["-loglevel", "error", "-y", "pipe:1"]
+            log.info("transcode %s: vcodec=%s acodec=%s → %s", p.name, vcodec, acodec,
+                     "remux" if copy_safe else "transcode")
             try:
                 proc = _sp.Popen(cmd, stdout=_sp.PIPE, stderr=_sp.PIPE)
                 self.send_response(200)
@@ -26090,7 +26111,6 @@ class CCHandler(BaseHTTPRequestHandler):
                     chunk = proc.stdout.read(65536)
                     if not chunk:
                         break
-                    # HTTP chunked encoding
                     self.wfile.write(f"{len(chunk):x}\r\n".encode())
                     self.wfile.write(chunk)
                     self.wfile.write(b"\r\n")
