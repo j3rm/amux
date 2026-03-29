@@ -3276,21 +3276,12 @@ def list_sessions() -> list:
             preview = strip_ansi(lines[-1][:120]) if lines else ""
             if running:
                 status = _detect_claude_status(raw)
-            # Detect session becoming idle → auto-complete board issue
             prev = _session_prev_status.get(name)
             if status == "waiting" and prev in ("active", ""):
                 threading.Thread(target=_send_pushover, args=(
                     f"amux — {name} needs input",
                     "Session is waiting for your response.",
                 ), daemon=True).start()
-            if status == "idle" and prev in ("active", "waiting"):
-                threading.Thread(target=_complete_session_board_issue, args=(name,), daemon=True).start()
-            elif status == "idle" and prev == "idle" and not running:
-                # Session stopped while idle — ensure board issue is completed
-                threading.Thread(target=_complete_session_board_issue, args=(name,), daemon=True).start()
-            elif status == "" and prev in ("active", "waiting", "idle"):
-                # Session went from running to not running
-                threading.Thread(target=_complete_session_board_issue, args=(name,), daemon=True).start()
             _session_prev_status[name] = status if running else ""
             # Filter for intelligible content lines
             intelligible = []
