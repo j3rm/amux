@@ -2294,12 +2294,16 @@ def _session_board_issue_id(session_name: str) -> str | None:
 
 
 def _complete_session_board_issue(session_name: str):
-    """Move a session's active board issue to done."""
+    """Move a session's in-progress board issue to done.
+
+    Only closes issues with status='doing' — issues the session explicitly
+    claimed. Never closes todo/backlog items that were merely assigned.
+    """
     try:
         db = get_db()
         row = db.execute(
             "SELECT id FROM issues WHERE session=? AND deleted IS NULL "
-            "AND status NOT IN ('done','discarded') ORDER BY created DESC LIMIT 1",
+            "AND status='doing' ORDER BY created DESC LIMIT 1",
             (session_name,)
         ).fetchone()
         if row:
