@@ -26,13 +26,11 @@ jobs:
         id: api
         run: |
           STATUS=$(curl -sk -o /dev/null -w "%{http_code}" --max-time 15 https://cloud.amux.io/api/cloud-health 2>/dev/null || echo "000")
-          BODY=$(curl -sk --max-time 15 https://cloud.amux.io/api/cloud-health 2>/dev/null || echo "{}")
           echo "status=$STATUS" >> "$GITHUB_OUTPUT"
-          echo "body=$BODY" >> "$GITHUB_OUTPUT"
           if [ "$STATUS" = "200" ]; then
-            echo "✅ API health OK: $BODY"
+            echo "✅ API health OK"
           else
-            echo "❌ API health failed (HTTP $STATUS): $BODY"
+            echo "❌ API health failed (HTTP $STATUS)"
           fi
 
       - name: Set up SSH (only if unhealthy)
