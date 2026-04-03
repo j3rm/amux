@@ -10708,6 +10708,7 @@ function render() {
           <div class="card-menu-item" onclick="event.stopPropagation();editField('${s.name}','desc','${esc(s.desc||"")}')"><span class="mi">&#x1F4DD;</span> Description</div>
           <div class="card-menu-item" onclick="event.stopPropagation();editField('${s.name}','tags','${esc(s.tags.join(", "))}')"><span class="mi">&#x1F3F7;</span> Tags</div>
           <div class="card-menu-item" onclick="event.stopPropagation();editField('${s.name}','dir','${esc(s.dir)}')"><span class="mi">&#x1F4C1;</span> Directory</div>
+          ${s.running ? `<div class="card-menu-item" onclick="event.stopPropagation();closeAllMenus();doStop('${s.name}')"><span class="mi">&#x25A0;</span> Stop session</div>` : ''}
           ${s.running ? `<div class="card-menu-item" onclick="event.stopPropagation();clearScrollback('${s.name}')"><span class="mi">&#x239A;</span> Clear scrollback</div>` : ''}
           <div class="card-menu-item" onclick="event.stopPropagation();duplicateSession('${s.name}')"><span class="mi">&#x2398;</span> Duplicate</div>
           ${s.running ? `<div class="card-menu-item" onclick="event.stopPropagation();cloneSession('${s.name}')"><span class="mi">&#x1F504;</span> Clone &amp; continue</div>` : ''}
