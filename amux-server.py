@@ -5928,106 +5928,36 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
   .explore-menu-item:active, .explore-menu-item:hover { background: var(--hover); }
 
   /* Connect session list */
-  /* Calendar — toolbar */
-  .cal-toolbar { display: flex; align-items: center; gap: 8px; padding: 10px 16px; border-bottom: 1px solid var(--border); flex-wrap: wrap; position: sticky; top: 0; z-index: 10; background: var(--bg); }
-  .cal-toolbar-left { display: flex; align-items: center; gap: 6px; flex: 1; min-width: 0; }
-  .cal-toolbar-right { display: flex; align-items: center; gap: 8px; flex-shrink: 0; }
-  .cal-nav-btn { display: flex; align-items: center; justify-content: center; width: 32px; height: 32px; border-radius: 50%; border: 1px solid var(--border); background: none; color: var(--text); cursor: pointer; -webkit-tap-highlight-color: transparent; transition: background 0.15s; }
-  .cal-nav-btn:hover { background: var(--hover); }
-  .cal-nav-btn:active { background: var(--border); }
-  .cal-today-btn { padding: 5px 14px; border-radius: 6px; border: 1px solid var(--border); background: none; color: var(--text); font-size: 0.82rem; font-weight: 500; cursor: pointer; font-family: inherit; -webkit-tap-highlight-color: transparent; transition: background 0.15s; }
-  .cal-today-btn:hover { background: var(--hover); }
-  .cal-title { font-weight: 600; font-size: 1rem; color: var(--text); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; margin-left: 4px; }
-  .cal-view-switcher { display: flex; border: 1px solid var(--border); border-radius: 8px; overflow: hidden; }
-  .cal-view-btn { padding: 5px 14px; border: none; background: none; color: var(--dim); font-size: 0.8rem; font-weight: 500; cursor: pointer; font-family: inherit; -webkit-tap-highlight-color: transparent; transition: all 0.15s; border-right: 1px solid var(--border); }
-  .cal-view-btn:last-child { border-right: none; }
-  .cal-view-btn:hover { background: var(--hover); }
-  .cal-view-btn.active { background: var(--accent); color: #fff; }
-  .cal-sub-btn { display: flex; align-items: center; justify-content: center; width: 32px; height: 32px; border-radius: 50%; border: 1px solid var(--border); background: none; color: var(--dim); cursor: pointer; -webkit-tap-highlight-color: transparent; transition: all 0.15s; }
-  .cal-sub-btn:hover { background: var(--hover); color: var(--accent); }
-  /* Calendar — month grid */
-  .cal-grid { display: grid; grid-template-columns: repeat(7, 1fr); border-top: 1px solid var(--border); border-left: 1px solid var(--border); }
-  .cal-day-header { text-align: center; font-size: 0.7rem; color: var(--dim); padding: 8px 2px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.04em; border-right: 1px solid var(--border); border-bottom: 1px solid var(--border); background: var(--bg); }
-  .cal-cell { min-height: 90px; padding: 4px 5px; position: relative; cursor: pointer; -webkit-tap-highlight-color: transparent; border-right: 1px solid var(--border); border-bottom: 1px solid var(--border); transition: background 0.1s; }
-  .cal-cell:hover { background: var(--hover); }
-  .cal-cell:active { background: var(--border); }
-  .cal-cell.other-month { opacity: 0.4; }
-  .cal-cell-num { font-size: 0.78rem; color: var(--dim); margin-bottom: 4px; width: 24px; height: 24px; display: flex; align-items: center; justify-content: center; border-radius: 50%; font-weight: 500; }
-  .cal-cell.today .cal-cell-num { background: var(--accent); color: #fff; font-weight: 700; }
-  .cal-chip { font-size: 0.7rem; line-height: 1.35; padding: 2px 6px; border-radius: 4px; margin-bottom: 2px; cursor: pointer; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 100%; display: block; font-weight: 500; border-left: 3px solid transparent; }
-  .cal-chip:hover { filter: brightness(1.15); }
-  .cal-chip:active { opacity: 0.7; }
-  .cal-chip.sched-chip { background: rgba(163,113,247,0.15); color: #c084fc; border-left-color: #a855f7; }
-  .cal-more { font-size: 0.68rem; color: var(--dim); padding: 2px 6px; cursor: pointer; }
-  .cal-more:hover { color: var(--accent); }
-  .cal-dots { display: none; gap: 3px; flex-wrap: wrap; padding: 3px 1px 0; justify-content: center; }
-  .cal-dot { width: 6px; height: 6px; border-radius: 50%; flex-shrink: 0; }
-  /* Calendar — week grid */
-  .cal-week-grid { display: grid; grid-template-columns: repeat(7,1fr); border-top: 1px solid var(--border); border-left: 1px solid var(--border); }
-  .cal-week-header { text-align: center; font-size: 0.7rem; color: var(--dim); padding: 8px 2px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.04em; border-right: 1px solid var(--border); border-bottom: 1px solid var(--border); background: var(--bg); }
-  .cal-week-cell { min-height: 200px; padding: 8px 6px; cursor: pointer; -webkit-tap-highlight-color: transparent; border-right: 1px solid var(--border); border-bottom: 1px solid var(--border); transition: background 0.1s; }
-  .cal-week-cell:hover { background: var(--hover); }
-  .cal-week-cell:active { background: var(--border); }
-  .cal-week-cell.today { background: rgba(56,139,253,0.04); }
-  .cal-week-cell.today .cal-week-num { background: var(--accent); color: #fff; border-radius: 50%; width: 26px; height: 26px; display: inline-flex; align-items: center; justify-content: center; font-weight: 700; }
-  .cal-week-num { font-size: 0.82rem; color: var(--dim); margin-bottom: 6px; font-weight: 500; }
-  .cal-week-chip { font-size: 0.72rem; line-height: 1.35; padding: 3px 6px; border-radius: 4px; margin-bottom: 3px; cursor: pointer; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; display: block; font-weight: 500; border-left: 3px solid transparent; }
-  .cal-week-chip:hover { filter: brightness(1.15); }
-  .cal-week-chip:active { opacity: 0.7; }
-  .cal-week-chip.sched-chip { border-left-color: #a855f7; }
-  .cal-week-more { font-size: 0.68rem; color: var(--dim); padding: 2px 6px; cursor: pointer; }
-  .cal-week-more:hover { color: var(--accent); }
-  .cal-week-dot { display: none; width: 6px; height: 6px; border-radius: 50%; margin: 2px 1px; }
-  /* Calendar — day view */
-  .cal-day-view { padding: 0; }
-  .cal-day-agenda { display: flex; flex-direction: column; }
-  .cal-day-hour { display: flex; min-height: 48px; border-bottom: 1px solid var(--border); }
-  .cal-day-hour-label { width: 56px; flex-shrink: 0; font-size: 0.72rem; color: var(--dim); padding: 6px 8px 0 0; text-align: right; font-weight: 500; }
-  .cal-day-hour-content { flex: 1; border-left: 1px solid var(--border); padding: 4px 8px; min-height: 48px; cursor: pointer; transition: background 0.1s; }
-  .cal-day-hour-content:hover { background: var(--hover); }
-  .cal-day-issue { background: var(--card); border: 1px solid var(--border); border-radius: 8px; padding: 10px 12px; margin-bottom: 6px; cursor: pointer; -webkit-tap-highlight-color: transparent; display: flex; align-items: flex-start; gap: 10px; border-left: 4px solid var(--accent); transition: border-color 0.15s, box-shadow 0.15s; }
-  .cal-day-issue:hover { box-shadow: 0 2px 8px rgba(0,0,0,0.12); }
-  .cal-day-issue:active { border-color: var(--accent); }
-  .cal-day-issue-text { flex: 1; min-width: 0; }
-  .cal-day-issue-title { font-size: 0.88rem; font-weight: 500; }
-  .cal-day-issue-desc { font-size: 0.78rem; color: var(--dim); margin-top: 3px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-  .cal-day-issue-time { font-size: 0.72rem; color: var(--dim); margin-top: 2px; }
-  .cal-day-empty { color: var(--dim); font-size: 0.88rem; text-align: center; padding: 48px 0; }
-  .cal-day-add { display: block; width: 100%; text-align: center; padding: 12px; border: 1px dashed var(--border); background: none; color: var(--dim); font-size: 0.82rem; cursor: pointer; -webkit-tap-highlight-color: transparent; border-radius: 0; }
-  .cal-day-add:hover { background: var(--hover); color: var(--accent); }
-  .cal-day-add:active { background: var(--border); }
-  .cal-day-hour-now { background: rgba(56,139,253,0.04); }
-  .cal-day-hour-now .cal-day-hour-label { color: var(--accent); font-weight: 700; }
-  .cal-day-hour-now .cal-day-hour-content { border-left-color: var(--accent); }
-  /* Calendar — mobile */
+  /* FullCalendar theme overrides */
+  #fc-container { --fc-border-color: var(--border); --fc-button-bg-color: transparent; --fc-button-border-color: var(--border); --fc-button-text-color: var(--text); --fc-button-hover-bg-color: var(--hover); --fc-button-hover-border-color: var(--border); --fc-button-active-bg-color: var(--accent); --fc-button-active-border-color: var(--accent); --fc-today-bg-color: rgba(56,139,253,0.06); --fc-event-border-color: transparent; --fc-page-bg-color: var(--bg); --fc-neutral-bg-color: var(--bg); --fc-list-event-hover-bg-color: var(--hover); --fc-now-indicator-color: var(--accent); --fc-non-business-color: transparent; }
+  #fc-container .fc { font-family: inherit; font-size: 0.85rem; }
+  #fc-container .fc .fc-toolbar { padding: 8px 4px; gap: 8px; flex-wrap: wrap; }
+  #fc-container .fc .fc-toolbar-title { font-size: 1.05rem; font-weight: 600; }
+  #fc-container .fc .fc-button { font-size: 0.8rem; padding: 5px 12px; border-radius: 6px; font-weight: 500; font-family: inherit; text-transform: none; }
+  #fc-container .fc .fc-button:focus { box-shadow: none; }
+  #fc-container .fc .fc-button-group > .fc-button { border-radius: 0; }
+  #fc-container .fc .fc-button-group > .fc-button:first-child { border-radius: 6px 0 0 6px; }
+  #fc-container .fc .fc-button-group > .fc-button:last-child { border-radius: 0 6px 6px 0; }
+  #fc-container .fc .fc-button-active { background: var(--accent) !important; border-color: var(--accent) !important; color: #fff !important; }
+  #fc-container .fc .fc-col-header-cell { font-size: 0.72rem; font-weight: 600; text-transform: uppercase; letter-spacing: 0.03em; padding: 8px 0; }
+  #fc-container .fc .fc-daygrid-day-number { font-size: 0.8rem; padding: 4px 6px; color: var(--dim); }
+  #fc-container .fc .fc-daygrid-day.fc-day-today .fc-daygrid-day-number { background: var(--accent); color: #fff; border-radius: 50%; width: 26px; height: 26px; display: inline-flex; align-items: center; justify-content: center; font-weight: 700; }
+  #fc-container .fc .fc-event { cursor: pointer; border-radius: 4px; font-size: 0.75rem; padding: 1px 4px; border-left-width: 3px; }
+  #fc-container .fc .fc-timegrid-slot { height: 2.5em; }
+  #fc-container .fc .fc-timegrid-slot-label { font-size: 0.72rem; color: var(--dim); }
+  #fc-container .fc .fc-scrollgrid { border: none; }
+  #fc-container .fc .fc-scrollgrid td { border-color: var(--border); }
+  #fc-container .fc .fc-daygrid-day-frame { min-height: 80px; }
+  #fc-container .fc-subscribe-button { font-size: 0.78rem !important; padding: 4px 10px !important; }
   @media (max-width: 600px) {
-    .cal-toolbar { padding: 8px 10px; gap: 4px; }
-    .cal-toolbar-left { gap: 3px; min-width: 0; flex: 0 1 auto; }
-    .cal-toolbar-right { gap: 4px; }
-    .cal-title { font-size: 0.85rem; margin-left: 2px; }
-    .cal-nav-btn { width: 28px; height: 28px; }
-    .cal-today-btn { padding: 4px 8px; font-size: 0.75rem; }
-    .cal-view-btn { padding: 4px 9px; font-size: 0.72rem; }
-    .cal-sub-btn { width: 28px; height: 28px; }
-    .cal-cell { min-height: unset; aspect-ratio: 1; padding: 3px; overflow: hidden; }
-    .cal-cell-num { font-size: 0.72rem; width: 20px; height: 20px; margin-bottom: 1px; }
-    .cal-chip { display: none; }
-    .cal-more { display: none; }
-    .cal-dots { display: flex; }
-    .cal-week-grid { grid-template-columns: repeat(7, minmax(0, 1fr)); }
-    .cal-week-cell { min-height: 90px; padding: 4px 3px; }
-    .cal-week-chip { font-size: 0.62rem; padding: 1px 3px; border-left-width: 2px; margin-bottom: 1px; }
-    .cal-week-header { font-size: 0.62rem; padding: 6px 1px; letter-spacing: 0; }
-    .cal-week-num { font-size: 0.72rem; margin-bottom: 3px; }
-    .cal-day-header { font-size: 0.62rem; padding: 6px 1px; }
-    .cal-day-hour-label { width: 42px; font-size: 0.68rem; padding: 4px 4px 0 0; }
-    .cal-day-hour { min-height: 42px; }
-    .cal-day-issue { padding: 8px 10px; }
-    .cal-day-issue-title { font-size: 0.84rem; }
-  }
-  @media (max-width: 380px) {
-    .cal-today-btn { display: none; }
-    .cal-view-btn { padding: 3px 7px; font-size: 0.7rem; }
+    #fc-container .fc .fc-toolbar { flex-direction: column; align-items: stretch; padding: 6px 2px; gap: 4px; }
+    #fc-container .fc .fc-toolbar-chunk { display: flex; justify-content: center; }
+    #fc-container .fc .fc-toolbar-title { font-size: 0.92rem; }
+    #fc-container .fc .fc-button { font-size: 0.75rem; padding: 4px 8px; }
+    #fc-container .fc .fc-daygrid-day-frame { min-height: 50px; }
+    #fc-container .fc .fc-daygrid-day-number { font-size: 0.72rem; padding: 2px 4px; }
+    #fc-container .fc .fc-event { font-size: 0.68rem; padding: 0 2px; }
+    #fc-container .fc .fc-col-header-cell { font-size: 0.65rem; padding: 6px 0; }
   }
   /* Board collapse */
   .board-col-collapse { background: none; border: none; cursor: pointer; color: var(--dim);
@@ -8493,24 +8423,8 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
   <div class="board-columns" id="board-columns"></div>
 </div>
 <!-- Calendar view -->
-<div id="calendar-view" style="display:none;flex-direction:column;flex:1;min-height:0;">
-  <div class="cal-toolbar">
-    <div class="cal-toolbar-left">
-      <button class="cal-nav-btn" onclick="calPrev()" title="Previous"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="15 18 9 12 15 6"/></svg></button>
-      <button class="cal-today-btn" onclick="calToday()">Today</button>
-      <button class="cal-nav-btn" onclick="calNext()" title="Next"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="9 18 15 12 9 6"/></svg></button>
-      <span id="cal-title" class="cal-title"></span>
-    </div>
-    <div class="cal-toolbar-right">
-      <div class="cal-view-switcher">
-        <button id="cal-tab-month" class="cal-view-btn" onclick="calSetView('month')">Month</button>
-        <button id="cal-tab-week" class="cal-view-btn" onclick="calSetView('week')">Week</button>
-        <button id="cal-tab-day" class="cal-view-btn" onclick="calSetView('day')">Day</button>
-      </div>
-      <button class="cal-sub-btn" onclick="showIcalInfo()" title="Subscribe to calendar"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"/><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"/></svg></button>
-    </div>
-  </div>
-  <div id="cal-body" style="flex:1;overflow-y:auto;"></div>
+<div id="calendar-view" style="display:none;">
+  <div id="fc-container" style="padding:4px 8px;"></div>
 </div>
 <!-- Scheduler view -->
 <div id="scheduler-view" style="display:none;">
@@ -16308,7 +16222,7 @@ function switchView(view) {
     const te = document.getElementById('tab-' + _svNames[i]);
     if (te) te.classList.toggle('active', view === _svNames[i]);
   }
-  if (view === 'calendar') { fetchBoard().then(() => renderCalendar()); }
+  if (view === 'calendar') { fetchBoard().then(() => { _fcInit(); }); }
   if (view === 'torrents') _torrentLoad();
   if (view === 'terminal') _termInit();
   if (view === 'graph') _graphInit();
@@ -18357,46 +18271,118 @@ async function deleteBoardStatus(id) {
 }
 
 
-// ═══════ CALENDAR ═══════
-let calYear = new Date().getFullYear();
-let calMonth = new Date().getMonth(); // 0-indexed
-let calDay = new Date().getDate();
-let calViewMode = localStorage.getItem('amux_cal_view') || 'week'; // 'month' | 'week' | 'day'
+// ═══════ CALENDAR (FullCalendar) ═══════
+let _fcInstance = null;
 
-function _calNavigate(delta) {
-  let d;
-  if (calViewMode === 'day') {
-    d = new Date(calYear, calMonth, calDay + delta);
-  } else if (calViewMode === 'week') {
-    d = new Date(calYear, calMonth, calDay + delta * 7);
-  } else {
-    calMonth += delta;
-    if (calMonth < 0) { calMonth = 11; calYear--; }
-    else if (calMonth > 11) { calMonth = 0; calYear++; }
-    renderCalendar(); return;
-  }
-  calYear = d.getFullYear(); calMonth = d.getMonth(); calDay = d.getDate();
-  renderCalendar();
-}
-function calPrev() { _calNavigate(-1); }
-function calNext() { _calNavigate(1); }
-function calToday() {
-  const n = new Date();
-  calYear = n.getFullYear(); calMonth = n.getMonth(); calDay = n.getDate();
-  renderCalendar();
-}
-function calSetView(mode) {
-  calViewMode = mode;
-  localStorage.setItem('amux_cal_view', mode);
-  ['month','week','day'].forEach(m => {
-    const el = document.getElementById('cal-tab-' + m);
-    if (el) el.classList.toggle('active', m === mode);
+function _fcGetEvents() {
+  const events = [];
+  (boardItems || []).forEach(item => {
+    if (!item.due || item.deleted) return;
+    const sty = statusStyle(item.status || 'todo');
+    const ev = {
+      id: item.id,
+      title: item.title,
+      start: item.due_time ? item.due + 'T' + item.due_time : item.due,
+      allDay: !item.due_time,
+      backgroundColor: sty.bg,
+      borderColor: sty.color,
+      textColor: sty.color,
+      extendedProps: { _type: 'board', status: item.status || 'todo', desc: item.desc || '' },
+    };
+    events.push(ev);
   });
-  renderCalendar();
+  (schedules || []).forEach(s => {
+    if (s.deleted || !s.enabled || !s.next_run) return;
+    events.push({
+      id: 'sched-' + s.id,
+      title: s.title,
+      start: s.next_run,
+      allDay: !s.next_run.includes('T'),
+      backgroundColor: 'rgba(163,113,247,0.15)',
+      borderColor: '#a855f7',
+      textColor: '#c084fc',
+      extendedProps: { _type: 'schedule', schedId: s.id },
+    });
+  });
+  return events;
 }
-function calSelectDay(y, m, d) {
-  calYear = y; calMonth = m; calDay = d;
-  calSetView('day');
+
+function _fcInit() {
+  const el = document.getElementById('fc-container');
+  if (!el || !window.FullCalendar) return;
+  if (_fcInstance) { _fcInstance.destroy(); _fcInstance = null; }
+  // Map old view names to FullCalendar view names
+  let savedView = localStorage.getItem('amux_cal_view') || 'dayGridMonth';
+  const _viewMap = { month: 'dayGridMonth', week: 'timeGridWeek', day: 'timeGridDay' };
+  if (_viewMap[savedView]) savedView = _viewMap[savedView];
+  if (!['dayGridMonth','timeGridWeek','timeGridDay'].includes(savedView)) savedView = 'dayGridMonth';
+  const isDark = document.documentElement.getAttribute('data-theme') === 'dark' || (!document.body.classList.contains('light'));
+  _fcInstance = new FullCalendar.Calendar(el, {
+    initialView: savedView,
+    headerToolbar: {
+      left: 'prev,today,next',
+      center: 'title',
+      right: 'dayGridMonth,timeGridWeek,timeGridDay subscribe',
+    },
+    customButtons: {
+      subscribe: {
+        text: 'Subscribe',
+        click: showIcalInfo,
+      },
+    },
+    events: function(info, successCallback) { successCallback(_fcGetEvents()); },
+    height: window.innerHeight - el.getBoundingClientRect().top - 16,
+    nowIndicator: true,
+    navLinks: true,
+    editable: false,
+    selectable: true,
+    selectMirror: true,
+    dayMaxEvents: true,
+    weekNumbers: false,
+    firstDay: 0,
+    slotMinTime: '06:00:00',
+    slotMaxTime: '22:00:00',
+    expandRows: true,
+    stickyHeaderDates: true,
+    eventClick: function(info) {
+      const props = info.event.extendedProps;
+      if (props._type === 'schedule') {
+        openSchedModal(props.schedId);
+      } else {
+        openBoardDetail(info.event.id);
+      }
+    },
+    dateClick: function(info) {
+      openBoardAdd(info.dateStr);
+    },
+    select: function(info) {
+      openBoardAdd(info.startStr.slice(0, 10));
+    },
+    viewDidMount: function(info) {
+      localStorage.setItem('amux_cal_view', info.view.type);
+    },
+    eventDidMount: function(info) {
+      // Tooltip with description
+      const desc = info.event.extendedProps.desc;
+      if (desc) info.el.title = desc;
+    },
+  });
+  _fcInstance.render();
+  // updateSize after layout settles (container was display:none → flex)
+  setTimeout(() => { if (_fcInstance) _fcInstance.updateSize(); }, 50);
+  // Resize handler
+  if (!window._fcResizeHandler) {
+    window._fcResizeHandler = () => { if (_fcInstance && activeView === 'calendar') { const c = document.getElementById('fc-container'); if (c) _fcInstance.setOption('height', window.innerHeight - c.getBoundingClientRect().top - 16); } };
+    window.addEventListener('resize', window._fcResizeHandler);
+  }
+}
+
+function renderCalendar() {
+  if (_fcInstance) {
+    _fcInstance.refetchEvents();
+  } else {
+    _fcInit();
+  }
 }
 
 function showIcalInfo() {
@@ -18404,291 +18390,34 @@ function showIcalInfo() {
   const origin = window.location.origin;
   const localUrl = origin + '/api/calendar.ics';
   const isLocal = origin.includes('localhost') || origin.includes('127.0.0.1');
-  // Prefer S3 URL for subscriptions (publicly reachable); fall back to local
   const subUrl = s3Url || localUrl;
-  const googleUrl = 'https://calendar.google.com/calendar/r/settings/addbyurl?' +
-    'url=' + encodeURIComponent(subUrl);
-  const appleUrl = s3Url ? ('webcal://' + s3Url.replace(/^https?:\/\//, '')) :
-    ('webcal://' + window.location.host + '/api/calendar.ics');
-
-  function ical_url_esc(s) { return s.replace(/&/g,'&amp;').replace(/</g,'&lt;'); }
-
+  const googleUrl = 'https://calendar.google.com/calendar/r/settings/addbyurl?url=' + encodeURIComponent(subUrl);
+  const appleUrl = s3Url ? ('webcal://' + s3Url.replace(/^https?:\/\//, '')) : ('webcal://' + window.location.host + '/api/calendar.ics');
+  function esc_url(s) { return s.replace(/&/g,'&amp;').replace(/</g,'&lt;'); }
   let html = '<div style="font-size:0.9rem;line-height:1.7;">';
   html += '<p style="margin-bottom:0.8rem;font-weight:600;">Subscribe to amux calendar</p>';
-
   if (s3Url) {
     html += '<p style="margin-bottom:0.6rem;font-size:0.82rem;">Subscription URL (public S3):</p>';
-    html += '<code style="display:block;background:var(--card-bg);padding:0.5rem 0.8rem;border-radius:6px;font-size:0.78rem;margin-bottom:1rem;word-break:break-all;">' + ical_url_esc(s3Url) + '</code>';
-    html += '<div style="display:flex;gap:0.5rem;flex-wrap:wrap;">';
-    html += '<a href="' + googleUrl + '" target="_blank" class="btn" style="font-size:0.8rem;">Add to Google Calendar</a>';
-    html += '<a href="' + appleUrl + '" class="btn" style="font-size:0.8rem;">Add to Apple Calendar</a>';
-    html += '</div>';
+    html += '<code style="display:block;background:var(--card-bg);padding:0.5rem 0.8rem;border-radius:6px;font-size:0.78rem;margin-bottom:1rem;word-break:break-all;">' + esc_url(s3Url) + '</code>';
   } else if (isLocal) {
-    html += '<p style="margin-bottom:0.8rem;color:var(--muted);font-size:0.82rem;">⚠️ You\'re on localhost — Google and Apple Calendar can\'t reach this URL directly.</p>';
-    html += '<p style="margin-bottom:0.8rem;font-size:0.82rem;">Set <code>AMUX_S3_BUCKET</code> to enable a publicly reachable subscription URL via S3.</p>';
+    html += '<p style="margin-bottom:0.8rem;color:var(--muted);font-size:0.82rem;">Set <code>AMUX_S3_BUCKET</code> for a publicly reachable subscription URL.</p>';
   } else {
-    html += '<p style="margin-bottom:0.6rem;font-size:0.82rem;">Feed URL:</p>';
-    html += '<code style="display:block;background:var(--card-bg);padding:0.5rem 0.8rem;border-radius:6px;font-size:0.78rem;margin-bottom:1rem;word-break:break-all;">' + ical_url_esc(localUrl) + '</code>';
-    html += '<div style="display:flex;gap:0.5rem;flex-wrap:wrap;">';
-    html += '<a href="' + googleUrl + '" target="_blank" class="btn" style="font-size:0.8rem;">Add to Google Calendar</a>';
-    html += '<a href="' + appleUrl + '" class="btn" style="font-size:0.8rem;">Add to Apple Calendar</a>';
-    html += '</div>';
+    html += '<code style="display:block;background:var(--card-bg);padding:0.5rem 0.8rem;border-radius:6px;font-size:0.78rem;margin-bottom:1rem;word-break:break-all;">' + esc_url(localUrl) + '</code>';
   }
-
-  // Always offer direct download
-  html += '<hr style="margin:0.9rem 0;border:none;border-top:1px solid var(--border);">';
-  html += '<a href="/api/calendar.ics" download="amux.ics" class="btn" style="font-size:0.8rem;">&#x2193; Download .ics file</a>';
-  html += '</div>';
-
-  // Reuse the board-edit overlay for a simple modal
-  const overlay = document.getElementById('board-edit-overlay');
-  const inner = overlay.querySelector('.board-edit-inner') || overlay;
-  // Create a temporary modal instead
+  html += '<div style="display:flex;gap:0.5rem;flex-wrap:wrap;margin-bottom:0.8rem;">';
+  html += '<a href="' + googleUrl + '" target="_blank" class="btn" style="font-size:0.8rem;">Add to Google Calendar</a>';
+  html += '<a href="' + appleUrl + '" class="btn" style="font-size:0.8rem;">Add to Apple Calendar</a>';
+  html += '<a href="/api/calendar.ics" download="amux.ics" class="btn" style="font-size:0.8rem;">Download .ics</a>';
+  html += '</div></div>';
   const modal = document.createElement('div');
   modal.style.cssText = 'position:fixed;inset:0;z-index:2000;display:flex;align-items:center;justify-content:center;background:rgba(0,0,0,0.55);';
   const box = document.createElement('div');
   box.style.cssText = 'background:var(--bg);border:1px solid var(--border);border-radius:12px;padding:1.4rem;max-width:420px;width:90%;box-shadow:0 8px 32px rgba(0,0,0,0.4);';
-  box.innerHTML = html + '<button onclick="this.closest(\'[data-ical-modal]\').remove()" class="btn" style="margin-top:0.8rem;font-size:0.8rem;">Close</button>';
+  box.innerHTML = html + '<button onclick="this.closest(\'[data-ical-modal]\').remove()" class="btn" style="margin-top:0.4rem;font-size:0.8rem;">Close</button>';
   modal.setAttribute('data-ical-modal', '1');
   modal.appendChild(box);
   modal.addEventListener('click', e => { if (e.target === modal) modal.remove(); });
   document.body.appendChild(modal);
-}
-
-const _CAL_MONTHS = ['January','February','March','April','May','June','July','August','September','October','November','December'];
-const _CAL_DAYS_LONG = ['Sunday','Monday','Tuesday','Wednesday','Thursday','Friday','Saturday'];
-const _CAL_DAYS_SHORT = ['Sun','Mon','Tue','Wed','Thu','Fri','Sat'];
-const _CAL_DAYS_MIN = ['S','M','T','W','T','F','S'];
-
-function _calDateStr(y, m, d) {
-  return y + '-' + String(m+1).padStart(2,'0') + '-' + String(d).padStart(2,'0');
-}
-function _calTodayStr() {
-  const t = new Date();
-  return _calDateStr(t.getFullYear(), t.getMonth(), t.getDate());
-}
-function _calItemsByDate() {
-  const map = {};
-  (boardItems || []).forEach(item => {
-    if (item.due && !item.deleted) {
-      if (!map[item.due]) map[item.due] = [];
-      map[item.due].push(item);
-    }
-  });
-  (schedules || []).forEach(s => {
-    if (!s.deleted && s.enabled && s.next_run) {
-      const dateStr = s.next_run.slice(0, 10);
-      if (!map[dateStr]) map[dateStr] = [];
-      const time = s.next_run.slice(11, 16);
-      map[dateStr].push({ ...s, _isSched: true, due: dateStr,
-        title: '⏰ ' + s.title + (time ? ' ' + time : ''),
-        status: 'sched' });
-    }
-  });
-  return map;
-}
-
-function renderCalendar() {
-  const titleEl = document.getElementById('cal-title');
-  const bodyEl = document.getElementById('cal-body');
-  if (!titleEl || !bodyEl) return;
-  // Sync active tab button state
-  ['month','week','day'].forEach(m => {
-    const el = document.getElementById('cal-tab-' + m);
-    if (el) el.classList.toggle('active', m === calViewMode);
-  });
-  if (calViewMode === 'week') { _renderCalWeek(titleEl, bodyEl); return; }
-  if (calViewMode === 'day')  { _renderCalDay(titleEl, bodyEl); return; }
-  _renderCalMonth(titleEl, bodyEl);
-}
-
-function _renderCalMonth(titleEl, bodyEl) {
-  const isMob = window.innerWidth <= 480;
-  const dayNames = isMob ? _CAL_DAYS_MIN : _CAL_DAYS_SHORT;
-  titleEl.textContent = _CAL_MONTHS[calMonth] + ' ' + calYear;
-  const todayStr = _calTodayStr();
-  const firstDay = new Date(calYear, calMonth, 1).getDay();
-  const daysInMonth = new Date(calYear, calMonth+1, 0).getDate();
-  const daysInPrevMonth = new Date(calYear, calMonth, 0).getDate();
-  const itemsByDate = _calItemsByDate();
-  let html = '<div id="cal-grid" class="cal-grid">';
-  dayNames.forEach(d => { html += '<div class="cal-day-header">' + d + '</div>'; });
-  const totalCells = Math.ceil((firstDay + daysInMonth) / 7) * 7;
-  for (let i = 0; i < totalCells; i++) {
-    let day, dateStr, isOther = false, cellY = calYear, cellM = calMonth;
-    if (i < firstDay) {
-      day = daysInPrevMonth - firstDay + i + 1;
-      cellM = calMonth === 0 ? 11 : calMonth - 1;
-      cellY = calMonth === 0 ? calYear - 1 : calYear;
-      isOther = true;
-    } else if (i >= firstDay + daysInMonth) {
-      day = i - firstDay - daysInMonth + 1;
-      cellM = calMonth === 11 ? 0 : calMonth + 1;
-      cellY = calMonth === 11 ? calYear + 1 : calYear;
-      isOther = true;
-    } else {
-      day = i - firstDay + 1; cellY = calYear; cellM = calMonth;
-    }
-    dateStr = _calDateStr(cellY, cellM, day);
-    const isToday = dateStr === todayStr;
-    const items = itemsByDate[dateStr] || [];
-    html += '<div class="cal-cell' + (isOther ? ' other-month' : '') + (isToday ? ' today' : '') + '"'
-          + ' onclick="openBoardAdd(\'' + dateStr + '\')">';
-    html += '<div class="cal-cell-num">' + day + '</div>';
-    if (isMob) {
-      if (items.length) {
-        html += '<div class="cal-dots">';
-        items.slice(0, 7).forEach(item => {
-          const sty = statusStyle(item.status || 'todo');
-          html += '<div class="cal-dot" style="background:' + sty.color + '" title="' + esc(item.title) + '"></div>';
-        });
-        html += '</div>';
-      }
-    } else {
-      items.slice(0, 3).forEach(item => {
-        if (item._isSched) {
-          html += '<div class="cal-chip sched-chip"'
-                + ' onclick="event.stopPropagation();openSchedModal(\'' + item.id + '\')"'
-                + ' title="' + esc(item.title) + '">' + esc(item.title) + '</div>';
-        } else {
-          const sty = statusStyle(item.status || 'todo');
-          html += '<div class="cal-chip" style="background:' + sty.bg + ';color:' + sty.color + '"'
-                + ' onclick="event.stopPropagation();openBoardDetail(\'' + item.id + '\')"'
-                + ' title="' + esc(item.title) + '">' + esc(item.title) + '</div>';
-        }
-      });
-      if (items.length > 3) html += '<div class="cal-more">+' + (items.length - 3) + ' more</div>';
-    }
-    html += '</div>';
-  }
-  html += '</div>';
-  bodyEl.innerHTML = html;
-}
-
-function _renderCalWeek(titleEl, bodyEl) {
-  const isMob = window.innerWidth <= 480;
-  // Find Sunday of current week
-  const anchor = new Date(calYear, calMonth, calDay);
-  const weekStart = new Date(anchor);
-  weekStart.setDate(anchor.getDate() - anchor.getDay());
-  const weekEnd = new Date(weekStart); weekEnd.setDate(weekStart.getDate() + 6);
-  const fmtDay = d => _CAL_MONTHS[d.getMonth()].slice(0,3) + ' ' + d.getDate();
-  titleEl.textContent = fmtDay(weekStart) + ' – ' + fmtDay(weekEnd) + ', ' + weekEnd.getFullYear();
-  const todayStr = _calTodayStr();
-  const itemsByDate = _calItemsByDate();
-  const dayNames = isMob ? _CAL_DAYS_MIN : _CAL_DAYS_SHORT;
-  let html = '<div class="cal-week-grid">';
-  for (let i = 0; i < 7; i++) {
-    const d = new Date(weekStart); d.setDate(weekStart.getDate() + i);
-    const dayLabel = dayNames[d.getDay()] + ' ' + d.getDate();
-    html += '<div class="cal-week-header">' + dayLabel + '</div>';
-  }
-  for (let i = 0; i < 7; i++) {
-    const d = new Date(weekStart); d.setDate(weekStart.getDate() + i);
-    const ds = _calDateStr(d.getFullYear(), d.getMonth(), d.getDate());
-    const isToday = ds === todayStr;
-    const items = itemsByDate[ds] || [];
-    html += '<div class="cal-week-cell' + (isToday ? ' today' : '') + '"'
-          + ' onclick="openBoardAdd(\'' + ds + '\')">';
-    html += '<div class="cal-week-num">' + d.getDate() + '</div>';
-    items.slice(0, 4).forEach(item => {
-      if (item._isSched) {
-        html += '<div class="cal-week-chip sched-chip"'
-              + ' onclick="event.stopPropagation();openSchedModal(\'' + item.id + '\')"'
-              + ' title="' + esc(item.title) + '">' + esc(item.title) + '</div>';
-        html += '<div class="cal-week-dot" style="background:#c084fc"></div>';
-      } else {
-        const sty = statusStyle(item.status || 'todo');
-        html += '<div class="cal-week-chip" style="background:' + sty.bg + ';color:' + sty.color + '"'
-              + ' onclick="event.stopPropagation();openBoardDetail(\'' + item.id + '\')"'
-              + ' title="' + esc(item.title) + '">' + esc(item.title) + '</div>';
-        html += '<div class="cal-week-dot" style="background:' + sty.color + '"></div>';
-      }
-    });
-    if (items.length > 4) html += '<div class="cal-week-more">+' + (items.length - 4) + '</div>';
-    html += '</div>';
-  }
-  html += '</div>';
-  bodyEl.innerHTML = html;
-}
-
-function _renderCalDay(titleEl, bodyEl) {
-  const d = new Date(calYear, calMonth, calDay);
-  const dayName = _CAL_DAYS_LONG[d.getDay()];
-  titleEl.textContent = dayName + ', ' + _CAL_MONTHS[calMonth].slice(0,3) + ' ' + calDay + ', ' + calYear;
-  const ds = _calDateStr(calYear, calMonth, calDay);
-  const items = (_calItemsByDate()[ds] || []);
-  // Bucket items by hour (items without due_time go into "all-day")
-  const allDay = [];
-  const byHour = {};
-  items.forEach(item => {
-    const t = item.due_time;
-    if (t && /^\d\d:\d\d/.test(t)) {
-      const h = parseInt(t.slice(0, 2), 10);
-      if (!byHour[h]) byHour[h] = [];
-      byHour[h].push(item);
-    } else {
-      allDay.push(item);
-    }
-  });
-  let html = '<div class="cal-day-view">';
-  // All-day section
-  if (allDay.length) {
-    html += '<div style="padding:8px 12px 4px;border-bottom:1px solid var(--border);">';
-    html += '<div style="font-size:0.7rem;font-weight:600;color:var(--dim);text-transform:uppercase;letter-spacing:0.04em;margin-bottom:6px;">All Day</div>';
-    allDay.forEach(item => { html += _calDayCard(item); });
-    html += '</div>';
-  }
-  // Hour grid
-  html += '<div class="cal-day-agenda">';
-  const nowH = new Date().getHours();
-  const isToday = ds === _calTodayStr();
-  for (let h = 0; h < 24; h++) {
-    const label = h === 0 ? '12 AM' : h < 12 ? h + ' AM' : h === 12 ? '12 PM' : (h - 12) + ' PM';
-    const isNow = isToday && h === nowH;
-    html += '<div class="cal-day-hour' + (isNow ? ' cal-day-hour-now' : '') + '">';
-    html += '<div class="cal-day-hour-label">' + label + '</div>';
-    html += '<div class="cal-day-hour-content" onclick="openBoardAdd(\'' + ds + '\')">';
-    if (byHour[h]) {
-      byHour[h].forEach(item => { html += _calDayCard(item); });
-    }
-    html += '</div></div>';
-  }
-  html += '</div>';
-  if (!items.length) {
-    html += '<div class="cal-day-empty">No events on this day</div>';
-  }
-  html += '</div>';
-  bodyEl.innerHTML = html;
-  // Scroll to current hour if viewing today
-  if (isToday) {
-    const nowEl = bodyEl.querySelector('.cal-day-hour-now');
-    if (nowEl) nowEl.scrollIntoView({ block: 'center', behavior: 'smooth' });
-  }
-}
-function _calDayCard(item) {
-  let html = '';
-  if (item._isSched) {
-    html += '<div class="cal-day-issue" style="border-left-color:#a855f7;" onclick="openSchedModal(\'' + item.id + '\')">';
-    html += '<div class="cal-day-issue-text">';
-    html += '<div class="cal-day-issue-title">' + esc(item.title) + '</div>';
-    if (item.desc) html += '<div class="cal-day-issue-desc">' + esc(item.desc) + '</div>';
-    if (item.due_time) html += '<div class="cal-day-issue-time">' + item.due_time + '</div>';
-    html += '</div>';
-    html += '<span style="font-size:0.68rem;padding:2px 8px;border-radius:10px;background:rgba(163,113,247,0.15);color:#c084fc;flex-shrink:0;">schedule</span>';
-    html += '</div>';
-  } else {
-    const sty = statusStyle(item.status || 'todo');
-    html += '<div class="cal-day-issue" style="border-left-color:' + sty.color + ';" onclick="openBoardDetail(\'' + item.id + '\')">';
-    html += '<div class="cal-day-issue-text">';
-    html += '<div class="cal-day-issue-title">' + esc(item.title) + '</div>';
-    if (item.desc) html += '<div class="cal-day-issue-desc">' + esc(item.desc) + '</div>';
-    if (item.due_time) html += '<div class="cal-day-issue-time">' + item.due_time + '</div>';
-    html += '</div>';
-    html += '<span style="font-size:0.68rem;padding:2px 8px;border-radius:10px;background:' + sty.bg + ';color:' + sty.color + ';flex-shrink:0;">' + esc(item.status || 'todo') + '</span>';
-    html += '</div>';
-  }
-  return html;
 }
 
 // ═══════ GRID MODE ═══════
@@ -24465,6 +24194,7 @@ async function _jrnlSaveConfig() {
 <script src="https://cdn.jsdelivr.net/npm/@xterm/addon-fit@0.10.0/lib/addon-fit.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/@xterm/addon-web-links@0.11.0/lib/addon-web-links.min.js"></script>
 <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/fullcalendar@6.1.15/index.global.min.js"></script>
 <div id="grid-view">
   <div class="grid-toolbar">
     <span class="grid-toolbar-title">Workspace</span>
