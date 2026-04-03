@@ -19,7 +19,12 @@ platform :ios do
       is_key_content_base64: true
     )
 
-    match(type: "appstore", api_key: api_key, readonly: false)
+    match(
+      type: "appstore",
+      api_key: api_key,
+      readonly: false,
+      force: true
+    )
   end
 
   # CI: fetch certs + build + upload to TestFlight

@@ -1,12 +1,15 @@
 import SwiftUI
 import WebKit
-import AuthenticationServices
+import os.log
+
+private let logger = Logger(subsystem: "io.amux.app", category: "WebView")
 
 struct WebView: UIViewRepresentable {
     let url: URL
     @Binding var isLoading: Bool
     @Binding var canGoBack: Bool
     @Binding var canGoForward: Bool
+    @Binding var loadError: String?
     let onNavigationAction: (WKNavigationAction) -> WKNavigationActionPolicy
 
     func makeCoordinator() -> Coordinator {
@@ -34,7 +37,31 @@ struct WebView: UIViewRepresentable {
         context.coordinator.refreshControl = refresh
         context.coordinator.webView = webView
 
+        // Capture JS console.log/error/warn into os_log
+        let script = WKUserScript(source: """
+            (function() {
+                const _log = console.log, _warn = console.warn, _err = console.error;
+                function post(level, args) {
+                    window.webkit.messageHandlers.consoleLog.postMessage(
+                        { level: level, message: Array.from(args).map(String).join(' ') }
+                    );
+                }
+                console.log = function() { post('log', arguments); _log.apply(console, arguments); };
+                console.warn = function() { post('warn', arguments); _warn.apply(console, arguments); };
+                console.error = function() { post('error', arguments); _err.apply(console, arguments); };
+                window.addEventListener('error', function(e) {
+                    post('error', ['Uncaught: ' + e.message + ' at ' + e.filename + ':' + e.lineno]);
+                });
+                window.addEventListener('unhandledrejection', function(e) {
+                    post('error', ['Unhandled rejection: ' + (e.reason || e)]);
+                });
+            })();
+            """, injectionTime: .atDocumentStart, forMainFrameOnly: false)
+        config.userContentController.add(context.coordinator, name: "consoleLog")
+        config.userContentController.addUserScript(script)
+
         webView.load(URLRequest(url: url))
+        logger.info("Loading URL: \(url.absoluteString)")
         return webView
     }
 
@@ -46,25 +73,28 @@ struct WebView: UIViewRepresentable {
     }
 
     // MARK: - Coordinator
-    class Coordinator: NSObject, WKNavigationDelegate, WKUIDelegate, ASWebAuthenticationPresentationContextProviding {
+    class Coordinator: NSObject, WKNavigationDelegate, WKUIDelegate, WKScriptMessageHandler {
         var parent: WebView
         weak var webView: WKWebView?
         var refreshControl: UIRefreshControl?
-        var authSession: ASWebAuthenticationSession?
 
         init(_ parent: WebView) {
             self.parent = parent
         }
 
-        // ASWebAuthenticationPresentationContextProviding
-        func presentationAnchor(for session: ASWebAuthenticationSession) -> ASPresentationAnchor {
-            UIApplication.shared.connectedScenes
-                .compactMap { $0 as? UIWindowScene }
-                .flatMap { $0.windows }
-                .first(where: { $0.isKeyWindow }) ?? ASPresentationAnchor()
+        // JS console → os_log bridge
+        func userContentController(_ controller: WKUserContentController, didReceive message: WKScriptMessage) {
+            guard let body = message.body as? [String: String],
+                  let level = body["level"], let msg = body["message"] else { return }
+            switch level {
+            case "error": logger.error("[js] \(msg)")
+            case "warn":  logger.warning("[js] \(msg)")
+            default:      logger.debug("[js] \(msg)")
+            }
         }
 
-        // Accept self-signed certs (Tailscale local installs)
+        // Accept self-signed certs for self-hosted servers
+        // (Tailscale, LAN, custom domains — anything that isn't a well-known public CA)
         func webView(_ webView: WKWebView,
                      didReceive challenge: URLAuthenticationChallenge,
                      completionHandler: @escaping (URLSession.AuthChallengeDisposition, URLCredential?) -> Void) {
@@ -74,8 +104,10 @@ struct WebView: UIViewRepresentable {
                 return
             }
             let host = challenge.protectionSpace.host
-            let isTailscale = host.contains(".ts.net") || host.hasSuffix(".local") || host == "localhost"
-            if isTailscale {
+            // Trust self-signed certs for: Tailscale (.ts.net), local networks,
+            // private IPs, and any non-cloud.amux.io host (user-configured servers)
+            let isPublicAmux = host.hasSuffix("amux.io")
+            if !isPublicAmux {
                 completionHandler(.useCredential, URLCredential(trust: serverTrust))
             } else {
                 completionHandler(.performDefaultHandling, nil)
@@ -84,40 +116,9 @@ struct WebView: UIViewRepresentable {
 
         func webView(_ webView: WKWebView, decidePolicyFor navigationAction: WKNavigationAction,
                      decisionHandler: @escaping (WKNavigationActionPolicy) -> Void) {
-            // Intercept Apple OAuth redirects and use ASWebAuthenticationSession
-            if let url = navigationAction.request.url,
-               let host = url.host,
-               host.contains("appleid.apple.com") {
-                decisionHandler(.cancel)
-                startAuthSession(url: url, webView: webView)
-                return
-            }
+            // Allow all navigations — OAuth is handled in-place via the gateway JS
+            // (window.open override converts popup OAuth to same-window navigation)
             decisionHandler(parent.onNavigationAction(navigationAction))
-        }
-
-        private func startAuthSession(url: URL, webView: WKWebView) {
-            // Determine the callback scheme from the server URL
-            let callbackScheme = "https"
-            let serverHost = parent.url.host ?? "cloud.amux.io"
-
-            let session = ASWebAuthenticationSession(
-                url: url,
-                callbackURLScheme: callbackScheme
-            ) { [weak self] callbackURL, error in
-                self?.authSession = nil
-                if let callbackURL = callbackURL {
-                    // Load the callback URL back in the WebView to complete the OAuth flow
-                    webView.load(URLRequest(url: callbackURL))
-                } else if let error = error as? ASWebAuthenticationSessionError,
-                          error.code == .canceledLogin {
-                    // User cancelled — reload the sign-in page
-                    webView.load(URLRequest(url: self?.parent.url ?? url))
-                }
-            }
-            session.presentationContextProvider = self
-            session.prefersEphemeralWebBrowserSession = false
-            authSession = session
-            session.start()
         }
 
         // Handle window.open — navigate in same webview instead of dropping
@@ -131,18 +132,47 @@ struct WebView: UIViewRepresentable {
 
         func webView(_ webView: WKWebView, didStartProvisionalNavigation navigation: WKNavigation!) {
             parent.isLoading = true
+            parent.loadError = nil
+            logger.debug("Navigation started: \(webView.url?.absoluteString ?? "nil")")
         }
 
         func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
             parent.isLoading = false
+            parent.loadError = nil
             parent.canGoBack = webView.canGoBack
             parent.canGoForward = webView.canGoForward
             refreshControl?.endRefreshing()
+            logger.info("Navigation finished: \(webView.url?.absoluteString ?? "nil")")
         }
 
         func webView(_ webView: WKWebView, didFail navigation: WKNavigation!, withError error: Error) {
             parent.isLoading = false
             refreshControl?.endRefreshing()
+            let nsError = error as NSError
+            // Don't show cancellation errors (e.g. user tapped a link before page loaded)
+            if nsError.code != NSURLErrorCancelled {
+                parent.loadError = error.localizedDescription
+            }
+            logger.error("Navigation failed: \(error.localizedDescription)")
+        }
+
+        func webView(_ webView: WKWebView, didFailProvisionalNavigation navigation: WKNavigation!, withError error: Error) {
+            parent.isLoading = false
+            refreshControl?.endRefreshing()
+            let nsError = error as NSError
+            if nsError.code != NSURLErrorCancelled {
+                parent.loadError = error.localizedDescription
+            }
+            logger.error("Provisional navigation failed: \(error.localizedDescription) url=\(webView.url?.absoluteString ?? "nil")")
+        }
+
+        func webView(_ webView: WKWebView, didReceiveServerRedirectForProvisionalNavigation navigation: WKNavigation!) {
+            logger.debug("Server redirect → \(webView.url?.absoluteString ?? "nil")")
+        }
+
+        func webViewWebContentProcessDidTerminate(_ webView: WKWebView) {
+            logger.fault("WebContent process terminated — reloading")
+            webView.reload()
         }
 
         @objc func handleRefresh(_ sender: UIRefreshControl) {

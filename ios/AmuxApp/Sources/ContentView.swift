@@ -8,6 +8,8 @@ struct ContentView: View {
     @State private var canGoForward = false
     @State private var showSettings = false
     @State private var webViewRef: WKWebView?
+    @State private var loadError: String?
+    @State private var webViewId = UUID()  // force recreation on retry
 
     var body: some View {
         ZStack(alignment: .top) {
@@ -17,8 +19,10 @@ struct ContentView: View {
                     isLoading: $isLoading,
                     canGoBack: $canGoBack,
                     canGoForward: $canGoForward,
+                    loadError: $loadError,
                     onNavigationAction: handleNavigation
                 )
+                .id(webViewId)
                 .ignoresSafeArea()
             }
 
@@ -27,6 +31,43 @@ struct ContentView: View {
                     .progressViewStyle(.linear)
                     .frame(maxWidth: .infinity)
                     .tint(Color.accentColor)
+            }
+
+            // Error overlay — shown when navigation fails
+            if let error = loadError {
+                VStack(spacing: 20) {
+                    Spacer()
+                    Image(systemName: "wifi.exclamationmark")
+                        .font(.system(size: 48))
+                        .foregroundColor(.secondary)
+                    Text("Can't reach server")
+                        .font(.title3.bold())
+                    Text(error)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .multilineTextAlignment(.center)
+                        .padding(.horizontal, 32)
+                    if let url = serverManager.serverURL {
+                        Text(url.absoluteString)
+                            .font(.caption2)
+                            .foregroundStyle(.tertiary)
+                    }
+                    HStack(spacing: 16) {
+                        Button("Retry") {
+                            loadError = nil
+                            webViewId = UUID()
+                        }
+                        .buttonStyle(.borderedProminent)
+                        Button("Switch Server") {
+                            showSettings = true
+                        }
+                        .buttonStyle(.bordered)
+                    }
+                    .padding(.top, 8)
+                    Spacer()
+                }
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                .background(Color(uiColor: .systemBackground))
             }
         }
         .gesture(
@@ -88,6 +129,7 @@ struct SettingsView: View {
             addSection
             resetSection
         }
+        .onAppear { serverManager.checkAllServers() }
     }
 
     private var serversSection: some View {
@@ -100,14 +142,33 @@ struct SettingsView: View {
     }
 
     private func serverRow(_ server: SavedServer) -> some View {
-        HStack {
-            VStack(alignment: .leading) {
+        HStack(spacing: 12) {
+            Image(systemName: server.serverType.icon)
+                .foregroundColor(.secondary)
+                .frame(width: 24)
+            VStack(alignment: .leading, spacing: 2) {
                 Text(server.name).font(.headline)
-                Text(server.url).font(.caption).foregroundColor(.secondary)
+                HStack(spacing: 6) {
+                    Text(server.serverType.label)
+                        .font(.caption2)
+                        .padding(.horizontal, 6)
+                        .padding(.vertical, 2)
+                        .background(Color.secondary.opacity(0.15))
+                        .clipShape(Capsule())
+                    if let status = serverManager.serverStatus[server.url] {
+                        Circle()
+                            .fill(status == .online ? Color.green : Color.red)
+                            .frame(width: 6, height: 6)
+                    }
+                    Text(server.url.replacingOccurrences(of: "https://", with: "").replacingOccurrences(of: "http://", with: ""))
+                        .font(.caption2)
+                        .foregroundColor(.secondary)
+                        .lineLimit(1)
+                }
             }
             Spacer()
             if serverManager.serverURL?.absoluteString == server.url {
-                Image(systemName: "checkmark").foregroundColor(.accentColor)
+                Image(systemName: "checkmark.circle.fill").foregroundColor(.accentColor)
             }
         }
         .contentShape(Rectangle())

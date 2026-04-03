@@ -16,6 +16,7 @@ services:
       - /opt/amux-cloud/app/icon-512.png:/app/icon-512.png:ro
     environment:
       AMUX_PORT: "8822"
+      AMUX_AUTH_TOKEN: "none"
     ports:
       - "${USER_PORT}:8822"
     healthcheck:

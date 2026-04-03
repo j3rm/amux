@@ -20,33 +20,33 @@ jobs:
           mkdir -p ~/.ssh
           printf '%s\n' "${{ secrets.CLOUD_SSH_KEY }}" > ~/.ssh/amux_cloud
           chmod 600 ~/.ssh/amux_cloud
-          ssh-keyscan -H 5.161.66.217 >> ~/.ssh/known_hosts
+          ssh-keyscan -H 34.121.177.76 >> ~/.ssh/known_hosts
           chmod 644 ~/.ssh/known_hosts
 
       - name: Deploy amux-server.py (shared mount for all containers)
         run: |
           # --inplace: overwrite in place to preserve inode (Docker bind mounts track inode, not path)
           rsync --inplace -e "ssh -i ~/.ssh/amux_cloud" amux-server.py \
-            root@5.161.66.217:/opt/amux-cloud/app/amux-server.py
+            root@34.121.177.76:/opt/amux-cloud/app/amux-server.py
           # Touch to trigger auto-restart in all running containers
-          ssh -i ~/.ssh/amux_cloud root@5.161.66.217 \
+          ssh -i ~/.ssh/amux_cloud root@34.121.177.76 \
             'touch /opt/amux-cloud/app/amux-server.py && echo "amux-server.py deployed"'
 
       - name: Deploy gateway.py
         run: |
           rsync --inplace -e "ssh -i ~/.ssh/amux_cloud" cloud/gateway/gateway.py \
-            root@5.161.66.217:/opt/amux-cloud/gateway/gateway.py
-          ssh -i ~/.ssh/amux_cloud root@5.161.66.217 \
+            root@34.121.177.76:/opt/amux-cloud/gateway/gateway.py
+          ssh -i ~/.ssh/amux_cloud root@34.121.177.76 \
             'pip3 install -q stripe 2>/dev/null; systemctl restart amux-gateway && echo "gateway restarted"'
 
       - name: Deploy docker-compose template
         run: |
           rsync -e "ssh -i ~/.ssh/amux_cloud" cloud/docker/docker-compose.template.yml \
-            root@5.161.66.217:/opt/amux-cloud/docker/docker-compose.template.yml
+            root@34.121.177.76:/opt/amux-cloud/docker/docker-compose.template.yml
 
       - name: Regenerate per-user compose files and apply changes
         run: |
-          ssh -i ~/.ssh/amux_cloud root@5.161.66.217 'bash -s' << 'ENDSSH'
+          ssh -i ~/.ssh/amux_cloud root@34.121.177.76 'bash -s' << 'ENDSSH'
             source /etc/amux/gateway.env
             R2_ENDPOINT="https://${CF_ACCOUNT_ID}.r2.cloudflarestorage.com"
             TEMPLATE=/opt/amux-cloud/docker/docker-compose.template.yml
