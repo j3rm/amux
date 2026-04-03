@@ -11142,6 +11142,7 @@ document.addEventListener('click', e => {
 const ALL_TABS = [
   { id: 'sessions',      label: 'Sessions',   required: true },
   { id: 'board',         label: 'Board' },
+  { id: 'calendar',      label: 'Calendar' },
   { id: 'notifications', label: 'Notifications' },
   { id: 'scheduler',     label: 'Scheduler' },
   { id: 'files',         label: 'Files' },
