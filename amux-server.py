@@ -4003,11 +4003,21 @@ def _auto_create_branch(name: str, work_dir: str, env_file: "Path") -> bool:
         return False
 
 
+_git_info_cache: dict[str, tuple[float, dict]] = {}  # work_dir -> (timestamp, result)
+_GIT_INFO_TTL = 15  # seconds — git status doesn't change that fast
+_GIT_INFO_DETAIL_TTL = 10  # seconds — detail view can be slightly fresher
+
+
 def _git_info(work_dir: str, detail: bool = False) -> dict:
     """Return {branch, repo} for a directory. Returns empty strings if not a git repo.
     With detail=True, also returns ahead commits, status lines, remote URL."""
     if not work_dir:
         return {"branch": "", "repo": ""}
+    cache_key = f"{work_dir}::{detail}"
+    ttl = _GIT_INFO_DETAIL_TTL if detail else _GIT_INFO_TTL
+    cached = _git_info_cache.get(cache_key)
+    if cached and time.time() - cached[0] < ttl:
+        return cached[1]
     try:
         rb = subprocess.run(
             ["git", "-C", work_dir, "branch", "--show-current"],
@@ -4023,6 +4033,7 @@ def _git_info(work_dir: str, detail: bool = False) -> dict:
             repo = rr.stdout.strip() if rr.returncode == 0 else ""
         result = {"branch": branch, "repo": repo}
         if not detail or not branch:
+            _git_info_cache[cache_key] = (time.time(), result)
             return result
         # Commits ahead of default branch (main/master)
         for base in ("main", "master", "dev", "develop"):
@@ -4072,6 +4083,7 @@ def _git_info(work_dir: str, detail: bool = False) -> dict:
             capture_output=True, text=True, timeout=5,
         )
         result["unpushed"] = len([l for l in rp.stdout.strip().splitlines() if l]) if rp.returncode == 0 else 0
+        _git_info_cache[cache_key] = (time.time(), result)
         return result
     except Exception:
         return {"branch": "", "repo": ""}
@@ -25915,7 +25927,26 @@ class CCHandler(BaseHTTPRequestHandler):
 
         # GET /api/sessions
         if method == "GET" and path == "/api/sessions":
-            return self._json(list_sessions())
+            # Use shared SSE cache to avoid redundant subprocess calls on concurrent requests
+            now = time.time()
+            sc = _sse_cache["sessions"]
+            if now - sc["time"] > _SSE_CACHE_TTL:
+                if _sse_cache_lock.acquire(blocking=False):
+                    try:
+                        if time.time() - sc["time"] > _SSE_CACHE_TTL:  # double-check
+                            data = list_sessions()
+                            sc["data"] = data
+                            sc["json"] = json.dumps(data, sort_keys=True)
+                            sc["time"] = time.time()
+                    finally:
+                        _sse_cache_lock.release()
+                else:
+                    # Another thread is refreshing — wait briefly for it
+                    for _ in range(50):
+                        time.sleep(0.1)
+                        if time.time() - sc["time"] <= _SSE_CACHE_TTL:
+                            break
+            return self._json(sc["data"] if sc["data"] is not None else list_sessions())
 
         # GET/POST /api/memory/global
         if path == "/api/memory/global":
@@ -29793,7 +29824,7 @@ def _cleanup_recordings():
 def _db_maintenance():
     """Periodic database maintenance: WAL checkpoint and optimize."""
     try:
-        conn = _get_db()
+        conn = get_db()
         conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
         conn.execute("PRAGMA optimize")
         slog("[cleanup] database maintenance: WAL checkpoint + optimize")
