@@ -12815,11 +12815,10 @@ async function refreshPeek() {
     const hasSearch = peekSearchQuery.trim().length > 0;
     const savedScrollTop = body.scrollTop;
     applyPeekSearch(hasSearch);  // keepIndex=true when search is active
-    if (hasSearch) {
-      // Preserve scroll position when user is searching — don't jump
-      body.scrollTop = savedScrollTop;
-    } else if (atBottom) {
+    if (atBottom && !hasSearch) {
       body.scrollTop = body.scrollHeight;
+    } else {
+      body.scrollTop = savedScrollTop;
     }
     statusEl.textContent = (data.saved ? 'Saved log' : 'Updated') + ' ' + new Date().toLocaleTimeString();
     // Cache peek output for offline browsing
