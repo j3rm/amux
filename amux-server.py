@@ -8771,6 +8771,9 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
       <button class="fe-tb-btn" onclick="loadFiles(_filesPath)" title="Refresh">
         <svg width="13" height="13" viewBox="0 0 13 13" fill="none"><path d="M11 6.5A4.5 4.5 0 1 1 8 2.3M11 2v4H7" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" fill="none"/></svg>
       </button>
+      <button class="fe-tb-btn" onclick="openInFinder()" title="Open in Finder">
+        <svg width="13" height="13" viewBox="0 0 13 13" fill="none"><path d="M2 2h4l1.5 1.5H11a1 1 0 011 1V10a1 1 0 01-1 1H2a1 1 0 01-1-1V3a1 1 0 011-1z" stroke="currentColor" stroke-width="1.3" stroke-linejoin="round" fill="none"/><path d="M4 8.5h5" stroke="currentColor" stroke-width="1.2" stroke-linecap="round"/></svg>
+      </button>
       <button class="fe-tb-btn" id="files-set-session-btn" onclick="setFilesSessionDir()" title="Set as session directory" style="display:none;background:var(--accent);color:#000;border-color:var(--accent);font-weight:600;font-size:0.72rem;white-space:nowrap;">
         <svg width="11" height="11" viewBox="0 0 11 11" fill="none"><path d="M5.5 1 10 5.5 5.5 10 1 5.5Z" stroke="currentColor" stroke-width="1.3" stroke-linejoin="round"/></svg>
         <span id="files-set-session-label">Set dir</span>
@@ -8812,6 +8815,11 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
         <button class="fe-tb-oitem" onclick="loadFiles(_filesPath);_filesOverflowClose()">
           <svg width="13" height="13" viewBox="0 0 13 13" fill="none"><path d="M11 6.5A4.5 4.5 0 1 1 8 2.3M11 2v4H7" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" fill="none"/></svg>
           Refresh
+        </button>
+        <div class="fe-tb-odivider"></div>
+        <button class="fe-tb-oitem" onclick="openInFinder();_filesOverflowClose()">
+          <svg width="13" height="13" viewBox="0 0 13 13" fill="none"><path d="M2 2h4l1.5 1.5H11a1 1 0 011 1V10a1 1 0 01-1 1H2a1 1 0 01-1-1V3a1 1 0 011-1z" stroke="currentColor" stroke-width="1.3" stroke-linejoin="round" fill="none"/><path d="M4 8.5h5" stroke="currentColor" stroke-width="1.2" stroke-linecap="round"/></svg>
+          Open in Finder
         </button>
         <button class="fe-tb-oitem fe-tb-oitem-session" id="files-session-oitem" onclick="setFilesSessionDir();_filesOverflowClose()" style="display:none;">
           <svg width="13" height="13" viewBox="0 0 13 13" fill="none"><path d="M6.5 1 12 6.5 6.5 12 1 6.5Z" stroke="currentColor" stroke-width="1.3" stroke-linejoin="round"/></svg>
@@ -14972,6 +14980,27 @@ function _fileTypeIcon(name, type) {
 let _filesPath = '/';
 let _filesCwd = '/';   // saved working directory (persisted on server)
 let _filesShowHidden = false;
+
+async function openInFinder() {
+  const path = _filesPath || '/';
+  // If accessing remote server, construct smb:// or sftp:// URL for Finder
+  const isRemote = location.hostname !== 'localhost' && location.hostname !== '127.0.0.1' && !location.hostname.endsWith('.local');
+  if (isRemote) {
+    // Open as SFTP remote folder in Finder via sftp:// URL scheme
+    const host = location.hostname;
+    const url = 'sftp://' + host + path;
+    window.open(url, '_blank');
+    showToast('Opening remote folder: ' + host + ':' + path);
+    return;
+  }
+  try {
+    const r = await apiCall(API + '/api/fs/open', {
+      method: 'POST', headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({ path })
+    });
+    if (r) showToast('Opened in Finder');
+  } catch(e) { showToast('Failed to open folder'); }
+}
 
 // ── File bookmarks (quick-access folders) ──
 const _FILES_HOME = window._AMUX_HOME || '/root';
@@ -26925,6 +26954,31 @@ class CCHandler(BaseHTTPRequestHandler):
                 return self._json({"path": str(p), "parent": str(p.parent) if p.parent != p else None, "entries": entries})
             except PermissionError:
                 return self._json({"error": "permission denied"}, 403)
+
+        # ── Open directory in native file manager ──
+        if method == "POST" and path == "/api/fs/open":
+            data = self._read_body()
+            dir_path = data.get("path", "/")
+            # Resolve to absolute path
+            target = Path(dir_path).expanduser().resolve()
+            if not target.exists():
+                return self._json({"error": "path not found"}, 404)
+            if target.is_file():
+                target = target.parent
+            import platform
+            plat = platform.system()
+            try:
+                if plat == "Darwin":
+                    subprocess.Popen(["open", str(target)])
+                elif plat == "Linux":
+                    subprocess.Popen(["xdg-open", str(target)])
+                elif plat == "Windows":
+                    subprocess.Popen(["explorer", str(target)])
+                else:
+                    return self._json({"error": f"unsupported platform: {plat}"}, 400)
+                return self._json({"ok": True, "path": str(target)})
+            except Exception as e:
+                return self._json({"error": str(e)}, 500)
 
         # ── Directory upload (Files view) ──
         if method == "POST" and path == "/api/fs/upload":
