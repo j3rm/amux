@@ -8759,8 +8759,6 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
   <button id="tab-torrents" onclick="switchView('torrents')">Torrents</button>
   <button id="tab-terminal" onclick="switchView('terminal')">Terminal</button>
   <button id="tab-browser" onclick="switchView('browser')">Browser</button>
-  <button id="tab-graph" onclick="switchView('graph')">Graph</button>
-  <button id="tab-journal" onclick="switchView('journal')">Journal</button>
 </div>
 <div class="tab-customize-wrap">
   <button class="tab-customize-btn" onclick="event.stopPropagation();toggleTabCustomizer()" title="Show/hide tabs">&#x229E;</button>
@@ -11666,8 +11664,6 @@ const ALL_TABS = [
   { id: 'torrents',      label: 'Torrents' },
   { id: 'terminal',      label: 'Terminal' },
   { id: 'browser',       label: 'Browser' },
-  { id: 'graph',         label: 'Graph' },
-  { id: 'journal',       label: 'Journal' },
 ];
 
 let hiddenTabs = (function() {
