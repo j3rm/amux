@@ -631,7 +631,7 @@ cmd_board() {
   local subcmd="${1:-help}"; shift 2>/dev/null || true
 
   case "$subcmd" in
-    done|doing|todo|backlog|discarded)
+    done|doing|todo|backlog|discarded|review)
       local status="$subcmd"
       local id="${1:-}"; [[ -n "$id" ]] || die "Usage: amux board $status <ISSUE-ID>"
       local result
@@ -664,26 +664,237 @@ cmd_board() {
         "$AMUX_API/api/board")
       echo "$result" | python3 -c "import sys,json; d=json.load(sys.stdin); print('Created',d['id'],'→',d['title'])" 2>/dev/null || echo "$result"
       ;;
+    import)
+      # amux board import gh:owner/repo#N [--workspace W] [--project P]
+      local gh_ref="${1:-}"; [[ -n "$gh_ref" ]] || die "Usage: amux board import gh:<owner>/<repo>#<number> [--workspace W] [--project P]"
+      shift
+      local workspace="" project=""
+      while [[ $# -gt 0 ]]; do
+        case "$1" in
+          --workspace) workspace="${2:-}"; shift 2 ;;
+          --project)   project="${2:-}";   shift 2 ;;
+          *) shift ;;
+        esac
+      done
+      # Parse gh:owner/repo#N format
+      local gh_stripped="${gh_ref#gh:}"
+      local repo_part="${gh_stripped%#*}"
+      local issue_num="${gh_stripped##*#}"
+      if [[ -z "$repo_part" || -z "$issue_num" || "$repo_part" == "$gh_stripped" ]]; then
+        die "Invalid format. Use: gh:<owner>/<repo>#<number> (e.g. gh:Tonal-Photo/ImageIntact#103)"
+      fi
+      echo "Fetching ${repo_part}#${issue_num}..."
+      local issue_json
+      issue_json=$(gh issue view "$issue_num" --repo "$repo_part" --json title,body 2>&1) || die "Failed to fetch issue: $issue_json"
+      # Build tags — normalize to lowercase
+      local ws_lower; ws_lower=$(echo "$workspace" | tr '[:upper:]' '[:lower:]')
+      local pj_lower; pj_lower=$(echo "$project" | tr '[:upper:]' '[:lower:]')
+      # Parse issue body, extract actionable tasks, create board items
+      # The Python script handles: section-aware parsing, checklist detection,
+      # skipping design/notes sections, table row handling, JSON escaping
+      echo "$issue_json" | python3 -c "
+import json, re, sys, subprocess, urllib.request, ssl
+
+data = json.load(sys.stdin)
+title = data['title']
+body = data.get('body', '') or ''
+lines = body.split('\n')
+
+repo = '$repo_part'
+issue_num = '$issue_num'
+gh_ref = '$gh_ref'
+api = '$AMUX_API'
+ws = '$ws_lower'
+pj = '$pj_lower'
+
+# Build tags
+tags = ['gh:' + repo + '#' + issue_num]
+if ws: tags.append('workspace:' + ws)
+if pj: tags.append('project:' + pj)
+
+# ── Strategy ──────────────────────────────────────────────────────
+# 1. If explicit checklists (- [ ]) exist, extract those only
+# 2. Otherwise: section-aware bullet extraction
+#    - Skip bullets under non-actionable headings
+#    - Extract bullets under actionable/neutral headings
+# 3. If nothing found, create single task for the whole issue
+
+# Headings whose bullets should be SKIPPED (informational, not tasks)
+SKIP_RE = re.compile(
+    r'design|note|convention|pattern|context|architecture|overview|'
+    r'background|motivation|reference|prerequisite|requirement|'
+    r'progress|summary|panel.review|approach|decision|constraint|'
+    r'rationale|trade.?off|consideration|assumption|scope|goal|'
+    r'problem|non.?functional',
+    re.IGNORECASE,
+)
+
+# ── Pass 1: look for explicit checklists ──────────────────────────
+checklists = []
+for line in lines:
+    m = re.match(r'^\s*-\s*\[\s\]\s*(.+)', line)
+    if m:
+        checklists.append(m.group(1).strip())
+
+tasks_to_create = []
+
+if checklists:
+    tasks_to_create = checklists
+else:
+    # ── Pass 2: section-aware bullet extraction ───────────────────
+    current_heading = ''
+    for line in lines:
+        # Track headings (any level)
+        hm = re.match(r'^#{1,6}\s+(.+)', line)
+        if hm:
+            current_heading = hm.group(1).strip()
+            continue
+
+        # Skip table rows (contain |) — especially progress tables
+        if '|' in line and not line.strip().startswith('-'):
+            continue
+
+        # Extract bullet items
+        bm = re.match(r'^(\s*)-\s*(?:\[(.)\]\s*)?(.+)', line)
+        if not bm:
+            continue
+
+        indent = len(bm.group(1))
+        checkbox = bm.group(2)
+        text = bm.group(3).strip()
+
+        # Skip checked-off items
+        if checkbox and checkbox.lower() == 'x':
+            continue
+
+        # Skip empty or very short items
+        if len(text) < 5:
+            continue
+
+        # Skip bullets under non-actionable headings
+        if current_heading and SKIP_RE.search(current_heading):
+            continue
+
+        # Skip deeply nested bullets (likely sub-details, not top-level tasks)
+        if indent > 4:
+            continue
+
+        tasks_to_create.append(text)
+
+# ── Create board tasks ────────────────────────────────────────────
+ctx = ssl.create_default_context()
+ctx.check_hostname = False
+ctx.verify_mode = ssl.CERT_NONE
+
+created = 0
+short_ref = '#' + issue_num
+
+if not tasks_to_create:
+    # No structure found — single task for the whole issue
+    payload = json.dumps({
+        'title': short_ref + ': ' + title,
+        'status': 'todo',
+        'owner_type': 'agent',
+        'tags': tags,
+        'desc': 'From ' + repo + '#' + issue_num + ': ' + title + '\n\n' + body[:800],
+    }).encode()
+    req = urllib.request.Request(api + '/api/board', data=payload, method='POST')
+    req.add_header('Content-Type', 'application/json')
+    try:
+        with urllib.request.urlopen(req, timeout=10, context=ctx) as resp:
+            result = json.loads(resp.read())
+            print(f\"  Created {result['id']} → {title} (single task — no actionable items found)\")
+            print(f\"  ⚠ Consider asking CC to decompose this issue into subtasks\")
+            created = 1
+    except Exception as e:
+        print(f'  ERROR: {e}', file=sys.stderr)
+else:
+    for task_text in tasks_to_create:
+        payload = json.dumps({
+            'title': short_ref + ': ' + task_text,
+            'status': 'todo',
+            'owner_type': 'agent',
+            'tags': tags,
+            'desc': 'From ' + repo + '#' + issue_num + ': ' + title,
+        }).encode()
+        req = urllib.request.Request(api + '/api/board', data=payload, method='POST')
+        req.add_header('Content-Type', 'application/json')
+        try:
+            with urllib.request.urlopen(req, timeout=10, context=ctx) as resp:
+                result = json.loads(resp.read())
+                print(f\"  Created {result['id']} → {task_text}\")
+                created += 1
+        except Exception as e:
+            print(f'  ERROR creating task: {e}', file=sys.stderr)
+
+print(f'Imported {created} task(s) from {repo}#{issue_num}')
+"
+      ;;
+    progress)
+      # amux board progress <ID> "message" — append progress note + post GH comment if gh-linked
+      local id="${1:-}"; shift 2>/dev/null || true
+      local msg="$*"
+      [[ -n "$id" && -n "$msg" ]] || die "Usage: amux board progress <ISSUE-ID> <message>"
+      # Update board task description
+      curl -sk -X PATCH \
+        -H 'Content-Type: application/json' \
+        -d "{\"desc\":$(python3 -c "import json,sys; print(json.dumps(sys.argv[1]))" "$msg")}" \
+        "$AMUX_API/api/board/$id" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d['id'],'— progress noted')" 2>/dev/null
+      # Check if task has a gh: tag — if so, post comment to GH issue
+      local task_json
+      task_json=$(curl -sk "$AMUX_API/api/board" | python3 -c "
+import sys,json
+items=json.load(sys.stdin)
+match=[i for i in items if i['id']=='$id']
+if match:
+    import json as j
+    print(j.dumps(match[0]))
+" 2>/dev/null)
+      if [[ -n "$task_json" ]]; then
+        local gh_tag
+        gh_tag=$(echo "$task_json" | python3 -c "
+import sys,json,re
+item=json.load(sys.stdin)
+for tag in item.get('tags',[]):
+    m=re.match(r'^gh:([^#]+)#(\d+)$', tag)
+    if m:
+        print(f'{m.group(1)} {m.group(2)}')
+        break
+" 2>/dev/null)
+        if [[ -n "$gh_tag" ]]; then
+          local repo issue_n
+          repo=$(echo "$gh_tag" | cut -d' ' -f1)
+          issue_n=$(echo "$gh_tag" | cut -d' ' -f2)
+          gh issue comment "$issue_n" --repo "$repo" --body "**Board progress** (\`$id\`): $msg" 2>/dev/null && \
+            echo "  → Posted comment to ${repo}#${issue_n}"
+        fi
+      fi
+      ;;
     ls|list)
       curl -sk "$AMUX_API/api/board" | python3 -c "
 import sys,json
 items=json.load(sys.stdin)
 for i in sorted(items, key=lambda x: x.get('updated',0), reverse=True):
-    status_sym = {'done':'✓','doing':'▶','todo':'○','backlog':'·','discarded':'✗'}.get(i['status'],'?')
-    print(f\"{status_sym} {i['id']:12s} {i['title'][:60]} [{i['status']}]\")
+    status_sym = {'done':'✓','doing':'▶','todo':'○','backlog':'·','discarded':'✗','review':'◎'}.get(i['status'],'?')
+    tags = ' '.join(f'[{t}]' for t in i.get('tags',[])) if i.get('tags') else ''
+    print(f\"{status_sym} {i['id']:12s} {i['title'][:50]:50s} [{i['status']}] {tags}\")
 "
       ;;
     help|*)
       cat <<EOF
 ${BOLD}amux board${RESET} — manage board issues from the CLI
 
-  amux board ls                    List all issues
+  amux board ls                    List all issues (with tags)
   amux board add <title>           Create a new todo issue
   amux board done <ID>             Move issue to done
   amux board doing <ID>            Move issue to doing (in progress)
+  amux board review <ID>           Move issue to in review
   amux board todo <ID>             Move issue to todo
   amux board backlog <ID>          Move issue to backlog
   amux board status <ID> <status>  Set any status
+  amux board import gh:owner/repo#N [--workspace W] [--project P]
+                                   Import GH issue as board task(s)
+  amux board progress <ID> <msg>   Add progress note (posts to GH if linked)
 EOF
       ;;
   esac
