@@ -7849,18 +7849,18 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
   .notes-quill-wrap { flex: 1; display: flex; flex-direction: column; overflow: hidden; }
   .notes-quill-wrap .ql-toolbar.ql-snow {
     background: var(--bg); border: none; border-bottom: 1px solid var(--border); flex-shrink: 0;
-    opacity: 0; max-height: 0; overflow: hidden; transition: opacity 0.15s, max-height 0.15s;
     padding: 4px 8px;
-  }
-  .notes-quill-wrap:hover .ql-toolbar.ql-snow,
-  .notes-quill-wrap:focus-within .ql-toolbar.ql-snow,
-  .notes-quill-wrap .ql-toolbar.ql-snow.pinned {
-    opacity: 1; max-height: 50px;
   }
   .notes-quill-wrap .ql-container.ql-snow {
     border: none; flex: 1; overflow-y: auto; background: var(--bg);
   }
-  .notes-quill-wrap .ql-editor { color: var(--text); font-size: 0.92rem; line-height: 1.75; min-height: 200px; padding: 8px 20px 60px; max-width: 720px; }
+  .notes-quill-wrap .ql-editor { color: var(--text); font-size: 0.92rem; line-height: 1.75; min-height: 200px; padding: 12px 24px 80px; max-width: 740px; }
+  /* Render Quill content with markdown-like typography (Obsidian-style) */
+  .notes-quill-wrap .ql-editor h1 { font-size: 1.6rem; font-weight: 700; margin: 0.5em 0 0.3em; letter-spacing: -0.01em; }
+  .notes-quill-wrap .ql-editor h2 { font-size: 1.25rem; font-weight: 600; margin: 0.8em 0 0.3em; }
+  .notes-quill-wrap .ql-editor h3 { font-size: 1.05rem; font-weight: 600; margin: 0.7em 0 0.25em; }
+  .notes-quill-wrap .ql-editor blockquote { border-left: 3px solid var(--accent); padding-left: 12px; color: var(--dim); margin: 8px 0; }
+  .notes-quill-wrap .ql-editor pre { background: var(--card); border: 1px solid var(--border); border-radius: 6px; padding: 10px 12px; font-size: 0.85em; }
   .notes-quill-wrap .ql-editor hr { border: none; border-top: 1px solid var(--border); margin: 16px 0; }
   .notes-quill-wrap .ql-snow .ql-toolbar .ql-divider { width: 28px; font-size: 0.75rem; color: var(--dim); font-weight: 600; }
   .notes-quill-wrap .ql-snow .ql-toolbar .ql-divider::after { content: '—'; }
@@ -7902,11 +7902,12 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
   .notes-mode-tab:not(.active):hover { background: rgba(139,148,158,0.08); color: var(--text); }
   /* Preview pane */
   .notes-preview {
-    flex: 1; overflow-y: auto; padding: 20px 24px; background: var(--bg);
-    display: none; color: var(--text); font-size: 0.9rem; line-height: 1.75;
-    box-sizing: border-box;
+    flex: 1; overflow-y: auto; padding: 20px 24px 80px; background: var(--bg);
+    display: none; color: var(--text); font-size: 0.92rem; line-height: 1.75;
+    box-sizing: border-box; cursor: text; max-width: 760px;
   }
   .notes-preview.active { display: block; }
+  .notes-preview > *:first-child { margin-top: 0; }
   .notes-preview h1 { font-size: 1.5rem; font-weight: 700; margin: 0 0 14px; }
   .notes-preview h2 { font-size: 1.15rem; font-weight: 600; margin: 20px 0 8px; border-bottom: 1px solid var(--border); padding-bottom: 4px; }
   .notes-preview h3 { font-size: 1rem; font-weight: 600; margin: 14px 0 6px; }
@@ -7937,24 +7938,38 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
   .notes-preview p:last-child { margin-bottom: 0; }
   .notes-preview mark.search-hit { background: rgba(250,204,21,0.35); border-radius: 2px; padding: 0 1px; }
   .notes-preview mark.search-hit.current { background: rgba(250,204,21,0.7); outline: 2px solid rgba(250,204,21,0.9); }
-  /* Mobile notes improvements */
+  /* Mobile notes improvements — Bear/iA Writer inspired */
   @media (max-width: 600px) {
     #notes-view { height: calc(100dvh - 122px); }
-    .notes-mode-tabs { padding: 5px 10px; }
-    .notes-mode-tab { padding: 6px 18px; font-size: 0.82rem; }
+    /* Hide mode tabs entirely on mobile — preview is tap-to-edit */
+    .notes-mode-tabs { display: none !important; }
     .notes-editor-header { padding: 10px 12px; min-height: 48px; }
-    .notes-title-input { font-size: 1rem; }
-    .notes-delete-btn { min-width: 40px; min-height: 40px; display: flex; align-items: center; justify-content: center; font-size: 1.1rem; }
-    .notes-pin-btn { min-width: 40px; min-height: 40px; display: flex; align-items: center; justify-content: center; font-size: 1.1rem; }
-    .notes-list-item { padding: 12px 14px; min-height: 52px; }
-    .notes-list-item .nli-title { font-size: 0.88rem; }
+    .notes-title-input { font-size: 1.05rem; }
+    .notes-delete-btn, .notes-pin-btn { min-width: 40px; min-height: 40px; display: flex; align-items: center; justify-content: center; font-size: 1.1rem; }
+    .notes-list-item { padding: 14px 14px; min-height: 56px; border-radius: 6px; }
+    .notes-list-item .nli-title { font-size: 0.92rem; }
     .notes-list-item .nli-date { font-size: 0.74rem; }
-    .notes-quill-wrap .ql-toolbar.ql-snow { overflow-x: auto; white-space: nowrap; flex-wrap: nowrap; }
-    .notes-quill-wrap .ql-toolbar.ql-snow .ql-formats { display: inline-flex; }
-    .notes-quill-wrap .ql-editor { font-size: 1rem; min-height: 160px; }
-    .notes-preview { padding: 16px; font-size: 0.95rem; }
-    .notes-new-btn { width: 32px; height: 32px; font-size: 1.3rem; }
-    .notes-search-wrap input { font-size: 0.88rem; padding: 7px 10px; }
+    .notes-list { padding: 4px 0; }
+    /* Sticky bottom toolbar — move Quill toolbar to bottom on mobile */
+    .notes-quill-wrap { flex-direction: column-reverse; }
+    .notes-quill-wrap .ql-toolbar.ql-snow {
+      position: sticky; bottom: 0; z-index: 5;
+      background: var(--bg); border-top: 1px solid var(--border); border-bottom: none;
+      padding: 6px 4px; overflow-x: auto; white-space: nowrap; flex-wrap: nowrap;
+      backdrop-filter: blur(8px); -webkit-backdrop-filter: blur(8px);
+    }
+    .notes-quill-wrap .ql-toolbar.ql-snow .ql-formats { display: inline-flex; margin-right: 8px; }
+    .notes-quill-wrap .ql-toolbar.ql-snow button { width: 36px; height: 36px; padding: 6px; }
+    .notes-quill-wrap .ql-toolbar.ql-snow .ql-picker { height: 36px; line-height: 36px; }
+    /* Hide less-used formatting on mobile to keep bar uncluttered */
+    .notes-quill-wrap .ql-toolbar.ql-snow .ql-strike,
+    .notes-quill-wrap .ql-toolbar.ql-snow .ql-underline,
+    .notes-quill-wrap .ql-toolbar.ql-snow .ql-clean,
+    .notes-quill-wrap .ql-toolbar.ql-snow .ql-divider { display: none; }
+    .notes-quill-wrap .ql-editor { font-size: 1rem; min-height: 160px; padding: 12px 16px 96px; }
+    .notes-preview { padding: 16px 16px 96px; font-size: 1rem; }
+    .notes-new-btn { width: 36px; height: 36px; font-size: 1.3rem; }
+    .notes-search-wrap input { font-size: 0.92rem; padding: 9px 12px; }
   }
 
   /* ── Gmail / Email view ─────────────────────────────────────────────────── */
@@ -17105,7 +17120,7 @@ function switchView(view) {
     }
   }
   if (view === 'notes') {
-    _notesInitQuill(); _notesApplySidebarState();
+    _notesInitQuill(); _notesApplySidebarState(); _notesBindSwipeGestures();
     _notesDirty = false;
     _notesLoad(); // always refresh list on tab switch
   }
@@ -22523,6 +22538,51 @@ function _notesPreviewBindCheckboxes(container) {
   });
 }
 
+// Tap-to-edit: clicking anywhere in the rendered preview switches to edit mode
+// (Obsidian/Bear-style — no explicit "Edit" button needed)
+function _notesPreviewBindTapToEdit(container) {
+  if (container._tapToEditBound) return;
+  container._tapToEditBound = true;
+  container.addEventListener('click', (e) => {
+    // Don't intercept link clicks, checkboxes, or text selection
+    if (e.target.closest('a')) return;
+    if (e.target.closest('li[data-list="checked"], li[data-list="unchecked"]')) return;
+    if (window.getSelection && window.getSelection().toString().length > 0) return;
+    _notesSwitchMode('edit');
+    setTimeout(() => { if (_quill) _quill.focus(); }, 30);
+  });
+}
+
+// Swipe-from-left-edge to open the notes sidebar on mobile (Bear/Apple Notes pattern)
+function _notesBindSwipeGestures() {
+  const view = document.getElementById('notes-view');
+  if (!view || view._swipeBound) return;
+  view._swipeBound = true;
+  let startX = 0, startY = 0, tracking = false;
+  view.addEventListener('touchstart', (e) => {
+    if (window.innerWidth > 600) return;
+    const t = e.touches[0];
+    // Only start tracking if touch begins near left edge OR sidebar is currently open (to close)
+    const sidebar = document.getElementById('notes-sidebar');
+    const sidebarOpen = sidebar && !sidebar.classList.contains('collapsed');
+    if (t.clientX < 24 || sidebarOpen) {
+      startX = t.clientX; startY = t.clientY; tracking = true;
+    }
+  }, { passive: true });
+  view.addEventListener('touchend', (e) => {
+    if (!tracking) return;
+    tracking = false;
+    const t = e.changedTouches[0];
+    const dx = t.clientX - startX;
+    const dy = Math.abs(t.clientY - startY);
+    if (dy > 50) return; // mostly vertical = scroll, ignore
+    const sidebar = document.getElementById('notes-sidebar');
+    const sidebarOpen = sidebar && !sidebar.classList.contains('collapsed');
+    if (dx > 60 && !sidebarOpen) _notesToggleSidebar();
+    else if (dx < -60 && sidebarOpen) _notesToggleSidebar();
+  }, { passive: true });
+}
+
 // ── Teleprompter ──
 let _tp = { running: false, y: 0, wpm: 150, size: 48, mirror: false, lastT: 0, raf: null, toolbarTimer: null };
 
@@ -22695,6 +22755,7 @@ function _notesSwitchMode(mode) {
       }
       preview.classList.add('md-content');
       _notesPreviewBindCheckboxes(preview);
+      _notesPreviewBindTapToEdit(preview);
     }
     preview.classList.add('active');
     quillWrap.style.display = 'none';
