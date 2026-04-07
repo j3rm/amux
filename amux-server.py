@@ -9030,7 +9030,6 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
     <div class="notes-mode-tabs" id="notes-mode-tabs" style="display:none;">
       <button class="notes-mode-tab" id="notes-tab-edit" onclick="_notesSwitchMode('edit')">Edit</button>
       <button class="notes-mode-tab active" id="notes-tab-preview" onclick="_notesSwitchMode('preview')">Preview</button>
-      <button class="notes-mode-tab" id="notes-tab-teleprompter" onclick="_notesOpenTeleprompter()" title="Teleprompter mode">&#x25B6; Teleprompter</button>
       <div id="notes-preview-search" style="display:none;margin-left:auto;display:none;align-items:center;gap:4px;">
         <input id="notes-preview-search-input" type="text" placeholder="Search in preview..." oninput="_notesPreviewSearch(this.value)" onkeydown="if(event.key==='Enter'){event.preventDefault();event.shiftKey?_notesPreviewSearchNav(-1):_notesPreviewSearchNav(1);}" style="font-size:0.75rem;padding:3px 8px;border:1px solid var(--border);border-radius:4px;background:var(--bg);color:var(--fg);width:160px;outline:none;">
         <span id="notes-preview-search-count" style="font-size:0.68rem;color:var(--dim);min-width:36px;text-align:center;"></span>
@@ -9437,7 +9436,7 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
   <!-- Reading line at 33% -->
   <div id="tp-reading-line" style="position:absolute;top:33%;left:0;right:0;height:2px;background:linear-gradient(to right,transparent,#fbbf24 20%,#fbbf24 80%,transparent);pointer-events:none;opacity:0.5;"></div>
   <!-- Top-right close -->
-  <button onclick="_notesCloseTeleprompter()" style="position:absolute;top:14px;right:18px;background:rgba(0,0,0,0.5);border:1px solid #444;border-radius:6px;color:#fff;padding:6px 12px;font-size:0.9rem;cursor:pointer;z-index:2;">&#x2715; Close</button>
+  <button onclick="_tpClose()" style="position:absolute;top:14px;right:18px;background:rgba(0,0,0,0.5);border:1px solid #444;border-radius:6px;color:#fff;padding:6px 12px;font-size:0.9rem;cursor:pointer;z-index:2;">&#x2715; Close</button>
   <!-- Bottom toolbar -->
   <div id="tp-toolbar" style="position:absolute;bottom:20px;left:50%;transform:translateX(-50%);background:rgba(20,20,30,0.92);backdrop-filter:blur(8px);border:1px solid #333;border-radius:10px;padding:10px 14px;display:flex;align-items:center;gap:14px;font-size:0.85rem;transition:opacity 0.3s;z-index:2;flex-wrap:wrap;justify-content:center;max-width:calc(100% - 40px);">
     <button id="tp-play" onclick="_tpToggle()" style="background:#7c6fcd;border:none;color:#fff;width:40px;height:40px;border-radius:50%;font-size:1.1rem;cursor:pointer;">&#x25B6;</button>
@@ -10085,6 +10084,7 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
       <button class="file-view-tab active" id="file-tab-preview" onclick="setFileViewMode('preview')">Preview</button>
       <button class="file-view-tab" id="file-tab-edit" onclick="setFileViewMode('edit')" style="display:none;">Edit</button>
       <button class="file-view-tab" id="file-tab-raw" onclick="setFileViewMode('raw')">Raw</button>
+      <button class="file-view-tab" id="file-tab-teleprompter" onclick="_filesOpenTeleprompter()" title="Teleprompter mode" style="display:none;">&#x25B6; Teleprompter</button>
       <button class="file-view-tab" id="file-tab-copy" onclick="copyFileContent()" title="Copy to clipboard">Copy</button>
       <button class="file-view-tab" id="file-tab-link" onclick="_copyFileDeeplink(_fileData&&_fileData.path||'')" title="Copy deep link">Link</button>
     </div>
@@ -14998,6 +14998,7 @@ async function openFilePreview(path) {
       document.getElementById('file-view-tabs').style.display = '';
       // Show Edit tab only for markdown
       document.getElementById('file-tab-edit').style.display = data.is_markdown ? '' : 'none';
+      document.getElementById('file-tab-teleprompter').style.display = data.is_markdown ? '' : 'none';
     }
     // Show download button for all files
     const dlBtn = document.getElementById('file-download-btn');
@@ -15032,6 +15033,8 @@ function closeFilePreview() {
   document.getElementById('file-overlay').classList.remove('active');
   document.getElementById('file-download-btn').style.display = 'none';
   document.getElementById('file-save-btn').style.display = 'none';
+  const tpTab = document.getElementById('file-tab-teleprompter');
+  if (tpTab) tpTab.style.display = 'none';
   document.getElementById('file-edit-wrap').style.display = 'none';
   document.getElementById('file-body').style.display = '';
   _fileData = null;
@@ -22538,21 +22541,12 @@ function _notesPreviewBindCheckboxes(container) {
 // ── Teleprompter ──
 let _tp = { running: false, y: 0, wpm: 150, size: 48, mirror: false, lastT: 0, raf: null, toolbarTimer: null };
 
-function _notesOpenTeleprompter() {
-  // Render current note's content as the teleprompter script
+function _filesOpenTeleprompter() {
+  // Render currently-open markdown file content as the teleprompter script
+  if (!_fileData || !_fileData.content) return;
   const overlay = document.getElementById('teleprompter-overlay');
   const content = document.getElementById('tp-content');
-  if (!_quill) return;
-  // Use rendered HTML from Quill (handles markdown the user pasted into the editor)
-  const rawIsHtml = /<[a-z][\s\S]*>/i.test(_notesRawContent);
-  let html;
-  if (rawIsHtml) {
-    html = _quill.root.innerHTML;
-  } else {
-    // Plain text / markdown: render minimally
-    html = _tpRenderMarkdown(_notesRawContent || _quill.getText());
-  }
-  content.innerHTML = html;
+  content.innerHTML = _tpRenderMarkdown(_fileData.content);
   // Restore saved settings
   try {
     const saved = JSON.parse(localStorage.getItem('amux_tp_settings') || '{}');
@@ -22575,7 +22569,7 @@ function _notesOpenTeleprompter() {
   document.getElementById('tp-viewport').addEventListener('wheel', _tpWheelScroll, { passive: false });
 }
 
-function _notesCloseTeleprompter() {
+function _tpClose() {
   _tp.running = false;
   if (_tp.raf) cancelAnimationFrame(_tp.raf);
   _tp.raf = null;
@@ -22689,7 +22683,7 @@ function _tpShowToolbar() {
 function _tpKeyHandler(e) {
   if (document.getElementById('teleprompter-overlay').style.display === 'none') return;
   if (e.key === ' ') { e.preventDefault(); _tpToggle(); _tpShowToolbar(); }
-  else if (e.key === 'Escape') { _notesCloseTeleprompter(); }
+  else if (e.key === 'Escape') { _tpClose(); }
   else if (e.key === 'ArrowUp') { e.preventDefault(); _tp.wpm = Math.min(400, _tp.wpm + 10); document.getElementById('tp-wpm').value = _tp.wpm; document.getElementById('tp-wpm-val').textContent = _tp.wpm; _tpShowToolbar(); }
   else if (e.key === 'ArrowDown') { e.preventDefault(); _tp.wpm = Math.max(60, _tp.wpm - 10); document.getElementById('tp-wpm').value = _tp.wpm; document.getElementById('tp-wpm-val').textContent = _tp.wpm; _tpShowToolbar(); }
   else if (e.key === 'ArrowLeft') { e.preventDefault(); _tp.y = Math.max(0, _tp.y - (_tp.wpm / 60) * _tp.size * 1.5 * 10); _tpTick(performance.now()); }
