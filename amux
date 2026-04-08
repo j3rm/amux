@@ -148,10 +148,15 @@ parse_claude_flags() {
         fi
         shift
         ;;
-      # Working directory — resolve to absolute path, create if needed
+      # Working directory — resolve to absolute path, create if needed.
+      # We previously fell back to the literal $2 if cd failed, which silently
+      # let relative paths slip into the session env file (CC_DIR=./foo). On
+      # next start the relative path would resolve from whatever pwd happened
+      # to be, and Claude Code would write files into the wrong tree. Now we
+      # die loudly instead.
       --dir)
-        mkdir -p "$2" 2>/dev/null || true
-        CC_DIR="$(cd "$2" 2>/dev/null && pwd || echo "$2")"
+        mkdir -p "$2" || die "cannot create --dir: $2"
+        CC_DIR="$(cd "$2" && pwd)" || die "cannot resolve --dir to absolute path: $2"
         shift 2
         ;;
       # Everything else goes to extra args
@@ -173,16 +178,26 @@ cmd_register() {
 
   parse_claude_flags "$@"
 
+  # Always persist an absolute CC_DIR. If --dir wasn't passed, use $(pwd) which
+  # is already absolute. Refuse to write a relative path because it would be
+  # resolved against pwd at start time — easy way for Claude Code to scribble
+  # files into the wrong tree.
+  local resolved_dir="${CC_DIR:-$(pwd)}"
+  case "$resolved_dir" in
+    /*) ;;  # absolute, ok
+    *) die "CC_DIR must be absolute, got: $resolved_dir" ;;
+  esac
+
   local file="$CC_SESSIONS/$name.env"
   cat > "$file" <<EOF
 # amux session: $name
 # registered: $(date -Iseconds)
 CC_NAME="$name"
-CC_DIR="${CC_DIR:-$(pwd)}"
+CC_DIR="$resolved_dir"
 CC_FLAGS="${CC_FLAGS_STR}"
 EOF
 
-  echo "${GREEN}registered${RESET} ${BOLD}$name${RESET} → ${CC_DIR:-$(pwd)}"
+  echo "${GREEN}registered${RESET} ${BOLD}$name${RESET} → $resolved_dir"
   [[ -n "$CC_FLAGS_STR" ]] && echo "  flags: $CC_FLAGS_STR"
 }
 
@@ -206,6 +221,14 @@ cmd_start() {
   local dir="${CC_DIR:-$HOME}"
   # Expand ~ in dir path
   dir="${dir/#\~/$HOME}"
+  # Hard requirement: dir must be absolute. A relative CC_DIR (from an old
+  # session env file) would resolve against whatever pwd happens to be when
+  # `amux start` is invoked, and Claude Code would silently write files into
+  # the wrong tree. Refuse instead. Re-register with --dir to fix.
+  case "$dir" in
+    /*) ;;
+    *) die "CC_DIR is not absolute ('$dir'). Re-register the session with: amux register $name --dir /absolute/path" ;;
+  esac
   [[ -d "$dir" ]] || die "directory not found: $dir"
 
   # Build claude command
@@ -249,13 +272,19 @@ cmd_exec() {
 
   parse_claude_flags "$@"
 
+  local resolved_dir="${CC_DIR:-$(pwd)}"
+  case "$resolved_dir" in
+    /*) ;;
+    *) die "CC_DIR must be absolute, got: $resolved_dir" ;;
+  esac
+
   # Register if not exists, or update
   local file="$CC_SESSIONS/$name.env"
   cat > "$file" <<EOF
 # amux session: $name
 # registered: $(date -Iseconds)
 CC_NAME="$name"
-CC_DIR="${CC_DIR:-$(pwd)}"
+CC_DIR="$resolved_dir"
 CC_FLAGS="${CC_FLAGS_STR}"
 EOF
 
