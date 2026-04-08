@@ -11485,6 +11485,8 @@ function render() {
           <div class="card-menu-item" onclick="event.stopPropagation();editField('${s.name}','desc','${esc(s.desc||"")}')"><span class="mi">&#x1F4DD;</span> Description</div>
           <div class="card-menu-item" onclick="event.stopPropagation();editField('${s.name}','tags','${esc(s.tags.join(", "))}')"><span class="mi">&#x1F3F7;</span> Tags</div>
           <div class="card-menu-item" onclick="event.stopPropagation();editField('${s.name}','dir','${esc(s.dir)}')"><span class="mi">&#x1F4C1;</span> Directory</div>
+          ${s.running ? `<div class="card-menu-item" onclick="event.stopPropagation();closeAllMenus();doRestart('${s.name}')"><span class="mi">&#x21BB;</span> Restart</div>` : ''}
+          ${s.running ? `<div class="card-menu-item" onclick="event.stopPropagation();closeAllMenus();doStop('${s.name}')"><span class="mi">&#x23F9;</span> Stop</div>` : ''}
           ${s.running ? `<div class="card-menu-item" onclick="event.stopPropagation();clearScrollback('${s.name}')"><span class="mi">&#x239A;</span> Clear scrollback</div>` : ''}
           <div class="card-menu-item" onclick="event.stopPropagation();duplicateSession('${s.name}')"><span class="mi">&#x2398;</span> Duplicate</div>
           ${s.running ? `<div class="card-menu-item" onclick="event.stopPropagation();cloneSession('${s.name}')"><span class="mi">&#x1F504;</span> Clone &amp; continue</div>` : ''}
@@ -11525,10 +11527,7 @@ function render() {
       </div>` : ''}
       ${!s.running ? `<div style="padding:6px 0 2px;" onclick="event.stopPropagation()">
         <button class="btn primary" style="width:100%;" onclick="doStart('${s.name}')">&#x25B6; Start</button>
-      </div>` : `<div style="padding:6px 0 2px;display:flex;gap:6px;" onclick="event.stopPropagation()">
-        <button class="btn" style="flex:1;background:var(--surface);border:1px solid var(--border);color:var(--dim);" onclick="doStop('${s.name}')">&#x23F9; Stop</button>
-        <button class="btn" style="flex:1;background:var(--surface);border:1px solid var(--border);color:var(--accent);" onclick="doRestart('${s.name}')">&#x21BB; Restart</button>
-      </div>`}
+      </div>` : ''}
       <div class="panel" onclick="event.stopPropagation()">
         ${isExp && s.task_name ? `<div class="card-task-name"><span class="tn-label">Task:</span>${esc(s.task_name)}</div>` : ''}
         ${isExp && s.running ? `<div class="card-timing">
