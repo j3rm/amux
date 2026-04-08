@@ -1655,8 +1655,9 @@ INSERT OR IGNORE INTO statuses (id, label, position, is_builtin) VALUES
     ('backlog',   'Backlog',      0, 1),
     ('todo',      'To Do',        1, 1),
     ('doing',     'In Progress',  2, 1),
-    ('done',      'Done',         3, 1),
-    ('discarded', 'Discarded',    4, 1);
+    ('review',    'In Review',    3, 1),
+    ('done',      'Done',         4, 1),
+    ('discarded', 'Discarded',    5, 1);
 CREATE TABLE IF NOT EXISTS issues (
     id          TEXT PRIMARY KEY,
     title       TEXT NOT NULL,
@@ -2738,6 +2739,7 @@ _DEFAULT_STATUSES = [
     {"id": "backlog",   "label": "Backlog"},
     {"id": "todo",      "label": "To Do"},
     {"id": "doing",     "label": "In Progress"},
+    {"id": "review",    "label": "In Review"},
     {"id": "done",      "label": "Done"},
     {"id": "discarded", "label": "Discarded"},
 ]
@@ -27903,7 +27905,7 @@ class CCHandler(BaseHTTPRequestHandler):
             if status_m:
                 sid = status_m.group(1)
                 if method == "DELETE":
-                    if sid in ("backlog", "todo", "doing", "done", "discarded"):
+                    if sid in ("backlog", "todo", "doing", "review", "done", "discarded"):
                         return self._json({"error": "cannot delete built-in status"}, 400)
                     db.execute("DELETE FROM statuses WHERE id = ? AND is_builtin = 0", (sid,))
                     db.execute(
