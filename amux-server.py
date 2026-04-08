@@ -4445,17 +4445,9 @@ def start_session(name: str, extra_flags: str = "", _skip_conv_id: bool = False)
         # Source user profile to ensure PATH includes ~/.local/bin (where claude lives)
         # Then cd back to work_dir since the profile may override CWD (e.g. cd ~/Dev)
         shell_rc = "unset CLAUDECODE CLAUDE_CODE_ENTRYPOINT; "
-        for rc in [Path.home() / ".zprofile", Path.home() / ".bash_profile", Path.home() / ".profile"]:
-            if rc.exists():
-                shell_rc += f"source {rc} 2>/dev/null; cd {shlex.quote(work_dir)}; "
-                break
-        else:
-            shell_rc += f"cd {shlex.quote(work_dir)}; "
-        # Forward select env vars into the tmux session.
-        # ANTHROPIC_API_KEY: only forward if there's no OAuth token in
-        # ~/.claude.json. OAuth/Max users manage their own auth; BYO-key
-        # users (cloud containers without OAuth) need the key injected.
-        _env_args = []
+        # Detect OAuth (Claude Max / claude.ai login) so we know whether to
+        # forward ANTHROPIC_API_KEY. OAuth users hit an auth conflict if both
+        # are present; BYO-key users need the key injected.
         _has_oauth = False
         try:
             import json as _j2
@@ -4464,9 +4456,24 @@ def start_session(name: str, extra_flags: str = "", _skip_conv_id: bool = False)
                 _has_oauth = bool(_j2.loads(_cj.read_text()).get("oauthAccount"))
         except Exception:
             pass
-        # If OAuth is present, explicitly blank ANTHROPIC_API_KEY so sessions
-        # don't inherit it from the parent shell (causes auth conflict).
-        # Only forward the key if there's no OAuth (BYO-key / cloud container).
+        # If OAuth is present, unset ANTHROPIC_API_KEY in the shell before
+        # sourcing profile or launching claude. Doing this in the bash wrapper
+        # (rather than only via tmux -e) defends against the tmux server's
+        # inherited env and any profile re-export.
+        if _has_oauth:
+            shell_rc += "unset ANTHROPIC_API_KEY; "
+        for rc in [Path.home() / ".zprofile", Path.home() / ".bash_profile", Path.home() / ".profile"]:
+            if rc.exists():
+                shell_rc += f"source {rc} 2>/dev/null; cd {shlex.quote(work_dir)}; "
+                break
+        else:
+            shell_rc += f"cd {shlex.quote(work_dir)}; "
+        # Belt-and-suspenders: also unset after sourcing profile in case the
+        # profile re-exports it.
+        if _has_oauth:
+            shell_rc += "unset ANTHROPIC_API_KEY; "
+        # Forward select env vars into the tmux session.
+        _env_args = []
         if _has_oauth:
             _env_args += ["-e", "ANTHROPIC_API_KEY="]
         else:

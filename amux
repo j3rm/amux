@@ -224,8 +224,15 @@ cmd_start() {
   fi
 
   # Create tmux session and attach
-  # Explicit cd to work dir in case shell profile overrides CWD
-  tmux new-session -d -s "$tname" -n "$name" -c "$dir" "cd $(printf '%q' "$dir"); $cmd"
+  # Explicit cd to work dir in case shell profile overrides CWD.
+  # If Claude OAuth is present (Max/claude.ai login), unset ANTHROPIC_API_KEY
+  # to prevent auth conflict — BYO-key users don't have oauthAccount so they're
+  # unaffected.
+  local unset_key=""
+  if [[ -f "$HOME/.claude.json" ]] && grep -q '"oauthAccount"' "$HOME/.claude.json" 2>/dev/null; then
+    unset_key="unset ANTHROPIC_API_KEY; "
+  fi
+  tmux new-session -d -s "$tname" -n "$name" -c "$dir" "${unset_key}cd $(printf '%q' "$dir"); $cmd"
   # Lock the window name so Claude can't overwrite it with escape sequences
   tmux set-option -t "$tname" allow-rename off 2>/dev/null
   tmux set-window-option -t "$tname" automatic-rename off 2>/dev/null
