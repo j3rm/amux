@@ -8043,7 +8043,7 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
   .notes-quill-wrap .ql-container.ql-snow {
     border: none; flex: 1; overflow-y: auto; background: var(--bg);
   }
-  .notes-quill-wrap .ql-editor { color: var(--text); font-size: 0.92rem; line-height: 1.75; min-height: 200px; padding: 12px 24px 80px; max-width: 740px; }
+  .notes-quill-wrap .ql-editor { color: var(--text); font-size: 0.92rem; line-height: 1.75; min-height: 200px; padding: 12px 24px 80px; max-width: 740px; margin: 0 auto; }
   /* Render Quill content with markdown-like typography (Obsidian-style) */
   .notes-quill-wrap .ql-editor h1 { font-size: 1.6rem; font-weight: 700; margin: 0.5em 0 0.3em; letter-spacing: -0.01em; }
   .notes-quill-wrap .ql-editor h2 { font-size: 1.25rem; font-weight: 600; margin: 0.8em 0 0.3em; }
@@ -8094,6 +8094,7 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
     flex: 1; overflow-y: auto; padding: 20px 24px 80px; background: var(--bg);
     display: none; color: var(--text); font-size: 0.92rem; line-height: 1.75;
     box-sizing: border-box; cursor: text; max-width: 760px;
+    margin-left: auto; margin-right: auto; width: 100%;
   }
   .notes-preview.active { display: block; }
   .notes-preview > *:first-child { margin-top: 0; }
