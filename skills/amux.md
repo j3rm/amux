@@ -149,19 +149,28 @@ curl -sk -X POST https://localhost:8822/api/notes/my-note/pin
 Accounts: ethan@mixpeek.com · esteininger21@gmail.com · beefinethan@icloud.com
 
 ```bash
-# Send email
+# Read inbox (returns recent messages with subject, from, date, body, message_id)
+curl -sk "https://localhost:8822/api/email/inbox?account=ethan@mixpeek.com&count=20&days=7"
+# Params: account (filter to one account), count (max messages, default 20), days (lookback, default 7)
+
+# Send email (validates email format, optional from account)
 curl -sk -X POST -H 'Content-Type: application/json' \
   -d '{"to":"x@example.com","subject":"Hi","body":"...","from":"ethan@mixpeek.com"}' \
   https://localhost:8822/api/email/send
 
-# Sync inbox (returns recent messages)
+# Reply to an existing email (by message_id from inbox response)
 curl -sk -X POST -H 'Content-Type: application/json' \
-  -d '{"account":"ethan@mixpeek.com","count":20}' \
-  https://localhost:8822/api/email/sync
+  -d '{"message_id":"<msg-id-from-inbox>","body":"Thanks!","reply_all":false}' \
+  https://localhost:8822/api/email/reply
 
-# Get email events stream
+# Sync email → calendar events (background AI extraction)
+curl -sk -X POST https://localhost:8822/api/email/sync
+
+# Get extracted calendar events
 curl -sk https://localhost:8822/api/email/events
 ```
+
+**Workflow for replying:** call `/api/email/inbox` first to find the message, then use its `message_id` field in `/api/email/reply`.
 
 ---
 

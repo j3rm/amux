@@ -29178,6 +29178,141 @@ class CCHandler(BaseHTTPRequestHandler):
                 get_db().commit()
                 return self._json({"ok": True})
 
+            # GET /api/email/inbox — read recent messages from Mail.app
+            if method == "GET" and path == "/api/email/inbox":
+                account_filter = qs.get("account", [""])[0]
+                count = min(int(qs.get("count", ["20"])[0]), 100)
+                lookback_days = float(qs.get("days", ["7"])[0])
+                lookback_secs = max(lookback_days * 86400, 3600)
+                max_msgs = min(count, 100)
+                lookback_days_frac = lookback_secs / 86400
+                acct_filter_line = ""
+                if account_filter:
+                    safe_acct = account_filter.replace('"', '\\"')
+                    acct_filter_line = f'if acctName is not equal to "{safe_acct}" then'
+                script = f"""
+set NL to ASCII character 10
+set output to ""
+set cutoff to (current date) - ({lookback_days_frac} * days)
+set msgCount to 0
+tell application "Mail"
+    repeat with acct in accounts
+        set acctName to name of acct
+        {acct_filter_line}
+        {"" if not account_filter else "-- skip non-matching accounts"}
+        {("end if" if not account_filter else "")}
+        try
+            repeat with mb in mailboxes of acct
+                if name of mb is "INBOX" then
+                    try
+                        set recentMsgs to messages 1 through {max_msgs} of mb
+                    on error
+                        set recentMsgs to messages of mb
+                    end try
+                    repeat with msg in recentMsgs
+                        try
+                            if date received of msg < cutoff then exit repeat
+                        end try
+                        try
+                            set subj to subject of msg
+                            set sndr to sender of msg
+                            set rcvd to date received of msg as string
+                            set msgId to message id of msg
+                            set isRead to read status of msg
+                            set msgBody to content of msg
+                            if length of msgBody > 3000 then set msgBody to text 1 thru 3000 of msgBody
+                            set readFlag to "1"
+                            if not isRead then set readFlag to "0"
+                            set output to output & "MSG_START" & NL & acctName & NL & sndr & NL & rcvd & NL & subj & NL & msgId & NL & readFlag & NL & msgBody & "MSG_END" & NL
+                            set msgCount to msgCount + 1
+                            if msgCount >= {max_msgs} then exit repeat
+                        end try
+                    end repeat
+                end if
+            end repeat
+        end try
+        if msgCount >= {max_msgs} then exit repeat
+    end repeat
+end tell
+return output
+"""
+                # Fix the account filter logic — need proper if/end if
+                if account_filter:
+                    safe_acct = account_filter.replace('"', '\\"')
+                    script = f"""
+set NL to ASCII character 10
+set output to ""
+set cutoff to (current date) - ({lookback_days_frac} * days)
+set msgCount to 0
+tell application "Mail"
+    repeat with acct in accounts
+        set acctName to name of acct
+        if acctName is not equal to "{safe_acct}" then
+            -- skip
+        else
+            try
+                repeat with mb in mailboxes of acct
+                    if name of mb is "INBOX" then
+                        try
+                            set recentMsgs to messages 1 through {max_msgs} of mb
+                        on error
+                            set recentMsgs to messages of mb
+                        end try
+                        repeat with msg in recentMsgs
+                            try
+                                if date received of msg < cutoff then exit repeat
+                            end try
+                            try
+                                set subj to subject of msg
+                                set sndr to sender of msg
+                                set rcvd to date received of msg as string
+                                set msgId to message id of msg
+                                set isRead to read status of msg
+                                set msgBody to content of msg
+                                if length of msgBody > 3000 then set msgBody to text 1 thru 3000 of msgBody
+                                set readFlag to "1"
+                                if not isRead then set readFlag to "0"
+                                set output to output & "MSG_START" & NL & acctName & NL & sndr & NL & rcvd & NL & subj & NL & msgId & NL & readFlag & NL & msgBody & "MSG_END" & NL
+                                set msgCount to msgCount + 1
+                                if msgCount >= {max_msgs} then exit repeat
+                            end try
+                        end repeat
+                    end if
+                end repeat
+            end try
+        end if
+        if msgCount >= {max_msgs} then exit repeat
+    end repeat
+end tell
+return output
+"""
+                try:
+                    r = subprocess.run(["osascript", "-e", script], capture_output=True, text=True, timeout=60)
+                    if r.returncode != 0:
+                        return self._json({"error": r.stderr.strip() or "AppleScript failed"}, 500)
+                    messages = []
+                    for block in r.stdout.split("MSG_START\n"):
+                        if "MSG_END" not in block:
+                            continue
+                        content = block[: block.rfind("MSG_END")].strip()
+                        lines = content.split("\n", 6)
+                        if len(lines) < 6:
+                            continue
+                        messages.append({
+                            "account": lines[0],
+                            "from":    lines[1],
+                            "date":    lines[2],
+                            "subject": lines[3],
+                            "message_id": lines[4],
+                            "read":    lines[5] == "1",
+                            "body":    lines[6] if len(lines) > 6 else "",
+                        })
+                    return self._json(messages)
+                except subprocess.TimeoutExpired:
+                    return self._json({"error": "Mail.app timed out"}, 504)
+                except Exception as e:
+                    return self._json({"error": str(e)}, 500)
+
             # POST /api/email/send — send email via Mail.app
             if method == "POST" and path == "/api/email/send":
                 body = self._read_body()
@@ -29185,12 +29320,31 @@ class CCHandler(BaseHTTPRequestHandler):
                 subject = body.get("subject", "").strip()
                 message = body.get("body", "").strip()
                 cc = body.get("cc", "").strip()
+                from_acct = body.get("from", "").strip()
                 if not to or not subject or not message:
                     return self._json({"error": "to, subject, and body are required"}, 400)
+                # Basic email validation
+                if not re.match(r'^[^@\s]+@[^@\s]+\.[^@\s]+$', to):
+                    return self._json({"error": f"invalid email address: {to}"}, 400)
+                if cc and not re.match(r'^[^@\s]+@[^@\s]+\.[^@\s]+$', cc):
+                    return self._json({"error": f"invalid cc address: {cc}"}, 400)
                 cc_line = f'\nset cc of new_msg to "{cc}"' if cc else ""
                 subj_safe = subject.replace('"', '\\"')
                 to_safe = to.replace('"', '\\"')
                 body_safe = message.replace('"', '\\"').replace('\n', '\\n')
+                # If from account specified, set the sender
+                from_line = ""
+                if from_acct:
+                    from_safe = from_acct.replace('"', '\\"')
+                    from_line = f"""
+        set sender to "{from_safe}"
+        repeat with acct in accounts
+            repeat with addr in email addresses of acct
+                if address of addr is "{from_safe}" then
+                    set sender of new_msg to (address of addr as string)
+                end if
+            end repeat
+        end repeat"""
                 script = f"""
 tell application "Mail"
     set new_msg to make new outgoing message with properties {{subject:"{subj_safe}", content:"{body_safe}", visible:false}}
@@ -29198,6 +29352,7 @@ tell application "Mail"
         make new to recipient with properties {{address:"{to_safe}"}}
         {cc_line}
     end tell
+    {from_line}
     send new_msg
 end tell
 """
@@ -29206,6 +29361,53 @@ end tell
                     if r.returncode != 0:
                         return self._json({"error": r.stderr.strip() or "AppleScript failed"}, 500)
                     return self._json({"ok": True, "to": to, "subject": subject})
+                except Exception as e:
+                    return self._json({"error": str(e)}, 500)
+
+            # POST /api/email/reply — reply to an existing email
+            if method == "POST" and path == "/api/email/reply":
+                body = self._read_body()
+                message_id = body.get("message_id", "").strip()
+                reply_body = body.get("body", "").strip()
+                reply_all = body.get("reply_all", False)
+                if not message_id or not reply_body:
+                    return self._json({"error": "message_id and body are required"}, 400)
+                msg_id_safe = message_id.replace('"', '\\"')
+                body_safe = reply_body.replace('"', '\\"').replace('\n', '\\n')
+                reply_cmd = "reply" if not reply_all else "reply with properties {reply to all: true}"
+                script = f"""
+tell application "Mail"
+    set targetMsg to missing value
+    repeat with acct in accounts
+        try
+            repeat with mb in mailboxes of acct
+                if name of mb is "INBOX" then
+                    set msgs to (messages of mb whose message id is "{msg_id_safe}")
+                    if (count of msgs) > 0 then
+                        set targetMsg to item 1 of msgs
+                        exit repeat
+                    end if
+                end if
+            end repeat
+        end try
+        if targetMsg is not missing value then exit repeat
+    end repeat
+    if targetMsg is missing value then
+        error "Message not found"
+    end if
+    set replyMsg to {reply_cmd} targetMsg opening window no
+    set content of replyMsg to "{body_safe}" & return & return & (content of replyMsg)
+    send replyMsg
+end tell
+"""
+                try:
+                    r = subprocess.run(["osascript", "-e", script], capture_output=True, text=True, timeout=30)
+                    if r.returncode != 0:
+                        err = r.stderr.strip()
+                        if "Message not found" in err:
+                            return self._json({"error": "message not found — check message_id"}, 404)
+                        return self._json({"error": err or "AppleScript failed"}, 500)
+                    return self._json({"ok": True, "message_id": message_id, "reply_all": reply_all})
                 except Exception as e:
                     return self._json({"error": str(e)}, 500)
 
