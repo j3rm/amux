@@ -1067,7 +1067,7 @@ def _yolo_auto_respond():
             cfg = parse_env_file(f)
             if '--dangerously-skip-permissions' not in cfg.get('CC_FLAGS', ''):
                 continue
-            raw = tmux_capture(name, 20)
+            raw = tmux_capture(name, 50)
             if not raw:
                 continue
             clean = re.sub(r'\x1b\[[0-9;?]*[a-zA-Z]|\x1b[^a-zA-Z]*[a-zA-Z]', '', raw)
@@ -1413,7 +1413,7 @@ def _snapshot_all_sessions():
                     # Still waiting on a subsequent snapshot — check opt-in flag
                     cfg_ac = parse_env_file(f)
                     if cfg_ac.get("CC_AUTO_CONTINUE") in ("1", "true", "yes"):
-                        if now - actions.get("last_auto_continue", 0) > 300:
+                        if now - actions.get("last_auto_continue", 0) > 30:
                             # Determine what kind of waiting and what to send
                             lines_ac = [l.strip() for l in clean.splitlines() if l.strip()]
                             response = None
@@ -20472,7 +20472,7 @@ async function _updateGridPane(name) {
     if (atBottom) body.scrollTop = body.scrollHeight;
     if (dot) {
       const s = (sessions || []).find(s => s.name === name);
-      dot.className = 'gp-dot' + (!s || !s.running ? '' : s.status === 'working' ? ' working' : s.status === 'needs_input' ? ' waiting' : ' idle');
+      dot.className = 'gp-dot' + (!s || !s.running ? '' : s.status === 'active' ? ' working' : s.status === 'waiting' ? ' waiting' : ' idle');
     }
   } catch(e) {
     if (body) { body.textContent = '(error loading output)'; }
