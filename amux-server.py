@@ -1070,7 +1070,7 @@ def _yolo_auto_respond():
             raw = tmux_capture(name, 20)
             if not raw:
                 continue
-            clean = re.sub(r'\x1b\[[0-9;]*[a-zA-Z]|\x1b[^a-zA-Z]*[a-zA-Z]', '', raw)
+            clean = re.sub(r'\x1b\[[0-9;?]*[a-zA-Z]|\x1b[^a-zA-Z]*[a-zA-Z]', '', raw)
             for pattern, response in _YOLO_PROMPTS:
                 if pattern.search(clean):
                     send_text(name, response)
@@ -1171,7 +1171,7 @@ def _last_meaningful_user_message(work_dir: str) -> str:
 
 
 _STRIP_ANSI = re.compile(
-    r'\x1b\[[0-9;]*[a-zA-Z]|\x1b\]8;[^\x1b]*\x1b\\|\x1b\][^\x07]*\x07'
+    r'\x1b\[[0-9;?]*[a-zA-Z]|\x1b\]8;[^\x1b]*\x1b\\|\x1b\][^\x07]*\x07'
     r'|\x1b\][^\x1b]*\x1b\\|\x1b[()][A-Z0-9]|\x1b[\x20-\x2f]*[\x40-\x7e]'
 )
 
@@ -1281,6 +1281,40 @@ def _snapshot_all_sessions():
                     threading.Thread(target=_replay, daemon=True).start()
                 _push_alert("thinking_reset", name,
                             f"Session '{name}' auto-restarted: thinking block corruption"
+                            + (" — last message replayed" if last_msg else ""))
+
+            # ── 2b. Reactive: session ID already in use → clear ID + restart ─
+            # Claude Code exits with "Session ID ... is already in use" when a
+            # stale process holds the lock. Clear the conversation ID so a fresh
+            # one is assigned, then restart.
+            if ("is already in use" in clean and "Session ID" in clean and
+                    now - actions.get("last_restart", 0) > 120):
+                actions["last_restart"] = now
+                wd = _session_work_dir(name)
+                last_msg = _last_meaningful_user_message(wd)
+                stop_session(name)
+                # Kill any stale claude processes in this tmux session
+                try:
+                    tmux_sess = tmux_name(name)
+                    r = subprocess.run(["tmux", "list-panes", "-t", tmux_sess, "-F", "#{pane_pid}"],
+                                       capture_output=True, text=True, timeout=5)
+                    if r.returncode == 0 and r.stdout.strip():
+                        shell_pid = r.stdout.strip().split("\n")[0]
+                        subprocess.run(["pkill", "-9", "-P", shell_pid],
+                                       capture_output=True, timeout=5)
+                except Exception:
+                    pass
+                meta = _load_meta(name)
+                meta.pop("cc_conversation_id", None)
+                _save_meta(name, meta)
+                start_session(name)
+                if last_msg:
+                    def _replay_id(sname=name, msg=last_msg):
+                        time.sleep(6)
+                        send_text(sname, msg)
+                    threading.Thread(target=_replay_id, daemon=True).start()
+                _push_alert("auto_restart", name,
+                            f"Session '{name}' auto-restarted: session ID conflict resolved"
                             + (" — last message replayed" if last_msg else ""))
 
             # ── 3. Auto-continue: unblock waiting sessions ───────────────────
@@ -3804,7 +3838,7 @@ def _detect_claude_status(raw_output: str) -> str:
     if not raw_output:
         return ""
     clean = re.sub(
-        r'\x1b\[[0-9;]*[a-zA-Z]|\x1b\]8;[^\x1b]*\x1b\\|\x1b\][^\x07]*\x07'
+        r'\x1b\[[0-9;?]*[a-zA-Z]|\x1b\]8;[^\x1b]*\x1b\\|\x1b\][^\x07]*\x07'
         r'|\x1b\][^\x1b]*\x1b\\|\x1b[()][A-Z0-9]|\x1b[\x20-\x2f]*[\x40-\x7e]',
         '', raw_output,
     )
@@ -3918,7 +3952,7 @@ def _parse_task_time(raw_output: str) -> str:
     if not raw_output:
         return ""
     clean = re.sub(
-        r'\x1b\[[0-9;]*[a-zA-Z]|\x1b\]8;[^\x1b]*\x1b\\|\x1b\][^\x07]*\x07'
+        r'\x1b\[[0-9;?]*[a-zA-Z]|\x1b\]8;[^\x1b]*\x1b\\|\x1b\][^\x07]*\x07'
         r'|\x1b\][^\x1b]*\x1b\\|\x1b[()][A-Z0-9]|\x1b[\x20-\x2f]*[\x40-\x7e]',
         '', raw_output,
     )
@@ -3984,7 +4018,7 @@ def list_sessions() -> list:
             if saved:
                 raw = "\n".join(saved.splitlines()[-30:])
         if raw:
-            strip_ansi = lambda t: re.sub(r'\x1b\[[0-9;]*[a-zA-Z]|\x1b\]8;[^\x1b]*\x1b\\|\x1b\][^\x07]*\x07|\x1b\][^\x1b]*\x1b\\|\x1b[()][A-Z0-9]|\x1b[\x20-\x2f]*[\x40-\x7e]', '', t)
+            strip_ansi = lambda t: re.sub(r'\x1b\[[0-9;?]*[a-zA-Z]|\x1b\]8;[^\x1b]*\x1b\\|\x1b\][^\x07]*\x07|\x1b\][^\x1b]*\x1b\\|\x1b[()][A-Z0-9]|\x1b[\x20-\x2f]*[\x40-\x7e]', '', t)
             lines = [l for l in raw.splitlines() if l.strip()]
             preview = strip_ansi(lines[-1][:120]) if lines else ""
             if running:
@@ -13961,7 +13995,7 @@ function stripAnsi(text) {
   // Strip ANSI escape sequences (colors, cursor movement, OSC hyperlinks, etc.)
   return text
     .replace(/\x1b\]8;[^\x1b]*\x1b\\/g, '')  // OSC 8 hyperlinks
-    .replace(/\x1b\[[0-9;]*[a-zA-Z]/g, '')    // CSI sequences (colors, etc.)
+    .replace(/\x1b\[[0-9;?]*[a-zA-Z]/g, '')    // CSI sequences (colors, DEC private modes, etc.)
     .replace(/\x1b\][^\x07]*\x07/g, '')        // OSC sequences (BEL terminated)
     .replace(/\x1b\][^\x1b]*\x1b\\/g, '')      // OSC sequences (ST terminated)
     .replace(/\x1b[()][A-Z0-9]/g, '')          // Character set selection
@@ -15516,7 +15550,7 @@ async function _runLogSearch() {
           const output = data.output || '';
           const lines = output.split('\n');
           const hits = [];
-          lines.forEach((l, i) => { if (l.toLowerCase().includes(q)) hits.push({ line: i + 1, text: l.replace(/\x1b\[[0-9;]*m/g, '').trim() }); });
+          lines.forEach((l, i) => { if (l.toLowerCase().includes(q)) hits.push({ line: i + 1, text: l.replace(/\x1b\[[0-9;?]*m/g, '').trim() }); });
           if (!hits.length) return null;
           return { name: s.name, hits };
         })
@@ -16175,7 +16209,7 @@ async function loadFiles(path) {
   _filesPath = path;
   // Update URL hash so path is shareable / bookmarkable (hash works in PWA mode)
   try {
-    history.replaceState({}, '', location.pathname + (path && path !== '/' ? '#path=' + encodeURIComponent(path) : ''));
+    history.replaceState({}, '', location.pathname + (path && path !== '/' ? '#path=' + _encodeHashPath(path) : ''));
   } catch(e) {}
   const srch = document.getElementById('files-search'); if (srch) srch.value = '';
   _updateFilesCwdBtn();
@@ -16573,9 +16607,12 @@ function _copyExplorePathFallback(path) {
   try { document.execCommand('copy'); } catch(e) {}
   document.body.removeChild(ta);
 }
+function _encodeHashPath(p) {
+  // Encode only chars that break fragment parsing - keep slashes readable
+  return p.replace(/%/g,'%25').replace(/#/g,'%23').replace(/\?/g,'%3F').replace(/ /g,'%20');
+}
 function _copyFileDeeplink(path) {
-  // Use hash (#path=...) — works in PWA mode (SW never strips fragments, no query-param loss on iOS)
-  const url = location.origin + location.pathname + '#path=' + encodeURIComponent(path);
+  const url = location.origin + location.pathname + '#path=' + _encodeHashPath(path);
   if (navigator.clipboard && navigator.clipboard.writeText) {
     navigator.clipboard.writeText(url).then(() => showToast('Link copied'), () => _copyFileDeeplinkFallback(url));
   } else {
@@ -18718,7 +18755,7 @@ async function fetchRawLogs() {
 }
 
 function _stripAnsi(s) {
-  return s.replace(/\x1b\[[0-9;]*[A-Za-z]/g, '').replace(/\x1b\][^\x07]*(\x07|$)/g, '');
+  return s.replace(/\x1b\[[0-9;?]*[A-Za-z]/g, '').replace(/\x1b\][^\x07]*(\x07|$)/g, '');
 }
 
 function renderRawLogs() {
@@ -31253,7 +31290,7 @@ p{{color:#888;margin:12px 0 28px;font-size:0.9rem;line-height:1.5}}
                             capture_output=True, text=True, timeout=10,
                         )
                         raw = r.stdout
-                        scrollback = re.sub(r'\x1b\[[0-9;]*[a-zA-Z]|\x1b\]8;[^\x1b]*\x1b\\|\x1b\][^\x07]*\x07', '', raw)
+                        scrollback = re.sub(r'\x1b\[[0-9;?]*[a-zA-Z]|\x1b\]8;[^\x1b]*\x1b\\|\x1b\][^\x07]*\x07', '', raw)
                         sb_lines = scrollback.splitlines()
                         while sb_lines and not sb_lines[0].strip():
                             sb_lines.pop(0)
