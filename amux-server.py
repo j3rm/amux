@@ -18999,7 +18999,7 @@ function renderScheduler() {
               style="width:auto;accent-color:var(--accent);">
           </label>
           <div style="flex:1;min-width:0;">
-            <div style="font-weight:600;font-size:0.85rem;">${esc(s.title)}</div>
+            <div style="font-weight:600;font-size:0.85rem;">${esc(s.title)} <span style="font-weight:400;font-size:0.68rem;color:var(--dim);user-select:all;">${esc(s.id)}</span></div>
             <div style="font-size:0.72rem;color:var(--dim);margin-top:2px;">
               <span style="color:var(--accent);">${esc(s.session)}</span>
               &nbsp;·&nbsp;<code style="font-size:0.7rem;background:var(--card);border:1px solid var(--border);border-radius:3px;padding:0 3px;">${esc(s.command.length > 60 ? s.command.slice(0,60) + '…' : s.command)}</code>
