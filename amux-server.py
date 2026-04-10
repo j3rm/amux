@@ -6318,6 +6318,15 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
     .csv-resize { width:10px;right:-5px; }
     .csv-table th.csv-rownum,.csv-table td.csv-rownum { width:36px;min-width:36px;max-width:36px;padding:10px 4px; }
   }
+  @media (max-width: 600px) {
+    .file-overlay-header { flex-wrap: wrap; gap: 6px; }
+    .file-overlay-header h2 { font-size: 0.88rem; flex-basis: calc(100% - 50px); }
+    .file-overlay-header .btn { min-width: 40px; min-height: 40px; font-size: 1.1rem;
+      display: flex; align-items: center; justify-content: center; }
+    .file-view-tabs { overflow-x: auto; -webkit-overflow-scrolling: touch; scrollbar-width: none; flex-wrap: nowrap; }
+    .file-view-tabs::-webkit-scrollbar { display: none; }
+    .file-view-tab { flex-shrink: 0; min-height: 36px; padding: 6px 12px; }
+  }
   /* Unified markdown content styling — used everywhere renderMarkdown() output appears */
   .md-content { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif; font-size: 0.88rem; line-height: 1.6; }
   .md-content > *:first-child { margin-top: 0 !important; }
@@ -7005,10 +7014,12 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
     border-radius: 12px; font-weight: 600; letter-spacing: 0.02em;
   }
   /* Peek tabs & memory panel */
-  .peek-tabs { display: flex; border-bottom: 1px solid var(--border); flex-shrink: 0; padding: 0 12px; }
+  .peek-tabs { display: flex; border-bottom: 1px solid var(--border); flex-shrink: 0; padding: 0 12px;
+    overflow-x: auto; -webkit-overflow-scrolling: touch; scrollbar-width: none; -ms-overflow-style: none; }
+  .peek-tabs::-webkit-scrollbar { display: none; }
   .peek-tab { padding: 8px 14px; font-size: 0.82rem; background: none; border: none;
     border-bottom: 2px solid transparent; color: var(--dim); cursor: pointer;
-    margin-bottom: -1px; -webkit-tap-highlight-color: transparent; }
+    margin-bottom: -1px; -webkit-tap-highlight-color: transparent; flex-shrink: 0; white-space: nowrap; }
   .peek-tab.active { color: var(--text); border-bottom-color: var(--accent); }
   .peek-tab:hover { color: var(--text); }
   .peek-dir-bar { display: flex; align-items: center; gap: 8px; padding: 6px 14px;
