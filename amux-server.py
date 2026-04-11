@@ -7275,6 +7275,10 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
     margin-bottom: -1px; -webkit-tap-highlight-color: transparent; flex-shrink: 0; white-space: nowrap; }
   .peek-tab.active { color: var(--text); border-bottom-color: var(--accent); }
   .peek-tab:hover { color: var(--text); }
+  .peek-tab-count { display: none; margin-left: 6px; font-size: 0.68rem; padding: 1px 6px;
+    border-radius: 9px; background: rgba(88,166,255,0.14); color: var(--accent);
+    border: 1px solid rgba(88,166,255,0.28); vertical-align: 1px; line-height: 1.2; }
+  .peek-tab-count.has-count { display: inline-block; }
   .peek-dir-bar { display: flex; align-items: center; gap: 8px; padding: 6px 14px;
     font-size: 0.75rem; color: var(--dim); border-bottom: 1px solid var(--border);
     flex-shrink: 0; min-width: 0; overflow: hidden; }
@@ -10366,8 +10370,8 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
     <button class="peek-tab" id="peek-tab-issues" onclick="setPeekTab('issues')">Issues</button>
     <button class="peek-tab" id="peek-tab-git" onclick="setPeekTab('git')">Worktree</button>
     <button class="peek-tab" id="peek-tab-commits" onclick="setPeekTab('commits')">Commits</button>
-    <button class="peek-tab" id="peek-tab-schedules" onclick="setPeekTab('schedules')">Schedules</button>
-    <button class="peek-tab" id="peek-tab-notes" onclick="setPeekTab('notes')">Notes</button>
+    <button class="peek-tab" id="peek-tab-schedules" onclick="setPeekTab('schedules')">Schedules<span class="peek-tab-count" id="peek-tab-schedules-count"></span></button>
+    <button class="peek-tab" id="peek-tab-notes" onclick="setPeekTab('notes')">Notes<span class="peek-tab-count" id="peek-tab-notes-count"></span></button>
   </div>
   <!-- Working directory bar -->
   <div class="peek-dir-bar">
@@ -13625,6 +13629,32 @@ function renderPeekIssues() {
   }).join('');
 }
 // ── Peek Schedules (scheduler tasks for this session) ────────────────────────
+async function _peekUpdateTabCounts() {
+  if (!peekSession) return;
+  const sess = peekSession;
+  const setCount = (id, n) => {
+    const el = document.getElementById(id);
+    if (!el) return;
+    if (n > 0) { el.textContent = n; el.classList.add('has-count'); }
+    else { el.textContent = ''; el.classList.remove('has-count'); }
+  };
+  try {
+    const r = await fetch(API + '/api/schedules');
+    if (peekSession !== sess) return;
+    const all = await r.json();
+    const n = all.filter(s => s.session === sess && !s.deleted).length;
+    setCount('peek-tab-schedules-count', n);
+  } catch(e) {}
+  try {
+    const r = await fetch(API + '/api/notes');
+    if (peekSession !== sess) return;
+    const all = await r.json();
+    const folder = '_sessions/' + sess + '/';
+    const n = all.filter(x => x.path && x.path.startsWith(folder)).length;
+    setCount('peek-tab-notes-count', n);
+  } catch(e) {}
+}
+
 async function _peekLoadSchedules() {
   const list = document.getElementById('peek-schedules-list');
   const count = document.getElementById('peek-schedules-count');
@@ -13635,6 +13665,11 @@ async function _peekLoadSchedules() {
     const all = await r.json();
     const items = all.filter(s => s.session === peekSession && !s.deleted);
     count.textContent = items.length ? items.length + ' schedule' + (items.length === 1 ? '' : 's') : '';
+    const tabCount = document.getElementById('peek-tab-schedules-count');
+    if (tabCount) {
+      if (items.length > 0) { tabCount.textContent = items.length; tabCount.classList.add('has-count'); }
+      else { tabCount.textContent = ''; tabCount.classList.remove('has-count'); }
+    }
     if (!items.length) {
       list.innerHTML = '<div style="color:var(--dim);font-size:0.85rem;padding:12px 4px;">No schedules for this session.</div>';
       return;
@@ -13742,6 +13777,11 @@ async function _peekNotesLoad() {
     const folder = _peekNotesFolder() + '/';
     _peekNotesAll = all.filter(n => n.path.startsWith(folder));
     _peekNotesRenderList(_peekNotesAll);
+    const tabCount = document.getElementById('peek-tab-notes-count');
+    if (tabCount) {
+      if (_peekNotesAll.length > 0) { tabCount.textContent = _peekNotesAll.length; tabCount.classList.add('has-count'); }
+      else { tabCount.textContent = ''; tabCount.classList.remove('has-count'); }
+    }
     // Auto-open first note if none active
     if (!_peekNotesActive && _peekNotesAll.length) {
       _peekNotesOpen(_peekNotesAll[0].path);
@@ -13920,6 +13960,7 @@ async function _peekNotesNew() {
   await _peekNotesOpen(filename);
   const ti = document.getElementById('peek-notes-title');
   if (ti) { ti.focus(); ti.select(); }
+  _peekUpdateTabCounts();
 }
 
 function _peekNotesSaveDebounce() {
@@ -13984,6 +14025,7 @@ async function _peekNotesDelete() {
     _peekNotesShowEmpty();
     _peekNotesRenderList([]);
   }
+  _peekUpdateTabCounts();
 }
 
 function _peekNotesSwitchMode(mode) {
@@ -14210,6 +14252,12 @@ function openPeek(name, opts) {
   document.getElementById('peek-title').textContent = name;
   updatePeekStatus();
   document.getElementById('peek-body').innerHTML = '<span style="color:var(--dim)">Loading...</span>';
+  // Reset tab badges; will be repopulated by _peekUpdateTabCounts
+  ['peek-tab-schedules-count','peek-tab-notes-count'].forEach(id => {
+    const el = document.getElementById(id);
+    if (el) { el.textContent = ''; el.classList.remove('has-count'); }
+  });
+  _peekUpdateTabCounts();
   updateConnectionStatus();
   const peekOv = document.getElementById('peek-overlay');
   peekOv.classList.add('active');
