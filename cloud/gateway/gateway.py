@@ -18,6 +18,8 @@ R2_ENDPOINT           = f"https://{CF_ACCOUNT_ID}.r2.cloudflarestorage.com"
 R2_BUCKET             = "amux-cloud-users"
 COOKIE_SECRET         = os.environ.get("COOKIE_SECRET", "change-me")
 ANTHROPIC_API_KEY     = os.environ.get("ANTHROPIC_API_KEY", "")
+POSTHOG_KEY           = os.environ.get("POSTHOG_KEY", "")
+POSTHOG_HOST          = os.environ.get("POSTHOG_HOST", "https://us.i.posthog.com")
 STRIPE_SECRET_KEY       = os.environ.get("STRIPE_SECRET_KEY", "")
 STRIPE_WEBHOOK_SECRET   = os.environ.get("STRIPE_WEBHOOK_SECRET", "")
 STRIPE_PRO_PRICE_ID     = os.environ.get("STRIPE_PRO_PRICE_ID", "")      # monthly
@@ -721,7 +723,9 @@ def _write_compose(user_id, port):
         .replace("${CF_ACCOUNT_ID}", CF_ACCOUNT_ID)
         .replace("${R2_ENDPOINT}", R2_ENDPOINT)
         .replace("${R2_ACCESS_KEY}", R2_ACCESS_KEY)
-        .replace("${R2_SECRET_KEY}", R2_SECRET_KEY))
+        .replace("${R2_SECRET_KEY}", R2_SECRET_KEY)
+        .replace("${POSTHOG_KEY}", POSTHOG_KEY)
+        .replace("${POSTHOG_HOST}", POSTHOG_HOST))
     d = _compose_dir(user_id)
     open(os.path.join(d, "docker-compose.yml"), "w").write(compose)
     open(os.path.join(d, "litestream.yml"), "w").write(
