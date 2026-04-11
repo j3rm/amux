@@ -61,6 +61,7 @@ CC_TRANSCRIPTS = CC_HOME / "transcripts"  # per-session JSONL backups
 CC_GMAIL = CC_HOME / "gmail-tokens"        # per-account Gmail OAuth tokens
 CC_BRANDING = CC_HOME / "branding"         # white-label assets (icon, logo)
 CC_JOURNAL_MEDIA = CC_HOME / "journal-media"  # journal photo/media files
+CC_CHANNELS = CC_HOME / "channels"            # pairwise session-to-session message threads (jsonl)
 TEMPLATES_DIR = Path(__file__).parent / "templates"
 
 def _safe_note_path(note_rel: str, base: Path = None) -> Path | None:
@@ -131,6 +132,36 @@ def _load_or_create_auth_token() -> str:
     return token
 
 AUTH_TOKEN = _load_or_create_auth_token()
+
+
+# ── PostHog server-side telemetry ────────────────────────────────────────────
+# Emits events for signals only the backend observes (YOLO auto-answers,
+# stale-session restarts, crashes). No-op when POSTHOG_KEY is unset.
+def _posthog_emit(event: str, props: dict = None, distinct_id: str = ""):
+    key = os.environ.get("POSTHOG_KEY", "")
+    if not key:
+        return
+    try:
+        import urllib.request as _ur, json as _j, ssl as _ssl
+        host = os.environ.get("POSTHOG_HOST", "https://us.i.posthog.com").rstrip("/")
+        payload = {
+            "api_key": key,
+            "event": event,
+            "distinct_id": distinct_id or "amux-server",
+            "properties": {"source": "amux-server", **(props or {})},
+        }
+        req = _ur.Request(
+            f"{host}/capture/",
+            data=_j.dumps(payload).encode(),
+            headers={"Content-Type": "application/json"},
+        )
+        ctx = _ssl.create_default_context()
+        ctx.check_hostname = False
+        ctx.verify_mode = _ssl.CERT_NONE
+        _ur.urlopen(req, timeout=3, context=ctx).read()
+    except Exception:
+        pass
+
 
 _PUBLIC_PATHS = frozenset({"/", "/manifest.json", "/sw.js", "/icon.svg", "/icon.png",
                            "/icon-192.png", "/icon-512.png", "/ca", "/release-notes",
@@ -1078,10 +1109,15 @@ def _yolo_auto_respond():
             if not raw:
                 continue
             clean = re.sub(r'\x1b\[[0-9;?]*[a-zA-Z]|\x1b[^a-zA-Z]*[a-zA-Z]', '', raw)
-            for pattern, response in _YOLO_PROMPTS:
+            for i, (pattern, response) in enumerate(_YOLO_PROMPTS):
                 if pattern.search(clean):
                     send_text(name, response)
                     _yolo_last_responded[name] = now
+                    _posthog_emit("yolo_auto_answered", {
+                        "session": name,
+                        "pattern_idx": i,
+                        "response": response,
+                    }, distinct_id=name)
                     break
         except Exception:
             pass
@@ -4935,6 +4971,89 @@ def send_text(name: str, text: str) -> tuple[bool, str]:
 
 
 # Allowed tmux key names for send_keys (control sequences, not arbitrary text)
+# ── Pairwise session channels ───────────────────────────────────────────────
+# A "channel" is a persistent message thread between two sessions, stored as
+# JSONL on disk. Both sessions read/write the same file. When a message is
+# posted, it's appended to the file AND PTY-injected into the recipient with
+# sender attribution + the literal reply command, so the receiving agent can
+# talk back without knowing any URL by heart.
+
+_VALID_SESSION_NAME_RE = re.compile(r'^[a-zA-Z0-9_.\-]+$')
+
+def _channel_id(a: str, b: str) -> str:
+    """Stable channel id = sorted pair joined by '__'. Order-independent."""
+    return "__".join(sorted([a, b]))
+
+def _channel_file(a: str, b: str) -> Path:
+    CC_CHANNELS.mkdir(parents=True, exist_ok=True)
+    return CC_CHANNELS / f"{_channel_id(a, b)}.jsonl"
+
+def _channel_history(a: str, b: str) -> list:
+    f = _channel_file(a, b)
+    if not f.exists():
+        return []
+    out = []
+    for line in f.read_text(encoding="utf-8").splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            out.append(json.loads(line))
+        except json.JSONDecodeError:
+            continue
+    return out
+
+def _channel_append(sender: str, recipient: str, text: str) -> dict:
+    f = _channel_file(sender, recipient)
+    msg = {"ts": int(time.time()), "from": sender, "to": recipient, "text": text}
+    with open(f, "a", encoding="utf-8") as fp:
+        fp.write(json.dumps(msg, ensure_ascii=False) + "\n")
+    return msg
+
+def _channel_list_for(session: str) -> list:
+    """Return list of channels involving `session`, newest-first."""
+    if not CC_CHANNELS.exists():
+        return []
+    out = []
+    for f in CC_CHANNELS.glob("*.jsonl"):
+        parts = f.stem.split("__")
+        if len(parts) != 2 or session not in parts:
+            continue
+        other = parts[0] if parts[1] == session else parts[1]
+        last = None
+        count = 0
+        try:
+            for line in f.read_text(encoding="utf-8").splitlines():
+                if not line.strip():
+                    continue
+                try:
+                    last = json.loads(line)
+                    count += 1
+                except json.JSONDecodeError:
+                    continue
+        except OSError:
+            continue
+        out.append({
+            "other": other,
+            "last_ts": (last or {}).get("ts", 0),
+            "last_from": (last or {}).get("from", ""),
+            "last_text": (last or {}).get("text", "")[:200],
+            "count": count,
+        })
+    out.sort(key=lambda c: c["last_ts"], reverse=True)
+    return out
+
+def _channel_deliver(sender: str, recipient: str, text: str) -> tuple[bool, str]:
+    """Wrap text with attribution + reply hint and PTY-inject into recipient."""
+    safe_sender = sender if _VALID_SESSION_NAME_RE.match(sender) else "unknown"
+    wrapped = (
+        f"[@{safe_sender}] {text}\n"
+        f"(reply: curl -sk -X POST $AMUX_URL/api/channels/$AMUX_SESSION/{safe_sender}/messages "
+        f"-H 'Content-Type: application/json' -d '{{\"text\":\"...\"}}')"
+    )
+    return send_text(recipient, wrapped)
+
+
 _ALLOWED_TMUX_KEYS = frozenset({
     "Enter", "Escape", "Tab", "BTab", "Space", "BSpace",
     "Up", "Down", "Left", "Right", "Home", "End",
@@ -5878,6 +5997,54 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
 <meta name="theme-color" content="#0d1117">
 <link rel="manifest" href="/manifest.json">
 <title>amux</title>
+<script>
+  // PostHog — frustration/issue telemetry. No-op when key unset (local/OSS).
+  // Full feature set: autocapture, session replay, rage clicks, dead clicks,
+  // heatmaps, exception capture, web vitals. Identifies user by gateway email.
+  (function() {
+    if (!window._AMUX_POSTHOG_KEY) return;
+    !function(t,e){var o,n,p,r;e.__SV||(window.posthog=e,e._i=[],e.init=function(i,s,a){function g(t,e){var o=e.split(".");2==o.length&&(t=t[o[0]],e=o[1]),t[e]=function(){t.push([e].concat(Array.prototype.slice.call(arguments,0)))}}(p=t.createElement("script")).type="text/javascript",p.crossOrigin="anonymous",p.async=!0,p.src=s.api_host.replace(".i.posthog.com","-assets.i.posthog.com")+"/static/array.js",(r=t.getElementsByTagName("script")[0]).parentNode.insertBefore(p,r);var u=e;for(void 0!==a?u=e[a]=[]:a="posthog",u.people=u.people||[],u.toString=function(t){var e="posthog";return"posthog"!==a&&(e+="."+a),t||(e+=" (stub)"),e},u.people.toString=function(){return u.toString(1)+".people (stub)"},o="init capture register register_once register_for_session unregister unregister_for_session getFeatureFlag getFeatureFlagPayload isFeatureEnabled reloadFeatureFlags updateEarlyAccessFeatureEnrollment getEarlyAccessFeatures on onFeatureFlags onSessionId getSurveys getActiveMatchingSurveys renderSurvey canRenderSurvey identify setPersonProperties group resetGroups setPersonPropertiesForFlags resetPersonPropertiesForFlags setGroupPropertiesForFlags resetGroupPropertiesForFlags reset get_distinct_id getGroups get_session_id get_session_replay_url alias set_config startSessionRecording stopSessionRecording sessionRecordingStarted captureException loadToolbar get_property getSessionProperty createPersonProfile opt_in_capturing opt_out_capturing has_opted_in_capturing has_opted_out_capturing clear_opt_in_out_capturing debug getPageViewId".split(" "),n=0;n<o.length;n++)g(u,o[n]);e._i.push([i,s,a])},e.__SV=1)}(document,window.posthog||[]);
+    posthog.init(window._AMUX_POSTHOG_KEY, {
+      api_host: window._AMUX_POSTHOG_HOST || 'https://us.i.posthog.com',
+      person_profiles: 'identified_only',
+      capture_pageview: true,
+      capture_pageleave: true,
+      autocapture: true,
+      rageclick: true,
+      capture_dead_clicks: true,
+      capture_exceptions: true,
+      capture_performance: true,
+      session_recording: {
+        maskAllInputs: false,
+        maskInputOptions: { password: true, email: false },
+        recordCrossOriginIframes: false,
+      },
+      loaded: function(ph) {
+        // Identify user from gateway-injected headers
+        var email = window._AMUX_USER_EMAIL || '';
+        var uid = window._AMUX_USER_ID || email || '';
+        if (uid) {
+          ph.identify(uid, { email: email, $email: email });
+        }
+        // Global props on every event — hostname helps distinguish cloud vs local
+        ph.register({ host: location.hostname, amux_version: '1' });
+      }
+    });
+    // Helper: safe track wrapper. Usage: amuxTrack('event_name', {prop: val})
+    window.amuxTrack = function(name, props) {
+      try { if (window.posthog && posthog.capture) posthog.capture(name, props || {}); } catch(e) {}
+    };
+    // Auto-track unhandled JS errors (beyond PostHog's exception capture)
+    window.addEventListener('error', function(e) {
+      amuxTrack('js_error', { message: e.message, src: e.filename, line: e.lineno, col: e.colno });
+    });
+    window.addEventListener('unhandledrejection', function(e) {
+      amuxTrack('promise_rejection', { reason: String(e.reason || '').slice(0, 500) });
+    });
+  })();
+  // No-op fallback so code that calls amuxTrack() works even when PostHog is disabled
+  if (!window.amuxTrack) window.amuxTrack = function() {};
+</script>
 <link rel="icon" type="image/svg+xml" href="/icon.svg">
 <link rel="icon" type="image/png" sizes="180x180" href="/icon.png">
 <link rel="apple-touch-icon" href="/icon.png">
@@ -7340,6 +7507,74 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
   .modal-msg { font-size: 0.95rem; color: var(--text); margin-bottom: 20px; line-height: 1.5; }
   .modal-btns { display: flex; gap: 10px; justify-content: center; }
   .modal-btns .btn { min-width: 80px; }
+
+  /* Channel drawer — Slack-style DM between two sessions */
+  .channel-drawer {
+    display: none; position: fixed; inset: 0; z-index: 700;
+    background: rgba(0,0,0,0.55); align-items: stretch; justify-content: flex-end;
+  }
+  .channel-drawer.open { display: flex; }
+  .channel-panel {
+    background: var(--bg); border-left: 1px solid var(--border);
+    width: min(440px, 100vw); height: 100%;
+    display: flex; flex-direction: column;
+    box-shadow: -8px 0 24px rgba(0,0,0,0.4);
+  }
+  .channel-header {
+    display: flex; align-items: center; justify-content: space-between;
+    padding: 12px 14px; border-bottom: 1px solid var(--border);
+    background: var(--card);
+  }
+  .channel-header-title {
+    display: flex; align-items: center; gap: 8px;
+    font-size: 0.95rem; font-weight: 600; color: var(--text);
+    min-width: 0;
+  }
+  .channel-header-icon {
+    color: var(--accent); font-weight: 700; font-size: 1.05rem;
+  }
+  .channel-thread {
+    flex: 1; overflow-y: auto; padding: 14px;
+    display: flex; flex-direction: column; gap: 10px;
+    background: var(--bg);
+  }
+  .channel-msg {
+    display: flex; flex-direction: column; gap: 3px;
+    max-width: 88%;
+  }
+  .channel-msg.mine { align-self: flex-end; align-items: flex-end; }
+  .channel-msg.theirs { align-self: flex-start; align-items: flex-start; }
+  .channel-msg-meta {
+    font-size: 0.65rem; color: var(--dim); padding: 0 6px;
+  }
+  .channel-msg-bubble {
+    padding: 8px 12px; border-radius: 14px; font-size: 0.88rem;
+    line-height: 1.4; word-wrap: break-word; white-space: pre-wrap;
+    border: 1px solid var(--border); background: var(--card); color: var(--text);
+  }
+  .channel-msg.mine .channel-msg-bubble {
+    background: var(--accent); color: #fff; border-color: transparent;
+  }
+  .channel-empty {
+    color: var(--dim); font-size: 0.85rem; text-align: center;
+    padding: 30px 16px; line-height: 1.5;
+  }
+  .channel-input-row {
+    display: flex; gap: 8px; padding: 10px 12px;
+    border-top: 1px solid var(--border); background: var(--card);
+    align-items: flex-end;
+  }
+  .channel-input {
+    flex: 1; min-height: 36px; max-height: 140px; resize: none;
+    padding: 8px 10px; border: 1px solid var(--border); border-radius: 8px;
+    background: var(--bg); color: var(--text); font: inherit; font-size: 0.88rem;
+    outline: none;
+  }
+  .channel-input:focus { border-color: var(--accent); }
+  #channel-send-btn { font-size: 0.85rem; padding: 8px 16px; }
+  @media (max-width: 520px) {
+    .channel-panel { width: 100vw; border-left: none; }
+  }
 
   /* Connection status indicator — pill button */
   .conn-status {
@@ -10446,6 +10681,25 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
   </div>
 </div>
 
+<!-- Channel drawer (session-to-session DM) -->
+<div id="channel-drawer" class="channel-drawer" onclick="if(event.target===this)channelClose()">
+  <div class="channel-panel" role="dialog" aria-label="Session channel">
+    <div class="channel-header">
+      <div class="channel-header-title">
+        <span class="channel-header-icon">#</span>
+        <span id="channel-header-pair">channel</span>
+      </div>
+      <button class="btn" onclick="channelClose()" aria-label="Close" style="font-size:1rem;padding:4px 10px;">&#x2715;</button>
+    </div>
+    <div id="channel-thread" class="channel-thread"></div>
+    <form class="channel-input-row" onsubmit="event.preventDefault(); channelSend();">
+      <textarea id="channel-input" class="channel-input" placeholder="Message..." rows="1"
+        onkeydown="if(event.key==='Enter'&&!event.shiftKey){event.preventDefault();channelSend();}"></textarea>
+      <button type="submit" class="btn primary" id="channel-send-btn">Send</button>
+    </form>
+  </div>
+</div>
+
 <!-- Confirm / alert modal -->
 <div id="modal-backdrop" class="modal-backdrop" onclick="_modalBgClick(event)">
   <div class="modal-box">
@@ -11378,6 +11632,7 @@ async function apiCall(url, options) {
     const r = await fetch(url, options);
     if (!r.ok) {
       showToast('Error: ' + r.status);
+      amuxTrack('api_error', { url: url.split('?')[0], status: r.status, method: options.method || 'GET' });
       return null;
     }
     consecutiveFailures = 0;
@@ -11387,6 +11642,7 @@ async function apiCall(url, options) {
     console.error('apiCall failed:', e);
     consecutiveFailures++;
     if (consecutiveFailures >= 2) setOnline(false);
+    amuxTrack('api_unreachable', { url: url.split('?')[0], err: String(e).slice(0, 200) });
     _queueOp(url, options);
     return null;
   }
@@ -11508,12 +11764,14 @@ function _checkSessionTransitions(newData) {
     if (statusChanged) {
       if (s.status === 'waiting') {
         _fireSessionNotif(s.name, s.name + ' needs input', s.task_name || 'Waiting for a response');
+        amuxTrack('session_waiting', { session: s.name, task: s.task_name || '', auto_continue: !!s.auto_continue });
       } else if (s.status === 'active' && prev.status !== 'active') {
         _fireSessionNotif(s.name, s.name + ' started working', s.task_name || '');
       }
     }
     if (stoppedNow && prev.status !== '') {
       _fireSessionNotif(s.name, s.name + ' stopped', '');
+      amuxTrack('session_stopped', { session: s.name, prev_status: prev.status });
     }
     _prevSessionState[s.name] = { status: s.status, running: s.running };
   }
@@ -12793,6 +13051,7 @@ async function doSend(name, text) {
   showSendingIndicator();
   // Slash commands (e.g. /clear, /compact) must be sent verbatim — no timestamp prefix
   const isSlashCmd = /^\/[a-z]/.test(text.trim());
+  amuxTrack('message_sent', { session: name, is_slash: isSlashCmd, cmd: isSlashCmd ? text.trim().split(/\s+/)[0] : null, length: text.length });
   let payload = text;
   if (!isSlashCmd) {
     const now = new Date();
@@ -12866,16 +13125,19 @@ async function sendFromInput(name) {
   const inp = document.getElementById('input-' + name);
   if (!inp || !inp.value.trim()) return;
   const text = inp.value.trim();
+  const routed = _atRoute(text);
+  if (routed) {
+    // @mention opens a persistent channel drawer instead of fire-and-forget routing.
+    // The message is pre-filled so the user can review/edit before sending.
+    inp.value = '';
+    inp.style.height = 'auto';
+    channelOpen(name, routed.target, routed.message);
+    return;
+  }
   cmdHistoryAdd(text);
   inp.value = '';
   inp.style.height = 'auto';
-  const routed = _atRoute(text);
-  if (routed) {
-    await doSend(routed.target, routed.message);
-    showToast('Sent to @' + routed.target);
-  } else {
-    await doSend(name, _expandAtMentions(text));
-  }
+  await doSend(name, _expandAtMentions(text));
   inp.style.borderColor = 'var(--green)';
   setTimeout(() => { inp.style.borderColor = ''; }, 400);
 }
@@ -14424,13 +14686,23 @@ async function sendPeekCmd() {
     const refs = files.map(f => '@' + f.path).join(' ');
     message = text ? `${text} ${refs}` : refs;
   }
+  // @-route at start of message → open channel drawer prefilled
+  const routed = _atRoute(message);
+  if (routed && routed.target !== peekSession) {
+    inp.value = '';
+    inp.style.height = 'auto';
+    delete _peekDrafts[peekSession];
+    clearPeekFiles();
+    channelOpen(peekSession, routed.target, routed.message);
+    return;
+  }
+
   inp.value = '';
   inp.style.height = 'auto';
   delete _peekDrafts[peekSession];
   clearPeekFiles();
 
-  // In peek view, always send to the current session (don't route @mentions away).
-  // @mentions are expanded as API hints so Claude knows how to reach them.
+  // @mentions in the middle of a message stay as text + API hints (Claude can reach them).
   message = _expandAtMentions(message);
   await doSend(peekSession, message);
   inp.style.borderColor = 'var(--green)';
@@ -14496,6 +14768,100 @@ async function peekShowTranscripts() {
   document.getElementById('modal-backdrop').classList.add('open');
 }
 
+// ── Channel drawer (session-to-session DM) ──
+let _channelMe = null;
+let _channelOther = null;
+let _channelPollTimer = null;
+let _channelLastTs = 0;
+
+function channelOpen(me, other, prefillText) {
+  if (!me || !other || me === other) return;
+  _channelMe = me;
+  _channelOther = other;
+  _channelLastTs = 0;
+  document.getElementById('channel-header-pair').textContent = me + ' ↔ ' + other;
+  document.getElementById('channel-thread').innerHTML =
+    '<div class="channel-empty">Loading…</div>';
+  document.getElementById('channel-drawer').classList.add('open');
+  const inp = document.getElementById('channel-input');
+  inp.value = prefillText || '';
+  setTimeout(() => inp.focus(), 100);
+  channelRefresh();
+  if (_channelPollTimer) clearInterval(_channelPollTimer);
+  _channelPollTimer = setInterval(channelRefresh, 2500);
+}
+
+function channelClose() {
+  document.getElementById('channel-drawer').classList.remove('open');
+  if (_channelPollTimer) { clearInterval(_channelPollTimer); _channelPollTimer = null; }
+  _channelMe = null; _channelOther = null;
+}
+
+async function channelRefresh() {
+  if (!_channelMe || !_channelOther) return;
+  try {
+    const r = await fetch(API + '/api/channels/' + encodeURIComponent(_channelMe) +
+      '/' + encodeURIComponent(_channelOther) + '/messages');
+    if (!r.ok) return;
+    const d = await r.json();
+    channelRender(d.messages || []);
+  } catch (e) { /* network blip — keep polling */ }
+}
+
+function channelRender(messages) {
+  const thread = document.getElementById('channel-thread');
+  if (!messages.length) {
+    thread.innerHTML =
+      '<div class="channel-empty">No messages yet.<br>Say hi to <b>@' +
+      esc(_channelOther) + '</b> — they will see your message in their terminal.</div>';
+    return;
+  }
+  // Skip re-render if nothing new
+  const newest = messages[messages.length - 1];
+  if (newest.ts === _channelLastTs && thread.children.length === messages.length) return;
+  _channelLastTs = newest.ts;
+  const html = messages.map(m => {
+    const mine = m.from === _channelMe;
+    const when = new Date((m.ts || 0) * 1000).toLocaleTimeString([],
+      { hour: 'numeric', minute: '2-digit' });
+    return '<div class="channel-msg ' + (mine ? 'mine' : 'theirs') + '">' +
+      '<div class="channel-msg-meta">' + esc(m.from) + ' · ' + when + '</div>' +
+      '<div class="channel-msg-bubble">' + esc(m.text || '') + '</div>' +
+      '</div>';
+  }).join('');
+  thread.innerHTML = html;
+  thread.scrollTop = thread.scrollHeight;
+}
+
+async function channelSend() {
+  if (!_channelMe || !_channelOther) return;
+  const inp = document.getElementById('channel-input');
+  const text = inp.value.trim();
+  if (!text) return;
+  inp.value = '';
+  inp.style.height = 'auto';
+  const btn = document.getElementById('channel-send-btn');
+  btn.disabled = true;
+  try {
+    const r = await fetch(API + '/api/channels/' + encodeURIComponent(_channelMe) +
+      '/' + encodeURIComponent(_channelOther) + '/messages',
+      { method: 'POST', headers: {'Content-Type':'application/json'},
+        body: JSON.stringify({ text }) });
+    const d = await r.json();
+    if (!r.ok || !d.ok) {
+      showToast('Send failed: ' + (d.error || r.status));
+    } else if (!d.delivered) {
+      showToast('Saved, but ' + _channelOther + ' is not running');
+    }
+    await channelRefresh();
+  } catch (e) {
+    showToast('Send error: ' + e.message);
+  } finally {
+    btn.disabled = false;
+    inp.focus();
+  }
+}
+
 // ── @mention routing ──
 // If a message starts with @sessionname, auto-route to that session.
 // Returns {target, message} where target may differ from the sending session.
@@ -14551,7 +14917,7 @@ function _atRender(inp, el, pickCall) {
   el.innerHTML = matches.map((s, i) =>
     `<div class="ac-item at-item" onmousedown="${pickCall}(${i})">` +
     `<span class="at-at">@</span>${esc(s.name)}` +
-    `<span class="ac-desc">${s.running ? '● running' : '○ stopped'}</span></div>`
+    `<span class="ac-desc">${s.running ? '● ' : '○ '}open channel &rarr;</span></div>`
   ).join('');
   el._atItems = matches;
   el.classList.add('open');
@@ -15332,7 +15698,18 @@ function slashAcUpdate() {
 function slashAcPick(i) {
   const inp = document.getElementById('peek-cmd-input');
   const el = document.getElementById('slash-ac-list');
-  if (el._atItems) {
+  if (el._atItems && el._atItems[i]) {
+    const target = el._atItems[i].name;
+    // If @ is at the start of the input, open the channel drawer instead of
+    // inserting text. peekSession is the "me" side of the channel.
+    if (peekSession && target !== peekSession && inp.value.trimStart().startsWith('@')) {
+      const after = inp.value.replace(/^\s*@[\w][\w.-]*\s*/, '').trim();
+      inp.value = '';
+      inp.style.height = 'auto';
+      el.classList.remove('open'); el._atItems = null; el._atSel = -1;
+      channelOpen(peekSession, target, after);
+      return;
+    }
     el._atSel = i;
     _atInsert(inp, el);
     inp.focus({ preventScroll: true });
@@ -15511,7 +15888,19 @@ function cardAtPick(i) {
   const name = _cardAcName;
   const inp = document.getElementById('input-' + name);
   const el = document.getElementById('card-ac-' + name);
-  if (!inp || !el) return;
+  if (!inp || !el || !el._atItems || !el._atItems[i]) return;
+  const target = el._atItems[i].name;
+  // If @ is at the start of the input, this is a routing intent — open the
+  // channel drawer immediately instead of just inserting "@name " as text.
+  // Any text already typed after "@partial" is carried as the drafted message.
+  if (inp.value.trimStart().startsWith('@') && target !== name) {
+    const after = inp.value.replace(/^\s*@[\w][\w.-]*\s*/, '').trim();
+    inp.value = '';
+    inp.style.height = 'auto';
+    el.classList.remove('open'); el._atItems = null; el._atSel = -1;
+    channelOpen(name, target, after);
+    return;
+  }
   el._atSel = i;
   _atInsert(inp, el);
   inp.focus({ preventScroll: true });
@@ -15521,13 +15910,14 @@ function cardSlashAcPick(name, i) {
   const inp = document.getElementById('input-' + name);
   const el = document.getElementById('card-ac-' + name);
   if (el && el._atItems) {
-    el._atSel = i;
-    _atInsert(inp, el);
-  } else {
-    inp.value = _cardAcItems[i].cmd;
-    if (el) el.classList.remove('open');
-    _cardAcItems = [];
+    // Route through cardAtPick so keyboard-pick has the same drawer behavior as click-pick
+    _cardAcName = name;
+    cardAtPick(i);
+    return;
   }
+  inp.value = _cardAcItems[i].cmd;
+  if (el) el.classList.remove('open');
+  _cardAcItems = [];
   inp.focus({ preventScroll: true });
 }
 
@@ -16662,6 +17052,22 @@ function _showFilesMenu(path, btn, type) {
   linkItem.textContent = 'Copy link';
   linkItem.onclick = () => { popup.remove(); _copyFileDeeplink(path); };
   popup.appendChild(linkItem);
+  // Download (files only)
+  if (type !== 'directory') {
+    const dlItem = document.createElement('button');
+    dlItem.className = 'explore-menu-item';
+    dlItem.textContent = 'Download';
+    dlItem.onclick = () => {
+      popup.remove();
+      const a = document.createElement('a');
+      a.href = API + '/api/file?path=' + encodeURIComponent(path);
+      a.download = path.split('/').pop();
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+    };
+    popup.appendChild(dlItem);
+  }
   // Delete
   const delItem = document.createElement('button');
   delItem.className = 'explore-menu-item';
@@ -27334,12 +27740,18 @@ class CCHandler(BaseHTTPRequestHandler):
         # GET /
         if method == "GET" and path == "/":
             import json as _json
+            _user_email = self.headers.get("X-Amux-User-Email", "")
+            _user_id = self.headers.get("X-Amux-User-Id", "")
             page = DASHBOARD_HTML.replace(
                 "</head>",
                 f'<script>window._AMUX_S3_ICAL_URL={_json.dumps(_S3_CAL_URL)};'
                 f'window._AMUX_AUTH_TOKEN={_json.dumps(AUTH_TOKEN)};'
                 f'window._AMUX_HOME={_json.dumps(str(Path.home()))};'
-                f'window._GOOGLE_API_KEY={_json.dumps(os.environ.get("GOOGLE_API_KEY",""))};</script></head>',
+                f'window._GOOGLE_API_KEY={_json.dumps(os.environ.get("GOOGLE_API_KEY",""))};'
+                f'window._AMUX_POSTHOG_KEY={_json.dumps(os.environ.get("POSTHOG_KEY",""))};'
+                f'window._AMUX_POSTHOG_HOST={_json.dumps(os.environ.get("POSTHOG_HOST","https://us.i.posthog.com"))};'
+                f'window._AMUX_USER_EMAIL={_json.dumps(_user_email)};'
+                f'window._AMUX_USER_ID={_json.dumps(_user_id)};</script></head>',
                 1,
             )
             return self._html(page)
@@ -30829,6 +31241,46 @@ p{{color:#888;margin:12px 0 28px;font-size:0.9rem;line-height:1.5}}
                 return self._json({"ok": True})
 
             return self._json({"error": "journal route not found"}, 404)
+
+        # ── Pairwise session channels ────────────────────────────────────────
+        if path == "/api/channels" or path.startswith("/api/channels/"):
+            # GET /api/channels?session=X — list channels involving X
+            if method == "GET" and path == "/api/channels":
+                sess = qs.get("session", [""])[0].strip()
+                if not sess:
+                    return self._json({"error": "missing 'session'"}, 400)
+                return self._json({"channels": _channel_list_for(sess)})
+            # /api/channels/{a}/{b}/messages
+            parts = path.strip("/").split("/")
+            # ['api','channels',a,b,'messages']
+            if len(parts) == 5 and parts[4] == "messages":
+                a, b = parts[2], parts[3]
+                if not (_VALID_SESSION_NAME_RE.match(a) and _VALID_SESSION_NAME_RE.match(b)):
+                    return self._json({"error": "invalid session name"}, 400)
+                if a == b:
+                    return self._json({"error": "cannot open channel with self"}, 400)
+                if method == "GET":
+                    return self._json({
+                        "channel": _channel_id(a, b),
+                        "a": a, "b": b,
+                        "messages": _channel_history(a, b),
+                    })
+                if method == "POST":
+                    body = self._read_body()
+                    text = (body.get("text") or "").strip()
+                    if not text:
+                        return self._json({"error": "missing 'text'"}, 400)
+                    # path order is {sender}/{recipient}
+                    sender, recipient = a, b
+                    msg = _channel_append(sender, recipient, text)
+                    delivered, deliver_msg = _channel_deliver(sender, recipient, text)
+                    return self._json({
+                        "ok": True,
+                        "message": msg,
+                        "delivered": delivered,
+                        "delivery_status": deliver_msg,
+                    })
+            return self._json({"error": "channel route not found"}, 404)
 
         # ── CRM / People ─────────────────────────────────────────────────────
         if path == "/api/crm/contacts" or path.startswith("/api/crm/"):
