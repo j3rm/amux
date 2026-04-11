@@ -72,6 +72,7 @@ Claude Code runs one agent per terminal. amux runs dozens — with live monitori
 
 ## Comparisons
 
+- [amux vs Claude Managed Agents](https://amux.io/compare/amux-vs-claude-managed-agents/): Self-hosted alternative to Anthropic's April 2026 Managed Agents launch. $0 session fees vs $0.08/session-hour, model-agnostic, MIT-licensed.
 - [amux vs Claude Code Agent Teams](https://amux.io/compare/amux-vs-claude-code-agent-teams/)
 - [amux vs Cursor](https://amux.io/compare/amux-vs-cursor/)
 - [amux vs Aider](https://amux.io/compare/amux-vs-aider/)
