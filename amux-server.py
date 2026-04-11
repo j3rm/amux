@@ -4087,10 +4087,13 @@ def list_sessions() -> list:
                 status = _detect_claude_status(raw)
             prev = _session_prev_status.get(name)
             if status == "waiting" and prev in ("active", ""):
-                threading.Thread(target=_send_pushover, args=(
-                    f"amux — {name} needs input",
-                    "Session is waiting for your response.",
-                ), daemon=True).start()
+                _cfg_notif = parse_env_file(CC_SESSIONS / f"{name}.env")
+                _auto_cont = _cfg_notif.get("CC_AUTO_CONTINUE", "") in ("1", "true", "yes")
+                if not _auto_cont:
+                    threading.Thread(target=_send_pushover, args=(
+                        f"amux — {name} needs input",
+                        "Session is waiting for your response.",
+                    ), daemon=True).start()
             _session_prev_status[name] = status if running else ""
             # Filter for intelligible content lines
             intelligible = []
