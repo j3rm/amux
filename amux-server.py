@@ -155,6 +155,8 @@ CLAUDE_HOME = Path.home() / ".claude"
 _S3_BUCKET = os.environ.get("AMUX_S3_BUCKET", "")
 _S3_KEY = os.environ.get("AMUX_S3_KEY", "amux/calendar.ics")
 _S3_REGION = os.environ.get("AMUX_S3_REGION", "us-east-1")
+# Google Calendar push sync (optional — set AMUX_GCAL_ID to enable)
+_GCAL_ID = os.environ.get("AMUX_GCAL_ID", "")
 _S3_CAL_URL = (
     f"https://{_S3_BUCKET}.s3.{_S3_REGION}.amazonaws.com/{_S3_KEY}"
     if _S3_BUCKET else ""
@@ -274,9 +276,16 @@ def _aria2_list_all():
 
 # ── Browser automation helpers (browser-use CLI) ─────────────────────────────
 _BROWSER_USE_BIN = shutil.which("browser-use") or "/usr/local/bin/browser-use"
+_browser_session_activity: dict[str, float] = {}  # session_name -> last_activity epoch
+
+def _browser_touch(session: str = "amux"):
+    """Record activity for a browser-use session (called on every _bu_call)."""
+    _browser_session_activity[session] = time.time()
 
 def _bu_call(args: list, timeout_s: int = 30, session: str = "amux") -> dict:
     """Run a browser-use CLI command, return parsed JSON result."""
+    if args and args[0] != "close":
+        _browser_touch(session)
     cmd = [_BROWSER_USE_BIN, "--json", "--session", session] + args
     try:
         r = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout_s)
@@ -323,6 +332,175 @@ def _bu_screenshot(session: str = "amux", path: str = "") -> dict:
             size = 0
         return {"path": dest, "size": size}
     return result
+
+def _bu_agent_run(task: str, session: str = "amux-agent", profile: str = "",
+                  start_url: str = "", max_iterations: int = 25,
+                  model: str = "claude-sonnet-4-5") -> dict:
+    """Run an Anthropic Computer Use agent loop driving the browser-use Playwright session.
+
+    The model takes screenshots, decides actions, and we execute them via _bu_call.
+    Default model is Sonnet 4.5 because computer use is canonically a Sonnet feature;
+    pass model='claude-opus-4-6' or similar to override.
+    """
+    try:
+        import anthropic
+    except ImportError:
+        return {"error": "anthropic package not installed (pip install anthropic)"}
+    import base64
+
+    # Ensure session is open
+    if profile and start_url:
+        _bu_call(["-b", "real", "--profile", profile, "open", start_url], session=session, timeout_s=30)
+    elif profile:
+        _bu_call(["-b", "real", "--profile", profile, "open", "about:blank"], session=session, timeout_s=30)
+    elif start_url:
+        _bu_call(["open", start_url], session=session, timeout_s=30)
+    else:
+        _bu_call(["open", "about:blank"], session=session, timeout_s=30)
+
+    DISPLAY_W, DISPLAY_H = 1280, 800
+
+    try:
+        client = anthropic.Anthropic()
+    except Exception as e:
+        return {"error": f"failed to init Anthropic client: {e}"}
+
+    def _shot_b64():
+        s = _bu_screenshot(session=session)
+        p = s.get("path", "")
+        if not p or not Path(p).exists():
+            return None, None, f"screenshot failed: {s}"
+        try:
+            data = Path(p).read_bytes()
+            # Detect media type from magic bytes (browser-use may write PNG to .jpg path)
+            if data[:8] == b"\x89PNG\r\n\x1a\n":
+                media = "image/png"
+            elif data[:3] == b"\xff\xd8\xff":
+                media = "image/jpeg"
+            elif data[:6] in (b"GIF87a", b"GIF89a"):
+                media = "image/gif"
+            elif data[:4] == b"RIFF" and data[8:12] == b"WEBP":
+                media = "image/webp"
+            else:
+                media = "image/png"
+            return base64.standard_b64encode(data).decode(), media, None
+        except Exception as e:
+            return None, None, str(e)
+
+    def _exec_action(inp):
+        a = inp.get("action", "")
+        coord = inp.get("coordinate") or [0, 0]
+        x, y = (coord + [0, 0])[:2]
+        text = inp.get("text", "")
+        try:
+            if a == "screenshot":
+                pass
+            elif a == "left_click":
+                _bu_call(["click", str(int(x)), str(int(y))], session=session)
+            elif a == "double_click":
+                _bu_call(["click", str(int(x)), str(int(y))], session=session)
+                time.sleep(0.1)
+                _bu_call(["click", str(int(x)), str(int(y))], session=session)
+            elif a == "triple_click":
+                for _ in range(3):
+                    _bu_call(["click", str(int(x)), str(int(y))], session=session)
+                    time.sleep(0.05)
+            elif a == "right_click":
+                _bu_call(["eval",
+                    f"(()=>{{const el=document.elementFromPoint({int(x)},{int(y)});"
+                    f"if(el)el.dispatchEvent(new MouseEvent('contextmenu',{{bubbles:true,clientX:{int(x)},clientY:{int(y)}}}));}})()"
+                ], session=session)
+            elif a == "middle_click":
+                _bu_call(["click", str(int(x)), str(int(y))], session=session)
+            elif a == "type":
+                _bu_call(["type", text], session=session)
+            elif a == "key":
+                _bu_call(["keys", text], session=session)
+            elif a == "scroll":
+                direction = inp.get("scroll_direction", "down")
+                amount = max(1, int(inp.get("scroll_amount", 3))) * 100
+                _bu_call(["scroll", direction, "--amount", str(amount)], session=session)
+            elif a == "wait":
+                time.sleep(min(float(inp.get("duration", 1)), 10))
+            elif a in ("mouse_move", "left_mouse_down", "left_mouse_up", "cursor_position", "hold_key"):
+                pass  # no-op (browser-use doesn't expose hover/drag)
+            else:
+                return {"is_error": True, "text": f"unsupported action: {a}"}
+        except Exception as e:
+            return {"is_error": True, "text": f"action {a} failed: {e}"}
+        b64, media, err = _shot_b64()
+        if err:
+            return {"is_error": True, "text": err}
+        return {"image_b64": b64, "media": media}
+
+    tools = [{
+        "type": "computer_20250124",
+        "name": "computer",
+        "display_width_px": DISPLAY_W,
+        "display_height_px": DISPLAY_H,
+    }]
+    messages = [{"role": "user", "content": task}]
+    action_log = []
+    final_text = ""
+    iterations = 0
+
+    for it in range(max_iterations):
+        iterations = it + 1
+        try:
+            resp = client.beta.messages.create(
+                model=model,
+                max_tokens=4096,
+                tools=tools,
+                messages=messages,
+                betas=["computer-use-2025-01-24"],
+            )
+        except Exception as e:
+            return {"error": f"anthropic call failed: {e}", "iterations": iterations, "log": action_log}
+
+        # Re-serialize content blocks to plain dicts so we can append
+        assistant_content = []
+        tool_uses = []
+        for block in resp.content:
+            try:
+                d = block.model_dump(exclude_none=True)
+            except Exception:
+                d = {"type": getattr(block, "type", "unknown")}
+            assistant_content.append(d)
+            if block.type == "text":
+                final_text = block.text
+                action_log.append({"type": "text", "text": block.text[:500]})
+            elif block.type == "tool_use":
+                tool_uses.append(block)
+                action_log.append({"type": "tool_use", "name": block.name, "input": block.input})
+        messages.append({"role": "assistant", "content": assistant_content})
+
+        if resp.stop_reason == "end_turn" or not tool_uses:
+            break
+
+        results = []
+        for tu in tool_uses:
+            r = _exec_action(tu.input)
+            content = []
+            if r.get("image_b64"):
+                content.append({
+                    "type": "image",
+                    "source": {"type": "base64", "media_type": r.get("media", "image/png"), "data": r["image_b64"]},
+                })
+            if r.get("text"):
+                content.append({"type": "text", "text": r["text"]})
+            tr = {"type": "tool_result", "tool_use_id": tu.id, "content": content}
+            if r.get("is_error"):
+                tr["is_error"] = True
+            results.append(tr)
+        messages.append({"role": "user", "content": results})
+
+    return {
+        "success": True,
+        "result": final_text,
+        "iterations": iterations,
+        "stop_reason": getattr(resp, "stop_reason", None),
+        "log": action_log,
+    }
 
 # ── Terminal (PTY) session management ─────────────────────────────────────────
 import pty
@@ -532,6 +710,8 @@ def _classify_request(method: str, path: str) -> tuple:
         return ("file", "uploaded", "", "")
     if path == "/api/fs/upload" and method == "POST":
         return ("file", "uploaded", "", "")
+    if path == "/api/fs/delete" and method == "DELETE":
+        return ("file", "deleted", "", "")
     # System
     if path == "/api/pull" and method == "POST":
         return ("system", "pull", "repo", "")
@@ -894,10 +1074,10 @@ def _yolo_auto_respond():
             cfg = parse_env_file(f)
             if '--dangerously-skip-permissions' not in cfg.get('CC_FLAGS', ''):
                 continue
-            raw = tmux_capture(name, 20)
+            raw = tmux_capture(name, 50)
             if not raw:
                 continue
-            clean = re.sub(r'\x1b\[[0-9;]*[a-zA-Z]|\x1b[^a-zA-Z]*[a-zA-Z]', '', raw)
+            clean = re.sub(r'\x1b\[[0-9;?]*[a-zA-Z]|\x1b[^a-zA-Z]*[a-zA-Z]', '', raw)
             for pattern, response in _YOLO_PROMPTS:
                 if pattern.search(clean):
                     send_text(name, response)
@@ -1023,7 +1203,7 @@ def _last_meaningful_user_message(work_dir: str) -> str:
 
 
 _STRIP_ANSI = re.compile(
-    r'\x1b\[[0-9;]*[a-zA-Z]|\x1b\]8;[^\x1b]*\x1b\\|\x1b\][^\x07]*\x07'
+    r'\x1b\[[0-9;?]*[a-zA-Z]|\x1b\]8;[^\x1b]*\x1b\\|\x1b\][^\x07]*\x07'
     r'|\x1b\][^\x1b]*\x1b\\|\x1b[()][A-Z0-9]|\x1b[\x20-\x2f]*[\x40-\x7e]'
 )
 
@@ -1135,6 +1315,40 @@ def _snapshot_all_sessions():
                             f"Session '{name}' auto-restarted: thinking block corruption"
                             + (" — last message replayed" if last_msg else ""))
 
+            # ── 2b. Reactive: session ID already in use → clear ID + restart ─
+            # Claude Code exits with "Session ID ... is already in use" when a
+            # stale process holds the lock. Clear the conversation ID so a fresh
+            # one is assigned, then restart.
+            if ("is already in use" in clean and "Session ID" in clean and
+                    now - actions.get("last_restart", 0) > 120):
+                actions["last_restart"] = now
+                wd = _session_work_dir(name)
+                last_msg = _last_meaningful_user_message(wd)
+                stop_session(name)
+                # Kill any stale claude processes in this tmux session
+                try:
+                    tmux_sess = tmux_name(name)
+                    r = subprocess.run(["tmux", "list-panes", "-t", tmux_sess, "-F", "#{pane_pid}"],
+                                       capture_output=True, text=True, timeout=5)
+                    if r.returncode == 0 and r.stdout.strip():
+                        shell_pid = r.stdout.strip().split("\n")[0]
+                        subprocess.run(["pkill", "-9", "-P", shell_pid],
+                                       capture_output=True, timeout=5)
+                except Exception:
+                    pass
+                meta = _load_meta(name)
+                meta.pop("cc_conversation_id", None)
+                _save_meta(name, meta)
+                start_session(name)
+                if last_msg:
+                    def _replay_id(sname=name, msg=last_msg):
+                        time.sleep(6)
+                        send_text(sname, msg)
+                    threading.Thread(target=_replay_id, daemon=True).start()
+                _push_alert("auto_restart", name,
+                            f"Session '{name}' auto-restarted: session ID conflict resolved"
+                            + (" — last message replayed" if last_msg else ""))
+
             # ── 3. Auto-continue: unblock waiting sessions ───────────────────
             status = _detect_claude_status(clean)
 
@@ -1231,7 +1445,7 @@ def _snapshot_all_sessions():
                     # Still waiting on a subsequent snapshot — check opt-in flag
                     cfg_ac = parse_env_file(f)
                     if cfg_ac.get("CC_AUTO_CONTINUE") in ("1", "true", "yes"):
-                        if now - actions.get("last_auto_continue", 0) > 300:
+                        if now - actions.get("last_auto_continue", 0) > 30:
                             # Determine what kind of waiting and what to send
                             lines_ac = [l.strip() for l in clean.splitlines() if l.strip()]
                             response = None
@@ -1271,6 +1485,114 @@ def _snapshot_all_sessions():
 def _snapshot_loop():
     try:
         _snapshot_all_sessions()
+    except Exception:
+        pass
+
+
+# ── Browser idle reaper ──────────────────────────────────────────────────────
+_BROWSER_IDLE_SECONDS = 15 * 60   # kill browser-use sessions idle >15 min
+_BROWSER_MAX_TTL_SECONDS = 2 * 3600  # hard cap: kill any browser process >2h regardless
+
+def _parse_etime(etime: str) -> int | None:
+    """Parse ps etime format [[DD-]HH:]MM:SS into seconds."""
+    if not etime:
+        return None
+    parts = etime.replace("-", ":").split(":")
+    try:
+        parts = [int(p) for p in parts]
+    except ValueError:
+        return None
+    if len(parts) == 2: return parts[0]*60 + parts[1]
+    elif len(parts) == 3: return parts[0]*3600 + parts[1]*60 + parts[2]
+    elif len(parts) == 4: return parts[0]*86400 + parts[1]*3600 + parts[2]*60 + parts[3]
+    return None
+
+def _reap_stale_browsers():
+    """Kill browser-use Chrome/Playwright processes that are idle or exceed max TTL.
+
+    Two checks:
+    1. Idle check — if no API call has touched a session in _BROWSER_IDLE_SECONDS, close it.
+    2. Hard TTL — any browser-use Chrome process older than _BROWSER_MAX_TTL_SECONDS is killed
+       regardless of activity (safety net for leaked processes).
+    """
+    now = time.time()
+
+    # ── Phase 1: close idle browser-use sessions via CLI ──
+    idle_sessions = []
+    for session, last_active in list(_browser_session_activity.items()):
+        if now - last_active > _BROWSER_IDLE_SECONDS:
+            idle_sessions.append(session)
+    for session in idle_sessions:
+        try:
+            _bu_call(["close"], session=session, timeout_s=10)
+            slog(f"[browser-reaper] closed idle session '{session}' "
+                 f"(idle {int(now - _browser_session_activity.get(session, now))}s)")
+        except Exception:
+            pass
+        _browser_session_activity.pop(session, None)
+
+    # ── Phase 2: hard-kill orphan Chrome/Playwright processes past max TTL ──
+    try:
+        r = subprocess.run(["pgrep", "-f", "browser-use-user-data-dir"],
+                           capture_output=True, text=True, timeout=5)
+        pids = [p.strip() for p in r.stdout.strip().split("\n") if p.strip()]
+        if not pids:
+            return
+        reaped = 0
+        for pid in pids:
+            try:
+                r2 = subprocess.run(["ps", "-o", "etime=", "-p", pid],
+                                    capture_output=True, text=True, timeout=5)
+                secs = _parse_etime(r2.stdout.strip())
+                if secs is None:
+                    continue
+                if secs > _BROWSER_MAX_TTL_SECONDS:
+                    os.kill(int(pid), 9)
+                    reaped += 1
+            except (ProcessLookupError, ValueError, subprocess.TimeoutExpired):
+                pass
+        if reaped:
+            slog(f"[browser-reaper] hard-killed {reaped} orphan Chrome processes "
+                 f"(>{_BROWSER_MAX_TTL_SECONDS//3600}h old)")
+    except Exception:
+        pass
+
+
+# ── Ray Serve killer — Ray should never be running locally for extended periods ──
+_last_ray_check = 0.0
+
+def _kill_stale_ray():
+    """Kill Ray Serve if it's been running for more than 30 minutes.
+    Sessions occasionally start Ray for local testing but never stop it,
+    consuming massive CPU/RAM (multiple ML model workers)."""
+    global _last_ray_check
+    now = time.time()
+    if now - _last_ray_check < 600:
+        return
+    _last_ray_check = now
+    try:
+        r = subprocess.run(["pgrep", "-f", "ray::ServeController"],
+                           capture_output=True, text=True, timeout=5)
+        if not r.stdout.strip():
+            return
+        pid = r.stdout.strip().split("\n")[0]
+        r2 = subprocess.run(["ps", "-o", "etime=", "-p", pid],
+                            capture_output=True, text=True, timeout=5)
+        etime = r2.stdout.strip()
+        if not etime:
+            return
+        parts = etime.replace("-", ":").split(":")
+        parts = [int(p) for p in parts]
+        if len(parts) == 2: secs = parts[0]*60 + parts[1]
+        elif len(parts) == 3: secs = parts[0]*3600 + parts[1]*60 + parts[2]
+        elif len(parts) == 4: secs = parts[0]*86400 + parts[1]*3600 + parts[2]*60 + parts[3]
+        else: return
+        if secs > 1800:  # > 30 minutes
+            subprocess.run("pkill -9 -f 'ray::' 2>/dev/null; pkill -9 -f 'ray/core/src/ray' 2>/dev/null; "
+                           "pkill -9 -f 'ray/dashboard' 2>/dev/null; pkill -9 -f 'ray/autoscaler' 2>/dev/null; "
+                           "pkill -9 -f 'ray.util.client' 2>/dev/null",
+                           shell=True, timeout=15)
+            slog(f"[ray-reaper] killed Ray Serve cluster — was running for {secs//60}m")
     except Exception:
         pass
 
@@ -1427,8 +1749,14 @@ INSERT OR IGNORE INTO statuses (id, label, position, is_builtin) VALUES
     ('backlog',   'Backlog',      0, 1),
     ('todo',      'To Do',        1, 1),
     ('doing',     'In Progress',  2, 1),
-    ('done',      'Done',         3, 1),
-    ('discarded', 'Discarded',    4, 1);
+    ('review',    'In Review',    3, 1),
+    ('done',      'Done',         4, 1),
+    ('discarded', 'Discarded',    5, 1);
+-- Migrate existing DBs: when 'review' was inserted into a pre-existing table,
+-- 'done' and 'discarded' kept their old positions (3, 4) and would tie with
+-- 'review' at 3, breaking ORDER BY position. Idempotent fix:
+UPDATE statuses SET position = 4 WHERE id = 'done'      AND position <> 4;
+UPDATE statuses SET position = 5 WHERE id = 'discarded' AND position <> 5;
 CREATE TABLE IF NOT EXISTS issues (
     id          TEXT PRIMARY KEY,
     title       TEXT NOT NULL,
@@ -1905,6 +2233,15 @@ if not cs: print('No contacts yet')
 for c in cs: print(c.get('id',''),c.get('name',''),c.get('company',''))" ;;
       *) echo "amux crm: unknown subcommand: $sub" >&2; exit 1 ;;
     esac ;;
+  restart)
+    session="$1"
+    if [ -z "$session" ]; then echo "Usage: amux restart <session>" >&2; exit 1; fi
+    echo "Stopping $session..."
+    curl -sk -X POST "$AMUX_URL/api/sessions/$session/stop" >/dev/null
+    sleep 1
+    echo "Starting $session..."
+    curl -sk -X POST "$AMUX_URL/api/sessions/$session/start" >/dev/null
+    echo "Restarted $session" ;;
   session|sessions)
     curl -sk "$AMUX_URL/api/sessions" | python3 -c "
 import json,sys
@@ -1932,6 +2269,7 @@ for s in json.load(sys.stdin): print(s['name'], '(running)' if s.get('running') 
     echo "amux crm followups                      — show upcoming follow-ups"
     echo "amux crm list                           — list all contacts"
     echo "amux sessions                           — list sessions"
+    echo "amux restart <session>                  — stop and restart a session"
     echo "amux share <session> [perms]            — create a public share link (perms: output, output+files, output+files+notes)"
     echo "amux unshare <session> [token]          — revoke share link(s)" ;;
   *) echo "amux: unknown command: $cmd" >&2; exit 1 ;;
@@ -1988,7 +2326,15 @@ def _init_db():
         "ALTER TABLE issues ADD COLUMN pinned INTEGER NOT NULL DEFAULT 0",
         "ALTER TABLE schedules ADD COLUMN run_count INTEGER NOT NULL DEFAULT 0",
         "ALTER TABLE schedules ADD COLUMN schedule_expr TEXT",
+        "ALTER TABLE schedules ADD COLUMN watch INTEGER NOT NULL DEFAULT 0",
+        "ALTER TABLE schedules ADD COLUMN watch_timeout INTEGER NOT NULL DEFAULT 120",
+        "ALTER TABLE schedules ADD COLUMN done_pattern TEXT",
+        "ALTER TABLE schedules ADD COLUMN done_action TEXT NOT NULL DEFAULT 'disable'",
         "ALTER TABLE graph_nodes ADD COLUMN source_path TEXT NOT NULL DEFAULT ''",
+        "ALTER TABLE issues ADD COLUMN gcal_event_id TEXT",
+        "ALTER TABLE issues ADD COLUMN pos REAL NOT NULL DEFAULT 0",
+        "ALTER TABLE issues ADD COLUMN notified INTEGER NOT NULL DEFAULT 0",
+        "ALTER TABLE schedules ADD COLUMN kind TEXT NOT NULL DEFAULT 'tmux'",
     ]:
         try:
             db.execute(migration)
@@ -2494,10 +2840,42 @@ def _complete_session_board_issue(session_name: str):
         pass
 
 
+def _notify_session_of_task(session_name: str, item_id: str, title: str):
+    """Push a one-line task pickup notice into the target session's tmux pane.
+    Idempotent per (session, item_id): we mark `notified=1` on the issue row so
+    re-PATCHes (e.g. tag edits) don't re-notify. Runs in a background thread so
+    the API call returns immediately even if the target session takes a moment.
+    Best-effort: silently swallows errors (session might not be running yet)."""
+    def _run():
+        try:
+            db = get_db()
+            row = db.execute(
+                "SELECT notified FROM issues WHERE id=?", (item_id,)
+            ).fetchone()
+            if row and row["notified"]:
+                return  # already notified
+            # Mark first to win the race against concurrent PATCHes
+            db.execute("UPDATE issues SET notified=1 WHERE id=?", (item_id,))
+            db.commit()
+            text = (
+                f"New board task assigned: {item_id} — {title[:120]}. "
+                f"Run `amux board claim {item_id}` to take it, or check `amux board` for context."
+            )
+            ok, _msg = send_text(session_name, text)
+            if not ok:
+                # Session not running — clear the flag so a future restart picks it up
+                db.execute("UPDATE issues SET notified=0 WHERE id=?", (item_id,))
+                db.commit()
+        except Exception:
+            pass
+    threading.Thread(target=_run, daemon=True).start()
+
+
 _DEFAULT_STATUSES = [
     {"id": "backlog",   "label": "Backlog"},
     {"id": "todo",      "label": "To Do"},
     {"id": "doing",     "label": "In Progress"},
+    {"id": "review",    "label": "In Review"},
     {"id": "done",      "label": "Done"},
     {"id": "discarded", "label": "Discarded"},
 ]
@@ -2510,12 +2888,16 @@ def _load_board() -> list:
         """SELECT i.id, i.title, i.desc, i.status, i.session, i.creator,
                   i.due, i.due_time, i.created, i.updated, i.owner_type,
                   COALESCE(i.pinned, 0) AS pinned,
+                  COALESCE(i.pos, 0) AS pos,
                   GROUP_CONCAT(t.tag) AS tags_csv
            FROM issues i
            LEFT JOIN issue_tags t ON t.issue_id = i.id
            WHERE i.deleted IS NULL
            GROUP BY i.id
-           ORDER BY COALESCE(i.pinned, 0) DESC, i.updated DESC"""
+           ORDER BY COALESCE(i.pinned, 0) DESC,
+                    CASE WHEN COALESCE(i.pos, 0) = 0 THEN 1 ELSE 0 END,
+                    COALESCE(i.pos, 0) ASC,
+                    i.updated DESC"""
     ).fetchall()
     result = []
     for row in rows:
@@ -2540,6 +2922,7 @@ def _item_by_id(bid: str) -> dict | None:
         """SELECT i.id, i.title, i.desc, i.status, i.session, i.creator,
                   i.due, i.due_time, i.created, i.updated, i.owner_type,
                   COALESCE(i.pinned, 0) AS pinned,
+                  COALESCE(i.pos, 0) AS pos,
                   GROUP_CONCAT(t.tag) AS tags_csv
            FROM issues i
            LEFT JOIN issue_tags t ON t.issue_id = i.id
@@ -2657,6 +3040,65 @@ def _upload_ical_to_s3():
         slog(f"S3 iCal upload failed: {e}")
 
 
+def _gcal_sync_item(item_id: str, title: str = "", due: str = "", due_time: str = "",
+                    desc: str = "", status: str = "", deleted: bool = False):
+    """Sync a single board item to Google Calendar (if AMUX_GCAL_ID is set).
+    Creates, updates, or deletes the corresponding GCal event."""
+    if not _GCAL_ID:
+        return
+    try:
+        import google.auth, google.auth.transport.requests
+        from googleapiclient.discovery import build
+        creds, _ = google.auth.default(scopes=["https://www.googleapis.com/auth/calendar"])
+        creds.refresh(google.auth.transport.requests.Request())
+        service = build("calendar", "v3", credentials=creds, cache_discovery=False)
+        db = get_db()
+        row = db.execute("SELECT gcal_event_id, due FROM issues WHERE id=?", (item_id,)).fetchone()
+        if not row:
+            return
+        event_id = row["gcal_event_id"] if row else None
+        # Delete: remove from GCal if item is deleted/done or has no due date
+        if deleted or not due or status == "done":
+            if event_id:
+                try:
+                    service.events().delete(calendarId=_GCAL_ID, eventId=event_id).execute()
+                    slog(f"[gcal] deleted event {event_id} for {item_id}")
+                except Exception:
+                    pass
+                db.execute("UPDATE issues SET gcal_event_id=NULL WHERE id=?", (item_id,))
+                db.commit()
+            return
+        # Build event body
+        event_body = {
+            "summary": title,
+            "description": f"amux board: {item_id}\n{desc}" if desc else f"amux board: {item_id}",
+        }
+        if due_time:
+            # Timed event
+            from datetime import datetime as _dt
+            start_dt = _dt.strptime(f"{due}T{due_time}", "%Y-%m-%dT%H:%M")
+            end_dt = start_dt + __import__("datetime").timedelta(hours=1)
+            event_body["start"] = {"dateTime": start_dt.strftime("%Y-%m-%dT%H:%M:%S"), "timeZone": "America/New_York"}
+            event_body["end"] = {"dateTime": end_dt.strftime("%Y-%m-%dT%H:%M:%S"), "timeZone": "America/New_York"}
+        else:
+            # All-day event
+            event_body["start"] = {"date": due}
+            event_body["end"] = {"date": due}
+        if event_id:
+            # Update existing
+            event = service.events().update(calendarId=_GCAL_ID, eventId=event_id, body=event_body).execute()
+            slog(f"[gcal] updated event {event_id} for {item_id}")
+        else:
+            # Create new
+            event = service.events().insert(calendarId=_GCAL_ID, body=event_body).execute()
+            event_id = event["id"]
+            db.execute("UPDATE issues SET gcal_event_id=? WHERE id=?", (event_id, item_id))
+            db.commit()
+            slog(f"[gcal] created event {event_id} for {item_id}")
+    except Exception as e:
+        slog(f"[gcal] sync failed for {item_id}: {e}")
+
+
 
 def _cron_next_run(parts: list, base) -> str | None:
     """Compute next fire time for a 5-field cron spec (MIN HOUR DOM MON DOW)."""
@@ -2692,14 +3134,39 @@ def _cron_next_run(parts: list, base) -> str | None:
     return None
 
 
+def _parse_time_str(s: str) -> tuple[int, int] | None:
+    """Parse flexible time strings: '18:00', '6pm', '6:30pm', '9am', '09:00'."""
+    import re as _re
+    # HH:MM am/pm
+    m = _re.match(r'^(\d{1,2}):(\d{2})\s*(am|pm)?$', s.strip().lower())
+    if m:
+        h, mi = int(m.group(1)), int(m.group(2))
+        if m.group(3) == 'pm' and h < 12: h += 12
+        elif m.group(3) == 'am' and h == 12: h = 0
+        return (h, mi)
+    # Ham/pm (no minutes)
+    m = _re.match(r'^(\d{1,2})\s*(am|pm)$', s.strip().lower())
+    if m:
+        h = int(m.group(1))
+        if m.group(2) == 'pm' and h < 12: h += 12
+        elif m.group(2) == 'am' and h == 12: h = 0
+        return (h, 0)
+    return None
+
+
 def _parse_next_run(expr: str, from_ts: float | None = None) -> str | None:
     """Parse a free-text schedule expression and return next ISO run time.
 
     Supported formats:
-      every Xm / Xh / Xd          — interval from now
-      daily at HH:MM               — delegates to _next_run_dt
-      weekly on <dayname> at HH:MM — delegates to _next_run_dt
-      MIN HOUR DOM MON DOW         — 5-field cron
+      every Xm / Xh / Xd               — interval from now
+      in Xm / Xh                        — one-shot relative
+      daily at HH:MM / 6pm              — daily recurring
+      every morning / every evening      — aliases for 9am / 18:00
+      every weekday at HH:MM            — Mon-Fri cron
+      every <dayname> at HH:MM          — weekly shorthand
+      weekly on <dayname> at HH:MM      — weekly recurring
+      monthly on <N> at HH:MM           — monthly recurring
+      MIN HOUR DOM MON DOW              — 5-field cron
     """
     import re as _re
     from datetime import datetime, timedelta
@@ -2709,6 +3176,16 @@ def _parse_next_run(expr: str, from_ts: float | None = None) -> str | None:
     base = datetime.fromtimestamp(from_ts) if from_ts else datetime.now()
     s = expr.strip().lower()
 
+    _DAY_MAP = {'monday':0,'tuesday':1,'wednesday':2,'thursday':3,'friday':4,'saturday':5,'sunday':6,
+                'mon':0,'tue':1,'wed':2,'thu':3,'fri':4,'sat':5,'sun':6}
+
+    # "in Xm/h" — one-shot relative
+    m = _re.match(r'^in\s+(\d+)\s*(m|min|minutes?|h|hr|hours?)$', s)
+    if m:
+        n, unit = int(m.group(1)), m.group(2)[0]
+        delta = {'m': timedelta(minutes=n), 'h': timedelta(hours=n)}[unit]
+        return (base + delta).strftime("%Y-%m-%dT%H:%M")
+
     # every Xm/h/d
     m = _re.match(r'^every\s+(\d+)\s*(m|min|minutes?|h|hr|hours?|d|days?)$', s)
     if m:
@@ -2716,21 +3193,56 @@ def _parse_next_run(expr: str, from_ts: float | None = None) -> str | None:
         delta = {'m': timedelta(minutes=n), 'h': timedelta(hours=n), 'd': timedelta(days=n)}[unit]
         return (base + delta).strftime("%Y-%m-%dT%H:%M")
 
-    # daily at HH:MM
-    m = _re.match(r'^daily\s+at\s+(\d{1,2}):(\d{2})$', s)
+    # "every morning" / "every evening" / "every night"
+    m = _re.match(r'^every\s+(morning|evening|night)$', s)
     if m:
+        h = 9 if m.group(1) == 'morning' else 18
         return _next_run_dt({"sched_type": "recurring", "recurrence": "daily",
-                              "run_at": f"{int(m.group(1)):02d}:{m.group(2)}"})
+                              "run_at": f"{h:02d}:00"})
 
-    # weekly on <day> at HH:MM
-    _DAY_MAP = {'monday':0,'tuesday':1,'wednesday':2,'thursday':3,'friday':4,'saturday':5,'sunday':6,
-                'mon':0,'tue':1,'wed':2,'thu':3,'fri':4,'sat':5,'sun':6}
-    m = _re.match(r'^weekly\s+on\s+(\w+)\s+at\s+(\d{1,2}):(\d{2})$', s)
+    # "every weekday at TIME" — Mon-Fri cron
+    m = _re.match(r'^every\s+weekday\s+at\s+(.+)$', s)
+    if m:
+        t = _parse_time_str(m.group(1))
+        if t:
+            return _cron_next_run([str(t[1]), str(t[0]), '*', '*', '1-5'], base)
+
+    # "every <dayname> at TIME" — weekly shorthand
+    m = _re.match(r'^every\s+(\w+)\s+at\s+(.+)$', s)
     if m:
         day_num = _DAY_MAP.get(m.group(1))
         if day_num is not None:
-            return _next_run_dt({"sched_type": "recurring", "recurrence": "weekly",
-                                  "run_at": f"{day_num}:{int(m.group(2)):02d}:{m.group(3)}"})
+            t = _parse_time_str(m.group(2))
+            if t:
+                return _next_run_dt({"sched_type": "recurring", "recurrence": "weekly",
+                                      "run_at": f"{day_num}:{t[0]:02d}:{t[1]:02d}"})
+
+    # daily at TIME (flexible: "daily at 18:00", "daily at 6pm")
+    m = _re.match(r'^daily\s+at\s+(.+)$', s)
+    if m:
+        t = _parse_time_str(m.group(1))
+        if t:
+            return _next_run_dt({"sched_type": "recurring", "recurrence": "daily",
+                                  "run_at": f"{t[0]:02d}:{t[1]:02d}"})
+
+    # weekly on <day> at TIME
+    m = _re.match(r'^weekly\s+on\s+(\w+)\s+at\s+(.+)$', s)
+    if m:
+        day_num = _DAY_MAP.get(m.group(1))
+        if day_num is not None:
+            t = _parse_time_str(m.group(2))
+            if t:
+                return _next_run_dt({"sched_type": "recurring", "recurrence": "weekly",
+                                      "run_at": f"{day_num}:{t[0]:02d}:{t[1]:02d}"})
+
+    # monthly on <N> at TIME — "monthly on 15 at 9am"
+    m = _re.match(r'^monthly\s+on\s+(\d{1,2})\s+at\s+(.+)$', s)
+    if m:
+        mday = int(m.group(1))
+        t = _parse_time_str(m.group(2))
+        if t and 1 <= mday <= 28:
+            return _next_run_dt({"sched_type": "recurring", "recurrence": "monthly",
+                                  "run_at": f"{mday}:{t[0]:02d}:{t[1]:02d}"})
 
     # 5-field cron
     parts = expr.strip().split()
@@ -2803,16 +3315,33 @@ def _next_run_dt(sched):
 
 
 def _run_schedule(sched):
-    """Execute a schedule entry — send message to tmux session and log the run."""
+    """Execute a schedule entry — send message to tmux session (kind='tmux')
+    or run as shell command (kind='shell'). Logs the run.
+    If watch=1, spawns a background thread to monitor the response."""
     session = sched["session"]
     command = sched.get("command") or ""
-    slog(f"[sched] running '{sched['title']}' → session '{session}'")
+    kind = sched.get("kind") or "tmux"
+    slog(f"[sched] running '{sched['title']}' [{kind}] → {session or '(shell)'}")
     status, note = "ok", None
+    # Capture output before sending so we can detect new output later (tmux mode only)
+    pre_output = tmux_capture(session, 200) if (kind == "tmux" and sched.get("watch")) else ""
     try:
-        ok, err = send_text(session, command)
-        if not ok:
-            status, note = "error", str(err)
-            slog(f"[sched] send failed for '{sched['title']}': {err}")
+        if kind == "shell":
+            r = subprocess.run(
+                ["/bin/bash", "-c", command],
+                capture_output=True, text=True, timeout=600,
+            )
+            if r.returncode != 0:
+                status = "error"
+                note = (r.stderr or r.stdout or f"exit {r.returncode}")[:500]
+                slog(f"[sched] shell failed for '{sched['title']}': {note}")
+            else:
+                note = (r.stdout or "")[:500] or None
+        else:
+            ok, err = send_text(session, command)
+            if not ok:
+                status, note = "error", str(err)
+                slog(f"[sched] send failed for '{sched['title']}': {err}")
     except Exception as e:
         status, note = "error", str(e)
         slog(f"[sched] exception running '{sched['title']}': {e}")
@@ -2830,6 +3359,100 @@ def _run_schedule(sched):
     except Exception as log_err:
         slog(f"[sched] failed to log run: {log_err}")
     _push_alert("scheduler", session, f"Ran schedule: {sched['title']}")
+    # If watch mode is enabled (tmux only), monitor response in background
+    if (sched.get("kind") or "tmux") == "tmux" and sched.get("watch") and status == "ok":
+        threading.Thread(
+            target=_watch_schedule_response,
+            args=(sched, pre_output),
+            daemon=True,
+            name=f"sched-watch-{sched['id']}"
+        ).start()
+
+
+def _watch_schedule_response(sched, pre_output: str):
+    """Monitor session output after a scheduled command. If done_pattern matches
+    new output, take done_action (disable, notify, or send a follow-up command)."""
+    import re as _re
+    session = sched["session"]
+    timeout = sched.get("watch_timeout") or 120
+    done_pattern = sched.get("done_pattern") or ""
+    done_action = sched.get("done_action") or "disable"
+    sched_id = sched["id"]
+
+    if not done_pattern:
+        return
+
+    slog(f"[sched-watch] watching '{sched['title']}' for pattern: {done_pattern}")
+    start = time.time()
+    poll_interval = 5  # check every 5s
+    matched = False
+
+    while time.time() - start < timeout:
+        time.sleep(poll_interval)
+        current_output = tmux_capture(session, 200)
+        # Extract only new output (after what was there before)
+        new_output = current_output
+        if pre_output:
+            # Find where old output ends in new output
+            overlap = pre_output[-200:] if len(pre_output) > 200 else pre_output
+            idx = current_output.find(overlap[-100:]) if len(overlap) >= 100 else -1
+            if idx >= 0:
+                new_output = current_output[idx + len(overlap[-100:]):]
+
+        try:
+            if _re.search(done_pattern, new_output, _re.IGNORECASE):
+                matched = True
+                slog(f"[sched-watch] pattern matched for '{sched['title']}': {done_pattern}")
+                break
+        except _re.error:
+            # Fallback to simple substring match if regex is invalid
+            if done_pattern.lower() in new_output.lower():
+                matched = True
+                slog(f"[sched-watch] substring matched for '{sched['title']}': {done_pattern}")
+                break
+
+    if not matched:
+        slog(f"[sched-watch] timeout ({timeout}s) for '{sched['title']}' — no match")
+        return
+
+    # Pattern matched — take action
+    try:
+        db = get_db()
+        now_ts = int(time.time())
+        if done_action == "disable":
+            db.execute("UPDATE schedules SET enabled=0, updated=? WHERE id=?", (now_ts, sched_id))
+            db.commit()
+            _push_alert("scheduler", session,
+                         f"Schedule '{sched['title']}' auto-disabled — done pattern matched")
+            slog(f"[sched-watch] disabled schedule '{sched['title']}'")
+            # Log the auto-disable as a run note
+            db.execute(
+                "INSERT INTO schedule_runs (schedule_id, ran_at, status, note) VALUES (?,?,?,?)",
+                (sched_id, now_ts, "done", f"Auto-disabled: matched '{done_pattern}'")
+            )
+            db.commit()
+        elif done_action == "notify":
+            _push_alert("scheduler", session,
+                         f"Schedule '{sched['title']}' — done pattern matched: {done_pattern}")
+            db.execute(
+                "INSERT INTO schedule_runs (schedule_id, ran_at, status, note) VALUES (?,?,?,?)",
+                (sched_id, now_ts, "done", f"Pattern matched (notify only): '{done_pattern}'")
+            )
+            db.commit()
+        elif done_action.startswith("command:"):
+            follow_up = done_action[8:]
+            send_text(session, follow_up)
+            db.execute("UPDATE schedules SET enabled=0, updated=? WHERE id=?", (now_ts, sched_id))
+            db.execute(
+                "INSERT INTO schedule_runs (schedule_id, ran_at, status, note) VALUES (?,?,?,?)",
+                (sched_id, now_ts, "done", f"Matched '{done_pattern}' → sent: {follow_up}")
+            )
+            db.commit()
+            _push_alert("scheduler", session,
+                         f"Schedule '{sched['title']}' — done, sent follow-up: {follow_up}")
+            slog(f"[sched-watch] sent follow-up for '{sched['title']}': {follow_up}")
+    except Exception as e:
+        slog(f"[sched-watch] error taking action for '{sched['title']}': {e}")
 
 
 def _scheduler_loop():
@@ -2838,7 +3461,7 @@ def _scheduler_loop():
     2. DB schedules table: user-configured tmux commands (cron-style, once, etc.)
     """
     from datetime import datetime
-    _DB_CHECK_INTERVAL = 30  # only hit SQLite every 30s for DB schedules
+    _DB_CHECK_INTERVAL = 10  # check SQLite every 10s for DB schedules
     _last_db_check = 0.0
     while True:
         time.sleep(1)
@@ -2883,6 +3506,11 @@ def _push_ical_bg():
     """Trigger S3 iCal upload in a background thread."""
     if _S3_BUCKET:
         threading.Thread(target=_upload_ical_to_s3, daemon=True).start()
+
+def _gcal_sync_bg(item_id, **kwargs):
+    """Trigger Google Calendar sync for a single item in a background thread."""
+    if _GCAL_ID:
+        threading.Thread(target=_gcal_sync_item, args=(item_id,), kwargs=kwargs, daemon=True).start()
 
 
 def get_daily_token_stats() -> dict:
@@ -3043,6 +3671,9 @@ def get_system_metrics() -> dict:
 _server_start_time = time.time()
 _server_request_count = 0
 _server_request_lock = threading.Lock()
+
+# Cached API key validation result — updated by background validator
+_api_key_status: dict = {"valid": None, "error": "", "checked_at": 0}
 
 
 def _build_system_metrics() -> dict:
@@ -3269,7 +3900,7 @@ def _detect_claude_status(raw_output: str) -> str:
     if not raw_output:
         return ""
     clean = re.sub(
-        r'\x1b\[[0-9;]*[a-zA-Z]|\x1b\]8;[^\x1b]*\x1b\\|\x1b\][^\x07]*\x07'
+        r'\x1b\[[0-9;?]*[a-zA-Z]|\x1b\]8;[^\x1b]*\x1b\\|\x1b\][^\x07]*\x07'
         r'|\x1b\][^\x1b]*\x1b\\|\x1b[()][A-Z0-9]|\x1b[\x20-\x2f]*[\x40-\x7e]',
         '', raw_output,
     )
@@ -3383,7 +4014,7 @@ def _parse_task_time(raw_output: str) -> str:
     if not raw_output:
         return ""
     clean = re.sub(
-        r'\x1b\[[0-9;]*[a-zA-Z]|\x1b\]8;[^\x1b]*\x1b\\|\x1b\][^\x07]*\x07'
+        r'\x1b\[[0-9;?]*[a-zA-Z]|\x1b\]8;[^\x1b]*\x1b\\|\x1b\][^\x07]*\x07'
         r'|\x1b\][^\x1b]*\x1b\\|\x1b[()][A-Z0-9]|\x1b[\x20-\x2f]*[\x40-\x7e]',
         '', raw_output,
     )
@@ -3449,7 +4080,7 @@ def list_sessions() -> list:
             if saved:
                 raw = "\n".join(saved.splitlines()[-30:])
         if raw:
-            strip_ansi = lambda t: re.sub(r'\x1b\[[0-9;]*[a-zA-Z]|\x1b\]8;[^\x1b]*\x1b\\|\x1b\][^\x07]*\x07|\x1b\][^\x1b]*\x1b\\|\x1b[()][A-Z0-9]|\x1b[\x20-\x2f]*[\x40-\x7e]', '', t)
+            strip_ansi = lambda t: re.sub(r'\x1b\[[0-9;?]*[a-zA-Z]|\x1b\]8;[^\x1b]*\x1b\\|\x1b\][^\x07]*\x07|\x1b\][^\x1b]*\x1b\\|\x1b[()][A-Z0-9]|\x1b[\x20-\x2f]*[\x40-\x7e]', '', t)
             lines = [l for l in raw.splitlines() if l.strip()]
             preview = strip_ansi(lines[-1][:120]) if lines else ""
             if running:
@@ -3517,7 +4148,7 @@ def list_sessions() -> list:
             "task_time": task_time,
             "task_name": _doing_tasks.get(name) or meta.get("task_summary", "") or cfg.get("CC_DESC", "") or "",
             "tokens": tokens,
-            "branch": cfg.get("CC_BRANCH", ""),
+            "branch": "" if cfg.get("CC_BRANCH", "") == "none" else cfg.get("CC_BRANCH", ""),
             "mcp": cfg.get("CC_MCP", ""),
             "worktree": cfg.get("CC_WORKTREE", "") == "1",
             "worktree_repo": cfg.get("CC_WORKTREE_REPO", ""),
@@ -3775,11 +4406,21 @@ def _auto_create_branch(name: str, work_dir: str, env_file: "Path") -> bool:
         return False
 
 
+_git_info_cache: dict[str, tuple[float, dict]] = {}  # work_dir -> (timestamp, result)
+_GIT_INFO_TTL = 15  # seconds — git status doesn't change that fast
+_GIT_INFO_DETAIL_TTL = 10  # seconds — detail view can be slightly fresher
+
+
 def _git_info(work_dir: str, detail: bool = False) -> dict:
     """Return {branch, repo} for a directory. Returns empty strings if not a git repo.
     With detail=True, also returns ahead commits, status lines, remote URL."""
     if not work_dir:
         return {"branch": "", "repo": ""}
+    cache_key = f"{work_dir}::{detail}"
+    ttl = _GIT_INFO_DETAIL_TTL if detail else _GIT_INFO_TTL
+    cached = _git_info_cache.get(cache_key)
+    if cached and time.time() - cached[0] < ttl:
+        return cached[1]
     try:
         rb = subprocess.run(
             ["git", "-C", work_dir, "branch", "--show-current"],
@@ -3795,6 +4436,7 @@ def _git_info(work_dir: str, detail: bool = False) -> dict:
             repo = rr.stdout.strip() if rr.returncode == 0 else ""
         result = {"branch": branch, "repo": repo}
         if not detail or not branch:
+            _git_info_cache[cache_key] = (time.time(), result)
             return result
         # Commits ahead of default branch (main/master)
         for base in ("main", "master", "dev", "develop"):
@@ -3844,6 +4486,7 @@ def _git_info(work_dir: str, detail: bool = False) -> dict:
             capture_output=True, text=True, timeout=5,
         )
         result["unpushed"] = len([l for l in rp.stdout.strip().splitlines() if l]) if rp.returncode == 0 else 0
+        _git_info_cache[cache_key] = (time.time(), result)
         return result
     except Exception:
         return {"branch": "", "repo": ""}
@@ -4113,17 +4756,9 @@ def start_session(name: str, extra_flags: str = "", _skip_conv_id: bool = False)
         # Source user profile to ensure PATH includes ~/.local/bin (where claude lives)
         # Then cd back to work_dir since the profile may override CWD (e.g. cd ~/Dev)
         shell_rc = "unset CLAUDECODE CLAUDE_CODE_ENTRYPOINT; "
-        for rc in [Path.home() / ".zprofile", Path.home() / ".bash_profile", Path.home() / ".profile"]:
-            if rc.exists():
-                shell_rc += f"source {rc} 2>/dev/null; cd {shlex.quote(work_dir)}; "
-                break
-        else:
-            shell_rc += f"cd {shlex.quote(work_dir)}; "
-        # Forward select env vars into the tmux session.
-        # ANTHROPIC_API_KEY: only forward if there's no OAuth token in
-        # ~/.claude.json. OAuth/Max users manage their own auth; BYO-key
-        # users (cloud containers without OAuth) need the key injected.
-        _env_args = []
+        # Detect OAuth (Claude Max / claude.ai login) so we know whether to
+        # forward ANTHROPIC_API_KEY. OAuth users hit an auth conflict if both
+        # are present; BYO-key users need the key injected.
         _has_oauth = False
         try:
             import json as _j2
@@ -4132,9 +4767,24 @@ def start_session(name: str, extra_flags: str = "", _skip_conv_id: bool = False)
                 _has_oauth = bool(_j2.loads(_cj.read_text()).get("oauthAccount"))
         except Exception:
             pass
-        # If OAuth is present, explicitly blank ANTHROPIC_API_KEY so sessions
-        # don't inherit it from the parent shell (causes auth conflict).
-        # Only forward the key if there's no OAuth (BYO-key / cloud container).
+        # If OAuth is present, unset ANTHROPIC_API_KEY in the shell before
+        # sourcing profile or launching claude. Doing this in the bash wrapper
+        # (rather than only via tmux -e) defends against the tmux server's
+        # inherited env and any profile re-export.
+        if _has_oauth:
+            shell_rc += "unset ANTHROPIC_API_KEY; "
+        for rc in [Path.home() / ".zprofile", Path.home() / ".bash_profile", Path.home() / ".profile"]:
+            if rc.exists():
+                shell_rc += f"source {rc} 2>/dev/null; cd {shlex.quote(work_dir)}; "
+                break
+        else:
+            shell_rc += f"cd {shlex.quote(work_dir)}; "
+        # Belt-and-suspenders: also unset after sourcing profile in case the
+        # profile re-exports it.
+        if _has_oauth:
+            shell_rc += "unset ANTHROPIC_API_KEY; "
+        # Forward select env vars into the tmux session.
+        _env_args = []
         if _has_oauth:
             _env_args += ["-e", "ANTHROPIC_API_KEY="]
         else:
@@ -4950,7 +5600,7 @@ def _gmail_list_labels(account: str) -> list:
 
 
 _SHARE_CSS = """
-:root { --bg:#0d1117; --card:#161b22; --border:#30363d; --text:#e6edf3; --text2:#8b949e; --green:#3fb950; --accent:#58a6ff; }
+:root { --bg:#0d1117; --card:#161b22; --border:#30363d; --text:#e6edf3; --text2:#9ca3af; --green:#3fb950; --accent:#58a6ff; }
 *{ box-sizing:border-box; margin:0; padding:0; }
 body{ background:var(--bg); color:var(--text); font-family:'SF Mono',Menlo,Consolas,monospace; font-size:13px; }
 header{ padding:16px 20px; border-bottom:1px solid var(--border); display:flex; align-items:center; gap:12px; }
@@ -5108,7 +5758,7 @@ RELEASE_NOTES_HTML = """<!DOCTYPE html>
 <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:ital,wght@0,300;0,400;0,500;0,600;0,700;1,400&family=DM+Sans:ital,opsz,wght@0,9..40,300;0,9..40,400;0,9..40,500;0,9..40,600;0,9..40,700;1,9..40,400&display=swap" rel="stylesheet">
 <style>
 *{box-sizing:border-box;margin:0;padding:0}
-:root{--bg:#0a0a0c;--card:#111114;--border:#2a2a30;--text:#e8e8ec;--dim:#8888a0;--muted:#55556a;--green:#4ade80;--mono:'JetBrains Mono','SF Mono',Consolas,monospace}
+:root{--bg:#0a0a0c;--card:#111114;--border:#2a2a30;--text:#e8e8ec;--dim:#a0a0b8;--muted:#707088;--green:#4ade80;--mono:'JetBrains Mono','SF Mono',Consolas,monospace}
 body{font-family:'DM Sans',-apple-system,BlinkMacSystemFont,'Segoe UI',system-ui,sans-serif;background:var(--bg);color:var(--text);min-height:100vh;line-height:1.5;-webkit-font-smoothing:antialiased}
 body::before{content:'';position:fixed;inset:0;background:repeating-linear-gradient(0deg,transparent,transparent 2px,rgba(255,255,255,0.008) 2px,rgba(255,255,255,0.008) 4px);pointer-events:none;z-index:9999}
 a{color:var(--green);text-decoration:none}
@@ -5396,10 +6046,10 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
     cursor: default; color: var(--dim); opacity: 0; transition: opacity 0.15s; border-radius: 3px;
     user-select: none; -webkit-user-select: none; touch-action: none;
   }
-  .card:hover .card-drag-handle { opacity: 0.45; cursor: grab; }
+  .card:hover .card-drag-handle { opacity: 0.7; cursor: grab; }
   .card-drag-handle:hover { opacity: 1 !important; cursor: grab; color: var(--fg); background: rgba(139,148,158,0.1); }
   .card-drag-handle:active { cursor: grabbing; }
-  @media (hover: none) { .card-drag-handle { opacity: 0.35; cursor: grab; } }
+  @media (hover: none) { .card-drag-handle { opacity: 0.6; cursor: grab; } }
   .card-header-meta { display: flex; align-items: center; gap: 6px; margin-left: 20px; min-width: 0; }
   .card-menu-btn {
     width: 28px; height: 28px; border-radius: 6px; border: 1px solid var(--border);
@@ -5726,15 +6376,52 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
   .csv-search { flex:0 0 auto;padding:3px 8px;background:var(--input,var(--card));border:1px solid var(--border);border-radius:6px;color:var(--text);font-size:0.78rem;width:160px;outline:none; }
   .csv-search:focus { border-color:var(--accent); }
   .csv-truncated { font-size:0.73rem;color:var(--yellow,#fbbf24);margin-left:4px; }
-  .csv-wrap { overflow:auto;flex:1;min-height:0; }
-  .csv-table { border-collapse:collapse;font-size:0.78rem;width:max-content;min-width:100%; }
-  .csv-table th,.csv-table td { border:1px solid var(--border);padding:4px 10px;text-align:left;white-space:nowrap;max-width:280px;overflow:hidden;text-overflow:ellipsis; }
-  .csv-table th { background:var(--card);font-weight:600;position:sticky;top:0;z-index:1;cursor:pointer;user-select:none; }
-  .csv-table th:hover { background:var(--hover,rgba(255,255,255,0.06)); }
-  .csv-table th.sort-asc::after { content:' ▲';font-size:0.65rem;opacity:0.7; }
-  .csv-table th.sort-desc::after { content:' ▼';font-size:0.65rem;opacity:0.7; }
-  .csv-table tr:nth-child(even) td { background:rgba(255,255,255,0.02); }
+  /* Excel-style CSV preview — always light, regardless of theme */
+  .csv-wrap { overflow:auto;flex:1;min-height:0;-webkit-overflow-scrolling:touch;background:#ffffff; }
+  .csv-table { border-collapse:collapse;font-size:13px;table-layout:fixed;
+    font-family:'Calibri','Segoe UI','Helvetica Neue',Arial,sans-serif;
+    color:#000000;background:#ffffff; }
+  .csv-table th,.csv-table td { border:1px solid #d4d4d4;padding:4px 8px;text-align:left;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;position:relative; }
+  .csv-table td { background:#ffffff;color:#000000; }
+  .csv-table th { background:#f2f2f2;color:#444444;font-weight:600;position:sticky;top:0;z-index:2;user-select:none;
+    border-color:#b8b8b8;text-align:center;font-size:12px; }
+  .csv-table th .csv-th-text { cursor:pointer;display:block;overflow:hidden;text-overflow:ellipsis; }
+  .csv-table th:hover { background:#e6e6e6; }
+  .csv-table th.sort-asc .csv-th-text::after { content:' ▲';font-size:0.65rem;opacity:0.7; }
+  .csv-table th.sort-desc .csv-th-text::after { content:' ▼';font-size:0.65rem;opacity:0.7; }
+  .csv-table tr:hover td { background:#f5f9ff; }
+  .csv-table td.csv-cell-active { outline:2px solid #217346;outline-offset:-2px;z-index:1;background:#e8f3ed !important; }
   .csv-row-hidden { display:none; }
+  /* Column resize handle */
+  .csv-resize { position:absolute;top:0;right:-3px;width:6px;height:100%;cursor:col-resize;z-index:3;user-select:none;-webkit-user-select:none; }
+  .csv-resize:hover,.csv-resize.active { background:#217346;opacity:0.5; }
+  /* Row number column — Excel-style gray gutter */
+  .csv-table th.csv-rownum,.csv-table td.csv-rownum { width:42px;min-width:42px;max-width:42px;text-align:center;color:#444444;font-size:11px;padding:4px 4px;background:#f2f2f2;position:sticky;left:0;z-index:1;border-right:1px solid #b8b8b8;font-weight:400; }
+  .csv-table th.csv-rownum { z-index:3;background:#e6e6e6;border-right:1px solid #b8b8b8; }
+  /* Frozen first column */
+  .csv-table.csv-frozen th:nth-child(2),.csv-table.csv-frozen td:nth-child(2) { position:sticky;left:42px;z-index:1;background:#ffffff;border-right:2px solid #b8b8b8; }
+  .csv-table.csv-frozen th:nth-child(2) { z-index:3;background:#f2f2f2; }
+  .csv-table tr:hover td.csv-rownum { background:#e6e6e6; }
+  .csv-table.csv-frozen tr:hover td:nth-child(2) { background:#f5f9ff; }
+  /* Cell expand popover — Excel-style */
+  .csv-cell-pop { position:fixed;z-index:1000;background:#ffffff;color:#000000;border:1px solid #b8b8b8;border-radius:4px;padding:8px 12px;font-size:13px;font-family:'Calibri','Segoe UI','Helvetica Neue',Arial,sans-serif;max-width:90vw;max-height:50vh;overflow:auto;white-space:pre-wrap;word-break:break-word;box-shadow:0 4px 16px rgba(0,0,0,0.18);line-height:1.5; }
+  /* Mobile: bigger touch targets */
+  @media (max-width:600px) {
+    .csv-table th,.csv-table td { padding:8px 10px;font-size:14px; }
+    .csv-toolbar { padding:10px 12px;gap:6px; }
+    .csv-search { width:100%;order:10; }
+    .csv-resize { width:10px;right:-5px; }
+    .csv-table th.csv-rownum,.csv-table td.csv-rownum { width:36px;min-width:36px;max-width:36px;padding:10px 4px; }
+  }
+  @media (max-width: 600px) {
+    .file-overlay-header { flex-wrap: wrap; gap: 6px; }
+    .file-overlay-header h2 { font-size: 0.88rem; flex-basis: calc(100% - 50px); }
+    .file-overlay-header .btn { min-width: 40px; min-height: 40px; font-size: 1.1rem;
+      display: flex; align-items: center; justify-content: center; }
+    .file-view-tabs { overflow-x: auto; -webkit-overflow-scrolling: touch; scrollbar-width: none; flex-wrap: nowrap; }
+    .file-view-tabs::-webkit-scrollbar { display: none; }
+    .file-view-tab { flex-shrink: 0; min-height: 36px; padding: 6px 12px; }
+  }
   /* Unified markdown content styling — used everywhere renderMarkdown() output appears */
   .md-content { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif; font-size: 0.88rem; line-height: 1.6; }
   .md-content > *:first-child { margin-top: 0 !important; }
@@ -5799,7 +6486,7 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
   .explore-mtime { font-size: 0.68rem; color: var(--dim); flex-shrink: 0; }
   .explore-menu-btn { flex-shrink: 0; background: none; border: none; color: var(--dim);
     cursor: pointer; font-size: 1rem; padding: 2px 6px; border-radius: 4px; line-height: 1;
-    opacity: 0.4; transition: opacity 0.15s; }
+    opacity: 0.7; transition: opacity 0.15s; }
   .explore-row:hover .explore-menu-btn, .explore-menu-btn:focus { opacity: 1; }
   #files-body.files-drop-active { outline: 2px dashed var(--accent); outline-offset: -4px; background: color-mix(in srgb, var(--accent) 6%, var(--bg)); }
   /* File explorer redesign */
@@ -5910,78 +6597,40 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
   .explore-menu-item:active, .explore-menu-item:hover { background: var(--hover); }
 
   /* Connect session list */
-  /* Calendar */
-  .cal-toolbar { display: flex; flex-direction: column; gap: 4px; padding: 8px 12px 4px; }
-  .cal-nav-row { display: flex; align-items: center; gap: 6px; }
-  .cal-controls-row { display: flex; align-items: center; gap: 6px; }
-  .cal-title { font-weight: 600; font-size: 0.95rem; flex: 1; text-align: center; }
-  .cal-grid { display: grid; grid-template-columns: repeat(7, 1fr); gap: 1px; background: var(--border); border-radius: 8px; overflow: hidden; margin: 0 8px 16px; }
-  .cal-day-header { background: var(--card); text-align: center; font-size: 0.68rem; color: var(--dim); padding: 5px 2px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.03em; }
-  .cal-cell { background: var(--card); min-height: 76px; padding: 4px; position: relative; cursor: pointer; -webkit-tap-highlight-color: transparent; }
-  .cal-cell:active { background: var(--hover); }
-  .cal-cell.other-month { background: rgba(0,0,0,0.15); }
-  .cal-cell.other-month .cal-cell-num { opacity: 0.35; }
-  .cal-cell-num { font-size: 0.75rem; color: var(--dim); margin-bottom: 3px; width: 20px; height: 20px; display: flex; align-items: center; justify-content: center; border-radius: 50%; }
-  .cal-cell.today .cal-cell-num { background: var(--accent); color: #fff; font-weight: 700; }
-  .cal-chip { font-size: 0.66rem; line-height: 1.25; padding: 2px 4px; border-radius: 3px; margin-bottom: 2px; cursor: pointer; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 100%; display: block; }
-  .cal-chip:active { opacity: 0.7; }
-  .cal-chip.sched-chip { background: rgba(163,113,247,0.18); color: #c084fc; border-left: 2px solid #c084fc; }
-  .cal-more { font-size: 0.62rem; color: var(--dim); padding-left: 2px; }
-  .cal-dots { display: none; gap: 3px; flex-wrap: wrap; padding: 3px 1px 0; }
-  .cal-dot { width: 6px; height: 6px; border-radius: 50%; flex-shrink: 0; }
-  @media (max-width: 480px) {
-    .cal-grid { margin: 0 0 12px; border-radius: 0; gap: 0; background: none; border-top: 1px solid var(--border); border-left: 1px solid var(--border); }
-    .cal-cell { min-height: unset; aspect-ratio: 1; padding: 3px; border-right: 1px solid var(--border); border-bottom: 1px solid var(--border); overflow: hidden; }
-    .cal-day-header { font-size: 0.65rem; padding: 6px 2px; border-right: 1px solid var(--border); border-bottom: 1px solid var(--border); }
-    .cal-cell-num { font-size: 0.7rem; width: 18px; height: 18px; margin-bottom: 0; }
-    .cal-chip { display: none; }
-    .cal-more { display: none; }
-    .cal-dots { display: flex; }
-    .cal-title { font-size: 0.88rem; }
-    .cal-toolbar { padding: 6px 8px 2px; }
-    .cal-nav-row .btn, .cal-controls-row .btn { padding: 5px 8px; font-size: 0.78rem; }
-    .cal-view-tab { padding: 4px 10px; font-size: 0.75rem; }
-    .cal-week-cell { min-height: 80px; }
-    .cal-week-chip { display: none !important; }
-    .cal-week-dot { display: block !important; }
+  /* FullCalendar theme overrides */
+  #fc-container { --fc-border-color: var(--border); --fc-button-bg-color: transparent; --fc-button-border-color: var(--border); --fc-button-text-color: var(--text); --fc-button-hover-bg-color: var(--hover); --fc-button-hover-border-color: var(--border); --fc-button-active-bg-color: var(--accent); --fc-button-active-border-color: var(--accent); --fc-today-bg-color: rgba(56,139,253,0.06); --fc-event-border-color: transparent; --fc-page-bg-color: var(--bg); --fc-neutral-bg-color: var(--bg); --fc-list-event-hover-bg-color: var(--hover); --fc-now-indicator-color: var(--accent); --fc-non-business-color: transparent; }
+  #fc-container .fc { font-family: inherit; font-size: 0.85rem; }
+  #fc-container .fc .fc-toolbar { padding: 8px 4px; gap: 8px; flex-wrap: wrap; }
+  #fc-container .fc .fc-toolbar-title { font-size: 1.05rem; font-weight: 600; }
+  #fc-container .fc .fc-button { font-size: 0.8rem; padding: 5px 12px; border-radius: 6px; font-weight: 500; font-family: inherit; text-transform: none; }
+  #fc-container .fc .fc-button:focus { box-shadow: none; }
+  #fc-container .fc .fc-button-group > .fc-button { border-radius: 0; }
+  #fc-container .fc .fc-button-group > .fc-button:first-child { border-radius: 6px 0 0 6px; }
+  #fc-container .fc .fc-button-group > .fc-button:last-child { border-radius: 0 6px 6px 0; }
+  #fc-container .fc .fc-button-active { background: var(--accent) !important; border-color: var(--accent) !important; color: #fff !important; }
+  #fc-container .fc .fc-col-header-cell { font-size: 0.72rem; font-weight: 600; text-transform: uppercase; letter-spacing: 0.03em; padding: 8px 0; }
+  #fc-container .fc .fc-daygrid-day-number { font-size: 0.8rem; padding: 4px 6px; color: var(--dim); }
+  #fc-container .fc .fc-daygrid-day.fc-day-today .fc-daygrid-day-number { background: var(--accent); color: #fff; border-radius: 50%; width: 26px; height: 26px; display: inline-flex; align-items: center; justify-content: center; font-weight: 700; }
+  #fc-container .fc .fc-event { cursor: pointer; border-radius: 4px; font-size: 0.75rem; padding: 1px 4px; border-left-width: 3px; }
+  #fc-container .fc .fc-timegrid-slot { height: 2.5em; }
+  #fc-container .fc .fc-timegrid-slot-label { font-size: 0.72rem; color: var(--dim); }
+  #fc-container .fc .fc-scrollgrid { border: none; }
+  #fc-container .fc .fc-scrollgrid td { border-color: var(--border); }
+  #fc-container .fc .fc-daygrid-day-frame { min-height: 80px; }
+  #fc-container .fc-subscribe-button { font-size: 0.78rem !important; padding: 4px 10px !important; }
+  @media (max-width: 600px) {
+    #fc-container .fc .fc-toolbar { flex-direction: column; align-items: stretch; padding: 6px 4px; gap: 4px; }
+    #fc-container .fc .fc-toolbar-chunk { display: flex; justify-content: center; }
+    #fc-container .fc .fc-toolbar-title { font-size: 0.95rem; }
+    #fc-container .fc .fc-button { font-size: 0.78rem; padding: 6px 10px; min-height: 34px; }
+    #fc-container .fc .fc-daygrid-day-frame { min-height: 48px; }
+    #fc-container .fc .fc-daygrid-day-number { font-size: 0.75rem; padding: 3px 5px; }
+    #fc-container .fc .fc-event { font-size: 0.72rem; padding: 2px 4px; min-height: 22px; line-height: 1.3; }
+    #fc-container .fc .fc-col-header-cell { font-size: 0.68rem; padding: 6px 0; }
+    #fc-container .fc .fc-timegrid-slot { height: 3em; }
+    #fc-container .fc .fc-scrollgrid { border: none; }
+    #fc-container .fc .fc-subscribe-button { display: none; }
   }
-  /* Calendar view tabs */
-  .cal-view-tabs { display: flex; gap: 3px; flex: 1; justify-content: center; }
-  .cal-view-tab { padding: 5px 14px; border-radius: 6px; border: 1px solid var(--border);
-    background: none; color: var(--dim); font-size: 0.82rem; cursor: pointer;
-    -webkit-tap-highlight-color: transparent; transition: all 0.15s; }
-  .cal-view-tab.active { background: var(--accent); color: #fff; border-color: var(--accent); }
-  /* Week view */
-  .cal-week-grid { display: grid; grid-template-columns: repeat(7,1fr); gap: 1px;
-    background: var(--border); border-radius: 8px; overflow: hidden; margin: 0 8px 16px; }
-  .cal-week-header { background: var(--card); text-align: center; font-size: 0.68rem;
-    color: var(--dim); padding: 5px 2px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.03em; }
-  .cal-week-cell { background: var(--card); min-height: 120px; padding: 6px 5px; cursor: pointer;
-    -webkit-tap-highlight-color: transparent; }
-  .cal-week-cell:active { background: var(--hover); }
-  .cal-week-cell.today { border-top: 2px solid var(--accent); }
-  .cal-week-cell.today .cal-week-num { color: var(--accent); font-weight: 700; }
-  .cal-week-num { font-size: 0.72rem; color: var(--dim); margin-bottom: 4px; }
-  .cal-week-chip { font-size: 0.67rem; line-height: 1.3; padding: 2px 5px; border-radius: 3px;
-    margin-bottom: 2px; cursor: pointer; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
-    display: block; }
-  .cal-week-chip:active { opacity: 0.7; }
-  .cal-week-more { font-size: 0.62rem; color: var(--dim); padding-left: 2px; }
-  .cal-week-dot { display: none; width: 6px; height: 6px; border-radius: 50%; margin: 1px; }
-  /* Day view */
-  .cal-day-view { padding: 6px 12px 16px; }
-  .cal-day-issue { background: var(--card); border: 1px solid var(--border); border-radius: 8px;
-    padding: 10px 12px; margin-bottom: 8px; cursor: pointer;
-    -webkit-tap-highlight-color: transparent; display: flex; align-items: flex-start; gap: 10px; }
-  .cal-day-issue:active { border-color: var(--accent); }
-  .cal-day-issue-text { flex: 1; min-width: 0; }
-  .cal-day-issue-title { font-size: 0.9rem; font-weight: 500; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-  .cal-day-issue-desc { font-size: 0.78rem; color: var(--dim); margin-top: 3px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-  .cal-day-empty { color: var(--dim); font-size: 0.88rem; text-align: center; padding: 32px 0; }
-  .cal-day-add { display: block; width: 100%; margin-top: 4px; text-align: center;
-    padding: 10px; border-radius: 8px; border: 1px dashed var(--border); background: none;
-    color: var(--dim); font-size: 0.82rem; cursor: pointer; -webkit-tap-highlight-color: transparent; }
-  .cal-day-add:active { background: var(--hover); }
   /* Board collapse */
   .board-col-collapse { background: none; border: none; cursor: pointer; color: var(--dim);
     font-size: 0.65rem; padding: 4px 6px; border-radius: 3px; line-height: 1; flex-shrink: 0;
@@ -6460,10 +7109,13 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
     border-radius: 12px; font-weight: 600; letter-spacing: 0.02em;
   }
   /* Peek tabs & memory panel */
-  .peek-tabs { display: flex; border-bottom: 1px solid var(--border); flex-shrink: 0; padding: 0 12px; }
+  .peek-tabs { display: flex; border-bottom: 1px solid var(--border); flex-shrink: 0; padding: 0 12px;
+    overflow-x: auto; overflow-y: hidden; -webkit-overflow-scrolling: touch; scrollbar-width: none; -ms-overflow-style: none;
+    overscroll-behavior-x: contain; touch-action: pan-x; }
+  .peek-tabs::-webkit-scrollbar { display: none; }
   .peek-tab { padding: 8px 14px; font-size: 0.82rem; background: none; border: none;
     border-bottom: 2px solid transparent; color: var(--dim); cursor: pointer;
-    margin-bottom: -1px; -webkit-tap-highlight-color: transparent; }
+    margin-bottom: -1px; -webkit-tap-highlight-color: transparent; flex-shrink: 0; white-space: nowrap; }
   .peek-tab.active { color: var(--text); border-bottom-color: var(--accent); }
   .peek-tab:hover { color: var(--text); }
   .peek-dir-bar { display: flex; align-items: center; gap: 8px; padding: 6px 14px;
@@ -6476,6 +7128,39 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
   .peek-memory-editor.active { display: flex; }
   .peek-git-panel { display: none; flex-direction: column; flex: 1; min-height: 0; overflow: hidden; }
   .peek-git-panel.active { display: flex; }
+  /* Commits panel */
+  .peek-commits-panel { display: none; flex-direction: column; flex: 1; min-height: 0; overflow: hidden; }
+  .peek-commits-panel.active { display: flex; }
+  .commits-layout { display: flex; flex: 1; min-height: 0; overflow: hidden; }
+  .commits-sidebar { width: 280px; flex-shrink: 0; border-right: 1px solid var(--border); overflow-y: auto; background: var(--bg); }
+  .commits-list { }
+  .commits-item { padding: 10px 14px; cursor: pointer; border-bottom: 1px solid rgba(139,148,158,0.08); transition: background 0.08s; }
+  .commits-item:hover { background: rgba(139,148,158,0.06); }
+  .commits-item.active { background: rgba(88,166,255,0.1); border-left: 3px solid var(--accent); }
+  .commits-item-subject { font-size: 0.82rem; font-weight: 500; color: var(--text); line-height: 1.35; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .commits-item-meta { display: flex; gap: 8px; margin-top: 4px; font-size: 0.7rem; color: var(--dim); }
+  .commits-item-hash { font-family: monospace; font-size: 0.7rem; color: var(--accent); opacity: 0.8; }
+  .commits-detail { flex: 1; display: flex; flex-direction: column; overflow: hidden; min-width: 0; }
+  .commits-detail-empty { flex: 1; display: flex; align-items: center; justify-content: center; }
+  .commits-back-btn { display: none; background: none; border: none; color: var(--accent); cursor: pointer; padding: 8px 14px; font-size: 0.82rem; text-align: left; border-bottom: 1px solid var(--border); }
+  .commits-detail-header { padding: 14px 16px; border-bottom: 1px solid var(--border); flex-shrink: 0; }
+  .commits-detail-header h3 { margin: 0 0 6px; font-size: 0.95rem; font-weight: 600; color: var(--text); line-height: 1.4; }
+  .commits-detail-header .commits-meta-row { display: flex; gap: 12px; flex-wrap: wrap; font-size: 0.75rem; color: var(--dim); }
+  .commits-detail-header .commits-body-text { margin-top: 8px; font-size: 0.82rem; color: var(--text); white-space: pre-wrap; line-height: 1.5; }
+  .commits-detail-header .commits-stat { margin-top: 10px; font-size: 0.78rem; font-family: monospace; color: var(--dim); white-space: pre-wrap; line-height: 1.4; }
+  .commits-detail-diff { flex: 1; overflow: auto; background: #1e1e2e; padding: 0; }
+  .commits-detail-diff pre { margin: 0; padding: 12px; font-size: 0.78rem; line-height: 1.5; color: #cdd6f4; white-space: pre; }
+  .commits-detail-diff .diff-add { color: #a6e3a1; }
+  .commits-detail-diff .diff-del { color: #f38ba8; }
+  .commits-detail-diff .diff-hdr { color: #89b4fa; font-weight: 600; }
+  .commits-detail-diff .diff-hunk { color: #cba6f7; }
+  @media (max-width: 600px) {
+    .commits-sidebar { width: 100%; position: absolute; top: 0; left: 0; bottom: 0; z-index: 10; transition: transform 0.2s ease; }
+    .commits-layout { position: relative; }
+    .commits-sidebar.hidden { transform: translateX(-110%); }
+    .commits-back-btn { display: block; }
+    .commits-detail-empty { display: none; }
+  }
   .git-panel-header { display:flex;align-items:center;gap:8px;padding:8px 14px;border-bottom:1px solid var(--border);flex-shrink:0;flex-wrap:wrap; }
   .git-panel-body { display:flex;flex:1;min-height:0;overflow:hidden;position:relative; }
   /* Left: collapsible dir tree (sidebar) */
@@ -6527,6 +7212,21 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
   /* Tasks panel */
   .peek-tasks-panel { display: none; flex-direction: column; flex: 1; min-height: 0; padding: 14px 16px; gap: 10px; }
   .peek-tasks-panel.active { display: flex; }
+  #peek-notes-panel.active { display: flex; padding: 0; gap: 0; }
+  #peek-notes-panel .notes-sidebar { min-width: 160px; width: 220px; }
+  #peek-notes-panel.sidebar-collapsed .notes-expand-btn { display: flex; }
+  @media (max-width: 600px) {
+    #peek-notes-panel .notes-sidebar {
+      position: absolute; top: 0; left: 0; bottom: 0; z-index: 10;
+      width: 100% !important; min-width: 0 !important; border-right: none;
+      transition: transform 0.2s ease, opacity 0.2s ease;
+    }
+    #peek-notes-panel .notes-sidebar.collapsed {
+      width: 100% !important; transform: translateX(-110%); opacity: 0; pointer-events: none;
+    }
+    #peek-notes-panel .notes-editor-pane { width: 100%; }
+    #peek-notes-panel .notes-expand-btn { display: flex !important; }
+  }
   .peek-tasks-add { display: flex; gap: 8px; flex-shrink: 0; }
   .peek-tasks-list { flex: 1; overflow-y: auto; display: flex; flex-direction: column; gap: 4px; }
   .peek-issue-item { display: flex; align-items: flex-start; gap: 8px; padding: 8px 10px;
@@ -6918,7 +7618,7 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
     transition: opacity 0.15s; border-radius: 4px;
     color: var(--dim); display: flex; align-items: center; justify-content: center;
   }
-  .board-card:hover .board-pin-btn { opacity: 0.5; }
+  .board-card:hover .board-pin-btn { opacity: 0.7; }
   .board-pin-btn:hover { opacity: 1 !important; background: rgba(139,148,158,0.12); }
   .board-pin-btn.active { opacity: 0.8 !important; color: var(--accent); }
   .board-card:hover .board-pin-btn.active { opacity: 1 !important; }
@@ -6931,7 +7631,7 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
     border-radius: 4px;
     touch-action: none;
   }
-  .board-card:hover .board-drag-handle { opacity: 0.55; cursor: grab; }
+  .board-card:hover .board-drag-handle { opacity: 0.7; cursor: grab; }
   .board-drag-handle:hover { opacity: 1 !important; cursor: grab; color: var(--fg); background: rgba(139,148,158,0.12); }
   .board-drag-handle:active { cursor: grabbing; }
   @media (hover: none) { .board-drag-handle { opacity: 0.5; width: 32px; height: 32px; cursor: grab; } }
@@ -7368,14 +8068,14 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
   /* Notes view */
   #notes-view { height: calc(100vh - 110px); }
   .notes-sidebar {
-    width: 220px; min-width: 160px; border-right: 1px solid var(--border);
+    width: 240px; min-width: 180px; border-right: 1px solid var(--border);
     display: flex; flex-direction: column; overflow: hidden; flex-shrink: 0;
-    background: var(--card); transition: width 0.2s ease, min-width 0.2s ease, border 0.2s ease;
+    background: var(--bg); transition: width 0.2s ease, min-width 0.2s ease, border 0.2s ease;
   }
   .notes-sidebar.collapsed { width: 0; min-width: 0; border-right: none; }
   .notes-sidebar-header {
     display: flex; align-items: center; justify-content: space-between;
-    padding: 10px 12px 6px; border-bottom: 1px solid var(--border); flex-shrink: 0;
+    padding: 10px 12px 6px; flex-shrink: 0;
   }
   .notes-sidebar-actions { display: flex; gap: 4px; align-items: center; }
   .notes-toggle-btn {
@@ -7396,7 +8096,7 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
   }
   .notes-expand-btn:hover { background: rgba(139,148,158,0.12); color: var(--text); }
   #notes-view.sidebar-collapsed .notes-expand-btn { display: flex; }
-  .notes-search-wrap { padding: 6px 8px; border-bottom: 1px solid var(--border); flex-shrink: 0; }
+  .notes-search-wrap { padding: 4px 8px 8px; flex-shrink: 0; }
   .notes-list { flex: 1; overflow-y: auto; }
   .notes-trash-section { flex-shrink: 0; border-top: 1px solid var(--border); }
   .notes-trash-header {
@@ -7433,14 +8133,15 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
     #notes-view.sidebar-collapsed .notes-expand-btn { display: flex; }
   }
   .notes-list-item {
-    padding: 8px 12px; cursor: pointer; border-bottom: 1px solid rgba(139,148,158,0.1);
-    font-size: 0.82rem; color: var(--text); line-height: 1.3;
-    transition: background 0.1s; touch-action: manipulation; user-select: none; -webkit-user-select: none;
+    padding: 5px 12px; cursor: pointer;
+    font-size: 0.82rem; color: var(--text); line-height: 1.4;
+    transition: background 0.08s; touch-action: manipulation; user-select: none; -webkit-user-select: none;
+    border-radius: 4px; margin: 1px 6px;
   }
   .notes-list-item:hover { background: rgba(139,148,158,0.08); }
   .notes-list-item.active { background: rgba(88,166,255,0.12); color: var(--accent); }
   .notes-list-item .nli-title { font-weight: 500; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-  .notes-list-item .nli-date { font-size: 0.7rem; color: var(--dim); margin-top: 2px; }
+  .notes-list-item .nli-date { display: none; }
   .notes-list-empty { padding: 16px 12px; color: var(--dim); font-size: 0.8rem; text-align: center; }
   .notes-folder-hdr {
     display: flex; align-items: center; gap: 5px; padding: 6px 10px 4px;
@@ -7479,13 +8180,13 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
     flex: 1; display: flex; flex-direction: column; overflow: hidden; position: relative;
   }
   .notes-editor-header {
-    display: flex; align-items: center; gap: 8px; padding: 8px 12px;
-    border-bottom: 1px solid var(--border); flex-shrink: 0;
+    display: flex; align-items: center; gap: 8px; padding: 10px 16px 8px;
+    flex-shrink: 0;
   }
   .notes-title-input {
     flex: 1; background: transparent; border: none; outline: none;
-    color: var(--text); font-size: 0.95rem; font-weight: 600;
-    font-family: inherit;
+    color: var(--text); font-size: 1.15rem; font-weight: 700;
+    font-family: inherit; letter-spacing: -0.01em;
   }
   .notes-delete-btn {
     background: transparent; border: none; color: var(--dim); cursor: pointer;
@@ -7497,15 +8198,22 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
   /* Quill editor fills pane */
   .notes-quill-wrap { flex: 1; display: flex; flex-direction: column; overflow: hidden; }
   .notes-quill-wrap .ql-toolbar.ql-snow {
-    background: var(--card); border-color: var(--border); flex-shrink: 0;
+    background: var(--bg); border: none; border-bottom: 1px solid var(--border); flex-shrink: 0;
+    padding: 4px 8px;
   }
   .notes-quill-wrap .ql-container.ql-snow {
-    border-color: var(--border); flex: 1; overflow-y: auto; background: var(--bg);
+    border: none; flex: 1; overflow-y: auto; background: var(--bg);
   }
-  .notes-quill-wrap .ql-editor { color: var(--text); font-size: 0.88rem; line-height: 1.7; min-height: 200px; }
+  .notes-quill-wrap .ql-editor { color: var(--text); font-size: 0.92rem; line-height: 1.75; min-height: 200px; padding: 12px 24px 80px; max-width: 740px; margin: 0 auto; }
+  /* Render Quill content with markdown-like typography (Obsidian-style) */
+  .notes-quill-wrap .ql-editor h1 { font-size: 1.6rem; font-weight: 700; margin: 0.5em 0 0.3em; letter-spacing: -0.01em; }
+  .notes-quill-wrap .ql-editor h2 { font-size: 1.25rem; font-weight: 600; margin: 0.8em 0 0.3em; }
+  .notes-quill-wrap .ql-editor h3 { font-size: 1.05rem; font-weight: 600; margin: 0.7em 0 0.25em; }
+  .notes-quill-wrap .ql-editor blockquote { border-left: 3px solid var(--accent); padding-left: 12px; color: var(--dim); margin: 8px 0; }
+  .notes-quill-wrap .ql-editor pre { background: var(--card); border: 1px solid var(--border); border-radius: 6px; padding: 10px 12px; font-size: 0.85em; }
   .notes-quill-wrap .ql-editor hr { border: none; border-top: 1px solid var(--border); margin: 16px 0; }
-  .notes-quill-wrap .ql-snow .ql-toolbar .ql-divider { width: 28px; font-size: 0.75rem; color: var(--dim); font-weight: 600; }
-  .notes-quill-wrap .ql-snow .ql-toolbar .ql-divider::after { content: '—'; }
+  .ql-snow .ql-toolbar .ql-divider { width: 28px; }
+  .ql-snow .ql-toolbar .ql-divider svg { width: 18px; height: 18px; }
   .notes-quill-wrap .ql-editor.ql-blank::before { color: var(--dim); font-style: normal; }
   .notes-quill-wrap .ql-snow .ql-stroke { stroke: var(--dim); }
   .notes-quill-wrap .ql-snow .ql-fill { fill: var(--dim); }
@@ -7533,23 +8241,26 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
   }
   /* Edit / Preview mode tabs */
   .notes-mode-tabs {
-    display: flex; gap: 2px; padding: 5px 12px; border-bottom: 1px solid var(--border);
-    flex-shrink: 0; background: var(--card);
+    display: flex; gap: 2px; padding: 3px 16px; flex-shrink: 0;
   }
   .notes-mode-tab {
-    background: none; border: none; padding: 4px 14px; border-radius: 5px;
-    font-size: 0.78rem; cursor: pointer; color: var(--dim); font-weight: 500;
-    transition: background 0.12s, color 0.12s;
+    background: none; border: none; padding: 3px 10px; border-radius: 4px;
+    font-size: 0.72rem; cursor: pointer; color: var(--dim); font-weight: 500;
+    transition: background 0.1s, color 0.1s; text-transform: uppercase; letter-spacing: 0.04em;
   }
-  .notes-mode-tab.active { background: var(--accent); color: #fff; }
-  .notes-mode-tab:not(.active):hover { background: rgba(139,148,158,0.12); color: var(--text); }
-  /* Preview pane */
+  .notes-mode-tab.active { background: rgba(88,166,255,0.12); color: var(--accent); }
+  .notes-mode-tab:not(.active):hover { background: rgba(139,148,158,0.08); color: var(--text); }
+  /* Preview pane — matches .ql-editor padding/max-width so content
+     stays in the exact same position when toggling Edit ↔ Preview */
   .notes-preview {
-    flex: 1; overflow-y: auto; padding: 20px 24px; background: var(--bg);
-    display: none; color: var(--text); font-size: 0.9rem; line-height: 1.75;
-    box-sizing: border-box;
+    flex: 1; overflow-y: auto; padding: 12px 24px 80px; background: var(--bg);
+    display: none; color: var(--text); font-size: 0.92rem; line-height: 1.75;
+    box-sizing: border-box; cursor: text; width: 100%;
   }
+  .notes-preview > * { max-width: 740px; margin-left: auto; margin-right: auto; }
+  .notes-preview > h1:first-child, .notes-preview > h2:first-child { margin-top: 0; }
   .notes-preview.active { display: block; }
+  .notes-preview > *:first-child { margin-top: 0; }
   .notes-preview h1 { font-size: 1.5rem; font-weight: 700; margin: 0 0 14px; }
   .notes-preview h2 { font-size: 1.15rem; font-weight: 600; margin: 20px 0 8px; border-bottom: 1px solid var(--border); padding-bottom: 4px; }
   .notes-preview h3 { font-size: 1rem; font-weight: 600; margin: 14px 0 6px; }
@@ -7580,24 +8291,43 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
   .notes-preview p:last-child { margin-bottom: 0; }
   .notes-preview mark.search-hit { background: rgba(250,204,21,0.35); border-radius: 2px; padding: 0 1px; }
   .notes-preview mark.search-hit.current { background: rgba(250,204,21,0.7); outline: 2px solid rgba(250,204,21,0.9); }
-  /* Mobile notes improvements */
+  /* Mobile notes improvements — Bear/iA Writer inspired */
   @media (max-width: 600px) {
     #notes-view { height: calc(100dvh - 122px); }
-    .notes-mode-tabs { padding: 5px 10px; }
-    .notes-mode-tab { padding: 6px 18px; font-size: 0.82rem; }
+    /* Hide mode tabs entirely on mobile — preview is tap-to-edit */
+    .notes-mode-tabs { display: none !important; }
     .notes-editor-header { padding: 10px 12px; min-height: 48px; }
-    .notes-title-input { font-size: 1rem; }
-    .notes-delete-btn { min-width: 40px; min-height: 40px; display: flex; align-items: center; justify-content: center; font-size: 1.1rem; }
-    .notes-pin-btn { min-width: 40px; min-height: 40px; display: flex; align-items: center; justify-content: center; font-size: 1.1rem; }
-    .notes-list-item { padding: 12px 14px; min-height: 52px; }
-    .notes-list-item .nli-title { font-size: 0.88rem; }
+    /* 16px minimum on inputs prevents iOS Safari auto-zoom on focus */
+    .notes-title-input { font-size: 16px; }
+    .notes-search-wrap input { font-size: 16px !important; padding: 10px 12px; }
+    .notes-delete-btn, .notes-pin-btn { min-width: 40px; min-height: 40px; display: flex; align-items: center; justify-content: center; font-size: 1.1rem; }
+    .notes-list-item { padding: 14px 14px; min-height: 56px; border-radius: 6px; }
+    .notes-list-item .nli-title { font-size: 0.92rem; }
     .notes-list-item .nli-date { font-size: 0.74rem; }
-    .notes-quill-wrap .ql-toolbar.ql-snow { overflow-x: auto; white-space: nowrap; flex-wrap: nowrap; }
-    .notes-quill-wrap .ql-toolbar.ql-snow .ql-formats { display: inline-flex; }
-    .notes-quill-wrap .ql-editor { font-size: 1rem; min-height: 160px; }
-    .notes-preview { padding: 16px; font-size: 0.95rem; }
-    .notes-new-btn { width: 32px; height: 32px; font-size: 1.3rem; }
-    .notes-search-wrap input { font-size: 0.88rem; padding: 7px 10px; }
+    .notes-list { padding: 4px 0; -webkit-overflow-scrolling: touch; overscroll-behavior: contain; }
+    .notes-quill-wrap .ql-container.ql-snow { -webkit-overflow-scrolling: touch; overscroll-behavior: contain; }
+    .notes-preview { -webkit-overflow-scrolling: touch; overscroll-behavior: contain; }
+    /* Prevent double-tap zoom on action buttons */
+    .notes-list-item, .notes-delete-btn, .notes-pin-btn, .notes-new-btn, .notes-toggle-btn, .notes-expand-btn,
+    .notes-quill-wrap .ql-toolbar.ql-snow button { touch-action: manipulation; }
+    /* Sticky bottom toolbar — move Quill toolbar to bottom on mobile */
+    .notes-quill-wrap { flex-direction: column-reverse; }
+    .notes-quill-wrap .ql-toolbar.ql-snow {
+      position: sticky; bottom: 0; z-index: 5;
+      background: var(--bg); border-top: 1px solid var(--border); border-bottom: none;
+      padding: 6px 4px; overflow-x: auto; white-space: nowrap; flex-wrap: nowrap;
+      backdrop-filter: blur(8px); -webkit-backdrop-filter: blur(8px);
+    }
+    .notes-quill-wrap .ql-toolbar.ql-snow .ql-formats { display: inline-flex; margin-right: 8px; }
+    .notes-quill-wrap .ql-toolbar.ql-snow button { width: 36px; height: 36px; padding: 6px; }
+    .notes-quill-wrap .ql-toolbar.ql-snow .ql-picker { height: 36px; line-height: 36px; }
+    /* Hide less-used formatting on mobile to keep bar uncluttered */
+    .notes-quill-wrap .ql-toolbar.ql-snow .ql-strike,
+    .notes-quill-wrap .ql-toolbar.ql-snow .ql-underline,
+    .notes-quill-wrap .ql-toolbar.ql-snow .ql-clean { display: none; }
+    .notes-quill-wrap .ql-editor { font-size: 16px; min-height: 160px; padding: 12px 16px 96px; }
+    .notes-preview { padding: 16px 16px 96px; font-size: 16px; }
+    .notes-new-btn { width: 36px; height: 36px; font-size: 1.3rem; }
   }
 
   /* ── Gmail / Email view ─────────────────────────────────────────────────── */
@@ -8038,12 +8768,24 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
   .metrics-table tr.row-selected td { background: rgba(88,166,255,0.08); }
   .metrics-mini-bar { display: inline-block; width: 50px; height: 4px; background: var(--border); border-radius: 2px; vertical-align: middle; margin-left: 4px; overflow: hidden; }
   .metrics-mini-bar-fill { height: 100%; border-radius: 2px; }
+  .metrics-speedtest { background: var(--card); border: 1px solid var(--border); border-radius: 10px; padding: 16px; margin-bottom: 20px; }
+  .metrics-speedtest-cards { display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px; margin-bottom: 14px; }
+  .metrics-speedtest-card { background: var(--bg); border: 1px solid var(--border); border-radius: 8px; padding: 12px 14px; text-align: center; }
+  .metrics-speedtest-label { font-size: 0.65rem; color: var(--dim); text-transform: uppercase; letter-spacing: 0.07em; font-weight: 600; }
+  .metrics-speedtest-value { font-size: 1.7rem; font-weight: 700; color: var(--accent); margin-top: 4px; line-height: 1.1; font-variant-numeric: tabular-nums; }
+  .metrics-speedtest-sub { font-size: 0.68rem; color: var(--dim); margin-top: 2px; }
+  .metrics-speedtest-bar { width: 100%; height: 4px; background: var(--border); border-radius: 2px; overflow: hidden; margin-bottom: 10px; }
+  .metrics-speedtest-bar-fill { height: 100%; background: linear-gradient(90deg, #58a6ff, #3fb950); width: 0%; transition: width 0.2s ease; }
+  .metrics-speedtest-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; }
+  .metrics-speedtest-status { font-size: 0.78rem; color: var(--dim); }
   @media (max-width: 600px) {
     #metrics-view { height: calc(100dvh - 122px); position: relative; }
     .metrics-sidebar { position: absolute; top: 0; left: 0; bottom: 0; z-index: 10; width: 100% !important; min-width: 0 !important; border-right: none; }
     .metrics-sidebar.collapsed { width: 100% !important; opacity: 0; pointer-events: none; position: absolute; }
     .metrics-main { width: 100%; padding: 40px 12px 12px; }
     .metrics-cards { grid-template-columns: repeat(2, 1fr); }
+    .metrics-speedtest-cards { grid-template-columns: repeat(3, 1fr); gap: 8px; }
+    .metrics-speedtest-value { font-size: 1.2rem; }
     .metrics-expand-btn { display: flex; }
   }
 
@@ -8213,28 +8955,41 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
 <!-- API key setup modal — shown on cloud when no user key is configured (dismissible) -->
 <div id="apikey-setup-modal" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,0.75);z-index:9999;display:none;align-items:center;justify-content:center;">
   <div style="background:#1a1a2e;border:1px solid #333;border-radius:12px;padding:32px;max-width:440px;width:90%;box-shadow:0 24px 64px rgba(0,0,0,0.6);position:relative;color:#e8e8e8;">
-    <button onclick="document.getElementById('apikey-setup-modal').style.display='none'" style="position:absolute;top:12px;right:14px;background:none;border:none;color:#aaa;font-size:1.2rem;cursor:pointer;padding:4px;" title="Close">&#x2715;</button>
-    <div style="font-size:1.4rem;font-weight:700;margin-bottom:8px;color:#fff;">Set your API key</div>
-    <div style="font-size:0.85rem;color:#aaa;margin-bottom:24px;line-height:1.5;">
-      Enter your Anthropic API key to start using Claude sessions. Your key is stored privately in your container — amux never has access to it.<br><br>
-      <a href="https://console.anthropic.com/settings/keys" target="_blank" style="color:#a78bfa;">Get a key at console.anthropic.com &rarr;</a>
+    <button onclick="document.getElementById('apikey-setup-modal').style.display='none'" style="position:absolute;top:12px;right:14px;background:none;border:none;color:#ccc;font-size:1.2rem;cursor:pointer;padding:4px;" title="Close">&#x2715;</button>
+    <div style="font-size:1.4rem;font-weight:700;margin-bottom:8px;color:#fff;">Get started</div>
+    <div style="font-size:0.85rem;color:#ccc;margin-bottom:20px;line-height:1.5;">
+      Choose how to authenticate with Claude:
+    </div>
+    <button id="apikey-login-btn" onclick="apikeySetupLogin()"
+      style="width:100%;padding:12px;border-radius:7px;border:1px solid #6366f1;background:#312e81;color:#e0e7ff;font-size:0.95rem;font-weight:600;cursor:pointer;margin-bottom:10px;display:flex;align-items:center;justify-content:center;gap:8px;">
+      <svg width="16" height="16" viewBox="0 0 16 16" fill="none"><path d="M8 1v6m0 0l2.5-2.5M8 7L5.5 4.5M2 10v2a2 2 0 002 2h8a2 2 0 002-2v-2" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>
+      Log in with Claude account
+    </button>
+    <div style="font-size:0.78rem;color:#b0b0b0;text-align:center;margin-bottom:16px;">Recommended — uses your Claude.ai account (Pro, Max, or Team)</div>
+    <div style="display:flex;align-items:center;gap:10px;margin-bottom:16px;">
+      <div style="flex:1;height:1px;background:#333;"></div>
+      <span style="font-size:0.75rem;color:#9ca3af;">or use an API key</span>
+      <div style="flex:1;height:1px;background:#333;"></div>
     </div>
     <input id="apikey-setup-input" type="password" placeholder="sk-ant-api03-..." autocomplete="off" spellcheck="false"
-      style="width:100%;box-sizing:border-box;padding:10px 12px;border-radius:7px;border:1px solid #444;background:#111;color:#e8e8e8;font-size:0.92rem;font-family:monospace;margin-bottom:8px;"
+      style="width:100%;box-sizing:border-box;padding:10px 12px;border-radius:7px;border:1px solid #555;background:#111;color:#e8e8e8;font-size:0.92rem;font-family:monospace;margin-bottom:8px;"
       onkeydown="if(event.key==='Enter')apikeySetupSave()">
     <div id="apikey-setup-err" style="color:#f87171;font-size:0.8rem;min-height:18px;margin-bottom:12px;"></div>
     <button id="apikey-setup-btn" onclick="apikeySetupSave()"
-      style="width:100%;padding:11px;border-radius:7px;border:none;background:#7c6fcd;color:#fff;font-size:0.95rem;font-weight:600;cursor:pointer;">
-      Save &amp; continue
+      style="width:100%;padding:11px;border-radius:7px;border:none;background:#444;color:#e8e8e8;font-size:0.88rem;font-weight:500;cursor:pointer;">
+      Save API key
     </button>
-    <div style="text-align:center;margin-top:10px;font-size:0.78rem;color:#888;">You can add this later in Settings</div>
+    <div style="text-align:center;margin-top:8px;">
+      <a href="https://console.anthropic.com/settings/keys" target="_blank" style="color:#a78bfa;font-size:0.78rem;">Get a key at console.anthropic.com &rarr;</a>
+    </div>
+    <div style="text-align:center;margin-top:8px;font-size:0.78rem;color:#b0b0b0;">You can change this later in Settings</div>
   </div>
 </div>
-<div id="org-banner" style="display:none;background:#1e1b4b;border-bottom:1px solid #4338ca;color:#c7d2fe;padding:7px 16px;text-align:center;font-size:0.82rem;z-index:200;position:relative;display:none;">
+<div id="org-banner" style="display:none;background:#312e81;border-bottom:1px solid #6366f1;color:#e0e7ff;padding:7px 16px;text-align:center;font-size:0.82rem;z-index:200;position:relative;display:none;">
   <span id="org-banner-text"></span>
   <button onclick="_switchOrg('')" style="margin-left:12px;background:#4338ca;color:#e0e7ff;border:none;border-radius:4px;padding:2px 10px;font-size:0.78rem;cursor:pointer;">← My workspace</button>
 </div>
-<div id="org-invite-banner" style="display:none;background:#14532d;border-bottom:1px solid #16a34a;color:#bbf7d0;padding:7px 16px;font-size:0.82rem;z-index:200;position:relative;display:none;align-items:center;justify-content:center;gap:10px;">
+<div id="org-invite-banner" style="display:none;background:#166534;border-bottom:1px solid #22c55e;color:#dcfce7;padding:7px 16px;font-size:0.82rem;z-index:200;position:relative;display:none;align-items:center;justify-content:center;gap:10px;">
   <span id="org-invite-banner-text"></span>
   <button onclick="_dismissOrgBanner()" style="background:none;border:none;color:#bbf7d0;cursor:pointer;font-size:1rem;line-height:1;opacity:0.7;padding:0 2px;" title="Dismiss">&#x2715;</button>
 </div>
@@ -8400,7 +9155,7 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
 <div class="tab-bar">
   <button id="tab-sessions" class="active" onclick="switchView('sessions')">Sessions</button>
   <button id="tab-board" onclick="switchView('board')">Board</button>
-  <button id="tab-notifications" onclick="switchView('notifications')">Notifications</button>
+  <button id="tab-calendar" onclick="switchView('calendar')">Calendar</button>
   <button id="tab-scheduler" onclick="switchView('scheduler')">Scheduler</button>
   <button id="tab-files" onclick="switchView('files')">Files</button>
   <button id="tab-logs" onclick="switchView('logs')">Logs</button>
@@ -8411,8 +9166,7 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
   <button id="tab-metrics" onclick="switchView('metrics')">Metrics</button>
   <button id="tab-torrents" onclick="switchView('torrents')">Torrents</button>
   <button id="tab-terminal" onclick="switchView('terminal')">Terminal</button>
-  <button id="tab-graph" onclick="switchView('graph')">Graph</button>
-  <button id="tab-journal" onclick="switchView('journal')">Journal</button>
+  <button id="tab-browser" onclick="switchView('browser')">Browser</button>
 </div>
 <div class="tab-customize-wrap">
   <button class="tab-customize-btn" onclick="event.stopPropagation();toggleTabCustomizer()" title="Show/hide tabs">&#x229E;</button>
@@ -8468,6 +9222,10 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
   <div class="board-filters" id="board-filters"></div>
   <div class="board-columns" id="board-columns"></div>
 </div>
+<!-- Calendar view -->
+<div id="calendar-view" style="display:none;flex-direction:column;width:100%;">
+  <div id="fc-container" style="width:100%;padding:0;"></div>
+</div>
 <!-- Scheduler view -->
 <div id="scheduler-view" style="display:none;">
   <div style="padding:10px 12px 6px;display:flex;align-items:center;gap:8px;border-bottom:1px solid var(--border);">
@@ -8482,18 +9240,6 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
   </div>
 </div>
 
-<!-- Email events view -->
-<div id="notifications-view" style="display:none;flex-direction:column;flex:1;min-height:0;">
-  <div style="display:flex;align-items:center;gap:8px;padding:8px 12px;border-bottom:1px solid var(--border);flex-shrink:0;">
-    <span style="font-weight:600;font-size:0.85rem;flex:1;">Notifications</span>
-    <button class="btn" onclick="_notifMarkAllRead()" style="font-size:0.72rem;padding:2px 8px;">Mark all read</button>
-    <button class="btn" onclick="_notifClearRead()" style="font-size:0.72rem;padding:2px 8px;">Clear read</button>
-    <button class="notes-new-btn" onclick="_notificationsLoad()" title="Refresh">
-      <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/></svg>
-    </button>
-  </div>
-  <div id="notif-list" style="flex:1;overflow-y:auto;padding:8px 12px;"></div>
-</div>
 <div id="files-view" style="display:none;flex-direction:column;flex:1;min-height:0;">
   <!-- Toolbar -->
   <div class="fe-toolbar">
@@ -8512,6 +9258,9 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
       <button class="fe-tb-btn" id="files-hidden-btn" onclick="toggleFilesHidden()" title="Show hidden files">
         <svg width="13" height="13" viewBox="0 0 13 13" fill="none"><path d="M1 6.5C1 6.5 3 3 6.5 3S12 6.5 12 6.5 10 10 6.5 10 1 6.5 1 6.5Z" stroke="currentColor" stroke-width="1.3"/><circle cx="6.5" cy="6.5" r="1.5" stroke="currentColor" stroke-width="1.3"/></svg>
       </button>
+      <button class="fe-tb-btn" onclick="_filesNewFile()" title="New file">
+        <svg width="13" height="13" viewBox="0 0 13 13" fill="none"><path d="M7 1H3a1 1 0 00-1 1v9a1 1 0 001 1h7a1 1 0 001-1V5L7 1z" stroke="currentColor" stroke-width="1.3" stroke-linejoin="round" fill="none"/><path d="M7 1v4h4M6.5 7v4M4.5 9h4" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"/></svg>
+      </button>
       <button class="fe-tb-btn" onclick="triggerFilesUpload()" title="Upload files">
         <svg width="13" height="13" viewBox="0 0 13 13" fill="none"><path d="M6.5 9V3M3.5 5.5l3-3 3 3M2 10.5h9" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/></svg>
       </button>
@@ -8520,6 +9269,9 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
       </button>
       <button class="fe-tb-btn" onclick="loadFiles(_filesPath)" title="Refresh">
         <svg width="13" height="13" viewBox="0 0 13 13" fill="none"><path d="M11 6.5A4.5 4.5 0 1 1 8 2.3M11 2v4H7" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" fill="none"/></svg>
+      </button>
+      <button class="fe-tb-btn" onclick="openInFinder()" title="Open in Finder">
+        <svg width="13" height="13" viewBox="0 0 13 13" fill="none"><path d="M2 2h4l1.5 1.5H11a1 1 0 011 1V10a1 1 0 01-1 1H2a1 1 0 01-1-1V3a1 1 0 011-1z" stroke="currentColor" stroke-width="1.3" stroke-linejoin="round" fill="none"/><path d="M4 8.5h5" stroke="currentColor" stroke-width="1.2" stroke-linecap="round"/></svg>
       </button>
       <button class="fe-tb-btn" id="files-set-session-btn" onclick="setFilesSessionDir()" title="Set as session directory" style="display:none;background:var(--accent);color:#000;border-color:var(--accent);font-weight:600;font-size:0.72rem;white-space:nowrap;">
         <svg width="11" height="11" viewBox="0 0 11 11" fill="none"><path d="M5.5 1 10 5.5 5.5 10 1 5.5Z" stroke="currentColor" stroke-width="1.3" stroke-linejoin="round"/></svg>
@@ -8547,6 +9299,10 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
           <span id="files-hidden-oitem-label">Show hidden files</span>
         </button>
         <div class="fe-tb-odivider"></div>
+        <button class="fe-tb-oitem" onclick="_filesNewFile();_filesOverflowClose()">
+          <svg width="13" height="13" viewBox="0 0 13 13" fill="none"><path d="M7 1H3a1 1 0 00-1 1v9a1 1 0 001 1h7a1 1 0 001-1V5L7 1z" stroke="currentColor" stroke-width="1.3" stroke-linejoin="round" fill="none"/><path d="M7 1v4h4M6.5 7v4M4.5 9h4" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"/></svg>
+          New file
+        </button>
         <button class="fe-tb-oitem" onclick="triggerFilesUpload();_filesOverflowClose()">
           <svg width="13" height="13" viewBox="0 0 13 13" fill="none"><path d="M6.5 9V3M3.5 5.5l3-3 3 3M2 10.5h9" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/></svg>
           Upload files
@@ -8558,6 +9314,11 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
         <button class="fe-tb-oitem" onclick="loadFiles(_filesPath);_filesOverflowClose()">
           <svg width="13" height="13" viewBox="0 0 13 13" fill="none"><path d="M11 6.5A4.5 4.5 0 1 1 8 2.3M11 2v4H7" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" fill="none"/></svg>
           Refresh
+        </button>
+        <div class="fe-tb-odivider"></div>
+        <button class="fe-tb-oitem" onclick="openInFinder();_filesOverflowClose()">
+          <svg width="13" height="13" viewBox="0 0 13 13" fill="none"><path d="M2 2h4l1.5 1.5H11a1 1 0 011 1V10a1 1 0 01-1 1H2a1 1 0 01-1-1V3a1 1 0 011-1z" stroke="currentColor" stroke-width="1.3" stroke-linejoin="round" fill="none"/><path d="M4 8.5h5" stroke="currentColor" stroke-width="1.2" stroke-linecap="round"/></svg>
+          Open in Finder
         </button>
         <button class="fe-tb-oitem fe-tb-oitem-session" id="files-session-oitem" onclick="setFilesSessionDir();_filesOverflowClose()" style="display:none;">
           <svg width="13" height="13" viewBox="0 0 13 13" fill="none"><path d="M6.5 1 12 6.5 6.5 12 1 6.5Z" stroke="currentColor" stroke-width="1.3" stroke-linejoin="round"/></svg>
@@ -8656,15 +9417,15 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
       <button class="notes-expand-btn" onclick="_notesToggleSidebar()" title="Show notes list"><svg xmlns="http://www.w3.org/2000/svg" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect width="18" height="18" x="3" y="3" rx="2"/><path d="M9 3v18"/><path d="m14 9 3 3-3 3"/></svg></button>
       <input id="notes-title" type="text" placeholder="Note title…" class="notes-title-input" oninput="_notesTitleChange()" onblur="_notesSaveDebounce()">
       <div style="display:flex;gap:6px;align-items:center;">
+        <span id="notes-session-badge" style="display:none;font-size:0.7rem;padding:3px 8px;border-radius:10px;background:rgba(88,166,255,0.12);color:var(--accent);cursor:pointer;border:1px solid rgba(88,166,255,0.3);" title="Open this session"></span>
         <span id="notes-save-status" style="font-size:0.72rem;color:var(--dim);"></span>
-        <button onclick="_notesTTS()" title="Text to Speech" style="background:none;border:1px solid var(--border);border-radius:6px;padding:3px 7px;cursor:pointer;color:var(--dim);font-size:0.85rem;">&#x1F50A;</button>
         <button id="notes-pin-btn" class="notes-pin-btn" onclick="_notesTogglePinActive()" title="Pin to top"><svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="17" x2="12" y2="22"/><path d="M5 17h14v-1.76a2 2 0 0 0-1.11-1.79l-1.78-.9A2 2 0 0 1 15 10.76V6h1a2 2 0 0 0 0-4H8a2 2 0 0 0 0 4h1v4.76a2 2 0 0 1-1.11 1.79l-1.78.9A2 2 0 0 0 5 15.24Z"/></svg></button>
         <button class="notes-delete-btn" onclick="_notesDelete()" title="Delete note"><svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/><path d="M10 11v6M14 11v6"/><path d="M9 6V4a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2"/></svg></button>
       </div>
     </div>
     <div class="notes-mode-tabs" id="notes-mode-tabs" style="display:none;">
-      <button class="notes-mode-tab active" id="notes-tab-edit" onclick="_notesSwitchMode('edit')">Edit</button>
-      <button class="notes-mode-tab" id="notes-tab-preview" onclick="_notesSwitchMode('preview')">Preview</button>
+      <button class="notes-mode-tab" id="notes-tab-edit" onclick="_notesSwitchMode('edit')">Edit</button>
+      <button class="notes-mode-tab active" id="notes-tab-preview" onclick="_notesSwitchMode('preview')">Preview</button>
       <div id="notes-preview-search" style="display:none;margin-left:auto;display:none;align-items:center;gap:4px;">
         <input id="notes-preview-search-input" type="text" placeholder="Search in preview..." oninput="_notesPreviewSearch(this.value)" onkeydown="if(event.key==='Enter'){event.preventDefault();event.shiftKey?_notesPreviewSearchNav(-1):_notesPreviewSearchNav(1);}" style="font-size:0.75rem;padding:3px 8px;border:1px solid var(--border);border-radius:4px;background:var(--bg);color:var(--fg);width:160px;outline:none;">
         <span id="notes-preview-search-count" style="font-size:0.68rem;color:var(--dim);min-width:36px;text-align:center;"></span>
@@ -8920,6 +9681,26 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
   </div>
 </div>
 
+<div id="browser-view" style="display:none;">
+  <div style="display:flex;align-items:center;gap:8px;padding:8px;flex-wrap:wrap;">
+    <select id="bw-profile" style="font-size:0.78rem;padding:4px 8px;background:var(--surface);border:1px solid var(--border);border-radius:4px;color:var(--fg);font-family:inherit;min-width:120px;">
+      <option value="">No profile</option>
+    </select>
+    <button onclick="_bwBack()" style="font-size:0.82rem;padding:4px 10px;background:var(--surface);border:1px solid var(--border);border-radius:6px;cursor:pointer;color:var(--fg);">&larr;</button>
+    <input id="bw-url" type="text" placeholder="https://example.com" style="flex:1;min-width:200px;font-size:0.82rem;padding:6px 10px;background:var(--surface);border:1px solid var(--border);border-radius:6px;color:var(--fg);font-family:inherit;" onkeydown="if(event.key==='Enter')_bwGo()">
+    <button onclick="_bwGo()" style="font-size:0.82rem;padding:4px 14px;background:var(--accent);color:#fff;border:none;border-radius:6px;cursor:pointer;font-weight:500;">Go</button>
+    <button onclick="_bwScreenshot()" style="font-size:0.82rem;padding:4px 10px;background:var(--surface);border:1px solid var(--border);border-radius:6px;cursor:pointer;color:var(--fg);">&#128247; Snap</button>
+    <button onclick="_bwSaveProfile()" style="font-size:0.82rem;padding:4px 10px;background:var(--surface);border:1px solid var(--border);border-radius:6px;cursor:pointer;color:var(--fg);">&#128190; Save Profile</button>
+    <span id="bw-status" style="font-size:0.72rem;color:var(--dim);"></span>
+  </div>
+  <div id="bw-viewport" style="position:relative;padding:0 8px 8px;cursor:crosshair;height:calc(100vh - 160px);overflow:auto;">
+    <img id="bw-img" style="max-width:100%;border:1px solid var(--border);border-radius:4px;display:none;" onclick="_bwClick(event)">
+    <div id="bw-placeholder" style="display:flex;align-items:center;justify-content:center;height:400px;color:var(--dim);font-size:0.9rem;">
+      Enter a URL and click Go to start browsing
+    </div>
+  </div>
+</div>
+
 <div id="graph-view" style="display:none;flex-direction:row;overflow:hidden;">
   <!-- Graph sidebar -->
   <div class="graph-sidebar" id="graph-sidebar">
@@ -9043,6 +9824,33 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
   </div>
 </div>
 
+<!-- Teleprompter overlay -->
+<div id="teleprompter-overlay" style="display:none;position:fixed;inset:0;z-index:10002;background:#000;color:#fff;font-family:-apple-system,BlinkMacSystemFont,sans-serif;">
+  <div id="tp-viewport" style="position:absolute;inset:0;overflow:hidden;">
+    <div id="tp-content" style="position:absolute;top:0;left:50%;transform:translate(-50%,0);max-width:70ch;width:90%;font-size:48px;line-height:1.5;font-weight:600;padding:50vh 20px;will-change:transform;"></div>
+  </div>
+  <!-- Reading line at 33% -->
+  <div id="tp-reading-line" style="position:absolute;top:33%;left:0;right:0;height:2px;background:linear-gradient(to right,transparent,#fbbf24 20%,#fbbf24 80%,transparent);pointer-events:none;opacity:0.5;"></div>
+  <!-- Top-right close -->
+  <button onclick="_tpClose()" style="position:absolute;top:14px;right:18px;background:rgba(0,0,0,0.5);border:1px solid #444;border-radius:6px;color:#fff;padding:6px 12px;font-size:0.9rem;cursor:pointer;z-index:2;">&#x2715; Close</button>
+  <!-- Bottom toolbar -->
+  <div id="tp-toolbar" style="position:absolute;bottom:20px;left:50%;transform:translateX(-50%);background:rgba(20,20,30,0.92);backdrop-filter:blur(8px);border:1px solid #333;border-radius:10px;padding:10px 14px;display:flex;align-items:center;gap:14px;font-size:0.85rem;transition:opacity 0.3s;z-index:2;flex-wrap:wrap;justify-content:center;max-width:calc(100% - 40px);">
+    <button id="tp-play" onclick="_tpToggle()" style="background:#7c6fcd;border:none;color:#fff;width:40px;height:40px;border-radius:50%;font-size:1.1rem;cursor:pointer;">&#x25B6;</button>
+    <div style="display:flex;align-items:center;gap:6px;">
+      <span style="color:#aaa;font-size:0.75rem;">WPM</span>
+      <input id="tp-wpm" type="range" min="10" max="400" step="5" value="150" oninput="_tpSetWpm(this.value)" style="width:120px;accent-color:#7c6fcd;">
+      <span id="tp-wpm-val" style="min-width:32px;font-variant-numeric:tabular-nums;">150</span>
+    </div>
+    <div style="display:flex;align-items:center;gap:6px;">
+      <span style="color:#aaa;font-size:0.75rem;">Size</span>
+      <input id="tp-size" type="range" min="24" max="96" step="2" value="48" oninput="_tpSetSize(this.value)" style="width:80px;accent-color:#7c6fcd;">
+    </div>
+    <button onclick="_tpRestart()" title="Restart (R)" style="background:none;border:1px solid #555;color:#fff;padding:6px 10px;border-radius:5px;cursor:pointer;">&#x21BB;</button>
+    <button id="tp-mirror-btn" onclick="_tpToggleMirror()" title="Mirror (M)" style="background:none;border:1px solid #555;color:#fff;padding:6px 10px;border-radius:5px;cursor:pointer;">Mirror</button>
+    <button onclick="_tpFullscreen()" title="Fullscreen (F)" style="background:none;border:1px solid #555;color:#fff;padding:6px 10px;border-radius:5px;cursor:pointer;">&#x26F6;</button>
+  </div>
+</div>
+
 <!-- Schedule modal -->
 <div id="sched-overlay" class="board-edit-overlay" onclick="if(event.target===this)closeSchedModal()" style="display:none;">
   <div class="board-edit-box" style="max-width:420px;">
@@ -9052,12 +9860,19 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
       <input id="sched-title" type="text" placeholder="What should run?" autocomplete="off">
     </div>
     <div class="field-group">
+      <label class="field-label">Kind</label>
+      <select id="sched-kind" class="board-detail-session-select" style="width:100%;" onchange="updateSchedKindUI()">
+        <option value="tmux">Send to session (Claude)</option>
+        <option value="shell">Run shell command</option>
+      </select>
+    </div>
+    <div class="field-group" id="sched-session-group">
       <label class="field-label">Session</label>
       <select id="sched-session" class="board-detail-session-select" style="width:100%;"></select>
     </div>
     <div class="field-group">
-      <label class="field-label">Command</label>
-      <input id="sched-command" type="text" placeholder="e.g. /status or npm run build" autocomplete="off">
+      <label class="field-label" id="sched-command-label">Command</label>
+      <textarea id="sched-command" rows="5" placeholder="e.g. /status or npm run build" autocomplete="off" style="resize:vertical;font-family:monospace;font-size:0.85rem;min-height:100px;white-space:pre;"></textarea>
     </div>
     <div class="field-group">
       <label class="field-label">Schedule</label>
@@ -9075,11 +9890,15 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
         <label class="field-label">Schedule expression <span class="field-optional">(optional — overrides dropdowns below)</span></label>
         <input id="sched-expr" type="text" placeholder='e.g. "every 30m", "daily at 09:00", "0 9 * * 1-5"' autocomplete="off">
         <div style="font-size:0.65rem;color:var(--dim);margin-top:3px;display:flex;gap:6px;flex-wrap:wrap;">
-          <a href="#" onclick="event.preventDefault();document.getElementById('sched-expr').value='every 1h'" style="color:var(--accent);">every 1h</a>
           <a href="#" onclick="event.preventDefault();document.getElementById('sched-expr').value='every 30m'" style="color:var(--accent);">every 30m</a>
-          <a href="#" onclick="event.preventDefault();document.getElementById('sched-expr').value='daily at 09:00'" style="color:var(--accent);">daily at 09:00</a>
+          <a href="#" onclick="event.preventDefault();document.getElementById('sched-expr').value='every 1h'" style="color:var(--accent);">every 1h</a>
+          <a href="#" onclick="event.preventDefault();document.getElementById('sched-expr').value='every morning'" style="color:var(--accent);">every morning</a>
+          <a href="#" onclick="event.preventDefault();document.getElementById('sched-expr').value='every evening'" style="color:var(--accent);">every evening</a>
+          <a href="#" onclick="event.preventDefault();document.getElementById('sched-expr').value='daily at 6pm'" style="color:var(--accent);">daily at 6pm</a>
+          <a href="#" onclick="event.preventDefault();document.getElementById('sched-expr').value='every weekday at 9am'" style="color:var(--accent);">every weekday at 9am</a>
           <a href="#" onclick="event.preventDefault();document.getElementById('sched-expr').value='weekly on monday at 08:00'" style="color:var(--accent);">weekly on monday</a>
-          <a href="#" onclick="event.preventDefault();document.getElementById('sched-expr').value='0 9 * * 1-5'" style="color:var(--accent);">0 9 * * 1-5 (cron)</a>
+          <a href="#" onclick="event.preventDefault();document.getElementById('sched-expr').value='monthly on 1 at 9am'" style="color:var(--accent);">monthly on 1st</a>
+          <a href="#" onclick="event.preventDefault();document.getElementById('sched-expr').value='0 9 * * 1-5'" style="color:var(--accent);">cron: weekdays 9am</a>
         </div>
       </div>
       <div class="field-group">
@@ -9106,6 +9925,30 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
       <div class="field-group" id="sched-monthday-field" style="display:none;">
         <label class="field-label">Day of month</label>
         <input id="sched-monthday" type="number" min="1" max="28" value="1" class="board-detail-session-select" style="width:100%;">
+      </div>
+    </div>
+    <div class="field-group" style="margin-top:8px;">
+      <label style="display:flex;align-items:center;gap:6px;cursor:pointer;font-size:0.8rem;font-weight:500;">
+        <input type="checkbox" id="sched-watch" style="width:auto;accent-color:var(--accent);" onchange="updateSchedWatchUI()">
+        Watch response
+      </label>
+      <div style="font-size:0.65rem;color:var(--dim);margin-top:2px;">After sending, monitor session output and take action when a pattern matches.</div>
+    </div>
+    <div id="sched-watch-fields" style="display:none;">
+      <div class="field-group">
+        <label class="field-label">Done pattern <span class="field-optional">(text or regex to match in response)</span></label>
+        <input id="sched-done-pattern" type="text" placeholder='e.g. "no more tasks", "all.*complete", "nothing to do"' autocomplete="off">
+      </div>
+      <div class="field-group">
+        <label class="field-label">When matched</label>
+        <select id="sched-done-action" class="board-detail-session-select" style="width:100%;">
+          <option value="disable">Stop schedule (disable)</option>
+          <option value="notify">Notify only (keep running)</option>
+        </select>
+      </div>
+      <div class="field-group">
+        <label class="field-label">Watch timeout <span class="field-optional">(seconds to wait for response)</span></label>
+        <input id="sched-watch-timeout" type="number" min="10" max="600" value="120" style="width:100px;">
       </div>
     </div>
     <div style="display:flex;gap:8px;justify-content:flex-end;margin-top:12px;">
@@ -9320,8 +10163,10 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
   <div class="peek-tabs">
     <button class="peek-tab active" id="peek-tab-terminal" onclick="setPeekTab('terminal')">Terminal</button>
     <button class="peek-tab" id="peek-tab-issues" onclick="setPeekTab('issues')">Issues</button>
-    <button class="peek-tab" id="peek-tab-memory" onclick="setPeekTab('memory')">Memory</button>
     <button class="peek-tab" id="peek-tab-git" onclick="setPeekTab('git')">Worktree</button>
+    <button class="peek-tab" id="peek-tab-commits" onclick="setPeekTab('commits')">Commits</button>
+    <button class="peek-tab" id="peek-tab-schedules" onclick="setPeekTab('schedules')">Schedules</button>
+    <button class="peek-tab" id="peek-tab-notes" onclick="setPeekTab('notes')">Notes</button>
   </div>
   <!-- Working directory bar -->
   <div class="peek-dir-bar">
@@ -9354,9 +10199,9 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
           <div id="slash-ac-list" class="ac-list slash-ac"></div>
         </div>
         <input type="file" id="peek-file-input" multiple
-          style="display:none" onchange="handlePeekFileInput(event)">
-        <label for="peek-file-input" class="peek-attach-btn" title="Attach file">&#128206;</label>
-        <button class="peek-mic-btn" id="peek-mic-btn" onclick="_voiceToggle()" title="Voice chat">&#127908;</button>
+          style="position:absolute;width:0;height:0;opacity:0;overflow:hidden;pointer-events:none;" onchange="handlePeekFileInput(event)">
+        <button class="peek-attach-btn" title="Attach file" onclick="document.getElementById('peek-file-input').click()">&#128206;</button>
+        <button class="peek-attach-btn" id="peek-hist-btn" onclick="openCmdHistoryModal()" title="Message history">&#x1F551;</button>
         <button class="btn primary" onclick="sendPeekCmd()">Send</button>
       </div>
       <!-- Drag-over hint (shown by CSS when drag-over class is on peek-overlay) -->
@@ -9420,6 +10265,76 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
         </div>
       </div>
       <div id="peek-git-empty" style="display:none;color:var(--dim);font-size:0.85rem;padding:20px 16px;">No git repository found for this session.</div>
+    </div>
+  </div>
+  <!-- Commits panel -->
+  <div id="peek-commits-panel" class="peek-commits-panel">
+    <div class="commits-layout">
+      <div class="commits-sidebar" id="commits-sidebar">
+        <div class="commits-list" id="commits-list">
+          <div style="color:var(--dim);font-size:0.85rem;padding:20px 16px;">Loading commits…</div>
+        </div>
+      </div>
+      <div class="commits-detail" id="commits-detail">
+        <button class="commits-back-btn" id="commits-back-btn" onclick="_commitsBack()">&#8592; Commits</button>
+        <div class="commits-detail-empty" id="commits-detail-empty">
+          <div style="color:var(--dim);font-size:0.85rem;">Select a commit to view details</div>
+        </div>
+        <div id="commits-detail-content" style="display:none;flex-direction:column;flex:1;overflow:hidden;">
+          <div class="commits-detail-header" id="commits-detail-header"></div>
+          <div class="commits-detail-diff" id="commits-detail-diff"></div>
+        </div>
+      </div>
+    </div>
+  </div>
+  <!-- Schedules panel -->
+  <div id="peek-schedules-panel" class="peek-tasks-panel">
+    <div class="peek-tasks-add" style="gap:10px;">
+      <span id="peek-schedules-count" style="flex:1;font-size:0.82rem;color:var(--dim);align-self:center;"></span>
+      <button class="btn primary" style="font-size:0.8rem;padding:5px 12px;" onclick="_peekNewSchedule()">+ New schedule</button>
+    </div>
+    <div class="peek-tasks-list" id="peek-schedules-list"></div>
+  </div>
+  <!-- Notes panel -->
+  <div id="peek-notes-panel" class="peek-tasks-panel" style="flex-direction:row;padding:0;gap:0;overflow:hidden;">
+    <!-- Sidebar -->
+    <div class="notes-sidebar" id="peek-notes-sidebar">
+      <div class="notes-sidebar-header">
+        <span style="font-weight:600;font-size:0.85rem;">Notes</span>
+        <div class="notes-sidebar-actions">
+          <button class="notes-new-btn" onclick="_peekNotesNew()" title="New note"><svg xmlns="http://www.w3.org/2000/svg" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 5v14M5 12h14"/></svg></button>
+          <button class="notes-toggle-btn" onclick="_peekNotesToggleSidebar()" title="Collapse sidebar"><svg xmlns="http://www.w3.org/2000/svg" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect width="18" height="18" x="3" y="3" rx="2"/><path d="M9 3v18"/><path d="m16 15-3-3 3-3"/></svg></button>
+        </div>
+      </div>
+      <div class="notes-search-wrap">
+        <input id="peek-notes-search" type="search" placeholder="Search notes…" oninput="_peekNotesSearchFilter(this.value)" style="width:100%;box-sizing:border-box;padding:5px 8px;background:var(--bg);border:1px solid var(--border);border-radius:6px;color:var(--text);font-size:0.8rem;outline:none;">
+      </div>
+      <div id="peek-notes-list" class="notes-list"></div>
+    </div>
+    <!-- Editor pane -->
+    <div class="notes-editor-pane" id="peek-notes-editor-pane">
+      <div class="notes-editor-header">
+        <button class="notes-expand-btn" onclick="_peekNotesToggleSidebar()" title="Show notes list"><svg xmlns="http://www.w3.org/2000/svg" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect width="18" height="18" x="3" y="3" rx="2"/><path d="M9 3v18"/><path d="m14 9 3 3-3 3"/></svg></button>
+        <input id="peek-notes-title" type="text" placeholder="Note title…" class="notes-title-input" oninput="_peekNotesTitleChange()" onblur="_peekNotesSaveDebounce()">
+        <div style="display:flex;gap:6px;align-items:center;">
+          <span id="peek-notes-save-status" style="font-size:0.72rem;color:var(--dim);"></span>
+          <button id="peek-notes-pin-btn" class="notes-pin-btn" onclick="_peekNotesTogglePin()" title="Pin to top"><svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="17" x2="12" y2="22"/><path d="M5 17h14v-1.76a2 2 0 0 0-1.11-1.79l-1.78-.9A2 2 0 0 1 15 10.76V6h1a2 2 0 0 0 0-4H8a2 2 0 0 0 0 4h1v4.76a2 2 0 0 1-1.11 1.79l-1.78.9A2 2 0 0 0 5 15.24Z"/></svg></button>
+          <button class="notes-delete-btn" onclick="_peekNotesDelete()" title="Delete note"><svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/><path d="M10 11v6M14 11v6"/><path d="M9 6V4a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2"/></svg></button>
+        </div>
+      </div>
+      <div class="notes-mode-tabs" id="peek-notes-mode-tabs" style="display:none;">
+        <button class="notes-mode-tab" id="peek-notes-tab-edit" onclick="_peekNotesSwitchMode('edit')">Edit</button>
+        <button class="notes-mode-tab active" id="peek-notes-tab-preview" onclick="_peekNotesSwitchMode('preview')">Preview</button>
+      </div>
+      <div class="notes-quill-wrap" id="peek-notes-quill-wrap" style="display:none;">
+        <div id="peek-notes-quill"></div>
+      </div>
+      <div class="notes-preview" id="peek-notes-preview"></div>
+      <div class="notes-empty-state" id="peek-notes-empty-state">
+        <div style="font-size:2rem;margin-bottom:8px;">📝</div>
+        <div style="color:var(--dim);font-size:0.85rem;">Select a note or create a new one</div>
+        <button class="btn" onclick="_peekNotesNew()" style="margin-top:12px;font-size:0.8rem;">+ New Note</button>
+      </div>
     </div>
   </div>
 </div>
@@ -9566,6 +10481,20 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
 <!-- Toast -->
 <div id="toast" class="toast"></div>
 
+<!-- Cmd history modal -->
+<div id="cmd-history-modal" class="overlay" style="z-index:210;" onclick="if(event.target===this)closeCmdHistoryModal()">
+  <div style="display:flex;flex-direction:column;height:100%;max-width:680px;margin:0 auto;width:100%;">
+    <div class="overlay-header">
+      <h2>&#x1F551; Message history</h2>
+      <button class="btn" onclick="closeCmdHistoryModal()">&#x2715;</button>
+    </div>
+    <input type="search" id="cmd-history-search" placeholder="Search past messages..."
+      oninput="_renderCmdHistoryList(this.value)"
+      style="width:100%;box-sizing:border-box;padding:8px 12px;background:var(--bg);border:1px solid var(--border);border-radius:6px;color:var(--text);font-size:0.9rem;outline:none;margin-bottom:10px;">
+    <div id="cmd-history-list" style="flex:1;overflow-y:auto;display:flex;flex-direction:column;gap:6px;"></div>
+  </div>
+</div>
+
 <!-- Confirm / alert modal -->
 <div id="modal-backdrop" class="modal-backdrop" onclick="_modalBgClick(event)">
   <div class="modal-box">
@@ -9617,11 +10546,12 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
       <button class="file-view-tab active" id="file-tab-preview" onclick="setFileViewMode('preview')">Preview</button>
       <button class="file-view-tab" id="file-tab-edit" onclick="setFileViewMode('edit')" style="display:none;">Edit</button>
       <button class="file-view-tab" id="file-tab-raw" onclick="setFileViewMode('raw')">Raw</button>
+      <button class="file-view-tab" id="file-tab-teleprompter" onclick="_filesOpenTeleprompter()" title="Teleprompter mode" style="display:none;">&#x25B6; Teleprompter</button>
       <button class="file-view-tab" id="file-tab-copy" onclick="copyFileContent()" title="Copy to clipboard">Copy</button>
       <button class="file-view-tab" id="file-tab-link" onclick="_copyFileDeeplink(_fileData&&_fileData.path||'')" title="Copy deep link">Link</button>
     </div>
     <button id="file-save-btn" onclick="_fileSave()" style="display:none;">Save</button>
-    <a id="file-download-btn" style="display:none;font-size:0.72rem;padding:3px 10px;border:1px solid var(--border);border-radius:6px;color:var(--accent);text-decoration:none;white-space:nowrap;flex-shrink:0;">&#x2B07; Download</a>
+    <button id="file-download-btn" onclick="_fileDownload()" style="display:none;font-size:0.72rem;padding:3px 10px;border:1px solid var(--border);border-radius:6px;color:var(--accent);background:transparent;cursor:pointer;white-space:nowrap;flex-shrink:0;">&#x2B07; Download</button>
     <button class="btn" onclick="closeFilePreview()" style="flex-shrink:0;">&#x2715;</button>
   </div>
   <div id="file-body" class="file-overlay-body"></div>
@@ -9780,6 +10710,9 @@ async function _initIdentity() {
         const banner = document.getElementById('no-apikey-banner');
         if (banner) banner.style.display = '';
       }
+    } else if (d.key_valid === false && d.key_error) {
+      // Key exists but is invalid — show warning banner
+      _showKeyWarning(d.key_error);
     }
     _applyIdentityToSettings();
     if (_cloudEmail) {
@@ -9788,6 +10721,82 @@ async function _initIdentity() {
       _loadGatewayOrgs();
     }
   } catch(e) {}
+}
+
+function _showKeyWarning(error) {
+  const msgs = {
+    invalid_api_key: 'Your API key is invalid or revoked.',
+    api_key_forbidden: 'Your API key does not have permission.',
+    no_api_key: 'No API key configured.',
+  };
+  const msg = msgs[error] || 'API key issue: ' + error;
+  showToast(msg + ' Open Settings to update.', 8000);
+  // Also open the API key modal if it exists
+  const m = document.getElementById('apikey-setup-modal');
+  if (m) {
+    m.style.display = 'flex';
+    setTimeout(() => document.getElementById('apikey-setup-input')?.focus(), 100);
+  }
+}
+
+async function apikeySetupLogin() {
+  // Dismiss the modal
+  const m = document.getElementById('apikey-setup-modal');
+  if (m) m.style.display = 'none';
+  try {
+    // Create session (ignore 409 if already exists)
+    await fetch(API + '/api/sessions', {
+      method: 'POST', headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({ name: 'login', desc: 'Claude account login' })
+    });
+    // Start the session (ensures tmux pane is up)
+    await fetch(API + '/api/sessions/login/start', { method: 'POST' });
+    showToast('Starting login session — please wait...');
+    // Open peek immediately so user sees progress
+    setTimeout(() => { openPeek('login'); }, 500);
+    // Wait for Claude to be ready, then send /login
+    let sent = false;
+    for (let i = 0; i < 20; i++) {
+      await new Promise(r => setTimeout(r, 1500));
+      const sr = await fetch(API + '/api/sessions/login/send', {
+        method: 'POST', headers: {'Content-Type':'application/json'},
+        body: JSON.stringify({ text: '/login' })
+      });
+      if (sr.ok) { sent = true; break; }
+    }
+    if (sent) {
+      showToast('Follow the URL in the terminal to authenticate');
+    } else {
+      showToast('Session started — type /login in the terminal');
+    }
+    // Poll for OAuth completion
+    _pollForOAuth();
+  } catch(e) {
+    showToast('Failed to start login session');
+    console.error('login setup error:', e);
+  }
+}
+
+let _oauthPollTimer = null;
+function _pollForOAuth() {
+  if (_oauthPollTimer) clearInterval(_oauthPollTimer);
+  let checks = 0;
+  _oauthPollTimer = setInterval(async () => {
+    checks++;
+    if (checks > 60) { clearInterval(_oauthPollTimer); return; } // give up after 5 min
+    try {
+      const r = await fetch(API + '/api/identity');
+      if (!r.ok) return;
+      const d = await r.json();
+      if (d.has_oauth) {
+        clearInterval(_oauthPollTimer);
+        showToast('Logged in successfully! Sessions will use your Claude account.');
+        // Hide banner if visible
+        const banner = document.getElementById('no-apikey-banner');
+        if (banner) banner.style.display = 'none';
+      }
+    } catch(e) {}
+  }, 5000);
 }
 
 async function apikeySetupSave() {
@@ -10708,7 +11717,8 @@ function render() {
           <div class="card-menu-item" onclick="event.stopPropagation();editField('${s.name}','desc','${esc(s.desc||"")}')"><span class="mi">&#x1F4DD;</span> Description</div>
           <div class="card-menu-item" onclick="event.stopPropagation();editField('${s.name}','tags','${esc(s.tags.join(", "))}')"><span class="mi">&#x1F3F7;</span> Tags</div>
           <div class="card-menu-item" onclick="event.stopPropagation();editField('${s.name}','dir','${esc(s.dir)}')"><span class="mi">&#x1F4C1;</span> Directory</div>
-          ${s.running ? `<div class="card-menu-item" onclick="event.stopPropagation();closeAllMenus();doStop('${s.name}')"><span class="mi">&#x25A0;</span> Stop session</div>` : ''}
+          ${s.running ? `<div class="card-menu-item" onclick="event.stopPropagation();closeAllMenus();doRestart('${s.name}')"><span class="mi">&#x21BB;</span> Restart</div>` : ''}
+          ${s.running ? `<div class="card-menu-item" onclick="event.stopPropagation();closeAllMenus();doStop('${s.name}')"><span class="mi">&#x23F9;</span> Stop</div>` : ''}
           ${s.running ? `<div class="card-menu-item" onclick="event.stopPropagation();clearScrollback('${s.name}')"><span class="mi">&#x239A;</span> Clear scrollback</div>` : ''}
           <div class="card-menu-item" onclick="event.stopPropagation();duplicateSession('${s.name}')"><span class="mi">&#x2398;</span> Duplicate</div>
           ${s.running ? `<div class="card-menu-item" onclick="event.stopPropagation();cloneSession('${s.name}')"><span class="mi">&#x1F504;</span> Clone &amp; continue</div>` : ''}
@@ -10920,6 +11930,8 @@ function _isBranchMain(b) { return !b || b === 'main' || b === 'master' || b ===
 
 function _renderBranchBadge(name, sessionBranch) {
   const gi = gitInfo[name];
+  // Treat the legacy 'none' sentinel as no preference and fall through to git-detected branch
+  if (sessionBranch === 'none') sessionBranch = '';
   // Show session branch from config, or fall back to git-detected branch
   const displayBranch = sessionBranch || (gi && gi.branch) || '';
   if (!displayBranch) return '';
@@ -10949,8 +11961,11 @@ async function _fetchGitBranches(sess) {
   for (const [n, gi] of Object.entries(newInfo)) {
     if (!gi.repo) continue;
     const sess = (sessions || []).find(s => s.name === n);
-    const effectiveBranch = (sess && sess.branch) || gi.branch;
+    const sb = sess && sess.branch;
+    const effectiveBranch = (sb && sb !== 'none' ? sb : null) || gi.branch;
     if (!effectiveBranch) continue;
+    // Sharing main/master/dev isn't a conflict — that's the default state
+    if (_isBranchMain(effectiveBranch)) continue;
     const key = gi.repo + '::' + effectiveBranch;
     (byKey[key] = byKey[key] || []).push(n);
   }
@@ -10968,7 +11983,8 @@ function showBranchPopover(name, e) {
   document.querySelectorAll('.branch-popover').forEach(p => p.remove());
   const gi = gitInfo[name] || {};
   const sess = sessions.find(s => s.name === name);
-  const sessionBranch = sess && sess.branch;
+  let sessionBranch = sess && sess.branch;
+  if (sessionBranch === 'none') sessionBranch = '';
   const displayBranch = sessionBranch || gi.branch || '';
   const hasBranch = sessionBranch || !_isBranchMain(gi.branch);
   const pop = document.createElement('div');
@@ -11110,6 +12126,8 @@ function closeAllMenus() {
     if (el) el.classList.remove('open');
   }
   openMenu = null;
+  const pm = document.getElementById('peek-menu');
+  if (pm) pm.classList.remove('open');
 }
 document.addEventListener('click', e => {
   closeAllMenus(); closeActiveDropdown(e); closeAddMenu();
@@ -11123,7 +12141,7 @@ document.addEventListener('click', e => {
 const ALL_TABS = [
   { id: 'sessions',      label: 'Sessions',   required: true },
   { id: 'board',         label: 'Board' },
-  { id: 'notifications', label: 'Notifications' },
+  { id: 'calendar',      label: 'Calendar' },
   { id: 'scheduler',     label: 'Scheduler' },
   { id: 'files',         label: 'Files' },
   { id: 'logs',          label: 'Logs' },
@@ -11135,8 +12153,7 @@ const ALL_TABS = [
   { id: 'metrics',       label: 'Metrics' },
   { id: 'torrents',      label: 'Torrents' },
   { id: 'terminal',      label: 'Terminal' },
-  { id: 'graph',         label: 'Graph' },
-  { id: 'journal',       label: 'Journal' },
+  { id: 'browser',       label: 'Browser' },
 ];
 
 let hiddenTabs = (function() {
@@ -11766,6 +12783,26 @@ async function doStop(name) {
   await fetchSessions();
 }
 
+async function doRestart(name) {
+  await apiCall(API + '/api/sessions/' + name + '/stop', { method: 'POST' });
+  // Poll until stopped (up to 5s). If it never stops, bail out instead of
+  // racing doStart against a still-running session.
+  let stopped = false;
+  for (let i = 0; i < 10; i++) {
+    await new Promise(r => setTimeout(r, 500));
+    await fetchSessions();
+    if (!sessions.find(s => s.name === name && s.running)) {
+      stopped = true;
+      break;
+    }
+  }
+  if (!stopped) {
+    showToast("Stop didn't take effect, try again");
+    return;
+  }
+  await doStart(name);
+}
+
 // ── Sending indicator ──
 let _sendingSnapshot = null; // peek HTML snapshot before send
 let _sendingTimer = null;
@@ -11896,20 +12933,137 @@ let _peekTab = 'terminal';
 let _peekGitData = null;
 function setPeekTab(tab) {
   _peekTab = tab;
+  // Flush peek notes save when switching away
+  if (tab !== 'notes' && _peekNotesSaveTimer) {
+    clearTimeout(_peekNotesSaveTimer); _peekNotesSaveTimer = null; _peekNotesSave();
+  }
   document.getElementById('peek-tab-terminal').classList.toggle('active', tab === 'terminal');
   document.getElementById('peek-tab-issues').classList.toggle('active', tab === 'issues');
-  document.getElementById('peek-tab-memory').classList.toggle('active', tab === 'memory');
   document.getElementById('peek-tab-git').classList.toggle('active', tab === 'git');
+  document.getElementById('peek-tab-commits').classList.toggle('active', tab === 'commits');
+  document.getElementById('peek-tab-schedules').classList.toggle('active', tab === 'schedules');
+  document.getElementById('peek-tab-notes').classList.toggle('active', tab === 'notes');
   document.getElementById('peek-terminal-panel').style.display = tab === 'terminal' ? '' : 'none';
   const issues = document.getElementById('peek-issues-panel');
   if (tab === 'issues') { issues.classList.add('active'); renderPeekIssues(); }
   else { issues.classList.remove('active'); }
-  const mem = document.getElementById('peek-memory-panel');
-  if (tab === 'memory') { mem.classList.add('active'); loadPeekMemory(); }
-  else { mem.classList.remove('active'); }
   const git = document.getElementById('peek-git-panel');
   if (tab === 'git') { git.classList.add('active'); loadPeekGit(); }
   else { git.classList.remove('active'); }
+  const commits = document.getElementById('peek-commits-panel');
+  if (tab === 'commits') { commits.classList.add('active'); _commitsLoad(); }
+  else { commits.classList.remove('active'); }
+  const scheds = document.getElementById('peek-schedules-panel');
+  if (tab === 'schedules') { scheds.classList.add('active'); _peekLoadSchedules(); }
+  else { scheds.classList.remove('active'); }
+  const notes = document.getElementById('peek-notes-panel');
+  if (tab === 'notes') { notes.classList.add('active'); _peekNotesLoad(); }
+  else { notes.classList.remove('active'); }
+}
+
+// ── Commits panel ──
+let _commitsData = [];
+let _commitsActiveHash = null;
+
+async function _commitsLoad() {
+  if (!peekSession) return;
+  const list = document.getElementById('commits-list');
+  list.innerHTML = '<div style="color:var(--dim);font-size:0.85rem;padding:20px 16px;">Loading commits…</div>';
+  try {
+    const r = await fetch(API + '/api/sessions/' + encodeURIComponent(peekSession) + '/git/commits?count=15');
+    const d = await r.json();
+    _commitsData = d.commits || [];
+    _commitsRenderList();
+  } catch(e) {
+    list.innerHTML = '<div style="color:var(--dim);font-size:0.85rem;padding:20px 16px;">Failed to load commits.</div>';
+  }
+}
+
+function _commitsRenderList() {
+  const list = document.getElementById('commits-list');
+  if (!_commitsData.length) {
+    list.innerHTML = '<div style="color:var(--dim);font-size:0.85rem;padding:20px 16px;">No commits found.</div>';
+    return;
+  }
+  let html = '';
+  let lastDate = '';
+  for (const c of _commitsData) {
+    const d = c.date ? c.date.slice(0, 10) : '';
+    if (d !== lastDate) {
+      lastDate = d;
+      const dt = new Date(d + 'T00:00:00');
+      const label = dt.toLocaleDateString('en-US', { weekday: 'long', month: 'short', day: 'numeric', year: 'numeric' });
+      html += `<div style="padding:8px 14px 4px;font-size:0.72rem;font-weight:600;color:var(--dim);text-transform:uppercase;letter-spacing:0.03em;background:var(--bg);position:sticky;top:0;z-index:1;">${esc(label)}</div>`;
+    }
+    const active = c.hash === _commitsActiveHash ? ' active' : '';
+    const shortHash = c.hash.slice(0, 7);
+    const time = c.date ? c.date.slice(11, 16) : '';
+    html += `<div class="commits-item${active}" data-hash="${c.hash}" onclick="_commitsSelect('${c.hash}')">`;
+    html += `<div class="commits-item-subject">${esc(c.subject)}</div>`;
+    html += `<div class="commits-item-meta"><span class="commits-item-hash">${shortHash}</span><span>${esc(c.author)}</span><span>${time}</span></div>`;
+    html += `</div>`;
+  }
+  list.innerHTML = html;
+}
+
+async function _commitsSelect(hash) {
+  _commitsActiveHash = hash;
+  // Highlight in list
+  document.querySelectorAll('#commits-list .commits-item').forEach(el => {
+    el.classList.toggle('active', el.dataset.hash === hash);
+  });
+  // On mobile, hide sidebar
+  if (window.innerWidth <= 600) {
+    document.getElementById('commits-sidebar').classList.add('hidden');
+  }
+  const content = document.getElementById('commits-detail-content');
+  const empty = document.getElementById('commits-detail-empty');
+  const hdr = document.getElementById('commits-detail-header');
+  const diffEl = document.getElementById('commits-detail-diff');
+  empty.style.display = 'none';
+  content.style.display = 'flex';
+  hdr.innerHTML = '<div style="color:var(--dim);font-size:0.85rem;">Loading…</div>';
+  diffEl.innerHTML = '';
+  try {
+    const r = await fetch(API + '/api/sessions/' + encodeURIComponent(peekSession) + '/git/commit-detail?sha=' + hash);
+    const d = await r.json();
+    let headerHtml = `<h3>${esc(d.subject || '')}</h3>`;
+    headerHtml += `<div class="commits-meta-row">`;
+    headerHtml += `<span style="font-family:monospace;color:var(--accent);">${(d.hash || hash).slice(0, 10)}</span>`;
+    headerHtml += `<span>${esc(d.author || '')}</span>`;
+    if (d.date) {
+      const dt = new Date(d.date.replace(' ', 'T'));
+      headerHtml += `<span>${dt.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })} ${dt.toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit' })}</span>`;
+    }
+    headerHtml += `</div>`;
+    if (d.body) headerHtml += `<div class="commits-body-text">${esc(d.body)}</div>`;
+    if (d.stat) headerHtml += `<div class="commits-stat">${esc(d.stat)}</div>`;
+    hdr.innerHTML = headerHtml;
+    // Render diff with syntax coloring
+    if (d.diff) {
+      const lines = d.diff.split('\n').map(line => {
+        const e = esc(line);
+        if (line.startsWith('+++') || line.startsWith('---') || line.startsWith('diff --git')) return `<span class="diff-hdr">${e}</span>`;
+        if (line.startsWith('@@')) return `<span class="diff-hunk">${e}</span>`;
+        if (line.startsWith('+')) return `<span class="diff-add">${e}</span>`;
+        if (line.startsWith('-')) return `<span class="diff-del">${e}</span>`;
+        return e;
+      });
+      diffEl.innerHTML = `<pre>${lines.join('\n')}</pre>`;
+    } else {
+      diffEl.innerHTML = '<div style="padding:16px;color:var(--dim);font-size:0.85rem;">No diff available</div>';
+    }
+  } catch(e) {
+    hdr.innerHTML = '<div style="color:var(--dim);font-size:0.85rem;">Failed to load commit details.</div>';
+  }
+}
+
+function _commitsBack() {
+  // Mobile: show sidebar again
+  document.getElementById('commits-sidebar').classList.remove('hidden');
+  _commitsActiveHash = null;
+  document.getElementById('commits-detail-content').style.display = 'none';
+  document.getElementById('commits-detail-empty').style.display = '';
 }
 
 let _peekTrackedFiles = null; // tracked files for current peek session
@@ -11940,7 +13094,7 @@ async function loadPeekGit() {
     }
     // Merge session branch from sessions list if not in git response
     const sess = sessions.find(s => s.name === peekSession);
-    if (sess && sess.branch && !d.session_branch) d.session_branch = sess.branch;
+    if (sess && sess.branch && sess.branch !== 'none' && !d.session_branch) d.session_branch = sess.branch;
     _peekGitData = d;
     _renderPeekGit(d);
   } catch(e) {
@@ -12239,6 +13393,434 @@ function renderPeekIssues() {
       '</div>';
   }).join('');
 }
+// ── Peek Schedules (scheduler tasks for this session) ────────────────────────
+async function _peekLoadSchedules() {
+  const list = document.getElementById('peek-schedules-list');
+  const count = document.getElementById('peek-schedules-count');
+  if (!peekSession) return;
+  list.innerHTML = '<div style="color:var(--dim);font-size:0.85rem;padding:12px 4px;">Loading…</div>';
+  try {
+    const r = await fetch(API + '/api/schedules');
+    const all = await r.json();
+    const items = all.filter(s => s.session === peekSession && !s.deleted);
+    count.textContent = items.length ? items.length + ' schedule' + (items.length === 1 ? '' : 's') : '';
+    if (!items.length) {
+      list.innerHTML = '<div style="color:var(--dim);font-size:0.85rem;padding:12px 4px;">No schedules for this session.</div>';
+      return;
+    }
+    list.innerHTML = items.map(s => {
+      const enabled = s.enabled ? 'enabled' : 'disabled';
+      const ebg = s.enabled ? 'rgba(63,185,80,0.15)' : 'rgba(139,148,158,0.15)';
+      const ecol = s.enabled ? '#3fb950' : 'var(--dim)';
+      const badge = '<span style="font-size:0.7rem;padding:1px 6px;border-radius:10px;background:' + ebg + ';color:' + ecol + ';">' + enabled + '</span>';
+      const stype = s.sched_type === 'recurring' ? (s.schedule_expr || 'recurring') : (s.run_at || 'once');
+      const nextRun = s.next_run ? '<span style="color:var(--dim);font-size:0.75rem;">next: ' + esc(s.next_run) + '</span>' : '';
+      const lastRun = s.last_run ? '<span style="color:var(--dim);font-size:0.75rem;">last: ' + esc(s.last_run) + '</span>' : '';
+      return '<div class="peek-issue-item" style="cursor:default;">' +
+        '<span class="peek-issue-key">' + esc(s.id) + '</span>' +
+        '<span class="peek-issue-title">' + esc(s.title || s.command || '(untitled)') + '</span>' +
+        '<span class="peek-issue-meta" style="gap:6px;">' + badge +
+          '<span style="font-size:0.72rem;color:var(--dim);font-family:monospace;">' + esc(stype) + '</span>' +
+          nextRun + lastRun +
+        '</span>' +
+        '<div style="display:flex;gap:4px;margin-top:4px;">' +
+          '<button class="btn" style="font-size:0.7rem;padding:2px 8px;" onclick="event.stopPropagation();_peekToggleSchedule(\'' + esc(s.id) + '\',' + (s.enabled ? 0 : 1) + ')">' + (s.enabled ? 'Disable' : 'Enable') + '</button>' +
+          '<button class="btn" style="font-size:0.7rem;padding:2px 8px;" onclick="event.stopPropagation();_peekRunSchedule(\'' + esc(s.id) + '\')">Run now</button>' +
+          '<button class="btn" style="font-size:0.7rem;padding:2px 8px;color:var(--red);" onclick="event.stopPropagation();_peekDeleteSchedule(\'' + esc(s.id) + '\')">Delete</button>' +
+        '</div>' +
+      '</div>';
+    }).join('');
+  } catch(e) {
+    list.innerHTML = '<div style="color:var(--dim);font-size:0.85rem;padding:12px 4px;">Failed to load schedules.</div>';
+  }
+}
+async function _peekToggleSchedule(id, val) {
+  await apiCall(API + '/api/schedules/' + id, {
+    method: 'PATCH', headers: {'Content-Type':'application/json'},
+    body: JSON.stringify({ enabled: val })
+  });
+  _peekLoadSchedules();
+}
+async function _peekRunSchedule(id) {
+  await apiCall(API + '/api/schedules/' + id + '/run', { method: 'POST' });
+  showToast('Schedule triggered');
+  _peekLoadSchedules();
+}
+async function _peekDeleteSchedule(id) {
+  if (!confirm('Delete this schedule?')) return;
+  await apiCall(API + '/api/schedules/' + id, { method: 'DELETE' });
+  _peekLoadSchedules();
+}
+function _peekNewSchedule() {
+  const title = prompt('Schedule title:');
+  if (!title) return;
+  const command = prompt('Command to send to session:');
+  if (!command) return;
+  const expr = prompt('Cron expression (e.g. "0 9 * * 1" for Mon 9am), or leave blank for one-time:');
+  const body = {
+    title, session: peekSession, command, kind: 'tmux',
+    sched_type: expr ? 'recurring' : 'once',
+  };
+  if (expr) body.schedule_expr = expr;
+  else body.run_at = new Date().toISOString().slice(0, 16);
+  apiCall(API + '/api/schedules', {
+    method: 'POST', headers: {'Content-Type':'application/json'},
+    body: JSON.stringify(body)
+  }).then(() => _peekLoadSchedules());
+}
+
+// ── Peek notes ──
+let _peekNotesAll = [];
+let _peekNotesActive = null;
+let _peekQuill = null;
+let _peekNotesSaveTimer = null;
+let _peekNotesLoading = false;
+let _peekNotesMode = 'preview';
+let _peekNotesSidebarOpen = true;
+let _peekNotesRawContent = '';
+
+function _peekNotesFolder() {
+  return '_sessions/' + peekSession;
+}
+
+function _peekNotesToggleSidebar() {
+  _peekNotesSidebarOpen = !_peekNotesSidebarOpen;
+  _peekNotesApplySidebarState();
+}
+
+function _peekNotesApplySidebarState() {
+  const panel = document.getElementById('peek-notes-panel');
+  const sidebar = document.getElementById('peek-notes-sidebar');
+  if (!panel || !sidebar) return;
+  if (_peekNotesSidebarOpen) {
+    sidebar.classList.remove('collapsed');
+    panel.classList.remove('sidebar-collapsed');
+  } else {
+    sidebar.classList.add('collapsed');
+    panel.classList.add('sidebar-collapsed');
+  }
+}
+
+async function _peekNotesLoad() {
+  const list = document.getElementById('peek-notes-list');
+  if (!peekSession) return;
+  list.innerHTML = '<div style="color:var(--dim);font-size:0.85rem;padding:12px 8px;">Loading…</div>';
+  try {
+    const r = await fetch(API + '/api/notes');
+    const all = await r.json();
+    const folder = _peekNotesFolder() + '/';
+    _peekNotesAll = all.filter(n => n.path.startsWith(folder));
+    _peekNotesRenderList(_peekNotesAll);
+    // Auto-open first note if none active
+    if (!_peekNotesActive && _peekNotesAll.length) {
+      _peekNotesOpen(_peekNotesAll[0].path);
+    }
+    if (!_peekNotesAll.length) _peekNotesShowEmpty();
+  } catch(e) {
+    list.innerHTML = '<div style="color:var(--dim);font-size:0.85rem;padding:12px 8px;">Failed to load notes.</div>';
+  }
+}
+
+function _peekNotesRenderList(notes) {
+  const el = document.getElementById('peek-notes-list');
+  if (!notes.length) {
+    el.innerHTML = '<div style="color:var(--dim);font-size:0.82rem;padding:12px 8px;">No notes yet</div>';
+    return;
+  }
+  el.innerHTML = notes.map(n => {
+    const active = _peekNotesActive && _peekNotesActive.path === n.path ? ' active' : '';
+    const pinned = n.pinned ? ' pinned' : '';
+    const dt = n.updated ? new Date(n.updated * 1000).toLocaleDateString() : '';
+    const stem = n.path.replace(/\.md$/, '').split('/').pop();
+    const rawName = n.name || stem;
+    const displayName = /^untitled(-\d+)?$/.test(rawName) ? 'Untitled' : rawName;
+    return `<div class="notes-list-item${active}${pinned}" data-path="${esc(n.path)}"
+      onclick="_peekNotesOpen(this.dataset.path)" style="display:flex;align-items:center;gap:4px;">
+      <div style="flex:1;min-width:0;">
+        <div class="nli-title">${esc(displayName)}</div>
+        <div class="nli-date">${dt}</div>
+      </div>
+    </div>`;
+  }).join('');
+}
+
+function _peekNotesShowEmpty() {
+  document.getElementById('peek-notes-empty-state').style.display = '';
+  document.getElementById('peek-notes-mode-tabs').style.display = 'none';
+  document.getElementById('peek-notes-quill-wrap').style.display = 'none';
+  document.getElementById('peek-notes-preview').classList.remove('active');
+  document.getElementById('peek-notes-preview').style.display = 'none';
+  document.getElementById('peek-notes-title').value = '';
+}
+
+function _peekNotesInitQuill() {
+  if (_peekQuill) return;
+  // Reuse divider blot registered by main notes init (registers globally on Quill)
+  if (!_quillDividerRegistered && typeof Quill !== 'undefined') {
+    const BlockEmbed = Quill.import('blots/block/embed');
+    class DividerBlot extends BlockEmbed {
+      static create() { return super.create(); }
+      static value() { return true; }
+    }
+    DividerBlot.blotName = 'divider';
+    DividerBlot.tagName = 'hr';
+    Quill.register(DividerBlot);
+    _quillDividerRegistered = true;
+  }
+  _peekQuill = new Quill('#peek-notes-quill', {
+    theme: 'snow',
+    modules: {
+      toolbar: {
+        container: [
+          [{ header: [1, 2, 3, false] }],
+          ['bold', 'italic', 'underline', 'strike'],
+          ['blockquote', 'code-block'],
+          [{ list: 'ordered' }, { list: 'bullet' }, { list: 'check' }],
+          ['link'],
+          ['divider'],
+          ['clean']
+        ],
+        handlers: {
+          divider: function() {
+            const range = _peekQuill.getSelection(true);
+            _peekQuill.insertText(range.index, '\n', 'user');
+            _peekQuill.insertEmbed(range.index + 1, 'divider', true, 'user');
+            _peekQuill.insertText(range.index + 2, '\n', 'user');
+            _peekQuill.setSelection(range.index + 3, 0, 'silent');
+          }
+        }
+      }
+    },
+    placeholder: 'Write your note…'
+  });
+  const _pdivBtn = document.querySelector('#peek-notes-panel .ql-toolbar .ql-divider');
+  if (_pdivBtn && !_pdivBtn.innerHTML) {
+    _pdivBtn.innerHTML = '<svg viewBox="0 0 18 18"><line class="ql-stroke" x1="3" x2="15" y1="9" y2="9" stroke-width="2"></line></svg>';
+    _pdivBtn.title = 'Insert horizontal divider';
+  }
+  if (typeof QuillMarkdown !== 'undefined') {
+    try { new QuillMarkdown(_peekQuill); } catch(e) {}
+  }
+  _peekQuill.on('text-change', (delta, old, source) => {
+    if (source === 'api' || _peekNotesLoading) return;
+    // Sync H1 → title
+    const first = _peekQuill.root.firstElementChild;
+    if (first && first.tagName === 'H1') {
+      const h1 = first.textContent.trim();
+      const ti = document.getElementById('peek-notes-title');
+      if (ti && ti.value !== h1) {
+        ti.value = h1;
+        if (_peekNotesActive) {
+          _peekNotesActive.title = h1;
+          const activeEl = document.querySelector('#peek-notes-list .notes-list-item.active');
+          if (activeEl) { const s = activeEl.querySelector('.nli-title'); if (s) s.textContent = h1 || _peekNotesActive.path.replace(/\.md$/, ''); }
+          const entry = _peekNotesAll.find(n => n.path === _peekNotesActive.path);
+          if (entry) entry.name = h1 || entry.path.replace(/\.md$/, '');
+        }
+      }
+    }
+    _peekNotesSaveDebounce();
+  });
+}
+
+async function _peekNotesOpen(path) {
+  if (path === _peekNotesActive?.path) return;
+  if (_peekNotesSaveTimer) { clearTimeout(_peekNotesSaveTimer); _peekNotesSaveTimer = null; _peekNotesSave(); }
+  _peekNotesInitQuill();
+  // Highlight in sidebar
+  document.querySelectorAll('#peek-notes-list .notes-list-item').forEach(el => {
+    el.classList.toggle('active', el.dataset.path === path);
+  });
+  document.getElementById('peek-notes-save-status').textContent = '';
+  const urlPath = path.replace(/\.md$/, '').split('/').map(encodeURIComponent).join('/');
+  try {
+    const r = await fetch(API + '/api/notes/' + urlPath);
+    if (!r.ok) throw new Error('not ok');
+    const data = await r.json();
+    _peekNotesActive = { path: data.path };
+    _peekNotesRawContent = data.content || '';
+    const h1html = _peekNotesRawContent.match(/<h1[^>]*>(.*?)<\/h1>/i);
+    const h1md = _peekNotesRawContent.match(/^#\s+(.+)$/m);
+    const titleFromContent = h1html ? h1html[1].replace(/<[^>]+>/g, '') : (h1md ? h1md[1] : '');
+    const titleFromPath = path.replace(/\.md$/, '').split('/').pop();
+    _peekNotesActive.title = titleFromContent || titleFromPath;
+    document.getElementById('peek-notes-title').value = _peekNotesActive.title;
+    const listEntry = _peekNotesAll.find(n => n.path === data.path);
+    if (listEntry) listEntry.name = _peekNotesActive.title;
+    _peekNotesLoading = true;
+    const isHtml = /<[a-z][\s\S]*>/i.test(_peekNotesRawContent);
+    if (isHtml) _peekQuill.root.innerHTML = _peekNotesRawContent;
+    else _peekQuill.setText(_peekNotesRawContent || '');
+    setTimeout(() => { _peekNotesLoading = false; }, 0);
+    document.getElementById('peek-notes-empty-state').style.display = 'none';
+    document.getElementById('peek-notes-mode-tabs').style.display = 'flex';
+    _peekNotesSwitchMode('preview');
+    _peekNotesUpdatePinBtn();
+    // On mobile, collapse sidebar after selecting
+    if (window.innerWidth <= 600 && _peekNotesSidebarOpen) {
+      _peekNotesSidebarOpen = false;
+      _peekNotesApplySidebarState();
+    }
+  } catch(e) {
+    showToast('Failed to load note');
+  }
+}
+
+async function _peekNotesNew() {
+  if (_peekNotesSaveTimer) { clearTimeout(_peekNotesSaveTimer); _peekNotesSaveTimer = null; _peekNotesSave(); }
+  const folder = _peekNotesFolder();
+  const existing = new Set(_peekNotesAll.map(n => n.path));
+  let filename = folder + '/untitled.md';
+  let displayName = 'Untitled';
+  if (existing.has(filename)) {
+    let i = 1;
+    while (existing.has(folder + '/untitled-' + i + '.md')) i++;
+    filename = folder + '/untitled-' + i + '.md';
+    displayName = 'Untitled ' + i;
+  }
+  const urlPath = filename.replace(/\.md$/, '').split('/').map(encodeURIComponent).join('/');
+  await apiCall(API + '/api/notes/' + urlPath, {
+    method: 'POST', headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({ content: '<h1>' + displayName + '</h1>' })
+  });
+  _peekNotesAll.unshift({ path: filename, name: displayName, updated: Math.floor(Date.now() / 1000), pinned: false, size: 0 });
+  _peekNotesRenderList(_peekNotesAll);
+  _peekNotesActive = null; // force open
+  await _peekNotesOpen(filename);
+  const ti = document.getElementById('peek-notes-title');
+  if (ti) { ti.focus(); ti.select(); }
+}
+
+function _peekNotesSaveDebounce() {
+  if (_peekNotesSaveTimer) clearTimeout(_peekNotesSaveTimer);
+  _peekNotesSaveTimer = setTimeout(_peekNotesSave, 400);
+}
+
+async function _peekNotesSave() {
+  if (!_peekNotesActive || !_peekQuill) return;
+  const content = _peekQuill.root.innerHTML === '<p><br></p>' ? '' : _peekQuill.root.innerHTML;
+  _peekNotesRawContent = content;
+  const pathKey = _peekNotesActive.path.replace(/\.md$/, '');
+  const statusEl = document.getElementById('peek-notes-save-status');
+  const result = await apiCall(API + '/api/notes/' + pathKey.split('/').map(encodeURIComponent).join('/'), {
+    method: 'POST', headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({ content })
+  });
+  if (!result) { statusEl.textContent = '◐ Offline'; }
+  else { statusEl.textContent = '✓ Saved'; setTimeout(() => { if (statusEl.textContent === '✓ Saved') statusEl.textContent = ''; }, 2000); }
+}
+
+function _peekNotesTitleChange() {
+  if (!_peekNotesActive || !_peekQuill) return;
+  const newTitle = document.getElementById('peek-notes-title').value;
+  _peekNotesActive.title = newTitle;
+  const first = _peekQuill.root.firstElementChild;
+  const isH1 = first && first.tagName === 'H1';
+  const oldLen = isH1 ? first.textContent.length : 0;
+  if (isH1) {
+    if (oldLen > 0) _peekQuill.deleteText(0, oldLen, 'api');
+    if (newTitle) _peekQuill.insertText(0, newTitle, 'api');
+  } else {
+    _peekQuill.insertText(0, (newTitle || '') + '\n', 'api');
+    _peekQuill.formatLine(0, 1, 'header', 1, 'api');
+  }
+  // Update sidebar immediately
+  const activeEl = document.querySelector('#peek-notes-list .notes-list-item.active');
+  if (activeEl) { const s = activeEl.querySelector('.nli-title'); if (s) s.textContent = newTitle || _peekNotesActive.path.replace(/\.md$/, ''); }
+  const entry = _peekNotesAll.find(n => n.path === _peekNotesActive.path);
+  if (entry) entry.name = newTitle || entry.path.replace(/\.md$/, '');
+  _peekNotesSaveDebounce();
+}
+
+async function _peekNotesDelete() {
+  if (!_peekNotesActive) return;
+  const btn = document.querySelector('#peek-notes-panel .notes-delete-btn');
+  if (btn && !btn.classList.contains('confirming')) {
+    btn.classList.add('confirming');
+    btn.textContent = 'Delete?';
+    setTimeout(() => { btn.classList.remove('confirming'); btn.innerHTML = _TRASH_SVG; }, 3000);
+    return;
+  }
+  if (btn) { btn.classList.remove('confirming'); btn.innerHTML = _TRASH_SVG; }
+  const pathKey = _peekNotesActive.path.replace(/\.md$/, '');
+  _peekNotesAll = _peekNotesAll.filter(n => n.path !== _peekNotesActive.path);
+  document.querySelector('#peek-notes-list .notes-list-item[data-path="' + _peekNotesActive.path + '"]')?.remove();
+  _peekNotesActive = null;
+  await apiCall(API + '/api/notes/' + pathKey.split('/').map(encodeURIComponent).join('/'), { method: 'DELETE' });
+  if (_peekNotesAll.length > 0) {
+    _peekNotesOpen(_peekNotesAll[0].path);
+  } else {
+    _peekNotesShowEmpty();
+    _peekNotesRenderList([]);
+  }
+}
+
+function _peekNotesSwitchMode(mode) {
+  _peekNotesMode = mode;
+  document.getElementById('peek-notes-tab-edit').classList.toggle('active', mode === 'edit');
+  document.getElementById('peek-notes-tab-preview').classList.toggle('active', mode === 'preview');
+  const quillWrap = document.getElementById('peek-notes-quill-wrap');
+  const preview = document.getElementById('peek-notes-preview');
+  if (mode === 'preview') {
+    if (_peekQuill) {
+      const rawIsHtml = /<[a-z][\s\S]*>/i.test(_peekNotesRawContent);
+      if (rawIsHtml) {
+        preview.innerHTML = _peekQuill.root.innerHTML;
+      } else {
+        preview.innerHTML = renderMarkdown(_peekNotesRawContent) || '<span style="color:var(--dim);font-size:0.85rem;">Empty note</span>';
+      }
+      preview.classList.add('md-content');
+    }
+    preview.style.display = '';
+    preview.classList.add('active');
+    quillWrap.style.display = 'none';
+  } else {
+    preview.classList.remove('active');
+    preview.style.display = 'none';
+    quillWrap.style.display = 'flex';
+  }
+}
+
+async function _peekNotesTogglePin() {
+  if (!_peekNotesActive) return;
+  const pathKey = _peekNotesActive.path.replace(/\.md$/, '');
+  const r = await apiCall(API + '/api/notes/' + pathKey.split('/').map(encodeURIComponent).join('/') + '/pin', { method: 'POST' });
+  if (r) {
+    const entry = _peekNotesAll.find(n => n.path === _peekNotesActive.path);
+    if (entry) entry.pinned = r.pinned;
+    _peekNotesUpdatePinBtn();
+    _peekNotesAll.sort((a, b) => (a.pinned === b.pinned ? 0 : a.pinned ? -1 : 1) || (b.updated - a.updated));
+    _peekNotesRenderList(_peekNotesAll);
+  }
+}
+
+function _peekNotesUpdatePinBtn() {
+  const btn = document.getElementById('peek-notes-pin-btn');
+  if (!btn) return;
+  const entry = _peekNotesAll.find(n => n.path === _peekNotesActive?.path);
+  btn.classList.toggle('pinned', !!entry?.pinned);
+  btn.style.color = entry?.pinned ? 'var(--accent)' : '';
+}
+
+function _peekNotesSearchFilter(q) {
+  if (!q.trim()) { _peekNotesRenderList(_peekNotesAll); return; }
+  const lq = q.toLowerCase();
+  _peekNotesRenderList(_peekNotesAll.filter(n =>
+    (n.name || '').toLowerCase().includes(lq) || n.path.toLowerCase().includes(lq)
+  ));
+}
+
+function _peekNotesReset() {
+  if (_peekNotesSaveTimer) { clearTimeout(_peekNotesSaveTimer); _peekNotesSaveTimer = null; _peekNotesSave(); }
+  _peekNotesActive = null;
+  _peekNotesAll = [];
+  _peekNotesSidebarOpen = true;
+  _peekNotesApplySidebarState();
+  _peekNotesShowEmpty();
+  const list = document.getElementById('peek-notes-list');
+  if (list) list.innerHTML = '';
+}
+
 function peekMemoryTab(tab) {
   document.getElementById('pm-tab-edit').classList.toggle('active', tab === 'edit');
   document.getElementById('pm-tab-preview').classList.toggle('active', tab === 'preview');
@@ -12372,6 +13954,8 @@ function openPeek(name, opts) {
   document.getElementById('peek-terminal-panel').style.display = '';
   document.getElementById('peek-memory-panel').classList.remove('active');
   document.getElementById('peek-git-panel').classList.remove('active');
+  document.getElementById('peek-commits-panel').classList.remove('active');
+  document.getElementById('peek-schedules-panel').classList.remove('active');
   // Update dir bar
   document.getElementById('peek-dir-text').textContent = peekSessionDir || '(unknown)';
   const prefillQuery = opts && opts.query ? opts.query : '';
@@ -12432,6 +14016,8 @@ function copyPeekContent() {
 }
 
 function closePeek() {
+  // Reset peek notes
+  _peekNotesReset();
   // Save command draft for this session
   if (peekSession) {
     const inp = document.getElementById('peek-cmd-input');
@@ -12536,11 +14122,12 @@ function stripAnsi(text) {
   // Strip ANSI escape sequences (colors, cursor movement, OSC hyperlinks, etc.)
   return text
     .replace(/\x1b\]8;[^\x1b]*\x1b\\/g, '')  // OSC 8 hyperlinks
-    .replace(/\x1b\[[0-9;]*[a-zA-Z]/g, '')    // CSI sequences (colors, etc.)
+    .replace(/\x1b\[[0-9;?]*[a-zA-Z]/g, '')    // CSI sequences (colors, DEC private modes, etc.)
     .replace(/\x1b\][^\x07]*\x07/g, '')        // OSC sequences (BEL terminated)
     .replace(/\x1b\][^\x1b]*\x1b\\/g, '')      // OSC sequences (ST terminated)
     .replace(/\x1b[()][A-Z0-9]/g, '')          // Character set selection
-    .replace(/\x1b[\x20-\x2f]*[\x40-\x7e]/g, '');  // Other escape sequences
+    .replace(/\x1b[\x20-\x2f]*[\x40-\x7e]/g, '')   // Other escape sequences
+    .replace(/^─{10,}\n?/gm, '');   // Remove decorative separator lines (mobile readability)
 }
 
 function linkifyOutput(text) {
@@ -12614,14 +14201,25 @@ async function refreshPeek() {
     if (peekSession !== name) return;
     const output = data.output || '(no output)';
     const atBottom = body.scrollHeight - body.scrollTop - body.clientHeight < 40;
+    // Anchor on distance-from-bottom, not scrollTop. Peek returns the
+    // tail of the buffer, so when new lines append, old lines roll off
+    // the top — every visible line shifts up by N. Preserving scrollTop
+    // would slide the user's reading position; preserving distance from
+    // the bottom keeps the same content under their eye.
+    const distFromBottom = body.scrollHeight - body.scrollTop - body.clientHeight;
     const newHTML = linkifyOutput(stripAnsi(output));
     // Re-check: user may have started selecting text during the async fetch
     if (peekSelecting || (window.getSelection()?.toString().length > 0)) return;
     // Clear sending indicator when output changes
     if (_sendingSnapshot && newHTML !== _sendingSnapshot) clearSendingIndicator();
     lastPeekHTML = newHTML;
-    applyPeekSearch();
-    if (atBottom) body.scrollTop = body.scrollHeight;
+    const hasSearch = peekSearchQuery.trim().length > 0;
+    applyPeekSearch(hasSearch);  // keepIndex=true when search is active
+    if (atBottom && !hasSearch) {
+      body.scrollTop = body.scrollHeight;
+    } else {
+      body.scrollTop = Math.max(0, body.scrollHeight - body.clientHeight - distFromBottom);
+    }
     statusEl.textContent = (data.saved ? 'Saved log' : 'Updated') + ' ' + new Date().toLocaleTimeString();
     // Cache peek output for offline browsing
     _idb.set('peek_' + peekSession, { output, time: Date.now() });
@@ -12694,6 +14292,32 @@ function togglePeekFocus() {
   const on = ov.classList.toggle('peek-focus');
   document.getElementById('peek-focus-title').textContent = peekSession || '';
   localStorage.setItem('peekFocus', on ? '1' : '');
+}
+
+function togglePeekMenu() {
+  const m = document.getElementById('peek-menu');
+  const btn = document.getElementById('peek-menu-btn');
+  if (!m || !btn) return;
+  const wasOpen = m.classList.contains('open');
+  closeAllMenus();
+  if (wasOpen) return;
+  const r = btn.getBoundingClientRect();
+  const vw = document.documentElement.clientWidth || window.innerWidth;
+  let left = r.right - 200;
+  if (left < 8) left = 8;
+  if (left + 200 > vw) left = vw - 208;
+  m.style.left = left + 'px';
+  m.style.top = (r.bottom + 4) + 'px';
+  m.style.bottom = 'auto';
+  m.classList.add('open');
+}
+function _peekMenuStop() {
+  const m = document.getElementById('peek-menu'); if (m) m.classList.remove('open');
+  if (peekSession) doStop(peekSession);
+}
+function _peekMenuRestart() {
+  const m = document.getElementById('peek-menu'); if (m) m.classList.remove('open');
+  if (peekSession) doRestart(peekSession);
 }
 
 function togglePeekCmd() {
@@ -12854,14 +14478,10 @@ async function sendPeekCmd() {
   delete _peekDrafts[peekSession];
   clearPeekFiles();
 
-  const routed = files.length === 0 && _atRoute(message);
-  if (routed) {
-    await doSend(routed.target, routed.message);
-    showToast('Sent to @' + routed.target);
-  } else {
-    message = _expandAtMentions(message);
-    await doSend(peekSession, message);
-  }
+  // In peek view, always send to the current session (don't route @mentions away).
+  // @mentions are expanded as API hints so Claude knows how to reach them.
+  message = _expandAtMentions(message);
+  await doSend(peekSession, message);
   inp.style.borderColor = 'var(--green)';
   setTimeout(() => { inp.style.borderColor = ''; }, 400);
   setTimeout(refreshPeek, 500);
@@ -13023,6 +14643,11 @@ const SLASH_COMMANDS = [
   { cmd: '/config', desc: 'Open config panel' },
   { cmd: '/amux', desc: 'Interact with amux — board, memory, sessions' },
   { cmd: '/amux-board', desc: 'Add a task or note to the board' },
+  { cmd: '/chrome-cdp', desc: 'Control live Chrome — screenshots, click, type, eval' },
+  { cmd: '/playwright-auth', desc: 'Capture and sync browser auth profiles' },
+  { cmd: '/pw-test', desc: 'Run Playwright UI tests or investigate issues' },
+  { cmd: '/record', desc: 'Record MP4 video of a browser task' },
+  { cmd: '/review-session-log', desc: 'Review a session terminal log' },
 ];
 
 // ── Customizable chip bar ──
@@ -13775,7 +15400,7 @@ function slashAcKeydown(e) {
   const el = document.getElementById('slash-ac-list');
   if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) { e.preventDefault(); sendPeekCmd(); return; }
   if (!el.classList.contains('open')) {
-    if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); sendPeekCmd(); return; }
+    if (e.key === 'Enter' && !e.shiftKey && !matchMedia('(pointer: coarse)').matches) { e.preventDefault(); sendPeekCmd(); return; }
     if (e.key === 'ArrowUp' && inp.selectionStart === 0) { e.preventDefault(); cmdHistoryUp(inp); return; }
     if (e.key === 'ArrowDown' && _cmdHistoryIdx !== -1) { e.preventDefault(); cmdHistoryDown(inp); return; }
     return;
@@ -13828,6 +15453,52 @@ function cmdHistoryAdd(text) {
 }
 
 function cmdHistoryReset() { _cmdHistoryIdx = -1; }
+
+function openCmdHistoryModal() {
+  const m = document.getElementById('cmd-history-modal');
+  if (!m) return;
+  m.classList.add('active');
+  const s = document.getElementById('cmd-history-search');
+  if (s) { s.value = ''; setTimeout(() => s.focus(), 50); }
+  _renderCmdHistoryList('');
+}
+function closeCmdHistoryModal() {
+  const m = document.getElementById('cmd-history-modal');
+  if (m) m.classList.remove('active');
+}
+function _renderCmdHistoryList(filter) {
+  const list = document.getElementById('cmd-history-list');
+  if (!list) return;
+  const q = (filter || '').trim().toLowerCase();
+  // newest first, dedupe consecutive duplicates already handled at add time
+  const items = _cmdHistory.slice().reverse();
+  const filtered = q ? items.filter(t => t.toLowerCase().includes(q)) : items;
+  if (!filtered.length) {
+    list.innerHTML = '<div style="color:var(--dim);font-size:0.85rem;padding:20px;text-align:center;">'
+      + (q ? 'No matches.' : 'No history yet.') + '</div>';
+    return;
+  }
+  list.innerHTML = filtered.map(t => {
+    const safe = t.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+    const enc = encodeURIComponent(t);
+    return '<div onclick="_pickCmdHistory(decodeURIComponent(\u0027' + enc + '\u0027))" '
+      + 'style="cursor:pointer;padding:8px 12px;background:var(--card);border:1px solid var(--border);border-radius:6px;'
+      + 'font-size:0.85rem;color:var(--text);white-space:pre-wrap;word-break:break-word;line-height:1.45;'
+      + 'transition:border-color 0.15s;" '
+      + 'onmouseenter="this.style.borderColor=\u0027var(--accent)\u0027" '
+      + 'onmouseleave="this.style.borderColor=\u0027var(--border)\u0027">' + safe + '</div>';
+  }).join('');
+}
+function _pickCmdHistory(text) {
+  const inp = document.getElementById('peek-cmd-input');
+  if (inp) {
+    inp.value = text;
+    autoGrow(inp);
+    inp.focus({ preventScroll: true });
+    requestAnimationFrame(() => { inp.selectionStart = inp.selectionEnd = inp.value.length; });
+  }
+  closeCmdHistoryModal();
+}
 
 function cmdHistoryUp(inp) {
   if (!_cmdHistory.length) return;
@@ -13915,7 +15586,7 @@ function cardSlashAcKeydown(name, e) {
   const el = document.getElementById('card-ac-' + name);
   if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) { e.preventDefault(); sendFromInput(name); return; }
   if (!el || !el.classList.contains('open')) {
-    if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); sendFromInput(name); return; }
+    if (e.key === 'Enter' && !e.shiftKey && !matchMedia('(pointer: coarse)').matches) { e.preventDefault(); sendFromInput(name); return; }
     if (e.key === 'ArrowUp' && inp && inp.selectionStart === 0) { e.preventDefault(); cmdHistoryUp(inp); return; }
     if (e.key === 'ArrowDown' && _cmdHistoryIdx !== -1) { e.preventDefault(); if (inp) cmdHistoryDown(inp); return; }
     return;
@@ -14012,7 +15683,7 @@ async function _runLogSearch() {
           const output = data.output || '';
           const lines = output.split('\n');
           const hits = [];
-          lines.forEach((l, i) => { if (l.toLowerCase().includes(q)) hits.push({ line: i + 1, text: l.replace(/\x1b\[[0-9;]*m/g, '').trim() }); });
+          lines.forEach((l, i) => { if (l.toLowerCase().includes(q)) hits.push({ line: i + 1, text: l.replace(/\x1b\[[0-9;?]*m/g, '').trim() }); });
           if (!hits.length) return null;
           return { name: s.name, hits };
         })
@@ -14037,62 +15708,77 @@ function clearPeekSearch() {
 
 // ── File preview ──
 function _csvEsc(s) { return String(s==null?'':s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
-let _csvRows = [], _csvSort = { col: -1, asc: true };
+let _csvRows = [], _csvHeader = [], _csvSort = { col: -1, asc: true }, _csvColWidths = [], _csvFrozen = false;
 
 function renderCsvTable(csv) {
   if (!csv.trim()) return '<em style="color:var(--dim)">Empty file</em>';
-  // Use Papa Parse for correct RFC 4180 parsing (handles multiline fields,
-  // escaped quotes, BOM, various delimiters, etc.)
-  const parsed = Papa.parse(csv, {
-    header: false,
-    skipEmptyLines: true,
-    dynamicTyping: false,  // keep everything as strings for display
-  });
+  const parsed = Papa.parse(csv, { header: false, skipEmptyLines: true, dynamicTyping: false });
   if (!parsed.data.length) return '<em style="color:var(--dim)">Empty file</em>';
-  const header = parsed.data[0];
+  _csvHeader = parsed.data[0];
   const allRows = parsed.data.slice(1);
   const MAX_ROWS = 2000;
   const truncated = allRows.length > MAX_ROWS;
   _csvRows = truncated ? allRows.slice(0, MAX_ROWS) : allRows;
   _csvSort = { col: -1, asc: true };
+  _csvFrozen = false;
+  // Auto-size columns: measure header + sample rows
+  _csvColWidths = _csvHeader.map((h, i) => {
+    let maxLen = (h || '').length;
+    for (let r = 0; r < Math.min(50, _csvRows.length); r++) {
+      const cell = (_csvRows[r][i] || '');
+      if (cell.length > maxLen) maxLen = cell.length;
+    }
+    return Math.max(60, Math.min(280, maxLen * 8 + 20));
+  });
   const delimLabel = parsed.meta.delimiter === '\t' ? ' · TSV' : '';
+  const metaText = `${_csvRows.length.toLocaleString()}${truncated ? '+' : ''} rows × ${_csvHeader.length} cols${delimLabel}`;
+  const truncNote = truncated ? `<span class="csv-truncated">⚠ first ${MAX_ROWS.toLocaleString()} of ${allRows.length.toLocaleString()}</span>` : '';
 
-  const metaText = `${_csvRows.length.toLocaleString()}${truncated ? '+' : ''} rows × ${header.length} cols${delimLabel}`;
-  const truncNote = truncated ? `<span class="csv-truncated">⚠ showing first ${MAX_ROWS.toLocaleString()} of ${allRows.length.toLocaleString()} rows</span>` : '';
-  const thead = '<tr>' + header.map((h,i) =>
-    `<th onclick="_csvSortBy(${i})" title="${_csvEsc(h)}">${_csvEsc(h) || '<span style="opacity:.4">#'+i+'</span>'}</th>`
+  const colgroup = '<col class="csv-rownum-col" style="width:42px">' +
+    _csvColWidths.map((w,i) => `<col data-ci="${i}" style="width:${w}px">`).join('');
+  const thead = '<tr><th class="csv-rownum">#</th>' + _csvHeader.map((h,i) =>
+    `<th data-ci="${i}"><span class="csv-th-text" onclick="_csvSortBy(${i})" title="${_csvEsc(h)}">${_csvEsc(h) || '<span style="opacity:.4">col '+i+'</span>'}</span><div class="csv-resize" data-ci="${i}"></div></th>`
   ).join('') + '</tr>';
-  const tbody = _csvRows.map((r,ri) =>
-    `<tr data-ri="${ri}">` + header.map((_,ci) => `<td title="${_csvEsc(r[ci])}">${_csvEsc(r[ci])}</td>`).join('') + '</tr>'
-  ).join('');
+  const tbody = _csvRenderRows(_csvRows);
+
+  // Schedule resize handle init after DOM render
+  setTimeout(_csvInitResize, 50);
+  setTimeout(_csvInitCellTap, 50);
 
   return `<div class="csv-toolbar">
     <span class="csv-meta">${metaText}${truncNote}</span>
+    <label style="font-size:0.72rem;display:flex;align-items:center;gap:4px;cursor:pointer;color:var(--dim);">
+      <input type="checkbox" style="width:auto;accent-color:var(--accent);" onchange="_csvToggleFreeze(this.checked)"> Freeze col
+    </label>
     <input class="csv-search" placeholder="Filter rows…" oninput="_csvFilter(this.value)" type="search">
   </div>
-  <div class="csv-wrap"><table class="csv-table" id="csv-tbl"><thead>${thead}</thead><tbody id="csv-body">${tbody}</tbody></table></div>`;
+  <div class="csv-wrap"><table class="csv-table" id="csv-tbl"><colgroup>${colgroup}</colgroup><thead>${thead}</thead><tbody id="csv-body">${tbody}</tbody></table></div>`;
+}
+
+function _csvRenderRows(rows) {
+  return rows.map((r, ri) =>
+    `<tr data-ri="${ri}"><td class="csv-rownum">${ri + 1}</td>` +
+    _csvHeader.map((_, ci) => `<td data-ci="${ci}" title="${_csvEsc(r[ci])}">${_csvEsc(r[ci])}</td>`).join('') + '</tr>'
+  ).join('');
 }
 
 function _csvSortBy(col) {
   const asc = _csvSort.col === col ? !_csvSort.asc : true;
   _csvSort = { col, asc };
-  const sorted = [..._csvRows].sort((a,b) => {
-    const av = a[col]??'', bv = b[col]??'';
+  const sorted = [..._csvRows].sort((a, b) => {
+    const av = a[col] ?? '', bv = b[col] ?? '';
     const an = parseFloat(av), bn = parseFloat(bv);
     const cmp = (!isNaN(an) && !isNaN(bn)) ? an - bn : av.localeCompare(bv);
     return asc ? cmp : -cmp;
   });
   const tbody = document.getElementById('csv-body');
   if (!tbody) return;
-  tbody.innerHTML = sorted.map((r,ri) =>
-    `<tr data-ri="${ri}">` + r.map(c => `<td title="${_csvEsc(c??'')}">${_csvEsc(c??'')}</td>`).join('') + '</tr>'
-  ).join('');
-  // Update sort indicators
-  document.querySelectorAll('#csv-tbl th').forEach((th,i) => {
-    th.classList.toggle('sort-asc', i === col && asc);
-    th.classList.toggle('sort-desc', i === col && !asc);
+  tbody.innerHTML = _csvRenderRows(sorted);
+  document.querySelectorAll('#csv-tbl thead th[data-ci]').forEach(th => {
+    const ci = parseInt(th.dataset.ci);
+    th.classList.toggle('sort-asc', ci === col && asc);
+    th.classList.toggle('sort-desc', ci === col && !asc);
   });
-  // Re-apply filter
   const q = document.querySelector('.csv-search');
   if (q && q.value) _csvFilter(q.value);
 }
@@ -14109,8 +15795,79 @@ function _csvFilter(q) {
   if (meta) {
     if (!meta.dataset.base) meta.dataset.base = meta.firstChild.textContent || '';
     const base = meta.dataset.base;
-    if (meta.firstChild) meta.firstChild.textContent = lower ? `${vis} match${vis!==1?'es':''} · ${base}` : base;
+    if (meta.firstChild) meta.firstChild.textContent = lower ? `${vis} match${vis !== 1 ? 'es' : ''} · ${base}` : base;
   }
+}
+
+function _csvToggleFreeze(on) {
+  const tbl = document.getElementById('csv-tbl');
+  if (tbl) tbl.classList.toggle('csv-frozen', on);
+  _csvFrozen = on;
+}
+
+// ── Column resize (drag handles) ──
+function _csvInitResize() {
+  const tbl = document.getElementById('csv-tbl');
+  if (!tbl) return;
+  tbl.querySelectorAll('.csv-resize').forEach(handle => {
+    const start = (startX, ci) => {
+      const col = tbl.querySelector(`colgroup col[data-ci="${ci}"]`);
+      if (!col) return;
+      const startW = parseInt(col.style.width) || 100;
+      handle.classList.add('active');
+      const move = (x) => {
+        const newW = Math.max(40, startW + (x - startX));
+        col.style.width = newW + 'px';
+        _csvColWidths[ci] = newW;
+      };
+      const up = () => {
+        handle.classList.remove('active');
+        document.removeEventListener('mousemove', onMM);
+        document.removeEventListener('mouseup', up);
+        document.removeEventListener('touchmove', onTM);
+        document.removeEventListener('touchend', up);
+      };
+      const onMM = (e) => { e.preventDefault(); move(e.clientX); };
+      const onTM = (e) => { if (e.touches[0]) move(e.touches[0].clientX); };
+      document.addEventListener('mousemove', onMM);
+      document.addEventListener('mouseup', up);
+      document.addEventListener('touchmove', onTM, { passive: true });
+      document.addEventListener('touchend', up);
+    };
+    handle.addEventListener('mousedown', (e) => { e.preventDefault(); e.stopPropagation(); start(e.clientX, parseInt(handle.dataset.ci)); });
+    handle.addEventListener('touchstart', (e) => { e.stopPropagation(); if (e.touches[0]) start(e.touches[0].clientX, parseInt(handle.dataset.ci)); }, { passive: true });
+  });
+}
+
+// ── Cell tap to expand (mobile-friendly) ──
+let _csvPopEl = null;
+function _csvInitCellTap() {
+  const tbl = document.getElementById('csv-tbl');
+  if (!tbl) return;
+  const dismiss = () => { if (_csvPopEl) { _csvPopEl.remove(); _csvPopEl = null; } };
+  tbl.addEventListener('click', (e) => {
+    const td = e.target.closest('td[data-ci]');
+    if (!td) { dismiss(); return; }
+    // Remove previous active
+    tbl.querySelectorAll('.csv-cell-active').forEach(c => c.classList.remove('csv-cell-active'));
+    dismiss();
+    td.classList.add('csv-cell-active');
+    const text = td.getAttribute('title') || td.textContent;
+    // Only show popover if content is truncated or on mobile
+    if (td.scrollWidth <= td.clientWidth + 2 && window.innerWidth > 600) return;
+    const pop = document.createElement('div');
+    pop.className = 'csv-cell-pop';
+    pop.textContent = text;
+    const rect = td.getBoundingClientRect();
+    pop.style.left = Math.min(rect.left, window.innerWidth - 320) + 'px';
+    pop.style.top = (rect.bottom + 4) + 'px';
+    document.body.appendChild(pop);
+    _csvPopEl = pop;
+    // Ensure it doesn't overflow screen
+    const popRect = pop.getBoundingClientRect();
+    if (popRect.bottom > window.innerHeight - 20) pop.style.top = (rect.top - popRect.height - 4) + 'px';
+  });
+  document.addEventListener('click', (e) => { if (_csvPopEl && !e.target.closest('.csv-cell-pop') && !e.target.closest('td[data-ci]')) dismiss(); });
 }
 
 let _fileData = null;
@@ -14168,7 +15925,7 @@ function _renderFileBody(data, mode) {
   // Text files — Raw / Edit / Preview
   const editWrap = document.getElementById('file-edit-wrap');
   const editTa = document.getElementById('file-edit-ta');
-  if (mode === 'edit' && data.is_markdown) {
+  if (mode === 'edit' && (data.is_markdown || data._isNew)) {
     body.style.display = 'none';
     editWrap.style.display = 'flex';
     editTa.value = data.content;
@@ -14246,7 +16003,7 @@ function setFileViewMode(mode) {
   document.getElementById('file-tab-raw').classList.toggle('active', mode === 'raw');
   const editTab = document.getElementById('file-tab-edit');
   if (editTab) editTab.classList.toggle('active', mode === 'edit');
-  document.getElementById('file-save-btn').style.display = (mode === 'edit' && _fileData && _fileData.is_markdown) ? '' : 'none';
+  document.getElementById('file-save-btn').style.display = (mode === 'edit' && _fileData && (_fileData.is_markdown || _fileData._isNew)) ? '' : 'none';
   if (_fileData) _renderFileBody(_fileData, mode);
 }
 
@@ -14277,15 +16034,13 @@ async function openFilePreview(path) {
       document.getElementById('file-view-tabs').style.display = '';
       // Show Edit tab only for markdown
       document.getElementById('file-tab-edit').style.display = data.is_markdown ? '' : 'none';
+      document.getElementById('file-tab-teleprompter').style.display = data.is_markdown ? '' : 'none';
     }
-    // Show download button for binary/audio/video/image (not text — they use copy)
-    if (!isTextFile) {
-      const dlBtn = document.getElementById('file-download-btn');
-      const rawUrl = API + '/api/file/raw?path=' + encodeURIComponent(data.path);
-      dlBtn.href = rawUrl;
-      dlBtn.download = data.path.split('/').pop();
-      dlBtn.style.display = '';
-    }
+    // Show download button for all files
+    const dlBtn = document.getElementById('file-download-btn');
+    dlBtn.dataset.url = API + '/api/file/raw?path=' + encodeURIComponent(data.path);
+    dlBtn.dataset.filename = data.path.split('/').pop();
+    dlBtn.style.display = '';
     _renderFileBody(data, _fileViewMode);
     // Update cache
     _idb.setFile(path, { type: 'file', data });
@@ -14314,14 +16069,39 @@ function closeFilePreview() {
   document.getElementById('file-overlay').classList.remove('active');
   document.getElementById('file-download-btn').style.display = 'none';
   document.getElementById('file-save-btn').style.display = 'none';
+  const tpTab = document.getElementById('file-tab-teleprompter');
+  if (tpTab) tpTab.style.display = 'none';
   document.getElementById('file-edit-wrap').style.display = 'none';
   document.getElementById('file-body').style.display = '';
   _fileData = null;
   _fileViewMode = 'preview';
 }
 
+async function _fileDownload() {
+  const dlBtn = document.getElementById('file-download-btn');
+  const url = dlBtn.dataset.url;
+  const filename = dlBtn.dataset.filename || 'download';
+  try {
+    dlBtn.textContent = '⏳ …';
+    const r = await fetch(url);
+    if (!r.ok) throw new Error('HTTP ' + r.status);
+    const blob = await r.blob();
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(blob);
+    a.download = filename;
+    document.body.appendChild(a);
+    a.click();
+    setTimeout(() => { URL.revokeObjectURL(a.href); a.remove(); }, 1000);
+    dlBtn.textContent = '✓ Done';
+    setTimeout(() => { dlBtn.textContent = '⬇ Download'; }, 2000);
+  } catch(e) {
+    dlBtn.textContent = '⬇ Download';
+    alert('Download failed: ' + e.message);
+  }
+}
+
 async function _fileSave() {
-  if (!_fileData || !_fileData.is_markdown) return;
+  if (!_fileData || (!_fileData.is_markdown && !_fileData._isNew)) return;
   const ta = document.getElementById('file-edit-ta');
   const btn = document.getElementById('file-save-btn');
   const content = ta.value;
@@ -14335,11 +16115,16 @@ async function _fileSave() {
     });
     const d = await r.json();
     if (d.ok) {
-      _fileData.content = content; // keep in sync
+      _fileData.content = content;
+      if (_fileData._isNew) {
+        _fileData._isNew = false;
+        document.getElementById('file-title').textContent = _fileData.path.split('/').pop();
+        loadFiles(_filesPath); // refresh file list
+      }
       btn.textContent = 'Saved!';
       setTimeout(() => { btn.textContent = 'Save'; btn.classList.remove('saving'); }, 1500);
     } else {
-      btn.textContent = 'Error';
+      btn.textContent = d.error || 'Error';
       btn.classList.remove('saving');
       setTimeout(() => { btn.textContent = 'Save'; }, 2000);
     }
@@ -14427,6 +16212,27 @@ function _fileTypeIcon(name, type) {
 let _filesPath = '/';
 let _filesCwd = '/';   // saved working directory (persisted on server)
 let _filesShowHidden = false;
+
+async function openInFinder() {
+  const path = _filesPath || '/';
+  // If accessing remote server, construct smb:// or sftp:// URL for Finder
+  const isRemote = location.hostname !== 'localhost' && location.hostname !== '127.0.0.1' && !location.hostname.endsWith('.local');
+  if (isRemote) {
+    // Open as SFTP remote folder in Finder via sftp:// URL scheme
+    const host = location.hostname;
+    const url = 'sftp://' + host + path;
+    window.open(url, '_blank');
+    showToast('Opening remote folder: ' + host + ':' + path);
+    return;
+  }
+  try {
+    const r = await apiCall(API + '/api/fs/open', {
+      method: 'POST', headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({ path })
+    });
+    if (r) showToast('Opened in Finder');
+  } catch(e) { showToast('Failed to open folder'); }
+}
 
 // ── File bookmarks (quick-access folders) ──
 const _FILES_HOME = window._AMUX_HOME || '/root';
@@ -14536,7 +16342,7 @@ async function loadFiles(path) {
   _filesPath = path;
   // Update URL hash so path is shareable / bookmarkable (hash works in PWA mode)
   try {
-    history.replaceState({}, '', location.pathname + (path && path !== '/' ? '#path=' + encodeURIComponent(path) : ''));
+    history.replaceState({}, '', location.pathname + (path && path !== '/' ? '#path=' + _encodeHashPath(path) : ''));
   } catch(e) {}
   const srch = document.getElementById('files-search'); if (srch) srch.value = '';
   _updateFilesCwdBtn();
@@ -14651,6 +16457,32 @@ function _filesSearchFilter(q) {
   if (!body || !_filesLastData) return;
   const { path, data, cacheTs } = _filesLastData;
   _renderFilesEntries(body, path, data, cacheTs);
+}
+
+function _filesNewFile() {
+  const name = prompt('File name (e.g. notes.txt, script.py, data.json):');
+  if (!name || !name.trim()) return;
+  const fname = name.trim();
+  const fpath = (_filesPath || '/').replace(/\/$/, '') + '/' + fname;
+  // Open the file overlay in edit mode with empty content
+  _fileData = { path: fpath, content: '', is_markdown: /\.md$/i.test(fname), _isNew: true };
+  _fileViewMode = 'edit';
+  document.getElementById('file-title').textContent = fname + ' (new)';
+  document.getElementById('file-body').className = 'file-overlay-body';
+  document.getElementById('file-body').style.display = 'none';
+  document.getElementById('file-view-tabs').style.display = '';
+  document.getElementById('file-tab-preview').classList.remove('active');
+  document.getElementById('file-tab-raw').classList.remove('active');
+  const editTab = document.getElementById('file-tab-edit');
+  if (editTab) { editTab.style.display = ''; editTab.classList.add('active'); }
+  document.getElementById('file-save-btn').style.display = '';
+  document.getElementById('file-download-btn').style.display = 'none';
+  const ta = document.getElementById('file-edit-ta');
+  const wrap = document.getElementById('file-edit-wrap');
+  ta.value = '';
+  wrap.style.display = 'flex';
+  document.getElementById('file-overlay').classList.add('active');
+  setTimeout(() => ta.focus(), 100);
 }
 
 function triggerFilesUpload() {
@@ -14831,6 +16663,23 @@ function _showExploreMenu(path, btn, type) {
   copyItem.textContent = 'Copy path';
   copyItem.onclick = () => { popup.remove(); _copyExplorePath(path); };
   popup.appendChild(copyItem);
+  // Delete
+  const delItem = document.createElement('button');
+  delItem.className = 'explore-menu-item';
+  delItem.style.color = 'var(--red, #f85149)';
+  delItem.textContent = type === 'directory' ? 'Delete folder' : 'Delete file';
+  delItem.onclick = async () => {
+    popup.remove();
+    const name = path.split('/').pop();
+    if (!confirm('Delete "' + name + '"? This cannot be undone.')) return;
+    try {
+      const r = await fetch(API + '/api/fs/delete', { method: 'DELETE', headers: {'Content-Type':'application/json'}, body: JSON.stringify({ path }) });
+      const d = await r.json();
+      if (r.ok) { showToast('Deleted ' + name); loadExplore(_explorePath); }
+      else showToast('Delete failed: ' + (d.error || r.status));
+    } catch(e) { showToast('Delete error: ' + e.message); }
+  };
+  popup.appendChild(delItem);
   document.body.appendChild(popup);
   // Position near button
   const r = btn.getBoundingClientRect();
@@ -14863,6 +16712,23 @@ function _showFilesMenu(path, btn, type) {
   linkItem.textContent = 'Copy link';
   linkItem.onclick = () => { popup.remove(); _copyFileDeeplink(path); };
   popup.appendChild(linkItem);
+  // Delete
+  const delItem = document.createElement('button');
+  delItem.className = 'explore-menu-item';
+  delItem.style.color = 'var(--red, #f85149)';
+  delItem.textContent = type === 'directory' ? 'Delete folder' : 'Delete file';
+  delItem.onclick = async () => {
+    popup.remove();
+    const name = path.split('/').pop();
+    if (!confirm('Delete "' + name + '"? This cannot be undone.')) return;
+    try {
+      const r = await fetch(API + '/api/fs/delete', { method: 'DELETE', headers: {'Content-Type':'application/json'}, body: JSON.stringify({ path }) });
+      const d = await r.json();
+      if (r.ok) { showToast('Deleted ' + name); loadFiles(_filesPath); }
+      else showToast('Delete failed: ' + (d.error || r.status));
+    } catch(e) { showToast('Delete error: ' + e.message); }
+  };
+  popup.appendChild(delItem);
   document.body.appendChild(popup);
   const r = btn.getBoundingClientRect();
   const pw = popup.offsetWidth || 160;
@@ -14891,9 +16757,12 @@ function _copyExplorePathFallback(path) {
   try { document.execCommand('copy'); } catch(e) {}
   document.body.removeChild(ta);
 }
+function _encodeHashPath(p) {
+  // Encode only chars that break fragment parsing - keep slashes readable
+  return p.replace(/%/g,'%25').replace(/#/g,'%23').replace(/\?/g,'%3F').replace(/ /g,'%20');
+}
 function _copyFileDeeplink(path) {
-  // Use hash (#path=...) — works in PWA mode (SW never strips fragments, no query-param loss on iOS)
-  const url = location.origin + location.pathname + '#path=' + encodeURIComponent(path);
+  const url = location.origin + location.pathname + '#path=' + _encodeHashPath(path);
   if (navigator.clipboard && navigator.clipboard.writeText) {
     navigator.clipboard.writeText(url).then(() => showToast('Link copied'), () => _copyFileDeeplinkFallback(url));
   } else {
@@ -15542,8 +17411,99 @@ function _peekOpenLink(e) {
 }
 document.getElementById('peek-body').addEventListener('click', _peekOpenLink);
 document.getElementById('peek-body').addEventListener('touchend', _peekOpenLink, {passive: false});
-document.addEventListener('mouseup', () => { peekCheckSelection(); });
-document.addEventListener('touchend', () => { peekCheckSelection(); });
+document.addEventListener('mouseup', () => { peekCheckSelection(); _peekShowSelPopover(); });
+document.addEventListener('touchend', () => { peekCheckSelection(); setTimeout(_peekShowSelPopover, 50); });
+
+// ── Peek selection popover (Look up / Copy) ──
+function _peekShowSelPopover() {
+  const sel = window.getSelection();
+  const text = sel ? sel.toString().trim() : '';
+  const body = document.getElementById('peek-body');
+  // Only show when selection is inside peek body
+  if (!text || !body || !sel.anchorNode || !body.contains(sel.anchorNode)) {
+    _peekHideSelPopover();
+    return;
+  }
+  let pop = document.getElementById('peek-sel-popover');
+  if (!pop) {
+    pop = document.createElement('div');
+    pop.id = 'peek-sel-popover';
+    pop.style.cssText = 'position:fixed;z-index:10000;background:#1a1a2e;border:1px solid #444;border-radius:8px;box-shadow:0 6px 20px rgba(0,0,0,0.5);padding:4px;display:flex;gap:2px;font-size:0.78rem;';
+    pop.innerHTML = '<button id="peek-sel-lookup" style="background:none;border:none;color:#c7d2fe;padding:6px 10px;cursor:pointer;border-radius:5px;">&#x1F50D; Look up</button><button id="peek-sel-copy" style="background:none;border:none;color:#c7d2fe;padding:6px 10px;cursor:pointer;border-radius:5px;">Copy</button>';
+    document.body.appendChild(pop);
+    pop.querySelector('#peek-sel-lookup').onclick = (e) => { e.stopPropagation(); _peekLookupSelection(); };
+    pop.querySelector('#peek-sel-copy').onclick = (e) => {
+      e.stopPropagation();
+      const t = window.getSelection()?.toString() || '';
+      if (t) navigator.clipboard?.writeText(t);
+      _peekHideSelPopover();
+    };
+    pop.addEventListener('mousedown', (e) => e.preventDefault()); // don't kill selection
+  }
+  // Position above the selection
+  const range = sel.getRangeAt(0);
+  const rect = range.getBoundingClientRect();
+  pop.style.display = 'flex';
+  // Default above selection; if no room, put below
+  const popH = 36;
+  const popW = 160;
+  let top = rect.top - popH - 8;
+  if (top < 8) top = rect.bottom + 8;
+  let left = rect.left + (rect.width / 2) - (popW / 2);
+  left = Math.max(8, Math.min(left, window.innerWidth - popW - 8));
+  pop.style.top = top + 'px';
+  pop.style.left = left + 'px';
+}
+function _peekHideSelPopover() {
+  const pop = document.getElementById('peek-sel-popover');
+  if (pop) pop.style.display = 'none';
+}
+async function _peekLookupSelection() {
+  const text = window.getSelection()?.toString().trim() || '';
+  if (!text) return;
+  _peekHideSelPopover();
+  _peekShowLookupModal(text, null, true);
+  try {
+    const r = await fetch(API + '/api/lookup', {
+      method: 'POST', headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({ text })
+    });
+    const d = await r.json();
+    if (d.error) {
+      _peekShowLookupModal(text, 'Error: ' + d.error, false);
+    } else {
+      _peekShowLookupModal(text, d.text || '(no response)', false);
+    }
+  } catch (e) {
+    _peekShowLookupModal(text, 'Lookup failed: ' + e.message, false);
+  }
+}
+function _peekShowLookupModal(query, result, loading) {
+  let modal = document.getElementById('peek-lookup-modal');
+  if (!modal) {
+    modal = document.createElement('div');
+    modal.id = 'peek-lookup-modal';
+    modal.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,0.7);z-index:10001;display:flex;align-items:center;justify-content:center;padding:20px;';
+    modal.innerHTML = '<div style="background:#1a1a2e;border:1px solid #444;border-radius:12px;max-width:560px;width:100%;max-height:80vh;overflow:auto;padding:20px;box-shadow:0 24px 64px rgba(0,0,0,0.6);color:#e8e8e8;position:relative;"><button id="peek-lookup-close" style="position:absolute;top:10px;right:12px;background:none;border:none;color:#aaa;font-size:1.1rem;cursor:pointer;">&#x2715;</button><div style="font-size:0.7rem;color:#888;text-transform:uppercase;letter-spacing:0.05em;margin-bottom:6px;">Looking up</div><div id="peek-lookup-query" style="font-family:monospace;font-size:0.85rem;background:#111;padding:8px 12px;border-radius:6px;margin-bottom:14px;word-break:break-word;max-height:120px;overflow:auto;"></div><div style="font-size:0.7rem;color:#888;text-transform:uppercase;letter-spacing:0.05em;margin-bottom:6px;">Explanation</div><div id="peek-lookup-result" style="font-size:0.92rem;line-height:1.55;white-space:pre-wrap;"></div></div>';
+    document.body.appendChild(modal);
+    modal.querySelector('#peek-lookup-close').onclick = () => { modal.style.display = 'none'; };
+    modal.addEventListener('click', (e) => { if (e.target === modal) modal.style.display = 'none'; });
+    document.addEventListener('keydown', (e) => {
+      if (e.key === 'Escape' && modal.style.display !== 'none') modal.style.display = 'none';
+    });
+  }
+  modal.querySelector('#peek-lookup-query').textContent = query;
+  modal.querySelector('#peek-lookup-result').textContent = loading ? 'Looking up…' : result;
+  modal.style.display = 'flex';
+}
+// Hide popover on click outside
+document.addEventListener('mousedown', (e) => {
+  const pop = document.getElementById('peek-sel-popover');
+  if (pop && pop.style.display !== 'none' && !pop.contains(e.target)) {
+    // Let the new selection check handle re-showing
+    setTimeout(() => { if (!window.getSelection()?.toString().trim()) _peekHideSelPopover(); }, 10);
+  }
+});
 
 // ── Clipboard: copy/paste events (most reliable in Chrome PWA desktop) ──
 // The 'copy' and 'paste' DOM events give direct clipboardData access without
@@ -15741,7 +17701,11 @@ document.addEventListener('keydown', (e) => {
     return;
   }
   if (!document.getElementById('peek-overlay').classList.contains('active')) return;
-  if (e.key === 'Escape') { e.preventDefault(); closePeek(); return; }
+  if (e.key === 'Escape') {
+    const histM = document.getElementById('cmd-history-modal');
+    if (histM && histM.classList.contains('active')) { e.preventDefault(); closeCmdHistoryModal(); return; }
+    e.preventDefault(); closePeek(); return;
+  }
   // Ctrl+C with no selection → send interrupt; Ctrl+X (outside input) → send Ctrl-X
   if ((e.metaKey || e.ctrlKey) && !e.altKey && !e.shiftKey) {
     const ae = document.activeElement;
@@ -16143,6 +18107,12 @@ let boardOwnerFilter = localStorage.getItem('amux_board_owner') || 'human';
 let _sessionGroupCollapsed = JSON.parse(localStorage.getItem('amux_board_collapsed') || '{}');
 let _tagGroupCollapsed = JSON.parse(localStorage.getItem('amux_status_collapsed') || '{}');
 let _collapsedCols = new Set(JSON.parse(localStorage.getItem('amux_col_collapsed') || '[]'));
+let _boardColPages = {};  // tracks how many cards to show per column (lazy load)
+
+function _boardShowMore(colId, pageSize) {
+  _boardColPages[colId] = (_boardColPages[colId] || pageSize) + pageSize;
+  renderBoard();
+}
 
 const _BUILT_IN_STATUS_STYLE = {
   'backlog':   {bg:'rgba(88,166,255,0.12)',color:'var(--accent)',border:'rgba(88,166,255,0.3)',dot:'var(--accent)'},
@@ -16198,21 +18168,23 @@ let _crmSidebarOpen = localStorage.getItem('amux_crm_sidebar') !== 'closed';
 function switchView(view) {
   if (document.getElementById('grid-view').classList.contains('active')) exitGridMode();
   activeView = view;
-  const _svIds = ['session','board','notifications','scheduler','files','logs','notes','crm','map','metrics','torrents','terminal','graph','journal'];
-  const _svNames = ['sessions','board','notifications','scheduler','files','logs','notes','crm','map','metrics','torrents','terminal','graph','journal'];
-  const _svDisplay = ['','','flex','','flex','flex','flex','flex','flex','flex','flex','flex','flex','flex'];
+  const _svIds = ['session','board','calendar','scheduler','files','logs','notes','crm','map','metrics','torrents','terminal','browser','graph','journal'];
+  const _svNames = ['sessions','board','calendar','scheduler','files','logs','notes','crm','map','metrics','torrents','terminal','browser','graph','journal'];
+  const _svDisplay = ['','','flex','','flex','flex','flex','flex','flex','flex','flex','flex','','flex','flex'];
   for (let i = 0; i < _svIds.length; i++) {
     const ve = document.getElementById(_svIds[i] + '-view');
     if (ve) ve.style.display = view === _svNames[i] ? (_svDisplay[i] || '') : 'none';
     const te = document.getElementById('tab-' + _svNames[i]);
     if (te) te.classList.toggle('active', view === _svNames[i]);
   }
+  if (view === 'calendar') { fetchBoard().then(() => { _fcInit(); }); }
   if (view === 'torrents') _torrentLoad();
   if (view === 'terminal') _termInit();
   if (view === 'graph') _graphInit();
   if (view === 'crm') { _crmDirty = false; _crmLoad(); _crmApplySidebarState(); } // always refresh on tab switch
   if (view === 'map') { _mapLoad(); _mapInit(); }
   if (view === 'metrics') { _metricsLoad(); _metricsApplySidebarState(); } // always refresh on tab switch
+  if (view === 'browser') _bwInit();
   if (view === 'journal') _journalInit();
   if (view === 'files') loadFiles(_filesPath);
   else {
@@ -16223,9 +18195,8 @@ function switchView(view) {
       setTimeout(() => openPeek(_sess), 50);
     }
   }
-  if (view === 'notifications') _notificationsLoad();
   if (view === 'notes') {
-    _notesInitQuill(); _notesApplySidebarState();
+    _notesInitQuill(); _notesApplySidebarState(); _notesBindSwipeGestures();
     _notesDirty = false;
     _notesLoad(); // always refresh list on tab switch
   }
@@ -16934,7 +18905,7 @@ async function fetchRawLogs() {
 }
 
 function _stripAnsi(s) {
-  return s.replace(/\x1b\[[0-9;]*[A-Za-z]/g, '').replace(/\x1b\][^\x07]*(\x07|$)/g, '');
+  return s.replace(/\x1b\[[0-9;?]*[A-Za-z]/g, '').replace(/\x1b\][^\x07]*(\x07|$)/g, '');
 }
 
 function renderRawLogs() {
@@ -17173,23 +19144,27 @@ function renderScheduler() {
               style="width:auto;accent-color:var(--accent);">
           </label>
           <div style="flex:1;min-width:0;">
-            <div style="font-weight:600;font-size:0.85rem;">${esc(s.title)}</div>
+            <div style="font-weight:600;font-size:0.85rem;">${esc(s.title)} <span style="font-weight:400;font-size:0.68rem;color:var(--dim);user-select:all;">${esc(s.id)}</span></div>
             <div style="font-size:0.72rem;color:var(--dim);margin-top:2px;">
               <span style="color:var(--accent);">${esc(s.session)}</span>
-              &nbsp;·&nbsp;<code style="font-size:0.7rem;background:var(--card);border:1px solid var(--border);border-radius:3px;padding:0 3px;">${esc(s.command)}</code>
+              &nbsp;·&nbsp;<code style="font-size:0.7rem;background:var(--card);border:1px solid var(--border);border-radius:3px;padding:0 3px;">${esc(s.command.length > 60 ? s.command.slice(0,60) + '…' : s.command)}</code>
             </div>
             <div style="font-size:0.7rem;color:var(--dim);margin-top:5px;display:flex;gap:10px;flex-wrap:wrap;">
               <span>🔁 ${esc(recLabel)}</span>
               <span>▶ next: <strong style="color:var(--text);">${esc(nextRun)}</strong></span>
               <span>✓ last: ${esc(lastRun)}</span>
               <span>runs: <strong>${s.run_count || 0}</strong></span>
+              ${s.watch ? `<span style="color:var(--accent);">👁 watching</span>` : ''}
+              ${s.done_pattern ? `<span style="color:var(--dim);">stop: <code style="font-size:0.65rem;">${esc(s.done_pattern)}</code></span>` : ''}
             </div>
-          </div>
-          <div style="display:flex;gap:4px;flex-shrink:0;">
-            <button class="btn" style="font-size:0.7rem;padding:2px 8px;"
-              onclick="openSchedModal('${esc(s.id)}')">Edit</button>
-            <button class="btn" style="font-size:0.7rem;padding:2px 8px;color:var(--red);"
-              onclick="deleteSchedule('${esc(s.id)}')">Delete</button>
+            <div style="display:flex;gap:6px;margin-top:8px;flex-wrap:wrap;">
+              <button class="btn" style="font-size:0.72rem;padding:4px 12px;"
+                onclick="runScheduleNow('${esc(s.id)}')">Run Now</button>
+              <button class="btn" style="font-size:0.72rem;padding:4px 12px;"
+                onclick="openSchedModal('${esc(s.id)}')">Edit</button>
+              <button class="btn" style="font-size:0.72rem;padding:4px 12px;color:var(--red);"
+                onclick="deleteSchedule('${esc(s.id)}')">Delete</button>
+            </div>
           </div>
         </div>
       </div>`;
@@ -17210,6 +19185,16 @@ function renderScheduler() {
         ${r.note ? `<span style="color:var(--red);max-width:160px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;" title="${esc(r.note)}">${esc(r.note)}</span>` : ''}
       </div>`;
     }).join('');
+  }
+}
+
+async function runScheduleNow(id) {
+  const r = await apiCall(API + '/api/schedules/' + id + '/run', {
+    method: 'POST', headers: {'Content-Type':'application/json'}, body: '{}'
+  });
+  if (r) {
+    await Promise.all([fetchSchedules(), fetchSchedulerRuns()]);
+    renderScheduler();
   }
 }
 
@@ -17543,7 +19528,11 @@ function _renderBoardBySession(visible, container) {
     html += '<div class="board-session-counts">' + _sessionCountsHtml(humanItems) + '</div></div>';
     if (!collapsed) {
       html += '<div class="board-session-items">';
-      humanItems.forEach(function(item) { html += _renderBoardCard(item); });
+      const _hPage = _boardColPages['__human__'] || 20;
+      const _hVisible = humanItems.slice(0, _hPage);
+      const _hRem = humanItems.length - _hPage;
+      _hVisible.forEach(function(item) { html += _renderBoardCard(item); });
+      if (_hRem > 0) html += '<button class="board-add-btn" style="color:var(--accent);border-color:var(--accent);opacity:0.8;" onclick="event.stopPropagation();_boardShowMore(\'__human__\',20)">Show ' + Math.min(_hRem, 20) + ' more (' + _hRem + ' remaining)</button>';
       html += '</div>';
     }
     html += '</div>';
@@ -17561,7 +19550,11 @@ function _renderBoardBySession(visible, container) {
     html += '<div class="board-session-counts">' + _sessionCountsHtml(items) + '</div></div>';
     if (!collapsed) {
       html += '<div class="board-session-items">';
-      items.forEach(function(item) { html += _renderBoardCard(item); });
+      const _sPage = _boardColPages[groupKey] || 20;
+      const _sVisible = items.slice(0, _sPage);
+      const _sRem = items.length - _sPage;
+      _sVisible.forEach(function(item) { html += _renderBoardCard(item); });
+      if (_sRem > 0) html += '<button class="board-add-btn" style="color:var(--accent);border-color:var(--accent);opacity:0.8;" onclick="event.stopPropagation();_boardShowMore(\'' + esc(groupKey) + '\',20)">Show ' + Math.min(_sRem, 20) + ' more (' + _sRem + ' remaining)</button>';
       html += '</div>';
     }
     html += '</div>';
@@ -17655,8 +19648,24 @@ function renderBoard() {
     if (stCol.length === 0) {
       html += '<div class="board-empty">Nothing here</div>';
     }
-    stCol.sort((a, b) => (b.pinned || 0) - (a.pinned || 0));
-    stCol.forEach(item => { html += _renderBoardCard(item); });
+    stCol.sort((a, b) => {
+      const pp = (b.pinned || 0) - (a.pinned || 0);
+      if (pp !== 0) return pp;
+      const ap = a.pos || 0, bp = b.pos || 0;
+      // Items without a pos (=0) sort to the bottom, ordered by recency
+      if (ap === 0 && bp === 0) return (b.updated || 0) - (a.updated || 0);
+      if (ap === 0) return 1;
+      if (bp === 0) return -1;
+      return ap - bp;
+    });
+    const PAGE_SIZE = 20;
+    const showCount = _boardColPages[st] || PAGE_SIZE;
+    const visibleCards = stCol.slice(0, showCount);
+    const remaining = stCol.length - showCount;
+    visibleCards.forEach(item => { html += _renderBoardCard(item); });
+    if (remaining > 0) {
+      html += '<button class="board-add-btn" style="color:var(--accent);border-color:var(--accent);opacity:0.8;" onclick="event.stopPropagation();_boardShowMore(\'' + st + '\',' + PAGE_SIZE + ')">Show ' + Math.min(remaining, PAGE_SIZE) + ' more (' + remaining + ' remaining)</button>';
+    }
     if (st === 'done' && stCol.length > 0) {
       html += '<button class="board-add-btn" style="color:var(--red);border-color:rgba(248,81,73,0.2);" onclick="clearDone()">Clear done</button>';
     }
@@ -17721,10 +19730,28 @@ function renderBoard() {
           document.body.classList.remove('board-dragging');
           const id = evt.item.dataset.id;
           const newStatus = evt.to.dataset.col;
-          if (id && newStatus) {
-            const item = boardItems.find(i => i.id === id);
-            if (item && item.status !== newStatus) moveBoardItem(id, newStatus);
+          if (!id || !newStatus) {
+            if (_boardRenderPending) { _boardRenderPending = false; renderBoard(); }
+            return;
           }
+          // Compute fractional position from DOM neighbors in the destination column
+          const cards = [...evt.to.querySelectorAll('.board-card[data-id]')];
+          const myIdx = cards.findIndex(el => el.dataset.id === id);
+          const prevEl = myIdx > 0 ? cards[myIdx - 1] : null;
+          const nextEl = myIdx >= 0 && myIdx < cards.length - 1 ? cards[myIdx + 1] : null;
+          const prevItem = prevEl ? boardItems.find(i => i.id === prevEl.dataset.id) : null;
+          const nextItem = nextEl ? boardItems.find(i => i.id === nextEl.dataset.id) : null;
+          const prevPos = prevItem && prevItem.pos ? prevItem.pos : null;
+          const nextPos = nextItem && nextItem.pos ? nextItem.pos : null;
+          let newPos;
+          if (prevPos != null && nextPos != null) newPos = (prevPos + nextPos) / 2;
+          else if (prevPos != null) newPos = prevPos + 1024;
+          else if (nextPos != null) newPos = nextPos - 1024;
+          else newPos = Date.now() / 1000;  // empty column — seed from time
+          const item = boardItems.find(i => i.id === id);
+          const statusChanged = item && item.status !== newStatus;
+          const posChanged = !item || item.pos !== newPos;
+          if (statusChanged || posChanged) moveBoardItem(id, newStatus, newPos);
           // Flush any renderBoard() calls that were deferred during the drag
           if (_boardRenderPending) { _boardRenderPending = false; renderBoard(); }
         }
@@ -17808,6 +19835,20 @@ function updateSchedRecUI() {
   document.getElementById('sched-monthday-field').style.display = rec === 'monthly' ? '' : 'none';
   document.getElementById('sched-time-field').style.display = rec === 'hourly' ? 'none' : '';
 }
+function updateSchedWatchUI() {
+  document.getElementById('sched-watch-fields').style.display =
+    document.getElementById('sched-watch').checked ? '' : 'none';
+}
+function updateSchedKindUI() {
+  const kind = document.getElementById('sched-kind').value;
+  document.getElementById('sched-session-group').style.display = kind === 'shell' ? 'none' : '';
+  document.getElementById('sched-command-label').textContent = kind === 'shell' ? 'Shell command' : 'Command';
+  document.getElementById('sched-command').placeholder = kind === 'shell'
+    ? 'e.g. /bin/bash /path/to/script.sh' : 'e.g. /status or npm run build';
+  // Watch mode only works in tmux mode
+  const watchSection = document.getElementById('sched-watch');
+  if (watchSection && kind === 'shell') { watchSection.checked = false; updateSchedWatchUI(); }
+}
 function openSchedModal(editId) {
   _schedEditId = editId || null;
   const overlay = document.getElementById('sched-overlay');
@@ -17818,24 +19859,36 @@ function openSchedModal(editId) {
     const s = schedules.find(x => x.id === editId);
     if (s) {
       document.getElementById('sched-title').value = s.title;
+      document.getElementById('sched-kind').value = s.kind || 'tmux';
       sel.value = s.session;
       document.getElementById('sched-command').value = s.command;
       document.getElementById('sched-type').value = s.sched_type;
       document.getElementById('sched-run-at').value = s.run_at || '';
       document.getElementById('sched-expr').value = s.schedule_expr || '';
       if (s.recurrence) document.getElementById('sched-recurrence').value = s.recurrence;
+      document.getElementById('sched-watch').checked = !!s.watch;
+      document.getElementById('sched-done-pattern').value = s.done_pattern || '';
+      document.getElementById('sched-done-action').value = s.done_action || 'disable';
+      document.getElementById('sched-watch-timeout').value = s.watch_timeout || 120;
     }
     document.getElementById('sched-save-btn').textContent = 'Update';
   } else {
     document.getElementById('sched-title').value = '';
+    document.getElementById('sched-kind').value = 'tmux';
     document.getElementById('sched-command').value = '';
     document.getElementById('sched-expr').value = '';
     document.getElementById('sched-type').value = 'once';
     document.getElementById('sched-run-at').value = new Date(Date.now() + 3600000).toISOString().slice(0,16);
+    document.getElementById('sched-watch').checked = false;
+    document.getElementById('sched-done-pattern').value = '';
+    document.getElementById('sched-done-action').value = 'disable';
+    document.getElementById('sched-watch-timeout').value = 120;
     document.getElementById('sched-save-btn').textContent = 'Save';
   }
   updateSchedTypeUI();
   updateSchedRecUI();
+  updateSchedWatchUI();
+  updateSchedKindUI();
   overlay.style.display = 'flex';
   requestAnimationFrame(() => overlay.classList.add('active'));
   setTimeout(() => document.getElementById('sched-title').focus(), 50);
@@ -17848,10 +19901,12 @@ function closeSchedModal() {
 }
 async function saveSchedModal() {
   const title = document.getElementById('sched-title').value.trim();
-  const session = document.getElementById('sched-session').value;
+  const kind = document.getElementById('sched-kind').value;
+  const session = kind === 'shell' ? '' : document.getElementById('sched-session').value;
   const command = document.getElementById('sched-command').value.trim();
   const stype = document.getElementById('sched-type').value;
-  if (!title || !session || !command) return;
+  if (!title || !command) return;
+  if (kind === 'tmux' && !session) return;
   let run_at, recurrence;
   if (stype === 'once') {
     run_at = document.getElementById('sched-run-at').value;
@@ -17869,8 +19924,13 @@ async function saveSchedModal() {
     }
   }
   const schedExpr = document.getElementById('sched-expr').value.trim();
-  const payload = { title, session, command, sched_type: stype, recurrence: recurrence || null, run_at,
-                    schedule_expr: schedExpr || null };
+  const watch = document.getElementById('sched-watch').checked ? 1 : 0;
+  const donePattern = document.getElementById('sched-done-pattern').value.trim();
+  const doneAction = document.getElementById('sched-done-action').value;
+  const watchTimeout = parseInt(document.getElementById('sched-watch-timeout').value) || 120;
+  const payload = { title, session, kind, command, sched_type: stype, recurrence: recurrence || null, run_at,
+                    schedule_expr: schedExpr || null,
+                    watch, done_pattern: donePattern || null, done_action: doneAction, watch_timeout: watchTimeout };
   const url = _schedEditId ? API + '/api/schedules/' + _schedEditId : API + '/api/schedules';
   const method = _schedEditId ? 'PATCH' : 'POST';
   const r = await apiCall(url, { method, headers: {'Content-Type':'application/json'}, body: JSON.stringify(payload) });
@@ -18161,15 +20221,21 @@ async function deleteBoardItem(id) {
   await apiCall(API + '/api/board/' + id, { method: 'DELETE' });
 }
 
-function moveBoardItem(id, newStatus) {
+function moveBoardItem(id, newStatus, newPos) {
   // Optimistic: update in-memory + cache immediately; Sortable already moved the DOM
   const idx = boardItems.findIndex(i => i.id === id);
-  if (idx >= 0) boardItems[idx] = { ...boardItems[idx], status: newStatus, updated: Math.floor(Date.now() / 1000) };
+  if (idx >= 0) {
+    const patch = { status: newStatus, updated: Math.floor(Date.now() / 1000) };
+    if (typeof newPos === 'number' && isFinite(newPos)) patch.pos = newPos;
+    boardItems[idx] = { ...boardItems[idx], ...patch };
+  }
   saveBoardCache();
   // Sync to backend silently — no renderBoard() so the drag stays smooth
+  const body = { status: newStatus };
+  if (typeof newPos === 'number' && isFinite(newPos)) body.pos = newPos;
   apiCall(API + '/api/board/' + id, {
     method: 'PATCH', headers: {'Content-Type': 'application/json'},
-    body: JSON.stringify({ status: newStatus })
+    body: JSON.stringify(body)
   }).then(r => {
     if (!r) return;
     r.json().then(updated => {
@@ -18255,46 +20321,123 @@ async function deleteBoardStatus(id) {
 }
 
 
-// ═══════ CALENDAR ═══════
-let calYear = new Date().getFullYear();
-let calMonth = new Date().getMonth(); // 0-indexed
-let calDay = new Date().getDate();
-let calViewMode = localStorage.getItem('amux_cal_view') || 'week'; // 'month' | 'week' | 'day'
+// ═══════ CALENDAR (FullCalendar) ═══════
+let _fcInstance = null;
 
-function _calNavigate(delta) {
-  let d;
-  if (calViewMode === 'day') {
-    d = new Date(calYear, calMonth, calDay + delta);
-  } else if (calViewMode === 'week') {
-    d = new Date(calYear, calMonth, calDay + delta * 7);
-  } else {
-    calMonth += delta;
-    if (calMonth < 0) { calMonth = 11; calYear--; }
-    else if (calMonth > 11) { calMonth = 0; calYear++; }
-    renderCalendar(); return;
-  }
-  calYear = d.getFullYear(); calMonth = d.getMonth(); calDay = d.getDate();
-  renderCalendar();
-}
-function calPrev() { _calNavigate(-1); }
-function calNext() { _calNavigate(1); }
-function calToday() {
-  const n = new Date();
-  calYear = n.getFullYear(); calMonth = n.getMonth(); calDay = n.getDate();
-  renderCalendar();
-}
-function calSetView(mode) {
-  calViewMode = mode;
-  localStorage.setItem('amux_cal_view', mode);
-  ['month','week','day'].forEach(m => {
-    const el = document.getElementById('cal-tab-' + m);
-    if (el) el.classList.toggle('active', m === mode);
+function _fcGetEvents() {
+  const events = [];
+  (boardItems || []).forEach(item => {
+    if (!item.due || item.deleted) return;
+    const sty = statusStyle(item.status || 'todo');
+    const ev = {
+      id: item.id,
+      title: item.title,
+      start: item.due_time ? item.due + 'T' + item.due_time : item.due,
+      allDay: !item.due_time,
+      backgroundColor: sty.bg,
+      borderColor: sty.color,
+      textColor: sty.color,
+      extendedProps: { _type: 'board', status: item.status || 'todo', desc: item.desc || '' },
+    };
+    events.push(ev);
   });
-  renderCalendar();
+  (schedules || []).forEach(s => {
+    if (s.deleted || !s.enabled || !s.next_run) return;
+    events.push({
+      id: 'sched-' + s.id,
+      title: s.title,
+      start: s.next_run,
+      allDay: !s.next_run.includes('T'),
+      backgroundColor: 'rgba(163,113,247,0.15)',
+      borderColor: '#a855f7',
+      textColor: '#c084fc',
+      extendedProps: { _type: 'schedule', schedId: s.id },
+    });
+  });
+  return events;
 }
-function calSelectDay(y, m, d) {
-  calYear = y; calMonth = m; calDay = d;
-  calSetView('day');
+
+function _fcInit() {
+  const el = document.getElementById('fc-container');
+  if (!el || !window.FullCalendar) return;
+  if (_fcInstance) { _fcInstance.destroy(); _fcInstance = null; }
+  // Map old view names to FullCalendar view names
+  let savedView = localStorage.getItem('amux_cal_view') || 'dayGridMonth';
+  const _viewMap = { month: 'dayGridMonth', week: 'timeGridWeek', day: 'timeGridDay' };
+  if (_viewMap[savedView]) savedView = _viewMap[savedView];
+  if (!['dayGridMonth','timeGridWeek','timeGridDay'].includes(savedView)) savedView = 'dayGridMonth';
+  const isDark = document.documentElement.getAttribute('data-theme') === 'dark' || (!document.body.classList.contains('light'));
+  const isMobile = window.innerWidth <= 600;
+  _fcInstance = new FullCalendar.Calendar(el, {
+    initialView: isMobile ? 'timeGridDay' : savedView,
+    headerToolbar: isMobile ? {
+      left: 'prev,next today',
+      center: 'title',
+      right: 'dayGridMonth,timeGridWeek,timeGridDay',
+    } : {
+      left: 'prev,today,next',
+      center: 'title',
+      right: 'dayGridMonth,timeGridWeek,timeGridDay subscribe',
+    },
+    customButtons: {
+      subscribe: {
+        text: 'Subscribe',
+        click: showIcalInfo,
+      },
+    },
+    events: function(info, successCallback) { successCallback(_fcGetEvents()); },
+    height: window.innerHeight - el.getBoundingClientRect().top,
+    nowIndicator: true,
+    navLinks: true,
+    editable: false,
+    selectable: true,
+    selectMirror: true,
+    dayMaxEvents: true,
+    weekNumbers: false,
+    firstDay: 0,
+    slotMinTime: '06:00:00',
+    slotMaxTime: '22:00:00',
+    expandRows: true,
+    stickyHeaderDates: true,
+    eventClick: function(info) {
+      const props = info.event.extendedProps;
+      if (props._type === 'schedule') {
+        openSchedModal(props.schedId);
+      } else {
+        openBoardDetail(info.event.id);
+      }
+    },
+    dateClick: function(info) {
+      openBoardAdd(info.dateStr);
+    },
+    select: function(info) {
+      openBoardAdd(info.startStr.slice(0, 10));
+    },
+    viewDidMount: function(info) {
+      localStorage.setItem('amux_cal_view', info.view.type);
+    },
+    eventDidMount: function(info) {
+      // Tooltip with description
+      const desc = info.event.extendedProps.desc;
+      if (desc) info.el.title = desc;
+    },
+  });
+  _fcInstance.render();
+  // updateSize after layout settles (container was display:none → flex)
+  setTimeout(() => { if (_fcInstance) _fcInstance.updateSize(); }, 50);
+  // Resize handler
+  if (!window._fcResizeHandler) {
+    window._fcResizeHandler = () => { if (_fcInstance && activeView === 'calendar') { const c = document.getElementById('fc-container'); if (c) _fcInstance.setOption('height', window.innerHeight - c.getBoundingClientRect().top); } };
+    window.addEventListener('resize', window._fcResizeHandler);
+  }
+}
+
+function renderCalendar() {
+  if (_fcInstance) {
+    _fcInstance.refetchEvents();
+  } else {
+    _fcInit();
+  }
 }
 
 function showIcalInfo() {
@@ -18302,250 +20445,34 @@ function showIcalInfo() {
   const origin = window.location.origin;
   const localUrl = origin + '/api/calendar.ics';
   const isLocal = origin.includes('localhost') || origin.includes('127.0.0.1');
-  // Prefer S3 URL for subscriptions (publicly reachable); fall back to local
   const subUrl = s3Url || localUrl;
-  const googleUrl = 'https://calendar.google.com/calendar/r/settings/addbyurl?' +
-    'url=' + encodeURIComponent(subUrl);
-  const appleUrl = s3Url ? ('webcal://' + s3Url.replace(/^https?:\/\//, '')) :
-    ('webcal://' + window.location.host + '/api/calendar.ics');
-
-  function ical_url_esc(s) { return s.replace(/&/g,'&amp;').replace(/</g,'&lt;'); }
-
+  const googleUrl = 'https://calendar.google.com/calendar/r/settings/addbyurl?url=' + encodeURIComponent(subUrl);
+  const appleUrl = s3Url ? ('webcal://' + s3Url.replace(/^https?:\/\//, '')) : ('webcal://' + window.location.host + '/api/calendar.ics');
+  function esc_url(s) { return s.replace(/&/g,'&amp;').replace(/</g,'&lt;'); }
   let html = '<div style="font-size:0.9rem;line-height:1.7;">';
   html += '<p style="margin-bottom:0.8rem;font-weight:600;">Subscribe to amux calendar</p>';
-
   if (s3Url) {
     html += '<p style="margin-bottom:0.6rem;font-size:0.82rem;">Subscription URL (public S3):</p>';
-    html += '<code style="display:block;background:var(--card-bg);padding:0.5rem 0.8rem;border-radius:6px;font-size:0.78rem;margin-bottom:1rem;word-break:break-all;">' + ical_url_esc(s3Url) + '</code>';
-    html += '<div style="display:flex;gap:0.5rem;flex-wrap:wrap;">';
-    html += '<a href="' + googleUrl + '" target="_blank" class="btn" style="font-size:0.8rem;">Add to Google Calendar</a>';
-    html += '<a href="' + appleUrl + '" class="btn" style="font-size:0.8rem;">Add to Apple Calendar</a>';
-    html += '</div>';
+    html += '<code style="display:block;background:var(--card-bg);padding:0.5rem 0.8rem;border-radius:6px;font-size:0.78rem;margin-bottom:1rem;word-break:break-all;">' + esc_url(s3Url) + '</code>';
   } else if (isLocal) {
-    html += '<p style="margin-bottom:0.8rem;color:var(--muted);font-size:0.82rem;">⚠️ You\'re on localhost — Google and Apple Calendar can\'t reach this URL directly.</p>';
-    html += '<p style="margin-bottom:0.8rem;font-size:0.82rem;">Set <code>AMUX_S3_BUCKET</code> to enable a publicly reachable subscription URL via S3.</p>';
+    html += '<p style="margin-bottom:0.8rem;color:var(--muted);font-size:0.82rem;">Set <code>AMUX_S3_BUCKET</code> for a publicly reachable subscription URL.</p>';
   } else {
-    html += '<p style="margin-bottom:0.6rem;font-size:0.82rem;">Feed URL:</p>';
-    html += '<code style="display:block;background:var(--card-bg);padding:0.5rem 0.8rem;border-radius:6px;font-size:0.78rem;margin-bottom:1rem;word-break:break-all;">' + ical_url_esc(localUrl) + '</code>';
-    html += '<div style="display:flex;gap:0.5rem;flex-wrap:wrap;">';
-    html += '<a href="' + googleUrl + '" target="_blank" class="btn" style="font-size:0.8rem;">Add to Google Calendar</a>';
-    html += '<a href="' + appleUrl + '" class="btn" style="font-size:0.8rem;">Add to Apple Calendar</a>';
-    html += '</div>';
+    html += '<code style="display:block;background:var(--card-bg);padding:0.5rem 0.8rem;border-radius:6px;font-size:0.78rem;margin-bottom:1rem;word-break:break-all;">' + esc_url(localUrl) + '</code>';
   }
-
-  // Always offer direct download
-  html += '<hr style="margin:0.9rem 0;border:none;border-top:1px solid var(--border);">';
-  html += '<a href="/api/calendar.ics" download="amux.ics" class="btn" style="font-size:0.8rem;">&#x2193; Download .ics file</a>';
-  html += '</div>';
-
-  // Reuse the board-edit overlay for a simple modal
-  const overlay = document.getElementById('board-edit-overlay');
-  const inner = overlay.querySelector('.board-edit-inner') || overlay;
-  // Create a temporary modal instead
+  html += '<div style="display:flex;gap:0.5rem;flex-wrap:wrap;margin-bottom:0.8rem;">';
+  html += '<a href="' + googleUrl + '" target="_blank" class="btn" style="font-size:0.8rem;">Add to Google Calendar</a>';
+  html += '<a href="' + appleUrl + '" class="btn" style="font-size:0.8rem;">Add to Apple Calendar</a>';
+  html += '<a href="/api/calendar.ics" download="amux.ics" class="btn" style="font-size:0.8rem;">Download .ics</a>';
+  html += '</div></div>';
   const modal = document.createElement('div');
   modal.style.cssText = 'position:fixed;inset:0;z-index:2000;display:flex;align-items:center;justify-content:center;background:rgba(0,0,0,0.55);';
   const box = document.createElement('div');
   box.style.cssText = 'background:var(--bg);border:1px solid var(--border);border-radius:12px;padding:1.4rem;max-width:420px;width:90%;box-shadow:0 8px 32px rgba(0,0,0,0.4);';
-  box.innerHTML = html + '<button onclick="this.closest(\'[data-ical-modal]\').remove()" class="btn" style="margin-top:0.8rem;font-size:0.8rem;">Close</button>';
+  box.innerHTML = html + '<button onclick="this.closest(\'[data-ical-modal]\').remove()" class="btn" style="margin-top:0.4rem;font-size:0.8rem;">Close</button>';
   modal.setAttribute('data-ical-modal', '1');
   modal.appendChild(box);
   modal.addEventListener('click', e => { if (e.target === modal) modal.remove(); });
   document.body.appendChild(modal);
-}
-
-const _CAL_MONTHS = ['January','February','March','April','May','June','July','August','September','October','November','December'];
-const _CAL_DAYS_LONG = ['Sunday','Monday','Tuesday','Wednesday','Thursday','Friday','Saturday'];
-const _CAL_DAYS_SHORT = ['Sun','Mon','Tue','Wed','Thu','Fri','Sat'];
-const _CAL_DAYS_MIN = ['S','M','T','W','T','F','S'];
-
-function _calDateStr(y, m, d) {
-  return y + '-' + String(m+1).padStart(2,'0') + '-' + String(d).padStart(2,'0');
-}
-function _calTodayStr() {
-  const t = new Date();
-  return _calDateStr(t.getFullYear(), t.getMonth(), t.getDate());
-}
-function _calItemsByDate() {
-  const map = {};
-  (boardItems || []).forEach(item => {
-    if (item.due && !item.deleted) {
-      if (!map[item.due]) map[item.due] = [];
-      map[item.due].push(item);
-    }
-  });
-  (schedules || []).forEach(s => {
-    if (!s.deleted && s.enabled && s.next_run) {
-      const dateStr = s.next_run.slice(0, 10);
-      if (!map[dateStr]) map[dateStr] = [];
-      const time = s.next_run.slice(11, 16);
-      map[dateStr].push({ ...s, _isSched: true, due: dateStr,
-        title: '⏰ ' + s.title + (time ? ' ' + time : ''),
-        status: 'sched' });
-    }
-  });
-  return map;
-}
-
-function renderCalendar() {
-  const titleEl = document.getElementById('cal-title');
-  const bodyEl = document.getElementById('cal-body');
-  if (!titleEl || !bodyEl) return;
-  // Sync active tab button state
-  ['month','week','day'].forEach(m => {
-    const el = document.getElementById('cal-tab-' + m);
-    if (el) el.classList.toggle('active', m === calViewMode);
-  });
-  if (calViewMode === 'week') { _renderCalWeek(titleEl, bodyEl); return; }
-  if (calViewMode === 'day')  { _renderCalDay(titleEl, bodyEl); return; }
-  _renderCalMonth(titleEl, bodyEl);
-}
-
-function _renderCalMonth(titleEl, bodyEl) {
-  const isMob = window.innerWidth <= 480;
-  const dayNames = isMob ? _CAL_DAYS_MIN : _CAL_DAYS_SHORT;
-  titleEl.textContent = _CAL_MONTHS[calMonth] + ' ' + calYear;
-  const todayStr = _calTodayStr();
-  const firstDay = new Date(calYear, calMonth, 1).getDay();
-  const daysInMonth = new Date(calYear, calMonth+1, 0).getDate();
-  const daysInPrevMonth = new Date(calYear, calMonth, 0).getDate();
-  const itemsByDate = _calItemsByDate();
-  let html = '<div id="cal-grid" class="cal-grid">';
-  dayNames.forEach(d => { html += '<div class="cal-day-header">' + d + '</div>'; });
-  const totalCells = Math.ceil((firstDay + daysInMonth) / 7) * 7;
-  for (let i = 0; i < totalCells; i++) {
-    let day, dateStr, isOther = false, cellY = calYear, cellM = calMonth;
-    if (i < firstDay) {
-      day = daysInPrevMonth - firstDay + i + 1;
-      cellM = calMonth === 0 ? 11 : calMonth - 1;
-      cellY = calMonth === 0 ? calYear - 1 : calYear;
-      isOther = true;
-    } else if (i >= firstDay + daysInMonth) {
-      day = i - firstDay - daysInMonth + 1;
-      cellM = calMonth === 11 ? 0 : calMonth + 1;
-      cellY = calMonth === 11 ? calYear + 1 : calYear;
-      isOther = true;
-    } else {
-      day = i - firstDay + 1; cellY = calYear; cellM = calMonth;
-    }
-    dateStr = _calDateStr(cellY, cellM, day);
-    const isToday = dateStr === todayStr;
-    const items = itemsByDate[dateStr] || [];
-    html += '<div class="cal-cell' + (isOther ? ' other-month' : '') + (isToday ? ' today' : '') + '"'
-          + ' onclick="openBoardAdd(\'' + dateStr + '\')">';
-    html += '<div class="cal-cell-num">' + day + '</div>';
-    if (isMob) {
-      if (items.length) {
-        html += '<div class="cal-dots">';
-        items.slice(0, 7).forEach(item => {
-          const sty = statusStyle(item.status || 'todo');
-          html += '<div class="cal-dot" style="background:' + sty.color + '" title="' + esc(item.title) + '"></div>';
-        });
-        html += '</div>';
-      }
-    } else {
-      items.slice(0, 3).forEach(item => {
-        if (item._isSched) {
-          html += '<div class="cal-chip sched-chip"'
-                + ' onclick="event.stopPropagation();openSchedModal(\'' + item.id + '\')"'
-                + ' title="' + esc(item.title) + '">' + esc(item.title) + '</div>';
-        } else {
-          const sty = statusStyle(item.status || 'todo');
-          html += '<div class="cal-chip" style="background:' + sty.bg + ';color:' + sty.color + '"'
-                + ' onclick="event.stopPropagation();openBoardDetail(\'' + item.id + '\')"'
-                + ' title="' + esc(item.title) + '">' + esc(item.title) + '</div>';
-        }
-      });
-      if (items.length > 3) html += '<div class="cal-more">+' + (items.length - 3) + ' more</div>';
-    }
-    html += '</div>';
-  }
-  html += '</div>';
-  bodyEl.innerHTML = html;
-}
-
-function _renderCalWeek(titleEl, bodyEl) {
-  const isMob = window.innerWidth <= 480;
-  // Find Sunday of current week
-  const anchor = new Date(calYear, calMonth, calDay);
-  const weekStart = new Date(anchor);
-  weekStart.setDate(anchor.getDate() - anchor.getDay());
-  const weekEnd = new Date(weekStart); weekEnd.setDate(weekStart.getDate() + 6);
-  const fmtDay = d => _CAL_MONTHS[d.getMonth()].slice(0,3) + ' ' + d.getDate();
-  titleEl.textContent = fmtDay(weekStart) + ' – ' + fmtDay(weekEnd) + ', ' + weekEnd.getFullYear();
-  const todayStr = _calTodayStr();
-  const itemsByDate = _calItemsByDate();
-  const dayNames = isMob ? _CAL_DAYS_MIN : _CAL_DAYS_SHORT;
-  let html = '<div class="cal-week-grid">';
-  for (let i = 0; i < 7; i++) {
-    const d = new Date(weekStart); d.setDate(weekStart.getDate() + i);
-    const dayLabel = dayNames[d.getDay()] + (isMob ? '' : ' ' + d.getDate());
-    html += '<div class="cal-week-header">' + dayLabel + '</div>';
-  }
-  for (let i = 0; i < 7; i++) {
-    const d = new Date(weekStart); d.setDate(weekStart.getDate() + i);
-    const ds = _calDateStr(d.getFullYear(), d.getMonth(), d.getDate());
-    const isToday = ds === todayStr;
-    const items = itemsByDate[ds] || [];
-    html += '<div class="cal-week-cell' + (isToday ? ' today' : '') + '"'
-          + ' onclick="openBoardAdd(\'' + ds + '\')">';
-    html += '<div class="cal-week-num">' + d.getDate() + '</div>';
-    items.slice(0, 4).forEach(item => {
-      if (item._isSched) {
-        html += '<div class="cal-week-chip sched-chip"'
-              + ' onclick="event.stopPropagation();openSchedModal(\'' + item.id + '\')"'
-              + ' title="' + esc(item.title) + '">' + esc(item.title) + '</div>';
-        html += '<div class="cal-week-dot" style="background:#c084fc"></div>';
-      } else {
-        const sty = statusStyle(item.status || 'todo');
-        html += '<div class="cal-week-chip" style="background:' + sty.bg + ';color:' + sty.color + '"'
-              + ' onclick="event.stopPropagation();openBoardDetail(\'' + item.id + '\')"'
-              + ' title="' + esc(item.title) + '">' + esc(item.title) + '</div>';
-        html += '<div class="cal-week-dot" style="background:' + sty.color + '"></div>';
-      }
-    });
-    if (items.length > 4) html += '<div class="cal-week-more">+' + (items.length - 4) + '</div>';
-    html += '</div>';
-  }
-  html += '</div>';
-  bodyEl.innerHTML = html;
-}
-
-function _renderCalDay(titleEl, bodyEl) {
-  const d = new Date(calYear, calMonth, calDay);
-  const dayName = _CAL_DAYS_LONG[d.getDay()];
-  titleEl.textContent = dayName + ', ' + _CAL_MONTHS[calMonth].slice(0,3) + ' ' + calDay + ' ' + calYear;
-  const ds = _calDateStr(calYear, calMonth, calDay);
-  const items = (_calItemsByDate()[ds] || []);
-  let html = '<div class="cal-day-view">';
-  if (!items.length) {
-    html += '<div class="cal-day-empty">No issues due on this day</div>';
-  } else {
-    items.forEach(item => {
-      if (item._isSched) {
-        html += '<div class="cal-day-issue" onclick="openSchedModal(\'' + item.id + '\')">';
-        html += '<span class="cal-dot" style="background:#c084fc;width:8px;height:8px;flex-shrink:0;border-radius:50%;margin-top:5px;"></span>';
-        html += '<div class="cal-day-issue-text">';
-        html += '<div class="cal-day-issue-title">' + esc(item.title) + '</div>';
-        if (item.desc) html += '<div class="cal-day-issue-desc">' + esc(item.desc) + '</div>';
-        html += '</div>';
-        html += '<span style="font-size:0.7rem;padding:2px 7px;border-radius:10px;background:rgba(163,113,247,0.18);color:#c084fc;flex-shrink:0;">schedule</span>';
-        html += '</div>';
-      } else {
-        const sty = statusStyle(item.status || 'todo');
-        html += '<div class="cal-day-issue" onclick="openBoardDetail(\'' + item.id + '\')">';
-        html += '<span class="cal-dot" style="background:' + sty.color + ';width:8px;height:8px;flex-shrink:0;border-radius:50%;margin-top:5px;"></span>';
-        html += '<div class="cal-day-issue-text">';
-        html += '<div class="cal-day-issue-title">' + esc(item.title) + '</div>';
-        if (item.desc) html += '<div class="cal-day-issue-desc">' + esc(item.desc) + '</div>';
-        html += '</div>';
-        html += '<span style="font-size:0.7rem;padding:2px 7px;border-radius:10px;background:' + sty.bg + ';color:' + sty.color + ';flex-shrink:0;">' + esc(item.status || 'todo') + '</span>';
-        html += '</div>';
-      }
-    });
-  }
-  html += '<button class="cal-day-add" onclick="openBoardAdd(\'' + ds + '\')">+ Add issue for this day</button>';
-  html += '</div>';
-  bodyEl.innerHTML = html;
 }
 
 // ═══════ GRID MODE ═══════
@@ -18570,7 +20497,7 @@ function enterGridMode() {
   }
   view.classList.add('active');
   // Mark Grid tab as active, deactivate others
-  ['sessions','board','scheduler','files','logs','email','notes','crm'].forEach(t => document.getElementById('tab-' + t)?.classList.remove('active'));
+  ['sessions','board','calendar','scheduler','files','logs','email','notes','crm'].forEach(t => document.getElementById('tab-' + t)?.classList.remove('active'));
   document.getElementById('tab-grid').classList.add('active');
   _renderGridChips();
   _wsRenderProfileBar();
@@ -18695,7 +20622,7 @@ async function _updateGridPane(name) {
     if (atBottom) body.scrollTop = body.scrollHeight;
     if (dot) {
       const s = (sessions || []).find(s => s.name === name);
-      dot.className = 'gp-dot' + (!s || !s.running ? '' : s.status === 'working' ? ' working' : s.status === 'needs_input' ? ' waiting' : ' idle');
+      dot.className = 'gp-dot' + (!s || !s.running ? '' : s.status === 'active' ? ' working' : s.status === 'waiting' ? ' waiting' : ' idle');
     }
   } catch(e) {
     if (body) { body.textContent = '(error loading output)'; }
@@ -20426,7 +22353,7 @@ async function _handleDeeplink(hash) {
   } else {
     dpath = new URLSearchParams(location.search).get('path');
     // Migrate old ?path= links to hash format
-    if (dpath) history.replaceState({}, '', location.pathname + '#path=' + encodeURIComponent(dpath));
+    if (dpath) history.replaceState({}, '', location.pathname + '#path=' + _encodeHashPath(dpath));
   }
   if (!dpath) return;
   try {
@@ -20925,6 +22852,114 @@ function _metricsRelTime(ts) {
   } catch(e) { return ts; }
 }
 
+// Network speed test
+let _metricsSpeedtestSize = 10 * 1024 * 1024;  // 10 MB per direction
+let _metricsSpeedtestRunning = false;
+let _metricsSpeedtestResult = null;  // { down: Mbps, up: Mbps, ping: ms }
+
+function _metricsResetSpeedtest() {
+  _metricsSpeedtestResult = null;
+  const down = document.getElementById('speedtest-down');
+  const up = document.getElementById('speedtest-up');
+  const ping = document.getElementById('speedtest-ping');
+  const bar = document.getElementById('speedtest-bar');
+  const status = document.getElementById('speedtest-status');
+  if (down) down.innerHTML = '\u2014';
+  if (up) up.innerHTML = '\u2014';
+  if (ping) ping.innerHTML = '\u2014';
+  if (bar) bar.style.width = '0%';
+  if (status) status.textContent = 'Tests transfer ' + (_metricsSpeedtestSize/1048576).toFixed(0) + ' MB to/from this server.';
+}
+
+function _metricsFmtSpeed(mbps) {
+  if (mbps >= 1000) return (mbps/1000).toFixed(2);
+  if (mbps >= 100) return mbps.toFixed(0);
+  if (mbps >= 10) return mbps.toFixed(1);
+  return mbps.toFixed(2);
+}
+
+function _metricsSpeedUnit(mbps) { return mbps >= 1000 ? 'Gbps' : 'Mbps'; }
+
+async function _metricsRunSpeedtest() {
+  if (_metricsSpeedtestRunning) return;
+  _metricsSpeedtestRunning = true;
+  const btn = document.getElementById('speedtest-run-btn');
+  const status = document.getElementById('speedtest-status');
+  const bar = document.getElementById('speedtest-bar');
+  const downEl = document.getElementById('speedtest-down');
+  const upEl = document.getElementById('speedtest-up');
+  const pingEl = document.getElementById('speedtest-ping');
+  const downSubEl = document.getElementById('speedtest-down-sub');
+  const upSubEl = document.getElementById('speedtest-up-sub');
+  if (btn) { btn.disabled = true; btn.textContent = 'Running\u2026'; }
+  if (downEl) downEl.innerHTML = '\u2026';
+  if (upEl) upEl.innerHTML = '\u2014';
+  if (pingEl) pingEl.innerHTML = '\u2014';
+  if (bar) bar.style.width = '0%';
+
+  try {
+    // 1. Latency: average of 3 small no-cache pings
+    if (status) status.textContent = 'Measuring latency\u2026';
+    const pings = [];
+    for (let i = 0; i < 3; i++) {
+      const t0 = performance.now();
+      await fetch(API + '/api/speedtest/download?bytes=1&_=' + Date.now() + '_' + i, { cache: 'no-store' }).then(r => r.arrayBuffer());
+      pings.push(performance.now() - t0);
+    }
+    const avgPing = pings.reduce((a,b)=>a+b,0) / pings.length;
+    if (pingEl) pingEl.textContent = avgPing.toFixed(0);
+    if (bar) bar.style.width = '15%';
+
+    // 2. Download test
+    if (status) status.textContent = 'Downloading ' + (_metricsSpeedtestSize/1048576).toFixed(0) + ' MB\u2026';
+    const dStart = performance.now();
+    const dResp = await fetch(API + '/api/speedtest/download?bytes=' + _metricsSpeedtestSize + '&_=' + Date.now(), { cache: 'no-store' });
+    const reader = dResp.body.getReader();
+    let downBytes = 0;
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      downBytes += value.length;
+      const pct = 15 + (downBytes / _metricsSpeedtestSize) * 40;
+      if (bar) bar.style.width = pct.toFixed(1) + '%';
+    }
+    const dElapsed = (performance.now() - dStart) / 1000;
+    const downMbps = (downBytes * 8) / dElapsed / 1e6;
+    if (downEl) downEl.textContent = _metricsFmtSpeed(downMbps);
+    if (downSubEl) downSubEl.textContent = _metricsSpeedUnit(downMbps);
+
+    // 3. Upload test — generate random payload
+    if (status) status.textContent = 'Uploading ' + (_metricsSpeedtestSize/1048576).toFixed(0) + ' MB\u2026';
+    if (upEl) upEl.innerHTML = '\u2026';
+    const payload = new Uint8Array(_metricsSpeedtestSize);
+    // Fill with pseudo-random — incompressible enough for HTTP
+    for (let i = 0; i < payload.length; i += 4096) {
+      const end = Math.min(i + 4096, payload.length);
+      for (let j = i; j < end; j++) payload[j] = (Math.random() * 256) | 0;
+    }
+    const uStart = performance.now();
+    await fetch(API + '/api/speedtest/upload?_=' + Date.now(), {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/octet-stream' },
+      body: payload,
+      cache: 'no-store',
+    });
+    const uElapsed = (performance.now() - uStart) / 1000;
+    const upMbps = (_metricsSpeedtestSize * 8) / uElapsed / 1e6;
+    if (upEl) upEl.textContent = _metricsFmtSpeed(upMbps);
+    if (upSubEl) upSubEl.textContent = _metricsSpeedUnit(upMbps);
+    if (bar) bar.style.width = '100%';
+    _metricsSpeedtestResult = { down: downMbps, up: upMbps, ping: avgPing };
+    if (status) status.textContent = 'Done \u00B7 ' + downMbps.toFixed(1) + ' Mbps down, ' + upMbps.toFixed(1) + ' Mbps up, ' + avgPing.toFixed(0) + ' ms ping.';
+  } catch (e) {
+    if (status) status.textContent = 'Speed test failed: ' + (e.message || e);
+    if (bar) bar.style.width = '0%';
+  } finally {
+    _metricsSpeedtestRunning = false;
+    if (btn) { btn.disabled = false; btn.textContent = 'Run again'; }
+  }
+}
+
 function _metricsRender() {
   const data = _metricsData;
   if (!data) return;
@@ -21064,6 +23099,36 @@ function _metricsRender() {
     </div>`;
     html += '</div>';
   }
+
+  // Network speed test
+  html += `<div class="metrics-section-title">Network Speed Test</div>
+    <div class="metrics-speedtest" id="metrics-speedtest">
+      <div class="metrics-speedtest-cards">
+        <div class="metrics-speedtest-card">
+          <div class="metrics-speedtest-label">Download</div>
+          <div class="metrics-speedtest-value" id="speedtest-down">&mdash;</div>
+          <div class="metrics-speedtest-sub" id="speedtest-down-sub">Mbps</div>
+        </div>
+        <div class="metrics-speedtest-card">
+          <div class="metrics-speedtest-label">Upload</div>
+          <div class="metrics-speedtest-value" id="speedtest-up">&mdash;</div>
+          <div class="metrics-speedtest-sub" id="speedtest-up-sub">Mbps</div>
+        </div>
+        <div class="metrics-speedtest-card">
+          <div class="metrics-speedtest-label">Latency</div>
+          <div class="metrics-speedtest-value" id="speedtest-ping">&mdash;</div>
+          <div class="metrics-speedtest-sub" id="speedtest-ping-sub">ms</div>
+        </div>
+      </div>
+      <div class="metrics-speedtest-bar"><div class="metrics-speedtest-bar-fill" id="speedtest-bar"></div></div>
+      <div class="metrics-speedtest-row">
+        <div class="metrics-speedtest-status" id="speedtest-status">Tests transfer ${(_metricsSpeedtestSize/1048576).toFixed(0)} MB to/from this server.</div>
+        <div style="display:flex;gap:8px;">
+          <button class="btn" id="speedtest-run-btn" onclick="_metricsRunSpeedtest()" style="font-size:0.8rem;padding:5px 14px;">Run speed test</button>
+          <button class="btn" id="speedtest-reset-btn" onclick="_metricsResetSpeedtest()" style="font-size:0.8rem;padding:5px 12px;">Reset</button>
+        </div>
+      </div>
+    </div>`;
 
   // Session breakdown table
   html += '<div class="metrics-section-title">Session Breakdown</div>';
@@ -21741,7 +23806,7 @@ let _quill = null;
 let _notesSidebarOpen = localStorage.getItem('amux_notes_sidebar') !== 'closed';
 let _notesOpenAbort = null; // AbortController for in-flight note fetches
 let _notesLoadingContent = false; // suppress text-change saves while loading note content
-let _notesMode = 'edit'; // 'edit' | 'preview'
+let _notesMode = 'preview'; // 'edit' | 'preview'
 let _notesRawContent = ''; // raw server content for the open note (for markdown preview)
 
 function _notesPreviewBindCheckboxes(container) {
@@ -21774,6 +23839,209 @@ function _notesPreviewBindCheckboxes(container) {
   });
 }
 
+// Tap-to-edit: clicking anywhere in the rendered preview switches to edit mode
+// (Obsidian/Bear-style — no explicit "Edit" button needed)
+function _notesPreviewBindTapToEdit(container) {
+  if (container._tapToEditBound) return;
+  container._tapToEditBound = true;
+  // Make all links open in a new tab so dbl-click-to-edit doesn't navigate away.
+  container.querySelectorAll('a[href]').forEach(a => {
+    a.setAttribute('target', '_blank');
+    a.setAttribute('rel', 'noopener noreferrer');
+  });
+  container.addEventListener('dblclick', (e) => {
+    if (e.target.closest('a')) return;
+    if (e.target.closest('li[data-list="checked"], li[data-list="unchecked"]')) return;
+    _notesSwitchMode('edit');
+    setTimeout(() => { if (_quill) _quill.focus(); }, 30);
+  });
+}
+
+// Swipe-from-left-edge to open the notes sidebar on mobile (Bear/Apple Notes pattern)
+function _notesBindSwipeGestures() {
+  const view = document.getElementById('notes-view');
+  if (!view || view._swipeBound) return;
+  view._swipeBound = true;
+  let startX = 0, startY = 0, tracking = false;
+  view.addEventListener('touchstart', (e) => {
+    if (window.innerWidth > 600) return;
+    const t = e.touches[0];
+    // Only start tracking if touch begins near left edge OR sidebar is currently open (to close)
+    const sidebar = document.getElementById('notes-sidebar');
+    const sidebarOpen = sidebar && !sidebar.classList.contains('collapsed');
+    if (t.clientX < 24 || sidebarOpen) {
+      startX = t.clientX; startY = t.clientY; tracking = true;
+    }
+  }, { passive: true });
+  view.addEventListener('touchend', (e) => {
+    if (!tracking) return;
+    tracking = false;
+    const t = e.changedTouches[0];
+    const dx = t.clientX - startX;
+    const dy = Math.abs(t.clientY - startY);
+    if (dy > 50) return; // mostly vertical = scroll, ignore
+    const sidebar = document.getElementById('notes-sidebar');
+    const sidebarOpen = sidebar && !sidebar.classList.contains('collapsed');
+    if (dx > 60 && !sidebarOpen) _notesToggleSidebar();
+    else if (dx < -60 && sidebarOpen) _notesToggleSidebar();
+  }, { passive: true });
+}
+
+// ── Teleprompter ──
+let _tp = { running: false, y: 0, wpm: 150, size: 48, mirror: false, lastT: 0, raf: null, toolbarTimer: null };
+
+function _filesOpenTeleprompter() {
+  // Render currently-open markdown file content as the teleprompter script
+  if (!_fileData || !_fileData.content) return;
+  const overlay = document.getElementById('teleprompter-overlay');
+  const content = document.getElementById('tp-content');
+  content.innerHTML = _tpRenderMarkdown(_fileData.content);
+  // Restore saved settings
+  try {
+    const saved = JSON.parse(localStorage.getItem('amux_tp_settings') || '{}');
+    _tp.wpm = saved.wpm || 150;
+    _tp.size = saved.size || 48;
+    _tp.mirror = !!saved.mirror;
+  } catch(e) {}
+  document.getElementById('tp-wpm').value = _tp.wpm;
+  document.getElementById('tp-wpm-val').textContent = _tp.wpm;
+  document.getElementById('tp-size').value = _tp.size;
+  content.style.fontSize = _tp.size + 'px';
+  _tp.y = 0;
+  content.style.transform = 'translate(-50%, 0px)' + (_tp.mirror ? ' scaleX(-1)' : '');
+  _tp.running = false;
+  document.getElementById('tp-play').innerHTML = '&#x25B6;';
+  overlay.style.display = 'block';
+  _tpShowToolbar();
+  document.addEventListener('keydown', _tpKeyHandler);
+  document.getElementById('tp-viewport').addEventListener('mousemove', _tpShowToolbar);
+  document.getElementById('tp-viewport').addEventListener('wheel', _tpWheelScroll, { passive: false });
+}
+
+function _tpClose() {
+  _tp.running = false;
+  if (_tp.raf) cancelAnimationFrame(_tp.raf);
+  _tp.raf = null;
+  document.getElementById('teleprompter-overlay').style.display = 'none';
+  document.removeEventListener('keydown', _tpKeyHandler);
+  clearTimeout(_tp.toolbarTimer);
+  try {
+    localStorage.setItem('amux_tp_settings', JSON.stringify({ wpm: _tp.wpm, size: _tp.size, mirror: _tp.mirror }));
+  } catch(e) {}
+  if (document.fullscreenElement) document.exitFullscreen().catch(()=>{});
+}
+
+function _tpRenderMarkdown(text) {
+  // Minimal markdown → HTML for teleprompter (headers, bold, italic, lists, paragraphs)
+  const esc = (s) => s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+  const lines = text.split('\n');
+  const out = [];
+  let inList = false;
+  for (let raw of lines) {
+    const line = raw.trimEnd();
+    if (!line.trim()) { if (inList) { out.push('</ul>'); inList = false; } out.push('<br>'); continue; }
+    let m;
+    if ((m = line.match(/^(#{1,3})\s+(.+)$/))) {
+      if (inList) { out.push('</ul>'); inList = false; }
+      const lvl = m[1].length;
+      out.push(`<h${lvl} style="font-size:${1.4 - (lvl-1)*0.15}em;margin:0.8em 0 0.3em;">${_tpInline(esc(m[2]))}</h${lvl}>`);
+    } else if ((m = line.match(/^[-*+]\s+(.+)$/))) {
+      if (!inList) { out.push('<ul style="padding-left:1.2em;margin:0.3em 0;">'); inList = true; }
+      out.push('<li>' + _tpInline(esc(m[1])) + '</li>');
+    } else {
+      if (inList) { out.push('</ul>'); inList = false; }
+      out.push('<p style="margin:0.4em 0;">' + _tpInline(esc(line)) + '</p>');
+    }
+  }
+  if (inList) out.push('</ul>');
+  return out.join('\n');
+}
+function _tpInline(s) {
+  return s.replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>')
+          .replace(/\*(.+?)\*/g, '<em>$1</em>')
+          .replace(/`([^`]+)`/g, '<code style="font-family:monospace;font-size:0.9em;opacity:0.85;">$1</code>');
+}
+
+function _tpToggle() {
+  _tp.running = !_tp.running;
+  document.getElementById('tp-play').innerHTML = _tp.running ? '&#x23F8;' : '&#x25B6;';
+  if (_tp.running) {
+    _tp.lastT = performance.now();
+    _tp.raf = requestAnimationFrame(_tpTick);
+  } else if (_tp.raf) {
+    cancelAnimationFrame(_tp.raf);
+    _tp.raf = null;
+  }
+}
+
+function _tpTick(t) {
+  if (!_tp.running) return;
+  const dt = Math.min((t - _tp.lastT) / 1000, 0.1); // clamp to 100ms
+  _tp.lastT = t;
+  // WPM → pixels/sec. Assume avg 5 chars/word and font-size px ≈ line-height * 1 word per char ratio.
+  // Empirically: pxPerSec ≈ (wpm / 60) * fontSize * 1.5 (line-height multiplier)
+  const pxPerSec = (_tp.wpm / 60) * _tp.size * 1.5;
+  _tp.y += pxPerSec * dt;
+  const content = document.getElementById('tp-content');
+  const viewport = document.getElementById('tp-viewport');
+  if (!content || !viewport) return;
+  // Stop at end
+  const maxY = content.scrollHeight - viewport.clientHeight + viewport.clientHeight * 0.5;
+  if (_tp.y > maxY) { _tp.y = maxY; _tp.running = false; document.getElementById('tp-play').innerHTML = '&#x25B6;'; return; }
+  content.style.transform = `translate(-50%, ${-_tp.y}px)` + (_tp.mirror ? ' scaleX(-1)' : '');
+  _tp.raf = requestAnimationFrame(_tpTick);
+}
+
+function _tpSetWpm(v) {
+  _tp.wpm = parseInt(v);
+  document.getElementById('tp-wpm-val').textContent = _tp.wpm;
+}
+function _tpSetSize(v) {
+  _tp.size = parseInt(v);
+  document.getElementById('tp-content').style.fontSize = _tp.size + 'px';
+}
+function _tpRestart() {
+  _tp.y = 0;
+  const content = document.getElementById('tp-content');
+  content.style.transform = 'translate(-50%, 0px)' + (_tp.mirror ? ' scaleX(-1)' : '');
+}
+function _tpToggleMirror() {
+  _tp.mirror = !_tp.mirror;
+  const content = document.getElementById('tp-content');
+  content.style.transform = `translate(-50%, ${-_tp.y}px)` + (_tp.mirror ? ' scaleX(-1)' : '');
+  document.getElementById('tp-mirror-btn').style.background = _tp.mirror ? '#7c6fcd' : 'none';
+}
+function _tpFullscreen() {
+  const el = document.getElementById('teleprompter-overlay');
+  if (!document.fullscreenElement) el.requestFullscreen?.().catch(()=>{});
+  else document.exitFullscreen?.();
+}
+function _tpWheelScroll(e) {
+  e.preventDefault();
+  _tp.y = Math.max(0, _tp.y + e.deltaY);
+  const content = document.getElementById('tp-content');
+  if (content) content.style.transform = `translate(-50%, ${-_tp.y}px)` + (_tp.mirror ? ' scaleX(-1)' : '');
+}
+function _tpShowToolbar() {
+  const tb = document.getElementById('tp-toolbar');
+  if (!tb) return;
+  tb.style.opacity = '1';
+  clearTimeout(_tp.toolbarTimer);
+  _tp.toolbarTimer = setTimeout(() => { tb.style.opacity = '0'; }, 3000);
+}
+function _tpKeyHandler(e) {
+  if (document.getElementById('teleprompter-overlay').style.display === 'none') return;
+  if (e.key === ' ') { e.preventDefault(); _tpToggle(); _tpShowToolbar(); }
+  else if (e.key === 'Escape') { _tpClose(); }
+  else if (e.key === 'ArrowUp') { e.preventDefault(); _tp.wpm = Math.min(400, _tp.wpm + 10); document.getElementById('tp-wpm').value = _tp.wpm; document.getElementById('tp-wpm-val').textContent = _tp.wpm; _tpShowToolbar(); }
+  else if (e.key === 'ArrowDown') { e.preventDefault(); _tp.wpm = Math.max(60, _tp.wpm - 10); document.getElementById('tp-wpm').value = _tp.wpm; document.getElementById('tp-wpm-val').textContent = _tp.wpm; _tpShowToolbar(); }
+  else if (e.key === 'ArrowLeft') { e.preventDefault(); _tp.y = Math.max(0, _tp.y - (_tp.wpm / 60) * _tp.size * 1.5 * 10); _tpTick(performance.now()); }
+  else if (e.key === 'ArrowRight') { e.preventDefault(); _tp.y += (_tp.wpm / 60) * _tp.size * 1.5 * 10; _tpTick(performance.now()); }
+  else if (e.key === 'f' || e.key === 'F') { _tpFullscreen(); }
+  else if (e.key === 'm' || e.key === 'M') { _tpToggleMirror(); _tpShowToolbar(); }
+  else if (e.key === 'r' || e.key === 'R') { _tpRestart(); _tpShowToolbar(); }
+}
+
 function _notesSwitchMode(mode) {
   _notesMode = mode;
   document.getElementById('notes-tab-edit').classList.toggle('active', mode === 'edit');
@@ -21791,6 +24059,7 @@ function _notesSwitchMode(mode) {
       }
       preview.classList.add('md-content');
       _notesPreviewBindCheckboxes(preview);
+      _notesPreviewBindTapToEdit(preview);
     }
     preview.classList.add('active');
     quillWrap.style.display = 'none';
@@ -21961,6 +24230,12 @@ function _notesInitQuill() {
     },
     placeholder: 'Write your note…'
   });
+  // Quill doesn't render any visual content for custom-format buttons — inject the icon ourselves
+  const _divBtn = document.querySelector('.notes-quill-wrap .ql-toolbar .ql-divider');
+  if (_divBtn && !_divBtn.innerHTML) {
+    _divBtn.innerHTML = '<svg viewBox="0 0 18 18"><line class="ql-stroke" x1="3" x2="15" y1="9" y2="9" stroke-width="2"></line></svg>';
+    _divBtn.title = 'Insert horizontal divider';
+  }
   // Enable inline markdown shortcuts (** → bold, # → heading, etc.)
   if (typeof QuillMarkdown !== 'undefined') {
     try { new QuillMarkdown(_quill); } catch(e) { console.warn('quilljs-markdown init failed:', e); }
@@ -22002,23 +24277,39 @@ function _notesInitQuill() {
 }
 
 async function _notesLoad() {
+  // SWR: render from cache INSTANTLY (synchronous localStorage), then revalidate
+  const cachedRaw = localStorage.getItem('amux_notes_cache');
+  let cached = null;
+  if (cachedRaw) {
+    try { cached = JSON.parse(cachedRaw); } catch(e) {}
+  }
+  let openedFromCache = false;
+  if (cached && cached.length) {
+    _notesAllNotes = cached;
+    _notesRenderList(_notesAllNotes);
+    // Open last-viewed note immediately from cache (cache-first)
+    if (!_notesActive) {
+      const lastPath = localStorage.getItem('amux_last_note');
+      const lastNote = lastPath && _notesAllNotes.find(n => n.path === lastPath);
+      _notesOpen(lastNote ? lastNote.path : _notesAllNotes[0].path); // fire and forget
+      openedFromCache = true;
+    }
+  }
+  // Revalidate in background
   let fresh;
   try {
     const r = await fetch(API + '/api/notes');
     fresh = await r.json();
-    // Cache the list
     localStorage.setItem('amux_notes_cache', JSON.stringify(fresh));
     _idb.set('amux_notes_cache', JSON.stringify(fresh));
   } catch(e) {
-    // Offline — load from cache
-    const cached = localStorage.getItem('amux_notes_cache');
+    // Offline and no cache — try IDB
     if (!cached) {
       const idbVal = await _idb.get('amux_notes_cache').catch(() => null);
       if (idbVal) { localStorage.setItem('amux_notes_cache', idbVal); fresh = JSON.parse(idbVal); }
-    } else {
-      fresh = JSON.parse(cached);
     }
-    if (!fresh) { _notesShowEmpty(); return; }
+    if (!fresh && !cached) { _notesShowEmpty(); return; }
+    if (!fresh) return; // already rendered from cache
   }
   // Preserve local titles — client may be ahead of server (unsaved debounce)
   if (_notesAllNotes.length) {
@@ -22030,7 +24321,7 @@ async function _notesLoad() {
   _notesTrashLoad();
   if (!_notesActive && _notesAllNotes.length === 0) {
     _notesShowEmpty();
-  } else if (!_notesActive && _notesAllNotes.length > 0) {
+  } else if (!_notesActive && !openedFromCache && _notesAllNotes.length > 0) {
     const lastPath = localStorage.getItem('amux_last_note');
     const lastNote = lastPath && _notesAllNotes.find(n => n.path === lastPath);
     await _notesOpen(lastNote ? lastNote.path : _notesAllNotes[0].path);
@@ -22074,6 +24365,22 @@ async function _notesFolderConfirm(name) {
 function _notesFolderInputKey(e) {
   if (e.key === 'Enter') { e.preventDefault(); _notesFolderConfirm(e.target.value); }
   else if (e.key === 'Escape') { e.preventDefault(); _notesFolderCancel(); }
+}
+
+// ── Notes keyboard shortcuts ──
+document.addEventListener('keydown', e => {
+  if (activeView !== 'notes') return;
+  const mod = e.metaKey || e.ctrlKey;
+  if (mod && e.key === 'n' && !e.shiftKey) { e.preventDefault(); _notesNew(); }
+  if (mod && e.key === 's') { e.preventDefault(); if (_notesSaveTimer) { clearTimeout(_notesSaveTimer); _notesSaveTimer = null; } _notesSave(); }
+  if (mod && e.key === 'p') { e.preventDefault(); _notesQuickOpen(); }
+});
+
+function _notesQuickOpen() {
+  const q = prompt('Open note:');
+  if (!q) return;
+  const match = _notesAllNotes.find(n => n.name.toLowerCase().includes(q.toLowerCase()) || n.path.toLowerCase().includes(q.toLowerCase()));
+  if (match) _notesOpen(match.path);
 }
 
 // ── Notes drag-and-drop ──
@@ -22237,60 +24544,20 @@ function _notesSearchFilter(q) {
   ));
 }
 
-async function _notesOpen(path) {
-  if (path === _notesActive?.path) return; // already open
-  // Fire pending save in background — don't block switching
-  // (content + pathKey are captured synchronously before the first await in _notesSave)
-  if (_notesSaveTimer) {
-    clearTimeout(_notesSaveTimer);
-    _notesSaveTimer = null;
-    _notesSave(); // intentionally not awaited
-  }
-  // Cancel any in-flight open request (rapid sidebar clicks)
-  if (_notesOpenAbort) _notesOpenAbort.abort();
-  _notesOpenAbort = new AbortController();
-  const signal = _notesOpenAbort.signal;
-
-  // Optimistic: highlight the clicked item immediately and blank the editor
-  document.querySelectorAll('#notes-list .notes-list-item').forEach(el => {
-    el.classList.toggle('active', el.dataset.path === path);
-  });
-  if (_quill) { _quill.setText(''); _quill.root.style.opacity = '0.3'; }
-  document.getElementById('notes-save-status').textContent = '';
-
-  let data;
-  const noteCacheKey = 'amux_note_' + path;
-  try {
-    const r = await fetch(API + '/api/notes/' + path.replace(/\.md$/, '').split('/').map(encodeURIComponent).join('/'), { signal });
-    if (!r.ok) throw new Error('not ok');
-    data = await r.json();
-    // Cache to IDB for offline access
-    _idb.set(noteCacheKey, JSON.stringify(data));
-  } catch(e) {
-    if (e.name === 'AbortError') return; // superseded by a newer click
-    // Offline — try IDB cache
-    const cached = await _idb.get(noteCacheKey).catch(() => null);
-    if (cached) { data = JSON.parse(cached); }
-    else return;
-  }
-
+function _notesRenderContent(data) {
+  // Populate UI from note data (shared by cache + network paths)
   _notesActive = { path: data.path };
   _notesRawContent = data.content || '';
   localStorage.setItem('amux_last_note', data.path);
-  // Derive title from content H1 or filename
   const h1html = data.content.match(/<h1[^>]*>(.*?)<\/h1>/i);
   const h1md = data.content.match(/^#\s+(.+)$/m);
   const titleFromContent = h1html ? h1html[1].replace(/<[^>]+>/g, '') : (h1md ? h1md[1] : '');
-  const titleFromPath = path.replace(/\.md$/, '').split('/').pop();
+  const titleFromPath = data.path.replace(/\.md$/, '').split('/').pop();
   _notesActive.title = titleFromContent || titleFromPath;
   document.getElementById('notes-title').value = _notesActive.title;
-  // Keep sidebar list name in sync with derived title
   const listEntry = _notesAllNotes.find(n => n.path === data.path);
   if (listEntry) listEntry.name = _notesActive.title;
-  // Load into Quill with a brief fade for smoothness
   if (!_quill) _notesInitQuill();
-  const quillRoot = _quill.root;
-  quillRoot.style.opacity = '0';
   const isHtml = /<[a-z][\s\S]*>/i.test(data.content);
   _notesLoadingContent = true;
   if (isHtml) {
@@ -22301,20 +24568,95 @@ async function _notesOpen(path) {
   setTimeout(() => { _notesLoadingContent = false; }, 0);
   document.getElementById('notes-empty-state').style.display = 'none';
   document.getElementById('notes-mode-tabs').style.display = 'flex';
-  // Always show edit mode when switching notes
-  _notesMode = 'edit';
-  document.getElementById('notes-tab-edit').classList.add('active');
-  document.getElementById('notes-tab-preview').classList.remove('active');
-  document.getElementById('notes-quill-wrap').style.display = '';
-  const previewEl = document.getElementById('notes-preview');
-  previewEl.innerHTML = '';
-  previewEl.classList.remove('active');
-  quillRoot.style.opacity = '1';
-  _notesSidebarUpdateActive(path);
+  _notesSwitchMode('preview');
+  _notesSidebarUpdateActive(data.path);
   _notesUpdatePinBtn();
+  _notesUpdateSessionBadge(data.path);
+}
+
+function _notesUpdateSessionBadge(path) {
+  const badge = document.getElementById('notes-session-badge');
+  if (!badge) return;
+  // Session-scoped notes live in _sessions/<sessionname>/<note>.md
+  const m = (path || '').match(/^_sessions\/([^/]+)\//);
+  if (m) {
+    const session = m[1];
+    badge.textContent = '⌘ ' + session;
+    badge.style.display = '';
+    badge.onclick = () => openPeek(session);
+  } else {
+    badge.style.display = 'none';
+    badge.onclick = null;
+  }
+}
+
+async function _notesOpen(path) {
+  if (path === _notesActive?.path) return; // already open
+  // Fire pending save in background — don't block switching
+  if (_notesSaveTimer) {
+    clearTimeout(_notesSaveTimer);
+    _notesSaveTimer = null;
+    _notesSave(); // intentionally not awaited
+  }
+  // Cancel any in-flight open request (rapid sidebar clicks)
+  if (_notesOpenAbort) _notesOpenAbort.abort();
+  _notesOpenAbort = new AbortController();
+  const signal = _notesOpenAbort.signal;
+
+  // Optimistic: highlight clicked item instantly
+  document.querySelectorAll('#notes-list .notes-list-item').forEach(el => {
+    el.classList.toggle('active', el.dataset.path === path);
+  });
   document.getElementById('notes-save-status').textContent = '';
-  // On mobile, auto-collapse sidebar after selecting a note
-  if (window.innerWidth <= 600 && _notesSidebarOpen) {
+
+  const noteCacheKey = 'amux_note_' + path;
+
+  // CACHE-FIRST: try to render from IDB synchronously-ish before network
+  // This gives Obsidian-like instant switching even on flaky connections
+  let rendered = false;
+  try {
+    const cached = await _idb.get(noteCacheKey);
+    if (cached && !signal.aborted) {
+      const data = JSON.parse(cached);
+      _notesRenderContent(data);
+      rendered = true;
+      // On mobile, collapse sidebar immediately after cache render
+      if (window.innerWidth <= 600 && _notesSidebarOpen) {
+        _notesSidebarOpen = false;
+        _notesApplySidebarState();
+      }
+    }
+  } catch(e) {}
+
+  // Revalidate from network (SWR)
+  let data;
+  try {
+    const r = await fetch(API + '/api/notes/' + path.replace(/\.md$/, '').split('/').map(encodeURIComponent).join('/'), { signal });
+    if (!r.ok) throw new Error('not ok');
+    data = await r.json();
+    _idb.set(noteCacheKey, JSON.stringify(data));
+  } catch(e) {
+    if (e.name === 'AbortError') return;
+    if (!rendered) { return; } // already logged; nothing to render
+    return; // cache already displayed, silently fail revalidation
+  }
+
+  // Only overwrite editor if content actually changed AND user isn't editing right now
+  // (avoid clobbering in-progress typing during revalidation)
+  if (rendered && _quill) {
+    const localHtml = _quill.root.innerHTML === '<p><br></p>' ? '' : _quill.root.innerHTML;
+    const serverContent = data.content || '';
+    if (localHtml === serverContent) {
+      // No change — just update metadata
+      _notesActive.path = data.path;
+      return;
+    }
+    // If Quill has focus, user is editing — skip server overwrite and let debounced save win
+    if (_quill.hasFocus()) return;
+  }
+
+  _notesRenderContent(data);
+  if (!rendered && window.innerWidth <= 600 && _notesSidebarOpen) {
     _notesSidebarOpen = false;
     _notesApplySidebarState();
   }
@@ -22377,7 +24719,7 @@ function _notesTitleChange() {
 
 function _notesSaveDebounce() {
   if (_notesSaveTimer) clearTimeout(_notesSaveTimer);
-  _notesSaveTimer = setTimeout(_notesSave, 800);
+  _notesSaveTimer = setTimeout(_notesSave, 400);
 }
 
 async function _notesSave() {
@@ -22386,19 +24728,22 @@ async function _notesSave() {
   _notesRawContent = content;
   const pathKey = _notesActive.path.replace(/\.md$/, '');
   const statusEl = document.getElementById('notes-save-status');
+  const activePath = _notesActive.path;
+  // OPTIMISTIC: write to IDB FIRST so local state is always durable
+  // (survives reload even if network/queue hasn't drained yet)
+  _idb.set('amux_note_' + activePath, JSON.stringify({ path: activePath, content }));
   const result = await apiCall(API + '/api/notes/' + pathKey.split('/').map(encodeURIComponent).join('/'), {
     method: 'POST', headers: {'Content-Type': 'application/json'},
     body: JSON.stringify({ content })
   });
   if (!result) {
-    statusEl.textContent = 'Queued';
-    setTimeout(() => { statusEl.textContent = ''; }, 2000);
+    statusEl.textContent = '◐ Offline';
+    statusEl.title = 'Saved locally, will sync when online';
     return;
   }
-  statusEl.textContent = '✓ Saved';
-  setTimeout(() => { statusEl.textContent = ''; }, 1500);
-  // Update IDB cache with fresh content
-  _idb.set('amux_note_' + _notesActive.path, JSON.stringify({ path: _notesActive.path, content }));
+  statusEl.textContent = '✓';
+  statusEl.title = 'Saved';
+  setTimeout(() => { statusEl.textContent = ''; statusEl.title = ''; }, 1500);
   // Update in-memory list and patch the DOM item in place (no full re-render)
   const saved = _notesAllNotes.find(n => n.path === _notesActive.path);
   if (saved) {
@@ -22416,15 +24761,6 @@ async function _notesSave() {
 }
 
 const _TRASH_SVG = `<svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/><path d="M10 11v6M14 11v6"/><path d="M9 6V4a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2"/></svg>`;
-function _notesTTS() {
-  if (!_notesActive) return;
-  // Get plain text from the Quill editor
-  const editor = _notesQuill;
-  const text = editor ? editor.getText().trim() : '';
-  if (!text) { showToast('Note is empty', 'error'); return; }
-  openTTS(text);
-}
-
 async function _notesDelete() {
   if (!_notesActive) return;
   const btn = document.querySelector('.notes-delete-btn');
@@ -22922,73 +25258,6 @@ function _gmailFmtDate(ts) {
 }
 
 // ── Notifications ────────────────────────────────────────────────────────────
-var _notifData = [];
-
-async function _notificationsLoad() {
-  const el = document.getElementById('notif-list');
-  if (!el) return;
-  el.innerHTML = '<div style="color:var(--muted);padding:24px;text-align:center">Loading…</div>';
-  const r = await fetch(API + '/api/notifications').catch(() => null);
-  if (!r || !r.ok) { el.innerHTML = '<div style="color:var(--muted);padding:24px;text-align:center">Could not load notifications.</div>'; return; }
-  _notifData = await r.json();
-  _notifRender();
-}
-
-function _notifRender() {
-  const el = document.getElementById('notif-list');
-  if (!el) return;
-  if (!_notifData.length) {
-    el.innerHTML = '<div style="color:var(--muted);padding:24px;text-align:center">No notifications.</div>';
-    return;
-  }
-  const levelColor = { info: 'var(--accent,#58a6ff)', warn: '#f0ad4e', error: '#e05252', success: '#3fb950' };
-  el.innerHTML = _notifData.map(n => {
-    const col = levelColor[n.level] || levelColor.info;
-    const ts = n.ts ? new Date(n.ts * 1000).toLocaleString() : '';
-    return `<div style="display:flex;gap:10px;align-items:flex-start;padding:10px 0;border-bottom:1px solid var(--border);opacity:${n.read ? '0.5' : '1'}">
-      <div style="width:8px;height:8px;border-radius:50%;background:${col};margin-top:5px;flex-shrink:0;"></div>
-      <div style="flex:1;min-width:0;">
-        <div style="font-weight:600;font-size:0.85rem;">${_esc(n.title || '')}</div>
-        ${n.body ? `<div style="font-size:0.8rem;color:var(--muted);margin-top:2px;">${_esc(n.body)}</div>` : ''}
-        <div style="font-size:0.72rem;color:var(--muted);margin-top:4px;">${n.source ? `<span style="margin-right:6px;opacity:0.7">${_esc(n.source)}</span>` : ''}${ts}</div>
-      </div>
-      <div style="display:flex;gap:4px;flex-shrink:0;">
-        ${!n.read ? `<button class="btn" style="font-size:0.7rem;padding:2px 6px;" onclick="_notifMarkRead('${n.id}')">✓</button>` : ''}
-        <button class="btn" style="font-size:0.7rem;padding:2px 6px;" onclick="_notifDelete('${n.id}')">✕</button>
-      </div>
-    </div>`;
-  }).join('');
-}
-
-function _esc(s) { return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
-
-async function _notifMarkRead(id) {
-  await fetch(API + '/api/notifications/' + id, { method: 'PATCH', headers: {'Content-Type':'application/json'}, body: JSON.stringify({read: true}) });
-  const n = _notifData.find(x => x.id === id);
-  if (n) { n.read = true; _notifRender(); }
-}
-
-async function _notifMarkAllRead() {
-  await Promise.all(_notifData.filter(n => !n.read).map(n =>
-    fetch(API + '/api/notifications/' + n.id, { method: 'PATCH', headers: {'Content-Type':'application/json'}, body: JSON.stringify({read: true}) })
-  ));
-  _notifData.forEach(n => n.read = true);
-  _notifRender();
-}
-
-async function _notifDelete(id) {
-  await fetch(API + '/api/notifications/' + id, { method: 'DELETE' });
-  _notifData = _notifData.filter(n => n.id !== id);
-  _notifRender();
-}
-
-async function _notifClearRead() {
-  const readIds = _notifData.filter(n => n.read).map(n => n.id);
-  await Promise.all(readIds.map(id => fetch(API + '/api/notifications/' + id, { method: 'DELETE' })));
-  _notifData = _notifData.filter(n => !n.read);
-  _notifRender();
-}
-
 async function _emailLoad() {
   // Load connected accounts, then render inbox
   const r = await fetch(API + '/api/gmail/accounts').catch(() => null);
@@ -23894,6 +26163,122 @@ function _graphRestorePositions() {
   } catch(e) {}
 }
 
+// ── Browser ─────────────────────────────────────────────────────────────────
+let _bwInited = false;
+let _bwSession = 'amux';
+
+async function _bwInit() {
+  if (_bwInited) return;
+  _bwInited = true;
+  // Load profiles
+  try {
+    const r = await fetch('/api/browser/profiles');
+    const d = await r.json();
+    const sel = document.getElementById('bw-profile');
+    (d.profiles || []).forEach(p => {
+      const o = document.createElement('option');
+      o.value = p; o.textContent = p;
+      sel.appendChild(o);
+    });
+    // Also add Playwright auth profiles
+    const pw = await fetch('/api/browser/pw-profiles').catch(() => null);
+    if (pw && pw.ok) {
+      const pd = await pw.json();
+      (pd.profiles || []).forEach(p => {
+        const o = document.createElement('option');
+        o.value = 'pw:' + p; o.textContent = '🔐 ' + p;
+        sel.appendChild(o);
+      });
+    }
+  } catch(e) {}
+}
+
+function _bwStatus(msg) {
+  const el = document.getElementById('bw-status');
+  if (el) el.textContent = msg;
+}
+
+async function _bwGo() {
+  const url = document.getElementById('bw-url').value.trim();
+  if (!url) return;
+  const profile = document.getElementById('bw-profile').value;
+  _bwStatus('Loading...');
+  try {
+    const body = { url, session: _bwSession };
+    if (profile && !profile.startsWith('pw:')) body.profile = profile;
+    else if (profile && profile.startsWith('pw:')) body.profile = profile.slice(3);
+    const r = await fetch('/api/browser/start', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify(body) });
+    const d = await r.json();
+    if (d.success === false && d.error) { _bwStatus('Error: ' + d.error); return; }
+    _bwStatus('Navigated');
+    // Auto-screenshot after a delay
+    setTimeout(() => _bwScreenshot(), 2000);
+  } catch(e) { _bwStatus('Error: ' + e.message); }
+}
+
+async function _bwScreenshot() {
+  _bwStatus('Taking screenshot...');
+  try {
+    const r = await fetch('/api/browser/screenshot?session=' + _bwSession + '&t=' + Date.now());
+    const d = await r.json();
+    if (d.path) {
+      // Load via file raw API
+      const img = document.getElementById('bw-img');
+      img.src = '/api/file/raw?path=' + encodeURIComponent(d.path) + '&t=' + Date.now();
+      img.style.display = '';
+      document.getElementById('bw-placeholder').style.display = 'none';
+      _bwStatus('Screenshot taken');
+    } else {
+      _bwStatus(d.error || 'Screenshot failed');
+    }
+  } catch(e) { _bwStatus('Error: ' + e.message); }
+}
+
+async function _bwClick(event) {
+  const img = document.getElementById('bw-img');
+  const rect = img.getBoundingClientRect();
+  // Scale click coords to actual viewport (1280x800 default)
+  const scaleX = 1280 / rect.width;
+  const scaleY = 800 / rect.height;
+  const x = Math.round((event.clientX - rect.left) * scaleX);
+  const y = Math.round((event.clientY - rect.top) * scaleY);
+  _bwStatus('Clicking ' + x + ',' + y + '...');
+  try {
+    await fetch('/api/browser/action', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({ action: 'click', x, y, session: _bwSession }) });
+    setTimeout(() => _bwScreenshot(), 1000);
+  } catch(e) { _bwStatus('Error: ' + e.message); }
+}
+
+async function _bwBack() {
+  _bwStatus('Going back...');
+  try {
+    await fetch('/api/browser/action', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({ action: 'back', session: _bwSession }) });
+    setTimeout(() => _bwScreenshot(), 1000);
+  } catch(e) { _bwStatus('Error: ' + e.message); }
+}
+
+async function _bwSaveProfile() {
+  const name = prompt('Profile name to save current session as:');
+  if (!name) return;
+  _bwStatus('Saving profile...');
+  try {
+    const r = await fetch('/api/browser/save-profile', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({ name, session: _bwSession }) });
+    const d = await r.json();
+    _bwStatus(d.success ? 'Profile saved: ' + name : (d.error || 'Save failed'));
+    if (d.success) {
+      // Add to dropdown if not there
+      const sel = document.getElementById('bw-profile');
+      const exists = Array.from(sel.options).some(o => o.value === 'pw:' + name);
+      if (!exists) {
+        const o = document.createElement('option');
+        o.value = 'pw:' + name; o.textContent = '🔐 ' + name;
+        sel.appendChild(o);
+        sel.value = 'pw:' + name;
+      }
+    }
+  } catch(e) { _bwStatus('Error: ' + e.message); }
+}
+
 // ── Journal ──────────────────────────────────────────────────────────────────
 let _jrnlEntries = [];
 let _jrnlAllEntries = [];
@@ -24376,6 +26761,7 @@ async function _jrnlSaveConfig() {
 <script src="https://cdn.jsdelivr.net/npm/@xterm/addon-fit@0.10.0/lib/addon-fit.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/@xterm/addon-web-links@0.11.0/lib/addon-web-links.min.js"></script>
 <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/fullcalendar@6.1.15/index.global.min.js"></script>
 <div id="grid-view">
   <div class="grid-toolbar">
     <span class="grid-toolbar-title">Workspace</span>
@@ -25062,6 +27448,10 @@ class CCHandler(BaseHTTPRequestHandler):
             )
             return self._html(page)
 
+        # GET /health — lightweight uptime check (no auth required)
+        if method == "GET" and path == "/health":
+            return self._json({"status": "ok"})
+
         # GET /release-notes — standalone SEO-indexable release notes page
         if method == "GET" and path == "/release-notes":
             return self._html(RELEASE_NOTES_HTML)
@@ -25386,7 +27776,52 @@ class CCHandler(BaseHTTPRequestHandler):
 
         # GET /api/sessions
         if method == "GET" and path == "/api/sessions":
-            return self._json(list_sessions())
+            # Shared cache with stale-while-revalidate. Only ONE thread ever
+            # runs list_sessions() at a time. Other threads return stale data
+            # immediately (if any) or wait briefly then return whatever the
+            # refresher produced. This prevents thundering herd under load
+            # where list_sessions() can take 30+ seconds.
+            now = time.time()
+            sc = _sse_cache["sessions"]
+            age = now - sc["time"]
+            if age > _SSE_CACHE_TTL:
+                if _sse_cache_lock.acquire(blocking=False):
+                    # We're the refresher.
+                    released_to_bg = False
+                    try:
+                        if time.time() - sc["time"] > _SSE_CACHE_TTL:
+                            # If we already have data, refresh in the background
+                            # so this request returns fast. Only block if cold.
+                            if sc["data"] is not None:
+                                def _bg_refresh():
+                                    try:
+                                        data = list_sessions()
+                                        sc["data"] = data
+                                        sc["json"] = json.dumps(data, sort_keys=True)
+                                        sc["time"] = time.time()
+                                    finally:
+                                        _sse_cache_lock.release()
+                                threading.Thread(target=_bg_refresh, daemon=True).start()
+                                released_to_bg = True
+                                return self._json(sc["data"])
+                            # Cold cache — must block.
+                            data = list_sessions()
+                            sc["data"] = data
+                            sc["json"] = json.dumps(data, sort_keys=True)
+                            sc["time"] = time.time()
+                    finally:
+                        if not released_to_bg:
+                            _sse_cache_lock.release()
+                else:
+                    # Another thread is refreshing. Return stale data immediately
+                    # if we have any, otherwise wait briefly for the refresher.
+                    if sc["data"] is not None:
+                        return self._json(sc["data"])
+                    for _ in range(100):  # up to 10s for cold start
+                        time.sleep(0.1)
+                        if sc["data"] is not None:
+                            break
+            return self._json(sc["data"] if sc["data"] is not None else [])
 
         # GET/POST /api/memory/global
         if path == "/api/memory/global":
@@ -25962,6 +28397,48 @@ class CCHandler(BaseHTTPRequestHandler):
         if method == "GET" and path == "/api/metrics":
             return self._json(get_system_metrics())
 
+        # GET /api/speedtest/download?bytes=N — stream N bytes for download speed test
+        if method == "GET" and path == "/api/speedtest/download":
+            try:
+                size = int(qs.get("bytes", ["10485760"])[0])  # default 10 MB
+            except (ValueError, TypeError):
+                size = 10 * 1024 * 1024
+            size = max(1, min(size, 100 * 1024 * 1024))  # cap at 100 MB
+            self.send_response(200)
+            self.send_header("Content-Type", "application/octet-stream")
+            self.send_header("Content-Length", str(size))
+            self.send_header("Cache-Control", "no-store, no-cache, must-revalidate")
+            self.send_header("Pragma", "no-cache")
+            self.end_headers()
+            chunk = os.urandom(65536)  # 64 KB random chunk, reused (incompressible)
+            remaining = size
+            try:
+                while remaining > 0:
+                    n = min(len(chunk), remaining)
+                    self.wfile.write(chunk[:n])
+                    remaining -= n
+            except (BrokenPipeError, ConnectionResetError):
+                pass
+            return
+
+        # POST /api/speedtest/upload — accept arbitrary bytes, return count for upload speed test
+        if method == "POST" and path == "/api/speedtest/upload":
+            try:
+                length = int(self.headers.get("Content-Length", 0))
+            except (ValueError, TypeError):
+                length = 0
+            length = max(0, min(length, 100 * 1024 * 1024))  # cap at 100 MB
+            received = 0
+            try:
+                while received < length:
+                    chunk = self.rfile.read(min(65536, length - received))
+                    if not chunk:
+                        break
+                    received += len(chunk)
+            except (BrokenPipeError, ConnectionResetError):
+                pass
+            return self._json({"ok": True, "bytes": received})
+
         # GET /api/stats/daily
         if method == "GET" and path == "/api/stats/daily":
             return self._json(get_daily_token_stats())
@@ -26042,9 +28519,19 @@ class CCHandler(BaseHTTPRequestHandler):
                 return self._json({"error": "access denied"}, 403)
             WRITABLE_EXTS = {".md", ".markdown", ".mdx", ".txt", ".json",
                              ".yml", ".yaml", ".toml", ".ini", ".cfg",
-                             ".sh", ".py", ".js", ".ts", ".css", ".html", ".htm"}
-            if p.suffix.lower() not in WRITABLE_EXTS:
-                return self._json({"error": "file type not writable"}, 400)
+                             ".sh", ".bash", ".zsh", ".py", ".js", ".ts", ".jsx", ".tsx",
+                             ".mjs", ".cjs", ".css", ".scss", ".less", ".html", ".htm",
+                             ".xml", ".svg", ".csv", ".sql", ".graphql", ".proto",
+                             ".go", ".rs", ".java", ".rb", ".php", ".swift", ".kt",
+                             ".c", ".cpp", ".h", ".cs", ".r", ".lua", ".pl",
+                             ".env", ".gitignore", ".dockerignore",
+                             ".tf", ".hcl", ".conf", ".log", ".makefile"}
+            ext = p.suffix.lower()
+            # Allow extensionless files and common text extensions
+            if ext and ext not in WRITABLE_EXTS:
+                return self._json({"error": "file type not writable: " + ext}, 400)
+            # Create parent directories if they don't exist (for new files)
+            p.parent.mkdir(parents=True, exist_ok=True)
             try:
                 p.write_text(body.get("content", ""))
                 return self._json({"ok": True, "path": str(p)})
@@ -26177,6 +28664,7 @@ class CCHandler(BaseHTTPRequestHandler):
                 length = end - start + 1
                 self.send_response(206)
                 self.send_header("Content-Type", mime)
+                self.send_header("Content-Disposition", f'attachment; filename="{p.name}"')
                 self.send_header("Content-Range", f"bytes {start}-{end}/{file_size}")
                 self.send_header("Content-Length", str(length))
                 self.send_header("Accept-Ranges", "bytes")
@@ -26195,6 +28683,7 @@ class CCHandler(BaseHTTPRequestHandler):
             else:
                 self.send_response(200)
                 self.send_header("Content-Type", mime)
+                self.send_header("Content-Disposition", f'attachment; filename="{p.name}"')
                 self.send_header("Content-Length", str(file_size))
                 self.send_header("Accept-Ranges", "bytes")
                 self.send_header("ETag", etag)
@@ -26358,6 +28847,31 @@ class CCHandler(BaseHTTPRequestHandler):
             except PermissionError:
                 return self._json({"error": "permission denied"}, 403)
 
+        # ── Open directory in native file manager ──
+        if method == "POST" and path == "/api/fs/open":
+            data = self._read_body()
+            dir_path = data.get("path", "/")
+            # Resolve to absolute path
+            target = Path(dir_path).expanduser().resolve()
+            if not target.exists():
+                return self._json({"error": "path not found"}, 404)
+            if target.is_file():
+                target = target.parent
+            import platform
+            plat = platform.system()
+            try:
+                if plat == "Darwin":
+                    subprocess.Popen(["open", str(target)])
+                elif plat == "Linux":
+                    subprocess.Popen(["xdg-open", str(target)])
+                elif plat == "Windows":
+                    subprocess.Popen(["explorer", str(target)])
+                else:
+                    return self._json({"error": f"unsupported platform: {plat}"}, 400)
+                return self._json({"ok": True, "path": str(target)})
+            except Exception as e:
+                return self._json({"error": str(e)}, 500)
+
         # ── Directory upload (Files view) ──
         if method == "POST" and path == "/api/fs/upload":
             ctype = self.headers.get("Content-Type", "")
@@ -26404,6 +28918,27 @@ class CCHandler(BaseHTTPRequestHandler):
                 dest.write_bytes(data)
                 saved.append({"name": dest.name, "size": len(data)})
             return self._json({"saved": saved})
+
+        # ── File/directory delete ──
+        if method == "DELETE" and path == "/api/fs/delete":
+            data = self._read_body()
+            target_path = data.get("path", "")
+            if not target_path:
+                return self._json({"error": "missing 'path'"}, 400)
+            target = Path(target_path).expanduser().resolve()
+            if not _is_path_allowed(target):
+                return self._json({"error": "access denied"}, 403)
+            if not target.exists():
+                return self._json({"error": "not found"}, 404)
+            try:
+                if target.is_dir():
+                    import shutil as _shutil
+                    _shutil.rmtree(str(target))
+                else:
+                    target.unlink()
+                return self._json({"ok": True, "deleted": str(target)})
+            except Exception as e:
+                return self._json({"error": str(e)}, 500)
 
         # ── File upload ──
         if method == "POST" and path == "/api/upload":
@@ -26501,10 +29036,16 @@ class CCHandler(BaseHTTPRequestHandler):
                 owner_type = body.get("owner_type", "agent" if session else "human")
                 if owner_type not in ("human", "agent"):
                     owner_type = "human"
+                # Place new card at top of its column: pos = (min existing pos) - 1
+                min_pos_row = db.execute(
+                    "SELECT COALESCE(MIN(NULLIF(pos, 0)), 0) AS m FROM issues WHERE status = ? AND deleted IS NULL",
+                    (status,),
+                ).fetchone()
+                new_pos = (min_pos_row["m"] if min_pos_row else 0) - 1024.0
                 db.execute(
-                    """INSERT INTO issues (id, title, desc, status, session, creator, due, due_time, created, updated, owner_type)
-                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-                    (item_id, title, desc, status, session or None, creator, due, due_time, now, now, owner_type),
+                    """INSERT INTO issues (id, title, desc, status, session, creator, due, due_time, created, updated, owner_type, pos)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    (item_id, title, desc, status, session or None, creator, due, due_time, now, now, owner_type, new_pos),
                 )
                 for tag in tags:
                     db.execute(
@@ -26515,13 +29056,24 @@ class CCHandler(BaseHTTPRequestHandler):
                 _sse_cache["board"]["time"] = 0  # invalidate SSE cache
                 item = _item_by_id(item_id)
                 _push_ical_bg()
+                if due:
+                    _gcal_sync_bg(item_id, title=title, due=due, due_time=due_time or "", desc=desc, status=status)
                 _req_tl.event = {"type": "board", "action": "created", "target": item_id,
                                  "session": session, "detail": f"{item_id}: {title}"}
+                # Auto-notify the assignee session if this is an agent task waiting for pickup.
+                # Skip if creator==session (the session created its own task).
+                if (session and owner_type == "agent"
+                        and status in ("todo", "backlog")
+                        and creator != session):
+                    _notify_session_of_task(session, item_id, title)
                 return self._json(item, 201)
 
             # POST /api/board/clear-done — soft-delete all done issues
             if method == "POST" and path == "/api/board/clear-done":
                 now = int(time.time())
+                done_ids = [r["id"] for r in db.execute(
+                    "SELECT id FROM issues WHERE status = 'done' AND deleted IS NULL"
+                ).fetchall()]
                 db.execute(
                     "UPDATE issues SET deleted = ? WHERE status = 'done' AND deleted IS NULL", (now,)
                 )
@@ -26531,6 +29083,8 @@ class CCHandler(BaseHTTPRequestHandler):
                     "SELECT COUNT(*) FROM issues WHERE deleted IS NULL"
                 ).fetchone()[0]
                 _push_ical_bg()
+                for did in done_ids:
+                    _gcal_sync_bg(did, deleted=True)
                 return self._json({"ok": True, "remaining": remaining})
 
             # PUT /api/board/statuses/reorder — reorder columns
@@ -26578,7 +29132,7 @@ class CCHandler(BaseHTTPRequestHandler):
             if status_m:
                 sid = status_m.group(1)
                 if method == "DELETE":
-                    if sid in ("backlog", "todo", "doing", "done", "discarded"):
+                    if sid in ("backlog", "todo", "doing", "review", "done", "discarded"):
                         return self._json({"error": "cannot delete built-in status"}, 400)
                     db.execute("DELETE FROM statuses WHERE id = ? AND is_builtin = 0", (sid,))
                     db.execute(
@@ -26594,6 +29148,21 @@ class CCHandler(BaseHTTPRequestHandler):
                         db.execute("UPDATE statuses SET label = ? WHERE id = ?", (label, sid))
                         db.commit()
                     return self._json({"ok": True})
+
+            # GET /api/board/tag-completion?tag=X — check if all tasks with a tag are done
+            if method == "GET" and path == "/api/board/tag-completion":
+                tag = qs.get("tag", [""])[0]
+                if not tag:
+                    return self._json({"error": "missing tag parameter"}, 400)
+                rows = db.execute(
+                    "SELECT i.status FROM issues i "
+                    "JOIN issue_tags t ON t.issue_id = i.id "
+                    "WHERE t.tag = ? AND i.deleted IS NULL",
+                    (tag,),
+                ).fetchall()
+                total = len(rows)
+                done = sum(1 for r in rows if r["status"] in ("done", "discarded"))
+                return self._json({"tag": tag, "total": total, "done": done, "complete": total > 0 and done == total})
 
             # POST /api/board/<id>/claim — atomic task claim for multi-agent coordination
             claim_m = re.match(r"^/api/board/([A-Za-z0-9_-]+)/claim$", path)
@@ -26614,15 +29183,16 @@ class CCHandler(BaseHTTPRequestHandler):
                 if dict(row)["status"] not in ("todo", "backlog"):
                     return self._json({"error": f"item not available (status: {dict(row)['status']})"}, 409)
                 now = int(time.time())
-                # Atomic claim: only succeeds if still todo/backlog
-                db.execute(
+                # Atomic claim: only succeeds if still todo/backlog AND agent-owned
+                # The owner_type check in the WHERE prevents TOCTOU races where
+                # owner_type changes between the SELECT above and this UPDATE.
+                cur = db.execute(
                     "UPDATE issues SET status='doing', session=?, updated=?"
-                    " WHERE id=? AND status IN ('todo','backlog') AND deleted IS NULL",
+                    " WHERE id=? AND status IN ('todo','backlog') AND owner_type='agent' AND deleted IS NULL",
                     (session_name, now, bid),
                 )
                 db.commit()
-                updated = db.execute("SELECT session FROM issues WHERE id=?", (bid,)).fetchone()
-                if not updated or dict(updated)["session"] != session_name:
+                if cur.rowcount == 0:
                     return self._json({"error": "claim failed — taken by another session"}, 409)
                 _sse_cache["board"]["time"] = 0
                 return self._json(_item_by_id(bid))
@@ -26640,8 +29210,13 @@ class CCHandler(BaseHTTPRequestHandler):
                 if method == "PATCH":
                     body = self._read_body()
                     now = int(time.time())
+                    # Snapshot the prior session+status so we can detect transitions
+                    prior = db.execute(
+                        "SELECT session, status, owner_type FROM issues WHERE id = ?", (bid,)
+                    ).fetchone()
+                    prior_session = prior["session"] if prior else None
                     set_clauses, params = [], []
-                    for k in ("title", "desc", "status", "session", "due", "due_time", "owner_type", "pinned"):
+                    for k in ("title", "desc", "status", "session", "due", "due_time", "owner_type", "pinned", "pos"):
                         if k in body:
                             set_clauses.append(f"{k} = ?")
                             v = body[k]
@@ -26649,6 +29224,9 @@ class CCHandler(BaseHTTPRequestHandler):
                     if "creator" in body:
                         set_clauses.append("creator = ?")
                         params.append(body["creator"])
+                    # If session is being changed, reset notified so the new assignee gets pinged
+                    if "session" in body and (body.get("session") or None) != prior_session:
+                        set_clauses.append("notified = 0")
                     set_clauses.append("updated = ?")
                     params.append(now)
                     params.append(bid)
@@ -26667,7 +29245,20 @@ class CCHandler(BaseHTTPRequestHandler):
                     db.commit()
                     _sse_cache["board"]["time"] = 0
                     _push_ical_bg()
-                    return self._json(_item_by_id(bid))
+                    updated_item = _item_by_id(bid)
+                    _gcal_sync_bg(bid, title=updated_item.get("title", ""),
+                                  due=updated_item.get("due", "") or "",
+                                  due_time=updated_item.get("due_time", "") or "",
+                                  desc=updated_item.get("desc", ""),
+                                  status=updated_item.get("status", ""))
+                    # Auto-notify the (possibly new) assignee if the card is now an
+                    # agent task waiting for pickup. Idempotent via the notified flag.
+                    new_session = updated_item.get("session") or ""
+                    if (new_session
+                            and updated_item.get("owner_type") == "agent"
+                            and updated_item.get("status") in ("todo", "backlog")):
+                        _notify_session_of_task(new_session, bid, updated_item.get("title", ""))
+                    return self._json(updated_item)
 
                 if method == "DELETE":
                     now = int(time.time())
@@ -26675,6 +29266,7 @@ class CCHandler(BaseHTTPRequestHandler):
                     db.commit()
                     _sse_cache["board"]["time"] = 0
                     _push_ical_bg()
+                    _gcal_sync_bg(bid, deleted=True)
                     return self._json({"ok": True, "deleted": bid})
 
             return self._json({"error": "not found"}, 404)
@@ -26740,11 +29332,16 @@ class CCHandler(BaseHTTPRequestHandler):
                     "id": sid, "title": data.get("title", ""),
                     "session": data.get("session", ""),
                     "command": data.get("command", ""),
+                    "kind": data.get("kind") or "tmux",
                     "sched_type": stype,
                     "recurrence": data.get("recurrence"),
                     "run_at": run_at, "next_run": run_at,
                     "last_run": None, "enabled": 1, "run_count": 0,
                     "schedule_expr": schedule_expr or None,
+                    "watch": int(data.get("watch") or 0),
+                    "watch_timeout": int(data.get("watch_timeout") or 120),
+                    "done_pattern": data.get("done_pattern") or None,
+                    "done_action": data.get("done_action") or "disable",
                     "created": now_ts, "updated": now_ts, "deleted": None,
                 }
                 # compute next_run — prefer schedule_expr if provided
@@ -26755,13 +29352,17 @@ class CCHandler(BaseHTTPRequestHandler):
                 else:
                     sched["next_run"] = _next_run_dt(sched) or run_at
                 db.execute(
-                    """INSERT INTO schedules (id,title,session,command,sched_type,recurrence,
-                       run_at,next_run,last_run,enabled,run_count,schedule_expr,created,updated,deleted)
-                       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
-                    (sched["id"], sched["title"], sched["session"], sched["command"],
+                    """INSERT INTO schedules (id,title,session,command,kind,sched_type,recurrence,
+                       run_at,next_run,last_run,enabled,run_count,schedule_expr,
+                       watch,watch_timeout,done_pattern,done_action,
+                       created,updated,deleted)
+                       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                    (sched["id"], sched["title"], sched["session"], sched["command"], sched["kind"],
                      sched["sched_type"], sched["recurrence"], sched["run_at"],
                      sched["next_run"], sched["last_run"], sched["enabled"],
                      sched["run_count"], sched["schedule_expr"],
+                     sched["watch"], sched["watch_timeout"],
+                     sched["done_pattern"], sched["done_action"],
                      sched["created"], sched["updated"], sched["deleted"])
                 )
                 db.commit()
@@ -26782,6 +29383,23 @@ class CCHandler(BaseHTTPRequestHandler):
                 self._json([dict(r) for r in rows])
                 return
 
+            # POST /api/schedules/<id>/run — run now (manual trigger)
+            if method == "POST" and sched_id.endswith("/run"):
+                sid_for_run = sched_id[:-4]  # strip "/run"
+                db = get_db()
+                row = db.execute("SELECT * FROM schedules WHERE id=? AND deleted IS NULL", (sid_for_run,)).fetchone()
+                if not row:
+                    self._json({"error": "not found"}, 404); return
+                cols = _sched_cols(db)
+                sched = _sched_row_to_dict(row, cols)
+                _run_schedule(sched)
+                now_str = _dt.now().strftime("%Y-%m-%dT%H:%M")
+                db.execute("UPDATE schedules SET last_run=?, updated=? WHERE id=?",
+                           (now_str, int(_time.time()), sid_for_run))
+                db.commit()
+                self._json({"ok": True, "ran": sched["title"]})
+                return
+
             # GET /api/schedules/<id>
             if method == "GET":
                 db = get_db()
@@ -26800,7 +29418,8 @@ class CCHandler(BaseHTTPRequestHandler):
                 cols = _sched_cols(db)
                 sched = _sched_row_to_dict(row, cols)
                 body = self._read_body()
-                for k in ("title","session","command","sched_type","recurrence","run_at","enabled","schedule_expr"):
+                for k in ("title","session","command","kind","sched_type","recurrence","run_at","enabled","schedule_expr",
+                          "watch","watch_timeout","done_pattern","done_action"):
                     if k in body:
                         sched[k] = body[k]
                 expr = (sched.get("schedule_expr") or "").strip()
@@ -26811,11 +29430,17 @@ class CCHandler(BaseHTTPRequestHandler):
                     sched["next_run"] = _next_run_dt(sched) or sched.get("run_at", "")
                 sched["updated"] = int(_time.time())
                 db.execute(
-                    """UPDATE schedules SET title=?,session=?,command=?,sched_type=?,recurrence=?,
-                       run_at=?,next_run=?,enabled=?,schedule_expr=?,updated=? WHERE id=?""",
-                    (sched["title"], sched["session"], sched["command"], sched["sched_type"],
+                    """UPDATE schedules SET title=?,session=?,command=?,kind=?,sched_type=?,recurrence=?,
+                       run_at=?,next_run=?,enabled=?,schedule_expr=?,
+                       watch=?,watch_timeout=?,done_pattern=?,done_action=?,
+                       updated=? WHERE id=?""",
+                    (sched["title"], sched["session"], sched["command"], sched.get("kind") or "tmux",
+                     sched["sched_type"],
                      sched["recurrence"], sched["run_at"], sched["next_run"],
-                     sched["enabled"], sched.get("schedule_expr"), sched["updated"], sched_id)
+                     sched["enabled"], sched.get("schedule_expr"),
+                     int(sched.get("watch") or 0), int(sched.get("watch_timeout") or 120),
+                     sched.get("done_pattern"), sched.get("done_action") or "disable",
+                     sched["updated"], sched_id)
                 )
                 db.commit()
                 self._json(sched)
@@ -27034,6 +29659,31 @@ class CCHandler(BaseHTTPRequestHandler):
                 return self._json({"branches": branches})
             except Exception:
                 return self._json({"branches": []})
+
+        if method == "POST" and path == "/api/lookup":
+            body = self._read_body()
+            text = (body.get("text") or "").strip()
+            if not text:
+                return self._json({"error": "missing text"}, 400)
+            if len(text) > 2000:
+                text = text[:2000]
+            api_key = os.environ.get("ANTHROPIC_API_KEY", "")
+            if not api_key:
+                return self._json({"error": "no API key configured"}, 400)
+            try:
+                import anthropic as _anthropic
+                client = _anthropic.Anthropic(api_key=api_key)
+                msg = client.messages.create(
+                    model="claude-haiku-4-5-20251001",
+                    max_tokens=400,
+                    messages=[{"role": "user", "content":
+                        f"Briefly explain what this means or refers to in 2-4 sentences. "
+                        f"Be concise and direct. If it's a technical term, code, error, "
+                        f"or concept, explain it. If it's a name, identify it.\n\n{text}"}],
+                )
+                return self._json({"text": msg.content[0].text.strip()})
+            except Exception as e:
+                return self._json({"error": str(e)}, 500)
 
         if method == "POST" and path == "/api/suggest-branch":
             body = self._read_body()
@@ -27447,6 +30097,141 @@ class CCHandler(BaseHTTPRequestHandler):
                 get_db().commit()
                 return self._json({"ok": True})
 
+            # GET /api/email/inbox — read recent messages from Mail.app
+            if method == "GET" and path == "/api/email/inbox":
+                account_filter = qs.get("account", [""])[0]
+                count = min(int(qs.get("count", ["20"])[0]), 100)
+                lookback_days = float(qs.get("days", ["7"])[0])
+                lookback_secs = max(lookback_days * 86400, 3600)
+                max_msgs = min(count, 100)
+                lookback_days_frac = lookback_secs / 86400
+                acct_filter_line = ""
+                if account_filter:
+                    safe_acct = account_filter.replace('"', '\\"')
+                    acct_filter_line = f'if acctName is not equal to "{safe_acct}" then'
+                script = f"""
+set NL to ASCII character 10
+set output to ""
+set cutoff to (current date) - ({lookback_days_frac} * days)
+set msgCount to 0
+tell application "Mail"
+    repeat with acct in accounts
+        set acctName to name of acct
+        {acct_filter_line}
+        {"" if not account_filter else "-- skip non-matching accounts"}
+        {("end if" if not account_filter else "")}
+        try
+            repeat with mb in mailboxes of acct
+                if name of mb is "INBOX" then
+                    try
+                        set recentMsgs to messages 1 through {max_msgs} of mb
+                    on error
+                        set recentMsgs to messages of mb
+                    end try
+                    repeat with msg in recentMsgs
+                        try
+                            if date received of msg < cutoff then exit repeat
+                        end try
+                        try
+                            set subj to subject of msg
+                            set sndr to sender of msg
+                            set rcvd to date received of msg as string
+                            set msgId to message id of msg
+                            set isRead to read status of msg
+                            set msgBody to content of msg
+                            if length of msgBody > 3000 then set msgBody to text 1 thru 3000 of msgBody
+                            set readFlag to "1"
+                            if not isRead then set readFlag to "0"
+                            set output to output & "MSG_START" & NL & acctName & NL & sndr & NL & rcvd & NL & subj & NL & msgId & NL & readFlag & NL & msgBody & "MSG_END" & NL
+                            set msgCount to msgCount + 1
+                            if msgCount >= {max_msgs} then exit repeat
+                        end try
+                    end repeat
+                end if
+            end repeat
+        end try
+        if msgCount >= {max_msgs} then exit repeat
+    end repeat
+end tell
+return output
+"""
+                # Fix the account filter logic — need proper if/end if
+                if account_filter:
+                    safe_acct = account_filter.replace('"', '\\"')
+                    script = f"""
+set NL to ASCII character 10
+set output to ""
+set cutoff to (current date) - ({lookback_days_frac} * days)
+set msgCount to 0
+tell application "Mail"
+    repeat with acct in accounts
+        set acctName to name of acct
+        if acctName is not equal to "{safe_acct}" then
+            -- skip
+        else
+            try
+                repeat with mb in mailboxes of acct
+                    if name of mb is "INBOX" then
+                        try
+                            set recentMsgs to messages 1 through {max_msgs} of mb
+                        on error
+                            set recentMsgs to messages of mb
+                        end try
+                        repeat with msg in recentMsgs
+                            try
+                                if date received of msg < cutoff then exit repeat
+                            end try
+                            try
+                                set subj to subject of msg
+                                set sndr to sender of msg
+                                set rcvd to date received of msg as string
+                                set msgId to message id of msg
+                                set isRead to read status of msg
+                                set msgBody to content of msg
+                                if length of msgBody > 3000 then set msgBody to text 1 thru 3000 of msgBody
+                                set readFlag to "1"
+                                if not isRead then set readFlag to "0"
+                                set output to output & "MSG_START" & NL & acctName & NL & sndr & NL & rcvd & NL & subj & NL & msgId & NL & readFlag & NL & msgBody & "MSG_END" & NL
+                                set msgCount to msgCount + 1
+                                if msgCount >= {max_msgs} then exit repeat
+                            end try
+                        end repeat
+                    end if
+                end repeat
+            end try
+        end if
+        if msgCount >= {max_msgs} then exit repeat
+    end repeat
+end tell
+return output
+"""
+                try:
+                    r = subprocess.run(["osascript", "-e", script], capture_output=True, text=True, timeout=60)
+                    if r.returncode != 0:
+                        return self._json({"error": r.stderr.strip() or "AppleScript failed"}, 500)
+                    messages = []
+                    for block in r.stdout.split("MSG_START\n"):
+                        if "MSG_END" not in block:
+                            continue
+                        content = block[: block.rfind("MSG_END")].strip()
+                        lines = content.split("\n", 6)
+                        if len(lines) < 6:
+                            continue
+                        messages.append({
+                            "account": lines[0],
+                            "from":    lines[1],
+                            "date":    lines[2],
+                            "subject": lines[3],
+                            "message_id": lines[4],
+                            "read":    lines[5] == "1",
+                            "body":    lines[6] if len(lines) > 6 else "",
+                        })
+                    return self._json(messages)
+                except subprocess.TimeoutExpired:
+                    return self._json({"error": "Mail.app timed out"}, 504)
+                except Exception as e:
+                    return self._json({"error": str(e)}, 500)
+
             # POST /api/email/send — send email via Mail.app
             if method == "POST" and path == "/api/email/send":
                 body = self._read_body()
@@ -27454,12 +30239,31 @@ class CCHandler(BaseHTTPRequestHandler):
                 subject = body.get("subject", "").strip()
                 message = body.get("body", "").strip()
                 cc = body.get("cc", "").strip()
+                from_acct = body.get("from", "").strip()
                 if not to or not subject or not message:
                     return self._json({"error": "to, subject, and body are required"}, 400)
+                # Basic email validation
+                if not re.match(r'^[^@\s]+@[^@\s]+\.[^@\s]+$', to):
+                    return self._json({"error": f"invalid email address: {to}"}, 400)
+                if cc and not re.match(r'^[^@\s]+@[^@\s]+\.[^@\s]+$', cc):
+                    return self._json({"error": f"invalid cc address: {cc}"}, 400)
                 cc_line = f'\nset cc of new_msg to "{cc}"' if cc else ""
                 subj_safe = subject.replace('"', '\\"')
                 to_safe = to.replace('"', '\\"')
                 body_safe = message.replace('"', '\\"').replace('\n', '\\n')
+                # If from account specified, set the sender
+                from_line = ""
+                if from_acct:
+                    from_safe = from_acct.replace('"', '\\"')
+                    from_line = f"""
+        set sender to "{from_safe}"
+        repeat with acct in accounts
+            repeat with addr in email addresses of acct
+                if address of addr is "{from_safe}" then
+                    set sender of new_msg to (address of addr as string)
+                end if
+            end repeat
+        end repeat"""
                 script = f"""
 tell application "Mail"
     set new_msg to make new outgoing message with properties {{subject:"{subj_safe}", content:"{body_safe}", visible:false}}
@@ -27467,6 +30271,7 @@ tell application "Mail"
         make new to recipient with properties {{address:"{to_safe}"}}
         {cc_line}
     end tell
+    {from_line}
     send new_msg
 end tell
 """
@@ -27475,6 +30280,53 @@ end tell
                     if r.returncode != 0:
                         return self._json({"error": r.stderr.strip() or "AppleScript failed"}, 500)
                     return self._json({"ok": True, "to": to, "subject": subject})
+                except Exception as e:
+                    return self._json({"error": str(e)}, 500)
+
+            # POST /api/email/reply — reply to an existing email
+            if method == "POST" and path == "/api/email/reply":
+                body = self._read_body()
+                message_id = body.get("message_id", "").strip()
+                reply_body = body.get("body", "").strip()
+                reply_all = body.get("reply_all", False)
+                if not message_id or not reply_body:
+                    return self._json({"error": "message_id and body are required"}, 400)
+                msg_id_safe = message_id.replace('"', '\\"')
+                body_safe = reply_body.replace('"', '\\"').replace('\n', '\\n')
+                reply_cmd = "reply" if not reply_all else "reply with properties {reply to all: true}"
+                script = f"""
+tell application "Mail"
+    set targetMsg to missing value
+    repeat with acct in accounts
+        try
+            repeat with mb in mailboxes of acct
+                if name of mb is "INBOX" then
+                    set msgs to (messages of mb whose message id is "{msg_id_safe}")
+                    if (count of msgs) > 0 then
+                        set targetMsg to item 1 of msgs
+                        exit repeat
+                    end if
+                end if
+            end repeat
+        end try
+        if targetMsg is not missing value then exit repeat
+    end repeat
+    if targetMsg is missing value then
+        error "Message not found"
+    end if
+    set replyMsg to {reply_cmd} targetMsg opening window no
+    set content of replyMsg to "{body_safe}" & return & return & (content of replyMsg)
+    send replyMsg
+end tell
+"""
+                try:
+                    r = subprocess.run(["osascript", "-e", script], capture_output=True, text=True, timeout=30)
+                    if r.returncode != 0:
+                        err = r.stderr.strip()
+                        if "Message not found" in err:
+                            return self._json({"error": "message not found — check message_id"}, 404)
+                        return self._json({"error": err or "AppleScript failed"}, 500)
+                    return self._json({"ok": True, "message_id": message_id, "reply_all": reply_all})
                 except Exception as e:
                     return self._json({"error": str(e)}, 500)
 
@@ -27518,7 +30370,20 @@ end tell
                         if _val.startswith("sk-ant-"):
                             has_key_in_env = True
                         break
-            return self._json({"email": email, "is_cloud": bool(email), "has_api_key": has_key_in_env})
+            # Also check for OAuth login in ~/.claude.json
+            has_oauth = False
+            try:
+                _cj = Path.home() / ".claude.json"
+                if _cj.exists():
+                    has_oauth = bool(json.loads(_cj.read_text()).get("oauthAccount"))
+            except Exception:
+                pass
+            # Include cached key validation result
+            key_valid, key_error = _api_key_status.get("valid", None), _api_key_status.get("error", "")
+            return self._json({"email": email, "is_cloud": bool(email),
+                               "has_api_key": has_key_in_env or has_oauth,
+                               "has_oauth": has_oauth,
+                               "key_valid": key_valid, "key_error": key_error})
 
         # ── Layout presets ────────────────────────────────────────────────────
         if path == "/api/layout-presets":
@@ -28422,6 +31287,52 @@ p{{color:#888;margin:12px 0 28px;font-size:0.9rem;line-height:1.5}}
                 except Exception as e:
                     return self._json({"error": str(e)}, 500)
 
+            # GET /api/browser/pw-profiles — list Playwright auth profiles
+            if method == "GET" and path == "/api/browser/pw-profiles":
+                pw_dir = Path.home() / ".amux" / "playwright-auth" / "profiles"
+                profiles = set()
+                if pw_dir.is_dir():
+                    profiles = {p.name for p in pw_dir.iterdir() if p.is_dir()}
+                # Also include default profile
+                default_dir = Path.home() / ".amux" / "playwright-auth" / "profile"
+                if default_dir.is_dir():
+                    profiles.add("default")
+                return self._json({"profiles": sorted(profiles)})
+
+            # POST /api/browser/save-profile  {"name":"...", "session":"..."}
+            if method == "POST" and path == "/api/browser/save-profile":
+                body = self._read_body()
+                name = body.get("name", "").strip()
+                if not name:
+                    return self._json({"error": "name required"}, 400)
+                session = body.get("session", "amux")
+                # Save current browser-use session cookies to a Playwright auth profile
+                dest = Path.home() / ".amux" / "playwright-auth" / "profiles" / name
+                dest.mkdir(parents=True, exist_ok=True)
+                try:
+                    result = _bu_call(["save-cookies", str(dest)], session=session, timeout_s=15)
+                    return self._json({"success": True, "profile": name, "path": str(dest)})
+                except Exception as e:
+                    return self._json({"error": str(e)}, 500)
+
+            # POST /api/browser/agent  {"task":"...", "session":"...", "profile":"...",
+            #                            "start_url":"...", "max_iterations":25, "model":"..."}
+            # AI agent loop powered by Anthropic Computer Use, executor = browser-use/Playwright.
+            if method == "POST" and path == "/api/browser/agent":
+                body = self._read_body()
+                task = body.get("task", "").strip()
+                if not task:
+                    return self._json({"error": "task required"}, 400)
+                result = _bu_agent_run(
+                    task=task,
+                    session=body.get("session", "amux-agent"),
+                    profile=body.get("profile", ""),
+                    start_url=body.get("start_url", ""),
+                    max_iterations=int(body.get("max_iterations", 25)),
+                    model=body.get("model", "claude-sonnet-4-5"),
+                )
+                return self._json(result)
+
             return self._json({"error": "browser route not found"}, 404)
 
         # ── Torrents (/api/torrents/*) ────────────────────────────────────────
@@ -28519,6 +31430,52 @@ p{{color:#888;margin:12px 0 28px;font-size:0.9rem;line-height:1.5}}
                 return self._json(stats)
             if action == "git":
                 wd = _session_work_dir(name)
+                if action_subid == "commits":
+                    count = int(qs.get("count", ["30"])[0])
+                    # Return commit log with hash, author, date, subject, body
+                    fmt = "%H%x00%an%x00%ai%x00%s%x00%b%x1E"
+                    rc = subprocess.run(
+                        ["git", "-C", wd, "log", f"-{count}", f"--format={fmt}"],
+                        capture_output=True, text=True, timeout=10, errors="replace",
+                    )
+                    commits = []
+                    if rc.returncode == 0:
+                        for entry in rc.stdout.split("\x1E"):
+                            entry = entry.strip()
+                            if not entry:
+                                continue
+                            parts = entry.split("\x00", 4)
+                            if len(parts) >= 4:
+                                commits.append({
+                                    "hash": parts[0], "author": parts[1],
+                                    "date": parts[2], "subject": parts[3],
+                                    "body": parts[4].strip() if len(parts) > 4 else "",
+                                })
+                    return self._json({"commits": commits})
+                if action_subid == "commit-detail":
+                    sha = qs.get("sha", [""])[0]
+                    if not sha:
+                        return self._json({"error": "sha required"}, 400)
+                    rd = subprocess.run(
+                        ["git", "-C", wd, "show", sha, "--stat", "--format=%H%n%an%n%ai%n%s%n%b%x00"],
+                        capture_output=True, text=True, timeout=10, errors="replace",
+                    )
+                    parts = rd.stdout.split("\x00", 1)
+                    meta = parts[0].split("\n", 4) if parts else []
+                    stat = parts[1].strip() if len(parts) > 1 else ""
+                    # Also get full diff
+                    rd2 = subprocess.run(
+                        ["git", "-C", wd, "show", sha, "--format="],
+                        capture_output=True, text=True, timeout=10, errors="replace",
+                    )
+                    return self._json({
+                        "hash": meta[0] if meta else sha,
+                        "author": meta[1] if len(meta) > 1 else "",
+                        "date": meta[2] if len(meta) > 2 else "",
+                        "subject": meta[3] if len(meta) > 3 else "",
+                        "body": meta[4].strip() if len(meta) > 4 else "",
+                        "stat": stat, "diff": rd2.stdout if rd2.returncode == 0 else "",
+                    })
                 if action_subid == "diff":
                     file_path = qs.get("file", [""])[0]
                     staged = qs.get("staged", ["0"])[0] == "1"
@@ -28533,7 +31490,8 @@ p{{color:#888;margin:12px 0 28px;font-size:0.9rem;line-height:1.5}}
                 cfg_g = parse_env_file(env_file)
                 info = _git_info(wd, detail=detail)
                 if detail:
-                    info["session_branch"] = cfg_g.get("CC_BRANCH", "")
+                    sb = cfg_g.get("CC_BRANCH", "")
+                    info["session_branch"] = "" if sb == "none" else sb
                 return self._json(info)
             if action == "memory":
                 mem_file = _session_mem_file(name)
@@ -28753,7 +31711,7 @@ p{{color:#888;margin:12px 0 28px;font-size:0.9rem;line-height:1.5}}
                             capture_output=True, text=True, timeout=10,
                         )
                         raw = r.stdout
-                        scrollback = re.sub(r'\x1b\[[0-9;]*[a-zA-Z]|\x1b\]8;[^\x1b]*\x1b\\|\x1b\][^\x07]*\x07', '', raw)
+                        scrollback = re.sub(r'\x1b\[[0-9;?]*[a-zA-Z]|\x1b\]8;[^\x1b]*\x1b\\|\x1b\][^\x07]*\x07', '', raw)
                         sb_lines = scrollback.splitlines()
                         while sb_lines and not sb_lines[0].strip():
                             sb_lines.pop(0)
@@ -28999,6 +31957,9 @@ p{{color:#888;margin:12px 0 28px;font-size:0.9rem;line-height:1.5}}
     def do_PATCH(self):
         self._route("PATCH")
 
+    def do_PUT(self):
+        self._route("PUT")
+
     def do_DELETE(self):
         self._route("DELETE")
 
@@ -29160,6 +32121,22 @@ def _auto_archive_idle():
         slog(f"[auto-archive] archived {len(archived)} idle sessions: {', '.join(archived)}")
 
 
+def _enforce_archived_stopped():
+    """Stop any archived sessions that still have running tmux processes."""
+    stopped = []
+    for env_file in sorted(CC_SESSIONS.glob("*.env")):
+        name = env_file.stem
+        cfg = parse_env_file(env_file)
+        if cfg.get("CC_ARCHIVED") == "1" and is_running(name):
+            try:
+                stop_session(name)
+                stopped.append(name)
+            except Exception:
+                pass
+    if stopped:
+        slog(f"[cleanup] stopped {len(stopped)} archived sessions still running: {', '.join(stopped)}")
+
+
 def _cleanup_old_transcripts():
     """Remove conversation transcripts older than 7 days and larger than 50 MB."""
     projects_dir = Path.home() / ".claude" / "projects"
@@ -29247,7 +32224,7 @@ def _cleanup_recordings():
 def _db_maintenance():
     """Periodic database maintenance: WAL checkpoint and optimize."""
     try:
-        conn = _get_db()
+        conn = get_db()
         conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
         conn.execute("PRAGMA optimize")
         slog("[cleanup] database maintenance: WAL checkpoint + optimize")
@@ -29319,6 +32296,113 @@ def _sync_skills_from_github(_ur, repo, branch):
 # ═══════════════════════════════════════════
 # SERVER STARTUP & FILE WATCHER
 # ═══════════════════════════════════════════
+
+_server_env_mtime: float = _server_env_file.stat().st_mtime if _server_env_file.exists() else 0
+
+
+def _watch_server_env():
+    """Periodically reload ~/.amux/server.env so key changes take effect without restart.
+
+    Checks every 15 seconds. When server.env has been modified, re-reads it and
+    updates os.environ for any changed values. Also pushes ANTHROPIC_API_KEY
+    into running tmux sessions and re-configures ~/.claude.json.
+    """
+    global _server_env_mtime
+    while True:
+        time.sleep(15)
+        try:
+            if not _server_env_file.exists():
+                continue
+            mt = _server_env_file.stat().st_mtime
+            if mt == _server_env_mtime:
+                continue
+            _server_env_mtime = mt
+            new_vals = {}
+            for line in _server_env_file.read_text().splitlines():
+                line = line.strip()
+                if line and not line.startswith("#") and "=" in line:
+                    k, _, v = line.partition("=")
+                    k, v = k.strip(), v.strip()
+                    if v and os.environ.get(k) != v:
+                        os.environ[k] = v
+                        new_vals[k] = v
+            if not new_vals:
+                continue
+            slog(f"[env-reload] server.env changed, updated: {', '.join(new_vals.keys())}")
+            if "ANTHROPIC_API_KEY" in new_vals:
+                _init_claude_config()
+                # Push key into all running tmux sessions
+                _new_key = new_vals["ANTHROPIC_API_KEY"]
+                try:
+                    r = subprocess.run(
+                        ["tmux", "list-sessions", "-F", "#{session_name}"],
+                        capture_output=True, text=True)
+                    if r.returncode == 0:
+                        for sn in r.stdout.strip().splitlines():
+                            subprocess.run(
+                                ["tmux", "set-environment", "-t", sn,
+                                 "ANTHROPIC_API_KEY", _new_key],
+                                capture_output=True)
+                except Exception:
+                    pass
+        except Exception as e:
+            slog(f"[env-reload] error: {e}")
+
+
+def _validate_api_key() -> tuple[bool, str]:
+    """Check if the current ANTHROPIC_API_KEY is valid with a minimal API call.
+
+    Returns (is_valid, error_message). Skips validation if OAuth is configured.
+    """
+    # Skip if OAuth is present — key isn't needed
+    try:
+        import json as _j
+        cj = Path.home() / ".claude.json"
+        if cj.exists() and _j.loads(cj.read_text()).get("oauthAccount"):
+            return True, ""
+    except Exception:
+        pass
+    key = os.environ.get("ANTHROPIC_API_KEY", "")
+    if not key:
+        return False, "no_api_key"
+    # Quick validation: count tokens endpoint is cheap
+    try:
+        import urllib.request
+        req = urllib.request.Request(
+            "https://api.anthropic.com/v1/messages/count_tokens",
+            data=json.dumps({
+                "model": "claude-haiku-4-5-20251001",
+                "messages": [{"role": "user", "content": "x"}],
+            }).encode(),
+            headers={
+                "x-api-key": key,
+                "anthropic-version": "2023-06-01",
+                "content-type": "application/json",
+            },
+        )
+        resp = urllib.request.urlopen(req, timeout=10)
+        return True, ""
+    except urllib.error.HTTPError as e:
+        if e.code == 401:
+            return False, "invalid_api_key"
+        if e.code == 403:
+            return False, "api_key_forbidden"
+        # Other errors (rate limit, server error) — don't block on transient issues
+        return True, ""
+    except Exception:
+        # Network error — don't block, assume key is fine
+        return True, ""
+
+
+def _validate_api_key_job():
+    """Background job: validate the API key every 5 min and cache the result."""
+    valid, error = _validate_api_key()
+    _api_key_status["valid"] = valid
+    _api_key_status["error"] = error
+    _api_key_status["checked_at"] = int(time.time())
+    if not valid and error:
+        slog(f"[key-validate] API key check failed: {error}")
+
 
 def _watch_self(server):
     """Watch amux-server.py for changes and restart on modification.
@@ -29512,6 +32596,18 @@ def main():
     lan_ip = get_lan_ip()
     no_tls = "--no-tls" in sys.argv
 
+    # Raise file descriptor limit — with 60+ sessions we need headroom for
+    # tmux subprocesses, log pipes, SSE connections, and SQLite
+    try:
+        import resource
+        soft, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
+        target = min(hard, 10240)
+        if soft < target:
+            resource.setrlimit(resource.RLIMIT_NOFILE, (target, hard))
+            slog(f"[init] raised fd limit: {soft} → {target}")
+    except Exception:
+        pass
+
     # Kill any stale server process holding our port (e.g. zombie from Amux.app)
     _kill_stale_port(port)
 
@@ -29630,16 +32726,20 @@ def main():
     # Register all recurring jobs with the unified scheduler
     schedule_job(_yolo_loop,             interval=3,                    name="yolo",        initial_delay=3)
     schedule_job(_snapshot_loop,         interval=60,                   name="snapshot",    initial_delay=0)
+    schedule_job(_reap_stale_browsers,  interval=120,                  name="browser_reap", initial_delay=60)
+    schedule_job(_kill_stale_ray,        interval=600,                  name="ray_reap",     initial_delay=120)
     schedule_job(_refresh_token_cache,   interval=120,                  name="token_cache", initial_delay=5)
     schedule_job(_email_sync_job,        interval=_EMAIL_SYNC_INTERVAL, name="email_sync",  initial_delay=20)
     schedule_job(_board_watcher,         interval=30,                   name="board_watcher", initial_delay=30)
     schedule_job(_board_watcher_clear_nudged, interval=60,             name="board_watcher_gc", initial_delay=60)
     schedule_job(_cleanup_tmp,           interval=1800,                 name="tmp_cleanup", initial_delay=60)
     schedule_job(_auto_archive_idle,     interval=3600,                 name="auto_archive", initial_delay=300)
+    schedule_job(_enforce_archived_stopped, interval=600,                name="archive_enforce", initial_delay=30)
     schedule_job(_cleanup_old_transcripts, interval=86400,              name="transcript_cleanup", initial_delay=600)
     schedule_job(_cleanup_logs,             interval=86400,              name="log_rotation",       initial_delay=120)
     schedule_job(_cleanup_recordings,       interval=86400,              name="recording_cleanup",  initial_delay=180)
     schedule_job(_db_maintenance,           interval=86400,              name="db_maintenance",     initial_delay=240)
+    schedule_job(_validate_api_key_job,     interval=300,                name="key_validate",       initial_delay=10)
     if _AUTO_UPDATE_REPO:
         slog(f"[auto-update] watching {_AUTO_UPDATE_REPO}@{_AUTO_UPDATE_BRANCH} every {_AUTO_UPDATE_INTERVAL}s")
         schedule_job(_auto_update_check, interval=_AUTO_UPDATE_INTERVAL, name="auto_update", initial_delay=_AUTO_UPDATE_INTERVAL)
@@ -29647,6 +32747,8 @@ def main():
     # Start file watcher thread
     watcher = threading.Thread(target=_watch_self, args=(server,), daemon=True)
     watcher.start()
+    # Watch server.env for key changes (catches gateway pushes, manual edits)
+    threading.Thread(target=_watch_server_env, daemon=True).start()
 
     # Initial snapshot immediately, then unified scheduler takes over
     threading.Thread(target=_snapshot_all_sessions, daemon=True).start()

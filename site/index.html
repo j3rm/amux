@@ -984,6 +984,11 @@ html[data-theme="dark"] .cta-pill-primary:hover { opacity: 0.85; }
     </div>
     <a href="https://cloud.amux.io" class="waitlist-btn" style="display:inline-block;text-decoration:none;text-align:center;width:auto;padding:0.65rem 2rem;">start free trial</a>
     <div class="waitlist-note" style="margin-top:0.75rem;"><a href="/pricing/" style="color:var(--dim);">See full pricing details</a></div>
+    <div id="uptime-monitor" style="margin-top:1.5rem;padding:1rem 1.2rem;border:1px solid var(--border);border-radius:8px;display:flex;align-items:center;gap:0.75rem;font-size:0.82rem;">
+      <span id="uptime-dot" style="width:8px;height:8px;border-radius:50%;background:var(--dim);flex-shrink:0;"></span>
+      <span id="uptime-text" style="color:var(--dim);">Checking cloud.amux.io&hellip;</span>
+      <span id="uptime-latency" style="margin-left:auto;color:var(--muted);font-family:'JetBrains Mono',monospace;font-size:0.75rem;"></span>
+    </div>
   </div>
 </div>
 
@@ -1220,6 +1225,32 @@ document.getElementById('theme-toggle').addEventListener('click', function() {
     localStorage.setItem('theme', 'dark');
   }
 });
+
+// Uptime monitor for cloud.amux.io
+(function() {
+  var dot = document.getElementById('uptime-dot');
+  var txt = document.getElementById('uptime-text');
+  var lat = document.getElementById('uptime-latency');
+  if (!dot || !txt) return;
+  function up(ms) {
+    dot.style.background = '#22c55e';
+    dot.style.boxShadow = '0 0 6px #22c55e80';
+    txt.textContent = 'cloud.amux.io — operational';
+    txt.style.color = 'var(--text)';
+    lat.textContent = ms + 'ms';
+  }
+  function down() {
+    dot.style.background = '#ef4444';
+    dot.style.boxShadow = '0 0 6px #ef444480';
+    txt.textContent = 'cloud.amux.io — unreachable';
+    txt.style.color = 'var(--text)';
+    lat.textContent = '';
+  }
+  var t0 = performance.now();
+  fetch('https://cloud.amux.io/health', { mode: 'no-cors', cache: 'no-store' })
+    .then(function() { up(Math.round(performance.now() - t0)); })
+    .catch(down);
+})();
 </script>
 
 <!-- iOS App Modal -->

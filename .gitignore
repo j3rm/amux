@@ -6,6 +6,10 @@ __pycache__/
 node_modules/
 package-lock.json
 scratch/
+
+# Compiled app binary (rebuild via ./build-desktop.sh)
+Amux.app/Contents/MacOS/amux
+
 # Generated during cloud deploy — always copied from root amux-server.py
 cloud/docker/amux-server.py
 
