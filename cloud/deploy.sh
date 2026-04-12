@@ -83,14 +83,15 @@ IAP_USER=$(gcloud config get-value account 2>/dev/null | tr '@.' '_')
 sleep 5
 gcloud compute scp \
     "$AMUX_SERVER" \
-    "${IAP_USER}@amux-dev:/tmp/amux-server.py" \
+    "$SCRIPT_DIR/../scripts/watchdog.py" \
+    "${IAP_USER}@amux-dev:/tmp/" \
     --zone=us-central1-a --project="$PROJECT_ID" \
     --tunnel-through-iap --quiet
 gcloud compute ssh "${IAP_USER}@amux-dev" \
     --zone=us-central1-a --project="$PROJECT_ID" \
     --tunnel-through-iap --quiet \
-    --command="sudo cp /tmp/amux-server.py /opt/amux/amux-server.py"
-ok "amux-server.py deployed"
+    --command="sudo cp /tmp/amux-server.py /opt/amux/amux-server.py && sudo mkdir -p /opt/amux/scripts && sudo cp /tmp/watchdog.py /opt/amux/scripts/watchdog.py"
+ok "amux-server.py + watchdog deployed"
 
 # ── Start amux service via IAP ──
 log "Starting amux service..."
