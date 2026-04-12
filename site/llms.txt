@@ -33,6 +33,7 @@ Claude Code runs one agent per terminal. amux runs dozens — with live monitori
 
 ## Guides
 
+- [CLAUDE.md Templates](https://amux.io/guides/claude-md-templates/): 20+ copy-paste CLAUDE.md configs for Python APIs, React apps, Go services, monorepos, data pipelines, Terraform, mobile apps, CLI tools. Filterable gallery with explanations.
 - [Getting Started with amux](https://amux.io/guides/getting-started/): Install amux and run your first parallel Claude Code agents in under 5 minutes.
 - [Running 10+ Agents in Parallel](https://amux.io/guides/running-10-plus-agents/): How to effectively run 10 or more Claude Code agents simultaneously.
 - [Self-Healing Configuration](https://amux.io/guides/self-healing-configuration/): Configure the watchdog for auto-compaction, restart, and prompt recovery.
