@@ -3925,8 +3925,13 @@ def _detect_claude_status(raw_output: str) -> str:
             break
 
     # "esc to interrupt" (may be truncated to "esc to" or "esc t…") → active
-    if status_bar and re.search(r"esc t", status_bar):
-        return "active"
+    # Scan the last few lines directly instead of gating on status_bar detection:
+    # in background-tasks mode the "esc to interrupt · ctrl+t to hide tasks" line
+    # REPLACES the ⏵⏵/bypass-permissions status bar, so status_bar will be empty
+    # even though Claude is actively working.
+    for l in lines[-5:]:
+        if re.search(r"esc t", l.lower()):
+            return "active"
 
     # ── 2. Scan last 12 lines bottom-up for the most recent signal ──
     for l in reversed(lines[-12:]):
