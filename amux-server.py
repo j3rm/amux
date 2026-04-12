@@ -1262,7 +1262,7 @@ def _snapshot_all_sessions():
 
     Session output is streamed to disk in real-time via tmux pipe-pane (set up
     in start_session). This loop only reads output for health-check logic:
-    1. Proactive: if context < 20% remaining before auto-compact, send /compact
+    1. Proactive: if context < 50% remaining before auto-compact, send /compact
     2. Reactive: if thinking-block corruption error detected, restart conversation
        and replay the last meaningful user message automatically.
     3. Auto-continue: if CC_AUTO_CONTINUE=1 and session is stuck waiting for user
@@ -1294,7 +1294,7 @@ def _snapshot_all_sessions():
                 if pct < 30 and now - actions.get("last_backup", 0) > 120:
                     actions["last_backup"] = now
                     threading.Thread(target=backup_session_jsonl, args=(name, "pre_compact"), daemon=True).start()
-                if _ac_enabled and pct < 20 and now - actions.get("last_compact", 0) > 300:
+                if _ac_enabled and pct < 50 and now - actions.get("last_compact", 0) > 300:
                     actions["last_compact"] = now
                     actions["post_compact_continue"] = True  # send continuation when compact finishes
                     send_text(name, "/compact")
@@ -9279,7 +9279,7 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
               <span class="theme-track"><span class="theme-thumb"></span></span>
             </label>
           </div>
-          <div style="font-size:0.68rem;color:var(--dim);margin-top:3px;">Send /compact when context &lt; 20%</div>
+          <div style="font-size:0.68rem;color:var(--dim);margin-top:3px;">Send /compact when context &lt; 50%</div>
         </div>
         <div class="settings-sep"></div>
         <div class="settings-section">
@@ -12186,12 +12186,19 @@ function _renderBranchBadge(name, sessionBranch) {
 async function _fetchGitBranches(sess) {
   const withDir = (sess || []).filter(s => s.dir);
   if (!withDir.length) return;
-  const results = await Promise.allSettled(
-    withDir.map(s =>
-      fetch(API + '/api/sessions/' + encodeURIComponent(s.name) + '/git')
-        .then(r => r.json()).then(d => ({name: s.name, ...d}))
-    )
-  );
+  // Fetch in batches of 5 to avoid spawning 70+ concurrent git subprocesses
+  const BATCH = 5;
+  const results = [];
+  for (let i = 0; i < withDir.length; i += BATCH) {
+    const batch = withDir.slice(i, i + BATCH);
+    const batchResults = await Promise.allSettled(
+      batch.map(s =>
+        fetch(API + '/api/sessions/' + encodeURIComponent(s.name) + '/git')
+          .then(r => r.json()).then(d => ({name: s.name, ...d}))
+      )
+    );
+    results.push(...batchResults);
+  }
   const newInfo = {};
   for (const r of results) {
     if (r.status === 'fulfilled' && r.value.name) newInfo[r.value.name] = r.value;
