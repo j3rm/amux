@@ -1,8 +1,8 @@
 # amux
 
-> Open-source Claude Code agent multiplexer — run dozens of parallel AI coding agents unattended via tmux, with a web dashboard, kanban board, self-healing watchdog, and agent-to-agent REST API orchestration.
+> Open-source personal OS for AI coding agents — run dozens of parallel Claude Code sessions with a web dashboard, kanban board, notes, CRM, email, browser automation, skills, channels, scheduler, and agent-to-agent REST API orchestration. Self-healing, single-file, zero external dependencies.
 
-amux (Agent Multiplexer) is a Python + tmux tool that runs multiple Claude Code sessions in parallel. It provides a mobile-first PWA dashboard, atomic kanban board (SQLite), session peek/send, iCal sync, and a REST API for agent orchestration. MIT licensed. No cloud dependency. Single Python file, zero dependencies beyond python3 and tmux.
+amux (Agent Multiplexer) is a Python + tmux tool that manages multiple Claude Code sessions in parallel. Beyond agent orchestration, it includes a full suite of built-in tools: markdown notes, CRM with interaction tracking, Mail.app email integration, shared Playwright browser automation, project-level slash-command skills, 1:1 inter-session channels with @mentions, a cron-style scheduler, and a file explorer with markdown editor. MIT licensed. No cloud dependency. Single Python file, zero dependencies beyond python3 and tmux.
 
 ## Quick Start
 
@@ -15,16 +15,31 @@ amux serve  # → https://localhost:8822
 
 ## Key Features
 
+### Agent infrastructure
 - Unlimited parallel Claude Code sessions via tmux (isolated panes, permanent conversation IDs)
 - Self-healing watchdog: auto-compacts on context overflow, restarts on corruption, replays last message
-- Web dashboard PWA — installable on iOS/Android, offline queue with Background Sync
+- Channels: 1:1 inter-session messaging with @mentions for real-time agent coordination
 - Kanban board with atomic task claiming via SQLite CAS (no Redis, no duplicated work)
 - Agent-to-agent REST API: POST /api/sessions/NAME/send, GET /api/sessions/NAME/peek, POST /api/board/ID/claim
-- iCal feed for board items with due dates (S3 export for Google/Apple Calendar)
-- Built-in cron (no crontab/systemd) — missed-fire recovery via SQLite
-- Single-file architecture (amux-server.py) — no Docker, no build step, no config files
-- Token tracking from JSONL with deduplication across restarts
 - Conversation fork: clone session JSONL history to a new agent on a new branch
+- Token tracking from JSONL with deduplication across restarts
+
+### Dashboard & mobile
+- Web dashboard PWA — installable on iOS/Android, offline queue with Background Sync
+- Native iOS app on the App Store
+- File explorer with syntax highlighting and markdown editor with find-in-page
+
+### Built-in tools
+- Notes: full markdown documents with rich Quill editor, accessible via API across all sessions
+- CRM: contacts with company, role, email, phone, LinkedIn, interaction logs, tags, and follow-up tracking
+- Email integration: send and read email through the Mail.app API
+- Browser automation: shared Playwright instance with saved auth profiles, screenshots, and AI agent mode
+- Skills / slash commands: project-level custom commands (e.g. /commit, /review-pr) any agent can invoke
+- Scheduler: named recurring jobs with cron expressions and management UI
+- iCal feed for board items with due dates (S3 export for Google/Apple Calendar)
+
+### Architecture
+- Single-file architecture (amux-server.py) — no Docker, no build step, no config files
 - MIT License — free, open-source, self-hosted
 
 ## How amux differs from plain Claude Code

@@ -7,19 +7,19 @@
 <title>amux — Agent Multiplexer</title>
 <link rel="icon" href="icon.svg" type="image/svg+xml">
 <link rel="icon" type="image/png" sizes="180x180" href="icon.png">
-<meta name="description" content="Run dozens of Claude Code agents in parallel, unattended, with self-healing. Open-source agent multiplexer — web dashboard, kanban board, mobile PWA. Python 3 + tmux.">
+<meta name="description" content="Open-source personal OS for AI coding agents. Run dozens of parallel Claude Code sessions with a web dashboard, kanban board, notes, CRM, email, browser automation, skills, and agent-to-agent orchestration. Self-healing, single-file. Python 3 + tmux.">
 <meta name="keywords" content="amux, claude code multiplexer, parallel AI coding agents, AI agent orchestration, self-healing AI agent, claude code dashboard, run multiple claude code, AI coding while you sleep, agent multiplexer, open source AI tools">
 <link rel="sitemap" type="application/xml" href="/sitemap.xml">
 <meta name="google-site-verification" content="AJSSTzLMefBajDLdBuVXCqkllDAaLSJ-vWrbabxJQDI">
 <meta property="og:title" content="amux — Agent Multiplexer">
-<meta property="og:description" content="Run dozens of Claude Code agents unattended. Python 3 + tmux. Open source.">
+<meta property="og:description" content="Personal OS for AI coding agents. Dashboard, kanban, notes, CRM, email, browser automation, skills. Open source.">
 <meta property="og:url" content="https://amux.io">
 <meta property="og:image" content="https://amux.io/og-image.png">
 <meta property="og:image:width" content="1280">
 <meta property="og:image:height" content="640">
 <meta name="twitter:card" content="summary_large_image">
 <meta name="twitter:image" content="https://amux.io/og-image.png">
-<script type="application/ld+json">{"@context":"https://schema.org","@type":"SoftwareApplication","name":"amux","alternateName":"Agent Multiplexer","description":"Run dozens of Claude Code agents in parallel, unattended, with self-healing. Open-source agent multiplexer with web dashboard, kanban board, and mobile PWA.","url":"https://amux.io","applicationCategory":"DeveloperApplication","operatingSystem":"macOS, Linux","license":"https://opensource.org/licenses/MIT","offers":[{"@type":"Offer","name":"Open Source","price":"0","priceCurrency":"USD"},{"@type":"Offer","name":"Cloud Monthly","price":"20","priceCurrency":"USD","priceSpecification":{"@type":"UnitPriceSpecification","billingDuration":"P1M"}},{"@type":"Offer","name":"Cloud Annual","price":"200","priceCurrency":"USD","priceSpecification":{"@type":"UnitPriceSpecification","billingDuration":"P1Y"}}],"author":{"@type":"Organization","name":"Mixpeek","url":"https://mixpeek.com"}}</script>
+<script type="application/ld+json">{"@context":"https://schema.org","@type":"SoftwareApplication","name":"amux","alternateName":"Agent Multiplexer","description":"Open-source personal OS for AI coding agents. Web dashboard, kanban board, notes, CRM, email, browser automation, skills, channels, and scheduler. Self-healing, single-file. Python 3 + tmux.","url":"https://amux.io","applicationCategory":"DeveloperApplication","operatingSystem":"macOS, Linux","license":"https://opensource.org/licenses/MIT","offers":[{"@type":"Offer","name":"Open Source","price":"0","priceCurrency":"USD"},{"@type":"Offer","name":"Cloud Monthly","price":"20","priceCurrency":"USD","priceSpecification":{"@type":"UnitPriceSpecification","billingDuration":"P1M"}},{"@type":"Offer","name":"Cloud Annual","price":"200","priceCurrency":"USD","priceSpecification":{"@type":"UnitPriceSpecification","billingDuration":"P1Y"}}],"author":{"@type":"Organization","name":"Mixpeek","url":"https://mixpeek.com"}}</script>
 <script>(function(){var t=localStorage.getItem('theme');if(t==='dark'||(t!=='light'&&matchMedia('(prefers-color-scheme:dark)').matches))document.documentElement.setAttribute('data-theme','dark')})()</script>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
@@ -772,7 +772,7 @@ html[data-theme="dark"] .cta-pill-primary:hover { opacity: 0.85; }
 <!-- HERO -->
 <div class="hero">
   <h1 class="hero-h1">Run dozens of Claude Code agents from your phone<span class="hth-cursor"></span></h1>
-  <p class="hero-sub">Self-healing, parallel AI coding sessions with a web dashboard, mobile app, and agent-to-agent orchestration. Zero external dependencies.</p>
+  <p class="hero-sub">A personal OS for AI coding agents &mdash; parallel sessions, web dashboard, kanban board, notes, CRM, email, browser automation, skills, and agent-to-agent orchestration. One Python file, zero external dependencies.</p>
   <div class="hero-ctas">
     <a class="cta-pill cta-pill-primary" href="https://cloud.amux.io">
       <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M18 10h-1.26A8 8 0 1 0 9 20h9a5 5 0 0 0 0-10z"/></svg>
@@ -831,8 +831,8 @@ html[data-theme="dark"] .cta-pill-primary:hover { opacity: 0.85; }
 <!-- PROBLEMS -->
 <div class="section reveal" id="why">
   <div class="section-label">Why amux</div>
-  <div class="section-title">Claude Code at scale is painful</div>
-  <div class="section-desc">Running more than one agent in parallel exposes problems that don't exist in a single terminal session.</div>
+  <div class="section-title">Claude Code alone isn't enough</div>
+  <div class="section-desc">Running agents at scale needs more than a terminal &mdash; it needs an operating system around them.</div>
   <div class="problems-grid">
     <div class="problem-card">
       <div class="problem-card-label">Crashes at 3am</div>
@@ -852,7 +852,17 @@ html[data-theme="dark"] .cta-pill-primary:hover { opacity: 0.85; }
     <div class="problem-card">
       <div class="problem-card-label">Can't coordinate</div>
       <div class="problem-pain">Agents are isolated. No way for one to delegate to or check on another.</div>
-      <div class="problem-fix">REST API injected at startup via $AMUX_URL. Agents send tasks and peek each other's output with a single curl call.</div>
+      <div class="problem-fix">Channels for 1:1 chat, REST API for task delegation, and a shared board with atomic claiming.</div>
+    </div>
+    <div class="problem-card">
+      <div class="problem-card-label">No shared context</div>
+      <div class="problem-pain">Notes, contacts, emails, and browser sessions are scattered across tools. Agents can't access any of it.</div>
+      <div class="problem-fix">Built-in notes, CRM, email integration, browser automation, and slash-command skills &mdash; all accessible via the same REST API.</div>
+    </div>
+    <div class="problem-card">
+      <div class="problem-card-label">No recurring automation</div>
+      <div class="problem-pain">You want agents to run a task every morning or check something hourly. No way to schedule it.</div>
+      <div class="problem-fix">Scheduler with named cron jobs. Define recurring agent work with a management UI and full history.</div>
     </div>
   </div>
 </div>
@@ -863,7 +873,7 @@ html[data-theme="dark"] .cta-pill-primary:hover { opacity: 0.85; }
 <div class="section-wide reveal" id="dashboard">
   <div class="section-label">Dashboard</div>
   <div class="section-title">Your fleet at a glance</div>
-  <div class="section-desc">Session cards, live terminal peek, kanban board, and a mobile PWA — all in one place.</div>
+  <div class="section-desc">Sessions, terminal peek, kanban board, notes, CRM, channels, files, scheduler, and a mobile PWA &mdash; all in one place.</div>
   <div class="slides-frame" id="slides-frame">
     <img src="https://ethan-personal.s3.us-east-2.amazonaws.com/amux/screenshots/sessions-overview.jpg" alt="Session Dashboard" class="active" loading="lazy">
     <img src="https://ethan-personal.s3.us-east-2.amazonaws.com/amux/screenshots/session-expanded.jpg" alt="Session Card" loading="lazy">
@@ -927,10 +937,17 @@ html[data-theme="dark"] .cta-pill-primary:hover { opacity: 0.85; }
   <div class="features-list">
     <div class="feat-item"><strong>Self-healing watchdog</strong> <span>&mdash; context low &rarr; auto-compact; thinking-block corruption &rarr; restart + replay; stuck waiting &rarr; auto-respond. All silent, all night.</span></div>
     <div class="feat-item"><strong>Agent-to-agent orchestration</strong> <span>&mdash; <code>$AMUX_SESSION</code> and <code>$AMUX_URL</code> injected at startup. A shared global memory file gives every agent the full REST API. Agents delegate work to each other in plain English.</span></div>
-    <div class="feat-item"><strong>Atomic task claiming</strong> <span>&mdash; <code>POST /api/board/:id/claim</code> is a SQLite CAS. Dozens of agents race for the same queue with no Redis, no duplicated work.</span></div>
-    <div class="feat-item"><strong>Mobile PWA</strong> <span>&mdash; installable on iOS and Android. Background Sync replays queued commands on reconnect. Manage your fleet from your phone.</span></div>
+    <div class="feat-item"><strong>Channels</strong> <span>&mdash; 1:1 inter-session messaging with @mentions. Agents chat, coordinate, and hand off context in real time without sharing a terminal.</span></div>
+    <div class="feat-item"><strong>Kanban board</strong> <span>&mdash; <code>POST /api/board/:id/claim</code> is a SQLite CAS. Dozens of agents race for the same queue with no Redis, no duplicated work. iCal sync for due dates.</span></div>
+    <div class="feat-item"><strong>Notes</strong> <span>&mdash; full markdown notes system with a rich Quill editor, find-in-page, and an API agents can read and write. Shared context that persists across sessions.</span></div>
+    <div class="feat-item"><strong>CRM</strong> <span>&mdash; contacts with company, role, email, phone, LinkedIn, interaction logs, tags, and follow-up tracking. Agents can look up people and log interactions via CLI or API.</span></div>
+    <div class="feat-item"><strong>Email integration</strong> <span>&mdash; send and read email through the Mail.app API. Agents can draft, send, and check inbox without leaving the terminal.</span></div>
+    <div class="feat-item"><strong>Browser automation</strong> <span>&mdash; shared Playwright instance with saved auth profiles, screenshots, click/type/eval actions, and an AI agent mode that drives the browser from plain English.</span></div>
+    <div class="feat-item"><strong>Skills / slash commands</strong> <span>&mdash; project-level custom commands like <code>/commit</code>, <code>/review-pr</code>, <code>/deploy</code>. Define once in the project, every agent can invoke them.</span></div>
+    <div class="feat-item"><strong>Scheduler</strong> <span>&mdash; named recurring jobs with cron expressions. Run nightly builds, morning reviews, or hourly checks on a schedule with a management UI.</span></div>
+    <div class="feat-item"><strong>File explorer + editor</strong> <span>&mdash; browse any session's working directory from the dashboard. Preview files with syntax highlighting, edit markdown with find-in-page.</span></div>
+    <div class="feat-item"><strong>Mobile PWA + iOS app</strong> <span>&mdash; installable PWA with Background Sync, plus a <a href="https://apps.apple.com/us/app/amux-agent-multiplexer/id6760410435" target="_blank" rel="noopener">native iOS app</a>. Manage your fleet from your phone.</span></div>
     <div class="feat-item"><strong>Single Python file, zero build step</strong> <span>&mdash; server + full dashboard as inline HTML/CSS/JS. Edit it; it restarts via <code>os.execv</code> on save. Only deps: <code>python3</code> and <code>tmux</code>.</span></div>
-    <div class="feat-item"><strong>Status without hooks or patches</strong> <span>&mdash; parses ANSI-stripped tmux output to detect working / waiting / idle. No modifications to Claude Code.</span></div>
     <div class="feat-item"><strong>White-label branding</strong> <span>&mdash; replace the name, icon, logo, and accent color. Stored server-side, synced to every connected client. <a href="#white-label" style="color:var(--green);">See details &uarr;</a></span></div>
   </div>
 </div>
@@ -941,7 +958,7 @@ html[data-theme="dark"] .cta-pill-primary:hover { opacity: 0.85; }
 <div class="section-wide reveal">
   <div class="section-label">How it's different</div>
   <div class="section-title">Not another Claude wrapper</div>
-  <div class="section-desc">Claude Code gives you one agent per terminal. amux gives you a fleet.</div>
+  <div class="section-desc">Claude Code gives you one agent per terminal. amux gives you an operating system.</div>
   <div class="table-scroll">
   <table class="diff-table">
     <thead>
@@ -955,8 +972,12 @@ html[data-theme="dark"] .cta-pill-primary:hover { opacity: 0.85; }
     <tbody>
       <tr><td class="row-label">Parallel agents</td><td class="has">Unlimited, isolated</td><td class="no">One per terminal</td><td class="partial">Limited or manual</td></tr>
       <tr><td class="row-label">Self-healing</td><td class="has">Watchdog auto-compacts + replays</td><td class="no">Crashes on context overflow</td><td class="partial">Basic restart only</td></tr>
+      <tr><td class="row-label">Agent coordination</td><td class="has">Channels, REST API, atomic task board</td><td class="no">None</td><td class="partial">Shared filesystem at best</td></tr>
+      <tr><td class="row-label">Notes &amp; CRM</td><td class="has">Built-in markdown notes, contacts, interactions</td><td class="no">Not available</td><td class="no">Not available</td></tr>
+      <tr><td class="row-label">Email &amp; browser</td><td class="has">Mail.app API + shared Playwright</td><td class="no">Not available</td><td class="no">Not available</td></tr>
+      <tr><td class="row-label">Skills / commands</td><td class="has">Project-level slash commands</td><td class="has">Built-in slash commands</td><td class="no">Not available</td></tr>
+      <tr><td class="row-label">Scheduler</td><td class="has">Named cron jobs with management UI</td><td class="no">Not available</td><td class="no">Not available</td></tr>
       <tr><td class="row-label">Mobile management</td><td class="has">Native iOS app + PWA</td><td class="no">Terminal only</td><td class="no">Not available</td></tr>
-      <tr><td class="row-label">Agent coordination</td><td class="has">REST API + atomic task claiming</td><td class="no">None</td><td class="partial">Shared filesystem at best</td></tr>
       <tr><td class="row-label">White-label</td><td class="has">Full branding: name, icon, logo, colors</td><td class="no">Not available</td><td class="no">Not available</td></tr>
       <tr><td class="row-label">Setup</td><td class="has">git clone + ./install.sh, 0 deps</td><td class="has">pip install</td><td class="partial">Docker, config, API keys</td></tr>
     </tbody>
@@ -1007,7 +1028,7 @@ html[data-theme="dark"] .cta-pill-primary:hover { opacity: 0.85; }
     <div class="footer-top">
       <div class="footer-brand-col">
         <a href="/" style="font-size:0.92rem;font-weight:700;color:var(--text);text-decoration:none;">amux</a>
-        <p>Open-source agent multiplexer. Run dozens of Claude Code sessions in parallel via tmux.</p>
+        <p>Open-source personal OS for AI coding agents. Dashboard, kanban, notes, CRM, email, browser, skills, scheduler.</p>
       </div>
       <div class="footer-col">
         <div class="footer-col-label">Product</div>
