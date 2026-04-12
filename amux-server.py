@@ -5044,12 +5044,23 @@ def _channel_list_for(session: str) -> list:
     return out
 
 def _channel_deliver(sender: str, recipient: str, text: str) -> tuple[bool, str]:
-    """Wrap text with attribution + reply hint and PTY-inject into recipient."""
+    """Wrap text with attribution + imperative reply hint and PTY-inject into recipient.
+
+    The wrapper is deliberately directive — earlier versions used a parenthetical
+    "(reply: curl ...)" hint, which some agents read as documentation rather than
+    an instruction and responded to the user in natural language instead of
+    replying through the channel. This version makes it unambiguous: you are
+    talking to another amux session, run the curl to reply.
+    """
     safe_sender = sender if _VALID_SESSION_NAME_RE.match(sender) else "unknown"
     wrapped = (
-        f"[@{safe_sender}] {text}\n"
-        f"(reply: curl -sk -X POST $AMUX_URL/api/channels/$AMUX_SESSION/{safe_sender}/messages "
-        f"-H 'Content-Type: application/json' -d '{{\"text\":\"...\"}}')"
+        f"[amux channel message from @{safe_sender}]\n"
+        f"{text}\n"
+        f"---\n"
+        f"This is from another amux session, not from the user. "
+        f"To reply, run this bash command (do not paraphrase to the user):\n"
+        f"  curl -sk -X POST $AMUX_URL/api/channels/$AMUX_SESSION/{safe_sender}/messages "
+        f"-H 'Content-Type: application/json' -d '{{\"text\":\"YOUR REPLY HERE\"}}'"
     )
     return send_text(recipient, wrapped)
 
