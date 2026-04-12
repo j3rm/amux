@@ -14744,6 +14744,33 @@ function peekDownloadLog() {
   a.click();
 }
 
+// Tell the active peek session to read its own full log from ~/.amux/logs/<name>.log
+// as context. Sends a clear instruction so Claude uses its Read tool — much cheaper
+// than streaming the whole (potentially huge) log inline.
+async function peekLoadLogIntoSession() {
+  if (!peekSession) return;
+  const sess = peekSession;
+  // Get the resolved log size first so we can warn on huge logs.
+  let sizeNote = '';
+  try {
+    const r = await fetch(API + '/api/sessions/' + encodeURIComponent(sess) + '/log/info');
+    if (r.ok) {
+      const d = await r.json();
+      if (d && typeof d.size === 'number') {
+        const mb = d.size / (1024 * 1024);
+        sizeNote = mb >= 1 ? ` (~${mb.toFixed(1)} MB)` : ` (~${Math.round(d.size/1024)} KB)`;
+        if (mb > 5 && !confirm('Your session log is ' + mb.toFixed(1) + ' MB. Loading it will eat a lot of context. Continue?')) return;
+      }
+    }
+  } catch(e) {}
+  const msg = 'Please use your Read tool to read your full session log at ~/.amux/logs/' + sess + '.log' + sizeNote +
+    ' — this is the complete terminal history of everything you have done in this amux session. ' +
+    'Use it as context for what we work on next. If the file is large, read it in chunks.';
+  await doSend(sess, msg);
+  showToast('Asked ' + sess + ' to read its full log');
+  setTimeout(refreshPeek, 500);
+}
+
 async function peekShowTranscripts() {
   if (!peekSession) return;
   const sess = peekSession;
@@ -15067,6 +15094,7 @@ const ALL_CHIPS = [
     { id: 'yes', label: 'Yes', action: 'send', value: 'yes', desc: 'Send "yes"' },
     { id: 'no', label: 'No', action: 'send', value: 'no', desc: 'Send "no"' },
     { id: 'log', label: '\uD83D\uDCC4 Log', action: 'special', value: 'downloadLog', desc: 'Download terminal log' },
+    { id: 'sendlog', label: '\uD83D\uDCE5 Load log', action: 'special', value: 'sendLog', desc: 'Tell the session to read its full ~/.amux/logs file as context' },
     { id: 'transcripts', label: '\uD83D\uDCBE Transcripts', action: 'special', value: 'showTranscripts', desc: 'Conversation transcripts' },
   ]},
 ];
@@ -15113,6 +15141,7 @@ function _chipAction(chip, sessionName, isPeek) {
     if (chip.value === 'gitPush') gitPush(isPeek ? peekSession : sessionName, event);
     else if (chip.value === 'downloadLog' && isPeek) peekDownloadLog();
     else if (chip.value === 'showTranscripts' && isPeek) peekShowTranscripts();
+    else if (chip.value === 'sendLog' && isPeek) peekLoadLogIntoSession();
   }
 }
 
@@ -31997,8 +32026,15 @@ p{{color:#888;margin:12px 0 28px;font-size:0.9rem;line-height:1.5}}
                     "mem_path": str(_session_mem_file(name)),
                 })
             if action == "log":
-                # Download raw terminal log file
                 lp = _log_path(name)
+                if action_subid == "info":
+                    # Lightweight metadata — used by the dashboard before asking
+                    # the session to load its log into context.
+                    if not lp.exists():
+                        return self._json({"exists": False, "size": 0, "path": str(lp)})
+                    st = lp.stat()
+                    return self._json({"exists": True, "size": st.st_size, "mtime": int(st.st_mtime), "path": str(lp)})
+                # Download raw terminal log file
                 if not lp.exists():
                     return self._json({"error": "no log"}, 404)
                 data = lp.read_bytes()
