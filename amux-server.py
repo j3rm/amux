@@ -213,12 +213,16 @@ def slog(*args):
 
 _server_start_time = time.time()
 
-def psutil_process_info():
-    """Gather process-level diagnostics without psutil dependency."""
+# Cached process info — updated by background thread, never blocks request handlers
+_proc_info_cache: dict = {}
+_proc_info_lock = threading.Lock()
+_proc_info_last_update: float = 0.0
+_PROC_INFO_TTL = 10.0  # refresh every 10s
+
+def _build_proc_info() -> dict:
+    """Gather process-level diagnostics (may block ~100ms for CPU sampling)."""
     info = {}
     try:
-        pid = os.getpid()
-        # CPU: sample over 0.1s
         t1 = os.times()
         time.sleep(0.1)
         t2 = os.times()
@@ -242,6 +246,28 @@ def psutil_process_info():
     except Exception:
         info["session_count"] = -1
     return info
+
+def psutil_process_info():
+    """Return cached process info (non-blocking). Triggers background refresh if stale."""
+    global _proc_info_last_update
+    now = time.time()
+    with _proc_info_lock:
+        cached = dict(_proc_info_cache)
+        age = now - _proc_info_last_update
+    if age > _PROC_INFO_TTL:
+        def _refresh():
+            global _proc_info_last_update
+            data = _build_proc_info()
+            with _proc_info_lock:
+                _proc_info_cache.update(data)
+                _proc_info_last_update = time.time()
+        if not cached:
+            # Cold start: build synchronously so first call returns real data
+            _refresh()
+            with _proc_info_lock:
+                return dict(_proc_info_cache)
+        threading.Thread(target=_refresh, daemon=True).start()
+    return cached
 
 def _log_resource_snapshot(label="snapshot"):
     """Log a resource snapshot to server.log."""
@@ -2998,30 +3024,55 @@ _DEFAULT_STATUSES = [
 ]
 
 
-def _load_board() -> list:
-    """Load all non-deleted issues from SQLite, with tags joined."""
+def _load_board(done_limit: int = 100) -> list:
+    """Load non-deleted issues from SQLite, with tags joined.
+
+    To keep payloads manageable, only the most recent `done_limit` items in
+    terminal statuses (done/discarded) are returned.  Pass done_limit=0 for
+    unlimited (all items).
+    """
     db = get_db()
-    rows = db.execute(
-        """SELECT i.id, i.title, i.desc, i.status, i.session, i.creator,
-                  i.due, i.due_time, i.created, i.updated, i.owner_type,
-                  COALESCE(i.pinned, 0) AS pinned,
-                  COALESCE(i.pos, 0) AS pos,
-                  GROUP_CONCAT(t.tag) AS tags_csv
-           FROM issues i
-           LEFT JOIN issue_tags t ON t.issue_id = i.id
-           WHERE i.deleted IS NULL
-           GROUP BY i.id
-           ORDER BY COALESCE(i.pinned, 0) DESC,
-                    CASE WHEN COALESCE(i.pos, 0) = 0 THEN 1 ELSE 0 END,
-                    COALESCE(i.pos, 0) ASC,
-                    i.updated DESC"""
-    ).fetchall()
+    _COLS = """i.id, i.title, i.desc, i.status, i.session, i.creator,
+               i.due, i.due_time, i.created, i.updated, i.owner_type,
+               COALESCE(i.pinned, 0) AS pinned,
+               COALESCE(i.pos, 0) AS pos,
+               GROUP_CONCAT(t.tag) AS tags_csv"""
+    if done_limit > 0:
+        # Active items (unlimited) UNION most recent done/discarded
+        rows = db.execute(
+            f"""SELECT {_COLS}
+                FROM issues i LEFT JOIN issue_tags t ON t.issue_id = i.id
+                WHERE i.deleted IS NULL AND i.status NOT IN ('done','discarded')
+                GROUP BY i.id
+              UNION ALL
+              SELECT * FROM (
+                SELECT {_COLS}
+                FROM issues i LEFT JOIN issue_tags t ON t.issue_id = i.id
+                WHERE i.deleted IS NULL AND i.status IN ('done','discarded')
+                GROUP BY i.id
+                ORDER BY i.updated DESC
+                LIMIT ?
+              )""",
+            (done_limit,),
+        ).fetchall()
+    else:
+        rows = db.execute(
+            f"""SELECT {_COLS}
+                FROM issues i LEFT JOIN issue_tags t ON t.issue_id = i.id
+                WHERE i.deleted IS NULL
+                GROUP BY i.id""",
+        ).fetchall()
+    # Sort in Python: pinned first, then by pos, then by updated
     result = []
     for row in rows:
         item = dict(row)
         tags_csv = item.pop("tags_csv") or ""
         item["tags"] = [t for t in tags_csv.split(",") if t]
         result.append(item)
+    result.sort(key=lambda x: (-x.get("pinned", 0),
+                                0 if x.get("pos", 0) == 0 else -1,
+                                x.get("pos", 0),
+                                -(x.get("updated", 0) or 0)))
     return result
 
 
@@ -28306,8 +28357,9 @@ class CCHandler(BaseHTTPRequestHandler):
             if not proxy_port.isdigit():
                 return self._json({"error": "invalid port"}, 400)
             proxy_url = f"http://127.0.0.1:{proxy_port}{proxy_path}"
-            if qs:
-                proxy_url += "?" + qs
+            raw_qs = urlparse(self.path).query
+            if raw_qs:
+                proxy_url += "?" + raw_qs
             try:
                 length = int(self.headers.get("Content-Length", 0))
                 body = self.rfile.read(length) if length else None
@@ -28317,17 +28369,23 @@ class CCHandler(BaseHTTPRequestHandler):
                 resp = _ureq.urlopen(req, timeout=30)
                 ct = resp.headers.get("Content-Type", "")
                 resp_body = resp.read()
-                # Inject <base> tag in HTML so all relative/absolute URLs route through the proxy
+                # Rewrite absolute paths in HTML so assets & links route through the proxy.
+                # <base> only affects relative URLs; absolute paths like /foo must be rewritten.
                 if "text/html" in ct:
-                    prefix = f"/proxy/{proxy_port}/"
+                    prefix = f"/proxy/{proxy_port}"
                     text = resp_body.decode("utf-8", errors="replace")
-                    base_tag = f'<base href="{prefix}">'
-                    if "<head>" in text:
-                        text = text.replace("<head>", f"<head>{base_tag}", 1)
-                    elif "<HEAD>" in text:
-                        text = text.replace("<HEAD>", f"<HEAD>{base_tag}", 1)
-                    else:
-                        text = base_tag + text
+                    # Rewrite src="/...", href="/...", action="/..." (but not //protocol-relative)
+                    text = re.sub(
+                        r'(\s(?:src|href|action)=")(/(?!/))([^"]*")',
+                        lambda m: m.group(1) + prefix + m.group(2) + m.group(3),
+                        text,
+                    )
+                    # Rewrite src='...', href='...', action='...' (single-quoted)
+                    text = re.sub(
+                        r"(\s(?:src|href|action)=')(/(?!/))([^']*')",
+                        lambda m: m.group(1) + prefix + m.group(2) + m.group(3),
+                        text,
+                    )
                     resp_body = text.encode("utf-8")
                 self.send_response(resp.status)
                 for k, v in resp.headers.items():
@@ -29818,9 +29876,11 @@ class CCHandler(BaseHTTPRequestHandler):
         if path == "/api/board" or path.startswith("/api/board/"):
             db = get_db()
 
-            # GET /api/board — list all non-deleted issues
+            # GET /api/board — list non-deleted issues
+            # ?done_limit=N  limits returned done/discarded items (default 100, 0=all)
             if method == "GET" and path == "/api/board":
-                return self._json(_load_board())
+                done_limit = int(qs.get("done_limit", ["100"])[0])
+                return self._json(_load_board(done_limit=done_limit))
 
             # POST /api/board — create issue
             if method == "POST" and path == "/api/board":
