@@ -14661,9 +14661,12 @@ async function _psfViewFile(filePath) {
       img.src = data.data_url;
       img.style.cssText = 'max-width:100%;height:auto;border-radius:4px;display:block;margin:auto;';
       content.appendChild(img);
-    } else if (data.is_markdown && data.html) {
-      content.className = 'file-overlay-body markdown-body';
-      content.innerHTML = data.html;
+    } else if (data.is_markdown) {
+      content.className = 'file-overlay-body markdown md-content';
+      content.innerHTML = renderMarkdown(data.content);
+    } else if (data.is_csv) {
+      content.className = 'file-overlay-body file-csv';
+      content.innerHTML = renderCsvTable(data.content);
     } else if (data.content != null) {
       content.textContent = data.content;
     } else {
