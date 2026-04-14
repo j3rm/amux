@@ -759,16 +759,13 @@ def _restore_user_files(user_id):
          "--quiet"],
         capture_output=True)
 
-def _push_org_api_key(org_id, api_key):
-    """Write the org's shared API key into the container's server.env."""
-    ctr = f"amux-user-{org_id}"
+def _push_key_to_container(ctr_name, api_key):
+    """Write an API key into a single container's server.env and reload."""
     try:
-        # Read existing server.env from container
         r = subprocess.run(
-            ["docker", "exec", ctr, "cat", "/root/.amux/server.env"],
+            ["docker", "exec", ctr_name, "cat", "/root/.amux/server.env"],
             capture_output=True, text=True)
         lines = r.stdout.splitlines() if r.returncode == 0 else []
-        # Update or add ANTHROPIC_API_KEY
         found = False
         for i, line in enumerate(lines):
             if line.startswith("ANTHROPIC_API_KEY="):
@@ -778,29 +775,60 @@ def _push_org_api_key(org_id, api_key):
         if not found and api_key:
             lines.append(f"ANTHROPIC_API_KEY={api_key}")
         content = "\n".join(l for l in lines if l.strip()) + "\n"
-        # Write back
         subprocess.run(
-            ["docker", "exec", "-i", ctr, "sh", "-c", "cat > /root/.amux/server.env"],
+            ["docker", "exec", "-i", ctr_name, "sh", "-c", "cat > /root/.amux/server.env"],
             input=content.encode(), capture_output=True)
-        # Touch amux-server.py to trigger reload
         subprocess.run(
-            ["docker", "exec", ctr, "touch", "/app/amux-server.py"],
+            ["docker", "exec", ctr_name, "touch", "/app/amux-server.py"],
             capture_output=True)
+        return True
+    except Exception:
+        return False
+
+def _push_org_api_key(org_id, api_key):
+    """Write the org's shared API key into the org container AND all member containers."""
+    # Push to the org's own container
+    if _push_key_to_container(f"amux-user-{org_id}", api_key):
         print(f"[org] pushed API key to {org_id}", flush=True)
+    else:
+        print(f"[org] failed to push API key to {org_id}", flush=True)
+    # Push to all member containers
+    try:
+        db = get_db()
+        members = db.execute(
+            "SELECT user_id FROM org_memberships WHERE org_id=? AND user_id!=?",
+            (org_id, org_id)).fetchall()
+        for m in members:
+            mid = m["user_id"]
+            ctr = f"amux-user-{mid}"
+            if _push_key_to_container(ctr, api_key):
+                print(f"[org] pushed shared key to member {mid}", flush=True)
     except Exception as e:
-        print(f"[org] failed to push API key to {org_id}: {e}", flush=True)
+        print(f"[org] failed to push key to members: {e}", flush=True)
+
+def _resolve_api_key(db, user_id):
+    """Find an API key for this user: own org first, then any org they belong to."""
+    own = db.execute("SELECT api_key FROM orgs WHERE id=?", (user_id,)).fetchone()
+    if own and own["api_key"]:
+        return own["api_key"]
+    # Check orgs the user is a member of
+    row = db.execute("""
+        SELECT o.api_key FROM org_memberships m
+        JOIN orgs o ON o.id = m.org_id
+        WHERE m.user_id=? AND o.api_key IS NOT NULL AND o.api_key != ''
+        LIMIT 1
+    """, (user_id,)).fetchone()
+    return row["api_key"] if row else None
 
 def start_container(user_id, port):
     _write_compose(user_id, port)
     _restore_user_files(user_id)
-    # Inject org API key into server.env before starting
+    # Inject API key into server.env before starting — own org or shared org
     try:
         db = get_db()
-        org_row = db.execute("SELECT api_key FROM orgs WHERE id=?", (user_id,)).fetchone()
-        if org_row and org_row["api_key"]:
+        api_key = _resolve_api_key(db, user_id)
+        if api_key:
             vol = f"amux-data-{user_id}"
-            # Write server.env into the volume via a temp container
-            env_content = f"ANTHROPIC_API_KEY={org_row['api_key']}\n"
             subprocess.run(
                 ["docker", "run", "--rm", "-i", "-v", f"{vol}:/root/.amux",
                  "alpine:latest", "sh", "-c", """
@@ -811,7 +839,7 @@ def start_container(user_id, port):
                     else
                         echo "ANTHROPIC_API_KEY=$1" >> "$ENV"
                     fi
-                 """, "--", org_row["api_key"]],
+                 """, "--", api_key],
                 capture_output=True)
     except Exception as e:
         print(f"[org] failed to inject API key for {user_id}: {e}", flush=True)
@@ -1578,6 +1606,13 @@ class Handler(BaseHTTPRequestHandler):
                 "INSERT OR IGNORE INTO org_memberships (org_id, user_id, role, joined_at) "
                 "VALUES (?,?,?,?)", (org_id, user_id, role, now))
             db.commit()
+            # Push org API key to new member's personal container
+            org_row = db.execute("SELECT api_key FROM orgs WHERE id=?", (org_id,)).fetchone()
+            if org_row and org_row["api_key"]:
+                threading.Thread(
+                    target=_push_key_to_container,
+                    args=(f"amux-user-{user_id}", org_row["api_key"]),
+                    daemon=True).start()
             sec = self._secure_cookie_flags()
             return self._redirect(
                 self._base_url() + "/",
