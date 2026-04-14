@@ -7514,6 +7514,12 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
   .peek-split-files-header .psf-crumb:hover { text-decoration: underline; }
   .peek-split-files-body { flex: 1; min-height: 0; overflow-y: auto; }
   .peek-split-btn.active { background: var(--accent); color: #000; border-color: var(--accent); }
+  /* Split pane file content — match the file preview overlay styles */
+  #peek-split-files .file-overlay-body.markdown { background: var(--bg); color: var(--text); }
+  #peek-split-files .file-overlay-body.file-image { background: var(--bg); }
+  body.light #peek-split-files .file-overlay-body { background: #1c2128; color: #cdd9e5; }
+  body.light #peek-split-files .file-overlay-body.markdown,
+  body.light #peek-split-files .file-overlay-body.file-image { background: var(--bg); color: var(--text); }
   .peek-memory-editor { display: none; flex-direction: column; flex: 1; min-height: 0;
     padding: 14px 16px; gap: 10px; overflow: hidden; }
   .peek-memory-editor.active { display: flex; }
