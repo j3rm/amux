@@ -14533,6 +14533,7 @@ function openPeek(name, opts) {
   });
   refreshPeek();
   peekTimer = setInterval(refreshPeek, 3000);
+  _savePeekState();
 }
 
 function copyPeekContent() {
@@ -14571,10 +14572,25 @@ function closePeek() {
   ov.style.height = '';
   ov.style.top = '';
   if (peekTimer) { clearInterval(peekTimer); peekTimer = null; }
+  sessionStorage.removeItem('peekState');
 }
 
 // ── Peek split pane (file browser) ──
 let _peekSplitPath = null;
+
+function _savePeekState() {
+  if (peekSession) {
+    const state = { session: peekSession };
+    const wrap = document.getElementById('peek-split-wrap');
+    if (wrap && wrap.classList.contains('split-active')) {
+      state.split = true;
+      state.splitPath = _peekSplitPath || peekSessionDir || '/';
+    }
+    sessionStorage.setItem('peekState', JSON.stringify(state));
+  } else {
+    sessionStorage.removeItem('peekState');
+  }
+}
 
 function togglePeekSplit() {
   // On mobile, open full-screen Files view instead of split pane
@@ -14590,10 +14606,12 @@ function togglePeekSplit() {
     _peekSplitPath = peekSessionDir || '/';
     _psfLoad(_peekSplitPath);
   }
+  _savePeekState();
 }
 
 async function _psfLoad(dirPath) {
   _peekSplitPath = dirPath;
+  _savePeekState();
   const body = document.getElementById('psf-body');
   const bc = document.getElementById('psf-breadcrumb');
   // Breadcrumb
@@ -23350,6 +23368,24 @@ async function _handleDeeplink(hash) {
 }
 // On page load
 _handleDeeplink(location.hash);
+// Restore peek state from sessionStorage (survives refresh)
+try {
+  const _ps = JSON.parse(sessionStorage.getItem('peekState') || 'null');
+  if (_ps && _ps.session) {
+    setTimeout(() => {
+      openPeek(_ps.session);
+      if (_ps.split && window.innerWidth > 600) {
+        setTimeout(() => {
+          const wrap = document.getElementById('peek-split-wrap');
+          const btn = document.getElementById('peek-split-toggle');
+          if (wrap) wrap.classList.add('split-active');
+          if (btn) btn.classList.add('active');
+          _psfLoad(_ps.splitPath || peekSessionDir || '/');
+        }, 300);
+      }
+    }, 200);
+  }
+} catch(e) {}
 // On hash change (e.g. paste URL into address bar while app already open — no page reload)
 window.addEventListener('hashchange', () => _handleDeeplink(location.hash));
 
