@@ -9686,14 +9686,7 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
     <button id="notif-btn" onclick="toggleNotifications()" title="Session notifications" style="background:none;border:none;cursor:pointer;padding:2px 4px;font-size:1rem;opacity:0.5;line-height:1;" aria-label="Toggle notifications">&#x1F514;</button>
   </div>
   <div style="display:flex;gap:8px;align-items:center;">
-    <div id="org-switcher-wrap" style="display:none;position:relative;">
-      <button id="org-switcher-btn" onclick="event.stopPropagation();toggleOrgDropdown()"
-        style="background:var(--bg2);border:1px solid var(--border);border-radius:6px;padding:3px 10px 3px 8px;font-size:0.72rem;color:var(--fg);cursor:pointer;display:flex;align-items:center;gap:5px;white-space:nowrap;max-width:200px;overflow:hidden;">
-        <span id="org-switcher-label" style="overflow:hidden;text-overflow:ellipsis;flex:1;">My workspace</span>
-        <span style="flex-shrink:0;">&#x25BE;</span>
-      </button>
-      <div id="org-switcher-menu" style="display:none;position:absolute;right:0;top:calc(100% + 4px);background:var(--bg2);border:1px solid var(--border);border-radius:8px;min-width:220px;z-index:500;box-shadow:0 4px 16px rgba(0,0,0,0.4);padding:4px;"></div>
-    </div>
+    <div id="org-switcher-wrap" style="display:none;"></div>
     <div class="active-wrap">
       <button class="btn-active" id="active-btn" onclick="event.stopPropagation();toggleActiveDropdown()">
         <span class="active-dot"></span>
@@ -9794,6 +9787,11 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
               onblur="saveOrgName(this.value)" onkeydown="if(event.key==='Enter')this.blur()">
           </div>
           <div id="settings-members-list" style="font-size:0.78rem;color:var(--dim);"></div>
+        </div>
+        <div class="settings-sep" id="settings-workspace-sep" style="display:none;"></div>
+        <div class="settings-section" id="settings-workspace-section" style="display:none;">
+          <div class="settings-section-label">Workspace</div>
+          <div id="settings-workspace-list" style="display:flex;flex-direction:column;gap:4px;"></div>
         </div>
         <div class="settings-sep"></div>
         <div class="settings-section" id="settings-connections-section">
@@ -11553,14 +11551,14 @@ async function _loadGatewayOrgs() {
 }
 
 function _renderOrgSwitcher() {
-  const wrap = document.getElementById('org-switcher-wrap');
-  const label = document.getElementById('org-switcher-label');
-  const menu = document.getElementById('org-switcher-menu');
   const orgBanner = document.getElementById('org-banner');
   const orgBannerText = document.getElementById('org-banner-text');
   const inviteBanner = document.getElementById('org-invite-banner');
   const inviteBannerText = document.getElementById('org-invite-banner-text');
-  if (!wrap || !_gatewayOrgs.length) return;
+  const wsSection = document.getElementById('settings-workspace-section');
+  const wsSep = document.getElementById('settings-workspace-sep');
+  const wsList = document.getElementById('settings-workspace-list');
+  if (!_gatewayOrgs.length) return;
 
   const otherOrgs = _gatewayOrgs.filter(o => !o.is_own);
   const cookieOrg = document.cookie.split(';').map(c => c.trim())
@@ -11568,25 +11566,28 @@ function _renderOrgSwitcher() {
   const current = _gatewayOrgs.find(o => o.id === cookieOrg) || _gatewayOrgs.find(o => o.is_own);
   const inOtherOrg = current && !current.is_own;
 
-  // Hide switcher if only own workspace
-  if (_gatewayOrgs.length <= 1) { wrap.style.display = 'none'; return; }
-  wrap.style.display = '';
-
-  // Highlight button when viewing another workspace
-  const btn = document.getElementById('org-switcher-btn');
-  if (btn) {
-    if (inOtherOrg) {
-      btn.style.borderColor = '#4338ca';
-      btn.style.background = '#1e1b4b';
-      btn.style.color = '#c7d2fe';
-    } else {
-      btn.style.borderColor = '';
-      btn.style.background = '';
-      btn.style.color = '';
-    }
+  // Show workspace section in settings if user has access to multiple orgs
+  if (wsSection && wsSep && wsList && _gatewayOrgs.length > 1) {
+    wsSection.style.display = '';
+    wsSep.style.display = '';
+    wsList.innerHTML = _gatewayOrgs.map(o => {
+      const isCurrent = current && o.id === current.id;
+      const label = o.is_own ? 'My workspace' : (o.email || o.id);
+      return `<div onclick="_switchOrg('${esc(o.id)}');closeSettings();" style="padding:8px 12px;border-radius:6px;cursor:pointer;font-size:0.82rem;${isCurrent ? 'background:rgba(56,139,253,0.12);font-weight:600;border:1px solid var(--accent);' : 'border:1px solid var(--border);'}display:flex;justify-content:space-between;align-items:center;-webkit-tap-highlight-color:transparent;" onmouseover="if(!${isCurrent})this.style.background='var(--bg3)'" onmouseout="if(!${isCurrent})this.style.background=''">
+        <span style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${esc(label)}</span>
+        ${isCurrent ? '<span style="color:var(--accent);font-size:0.65rem;">current</span>' : ''}
+      </div>`;
+    }).join('');
+  } else if (wsSection && wsSep) {
+    wsSection.style.display = 'none';
+    wsSep.style.display = 'none';
   }
 
-  if (label) label.textContent = inOtherOrg ? (current.email || current.id) : 'My workspace';
+  // Tint settings gear when viewing another workspace
+  const settingsBtn = document.getElementById('settings-btn');
+  if (settingsBtn) {
+    settingsBtn.style.color = inOtherOrg ? '#818cf8' : '';
+  }
 
   // Banner: viewing another workspace
   if (orgBanner && orgBannerText) {
@@ -11615,31 +11616,9 @@ function _renderOrgSwitcher() {
   } else if (inviteBanner) {
     inviteBanner.style.display = 'none';
   }
-
-  if (menu) {
-    menu.innerHTML = _gatewayOrgs.map(o => {
-      const isCurrent = current && o.id === current.id;
-      return `<div onclick="_switchOrg('${esc(o.id)}')" style="padding:8px 12px;border-radius:6px;cursor:pointer;font-size:0.8rem;${isCurrent ? 'background:var(--accent10);font-weight:600;' : ''}display:flex;justify-content:space-between;align-items:center;" onmouseover="this.style.background='var(--bg3)'" onmouseout="this.style.background='${isCurrent ? 'var(--accent10)' : ''}'">
-        <span style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${esc(o.is_own ? 'My workspace' : (o.email || o.id))}</span>
-        ${isCurrent ? '<span style="color:var(--accent);font-size:0.65rem;">current</span>' : ''}
-      </div>`;
-    }).join('');
-  }
-}
-
-function toggleOrgDropdown() {
-  const menu = document.getElementById('org-switcher-menu');
-  if (!menu) return;
-  const open = menu.style.display === 'none' || !menu.style.display;
-  menu.style.display = open ? '' : 'none';
-  if (open) {
-    const close = () => { menu.style.display = 'none'; document.removeEventListener('click', close); };
-    setTimeout(() => document.addEventListener('click', close), 0);
-  }
 }
 
 async function _switchOrg(orgId) {
-  document.getElementById('org-switcher-menu').style.display = 'none';
   await fetch('/api/gateway/switch-org', {
     method: 'POST',
     headers: {'Content-Type': 'application/json'},
