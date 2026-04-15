@@ -11301,6 +11301,30 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
 </div>
 
 <script>
+// ── Auth token injection (must be first — before any fetch calls) ──
+const _authToken = window._AMUX_AUTH_TOKEN || '';
+function _authHeaders(headers) {
+  const h = headers ? { ...headers } : {};
+  if (_authToken) h['Authorization'] = 'Bearer ' + _authToken;
+  return h;
+}
+function _authUrl(url) {
+  if (!_authToken) return url;
+  const sep = url.includes('?') ? '&' : '?';
+  return url + sep + '_token=' + encodeURIComponent(_authToken);
+}
+if (_authToken) {
+  const _origFetchForAuth = window.fetch;
+  window.fetch = function(input, init) {
+    const url = typeof input === 'string' ? input : (input instanceof Request ? input.url : '');
+    if (url.startsWith('/') || url.startsWith(location.origin)) {
+      init = init || {};
+      init.headers = _authHeaders(init.headers instanceof Headers ? Object.fromEntries(init.headers) : init.headers);
+    }
+    return _origFetchForAuth.call(this, input, init);
+  };
+}
+
 // ── Theme ──
 function _applyTheme(light) {
   document.body.classList.toggle('light', light);
@@ -12094,30 +12118,6 @@ document.addEventListener('visibilitychange', () => {
     }
   }
 });
-
-// ── Auth token injection ──
-const _authToken = window._AMUX_AUTH_TOKEN || '';
-function _authHeaders(headers) {
-  const h = headers ? { ...headers } : {};
-  if (_authToken) h['Authorization'] = 'Bearer ' + _authToken;
-  return h;
-}
-function _authUrl(url) {
-  if (!_authToken) return url;
-  const sep = url.includes('?') ? '&' : '?';
-  return url + sep + '_token=' + encodeURIComponent(_authToken);
-}
-if (_authToken) {
-  const _origFetchForAuth = window.fetch;
-  window.fetch = function(input, init) {
-    const url = typeof input === 'string' ? input : (input instanceof Request ? input.url : '');
-    if (url.startsWith('/') || url.startsWith(location.origin)) {
-      init = init || {};
-      init.headers = _authHeaders(init.headers instanceof Headers ? Object.fromEntries(init.headers) : init.headers);
-    }
-    return _origFetchForAuth.call(this, input, init);
-  };
-}
 
 // apiCall — wraps mutation fetches; queues when offline or server unreachable
 async function apiCall(url, options) {
@@ -17007,7 +17007,7 @@ function _renderFileBody(data, mode) {
     const fname = data.path.split('/').pop();
     const sizeMB = data.size ? (data.size / 1048576).toFixed(1) + ' MB' : '';
     const rawUrl = API + '/api/file/raw?path=' + encodeURIComponent(data.path) + (peekSessionDir ? '&cwd=' + encodeURIComponent(peekSessionDir) : '');
-    body.innerHTML = `<div style="display:flex;flex-direction:column;align-items:center;gap:12px;padding:32px;"><div style="font-size:2.5rem;">📦</div><div style="font-size:0.95rem;color:var(--muted);">${fname}${sizeMB ? ' · ' + sizeMB : ''}${data.ext ? ' · ' + data.ext : ''}</div><a href="${rawUrl}" download="${fname}" style="padding:8px 18px;background:var(--green);color:#fff;border-radius:6px;font-size:0.85rem;font-weight:600;text-decoration:none;">Download</a></div>`;
+    body.innerHTML = `<div style="display:flex;flex-direction:column;align-items:center;gap:12px;padding:32px;"><div style="font-size:2.5rem;">📦</div><div style="font-size:0.95rem;color:var(--muted);">${fname}${sizeMB ? ' · ' + sizeMB : ''}${data.ext ? ' · ' + data.ext : ''}</div><a href="${_authUrl(rawUrl)}" download="${fname}" style="padding:8px 18px;background:var(--green);color:#fff;border-radius:6px;font-size:0.85rem;font-weight:600;text-decoration:none;">Download</a></div>`;
     return;
   }
   // Text files — Raw / Edit / Preview
@@ -27507,7 +27507,7 @@ async function _bwScreenshot() {
     if (d.path) {
       // Load via file raw API
       const img = document.getElementById('bw-img');
-      img.src = '/api/file/raw?path=' + encodeURIComponent(d.path) + '&t=' + Date.now();
+      img.src = _authUrl('/api/file/raw?path=' + encodeURIComponent(d.path) + '&t=' + Date.now());
       img.style.display = '';
       document.getElementById('bw-placeholder').style.display = 'none';
       _bwStatus('Screenshot taken');
