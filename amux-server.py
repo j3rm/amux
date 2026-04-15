@@ -444,17 +444,23 @@ def _bu_list_profiles() -> list:
     except Exception:
         return []
 
-def _bu_screenshot(session: str = "amux", path: str = "") -> dict:
-    """Take a screenshot, return {path, size}."""
+def _bu_screenshot(session: str = "amux", path: str = "", retries: int = 3) -> dict:
+    """Take a screenshot, return {path, size}. Retries on SessionManager errors."""
     dest = path or str(Path.home() / ".amux" / "browser-screenshots" / "latest.jpg")
     Path(dest).parent.mkdir(parents=True, exist_ok=True)
-    result = _bu_call(["screenshot", dest], session=session)
-    if result.get("success"):
-        try:
-            size = Path(dest).stat().st_size
-        except Exception:
-            size = 0
-        return {"path": dest, "size": size}
+    for attempt in range(retries):
+        result = _bu_call(["screenshot", dest], session=session)
+        if result.get("success"):
+            try:
+                size = Path(dest).stat().st_size
+            except Exception:
+                size = 0
+            return {"path": dest, "size": size}
+        err = result.get("error", "")
+        if "SessionManager" in err and attempt < retries - 1:
+            import time as _t; _t.sleep(1.5)
+            continue
+        return result
     return result
 
 def _bu_agent_run(task: str, session: str = "amux-agent", profile: str = "",
