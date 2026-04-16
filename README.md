@@ -1,6 +1,6 @@
-<img src="site/github-header.svg" alt="amux — Claude Code Multiplexer" width="1280"/>
+<img src="site/github-header.svg" alt="amux — The Agent Control Plane" width="1280"/>
 
-**Open-source personal OS for AI coding agents.** Run dozens of parallel Claude Code sessions from your browser or phone — with a web dashboard, kanban board, notes, CRM, email, browser automation, slash-command skills, and agent-to-agent orchestration. Self-healing, single-file, zero external dependencies. Python 3 + tmux.
+**Open-source control plane for AI agents.** Run dozens of parallel agent sessions from your browser or phone — with a web dashboard, kanban board, notes, CRM, email, browser automation, slash-command skills, and agent-to-agent orchestration. Self-healing, single-file, zero external dependencies. Currently supports Claude Code via tmux.
 
 > **[amux.io](https://amux.io)** · [Getting started](https://amux.io/guides/getting-started/) · [FAQ](https://amux.io/faq/) · [Blog](https://amux.io/blog/)
 
@@ -73,7 +73,7 @@ Parses ANSI-stripped tmux output — no hooks, no patches, no modifications to C
 
 | Condition | Action |
 |-----------|--------|
-| Context < 20% | Sends `/compact` (5-min cooldown) |
+| Context < 50% | Sends `/compact` (5-min cooldown) |
 | `redacted_thinking … cannot be modified` | Restarts + replays last message |
 | Stuck waiting + `CC_AUTO_CONTINUE=1` | Auto-responds based on prompt type |
 | YOLO session + safety prompt | Auto-answers (never fires on model questions) |
