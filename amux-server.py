@@ -21,7 +21,7 @@ import time
 import uuid
 from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
 from pathlib import Path
-from urllib.parse import urlparse, parse_qs
+from urllib.parse import urlparse, parse_qs, unquote
 
 # Strip Claude Code env vars so child processes (new sessions) don't inherit them
 for _cv in ("CLAUDECODE", "CLAUDE_CODE_ENTRYPOINT"):
@@ -4459,10 +4459,69 @@ def _find_latest_session_id(work_dir: str) -> str:
     return ""
 
 
+def _ascript_str(s: str) -> str:
+    """Convert a Python string to an AppleScript expression with proper linefeed handling.
+    Returns an expression like: ("line1" & linefeed & "line2")
+    Handles quotes, backslashes, and newlines safely."""
+    lines = s.split("\n")
+    escaped = []
+    for line in lines:
+        escaped.append('"' + line.replace("\\", "\\\\").replace('"', '\\"') + '"')
+    if len(escaped) == 1:
+        return escaped[0]
+    return "(" + " & linefeed & ".join(escaped) + ")"
+
+
 def _project_name(work_dir: str) -> str:
     """Return the Claude project folder name for a given work dir (mirrors Claude's own encoding)."""
     resolved = str(Path(work_dir).expanduser().resolve())
     return resolved.replace("/", "-")
+
+
+def _live_conv_id(name: str, work_dir: str = "") -> str:
+    """Return the conversation id of the running claude process for a session.
+
+    Sources, in order of authority:
+      1. Argv of the running claude process — definitive when --session-id or
+         --resume is set (i.e. when start_session launched it).
+      2. Most-recently-modified jsonl in the work_dir's project folder.
+         Unreliable when multiple amux sessions share a work_dir, but the only
+         option for sessions started via the bash CLI (which doesn't set the
+         flag — Claude generates the id internally and doesn't expose it).
+    Empty string if nothing can be determined.
+    """
+    try:
+        r = subprocess.run(
+            ["tmux", "list-panes", "-t", tmux_target(name), "-F", "#{pane_pid}"],
+            capture_output=True, text=True, timeout=5,
+        )
+        pane_pid = r.stdout.strip().split("\n")[0] if r.returncode == 0 else ""
+        if pane_pid:
+            r2 = subprocess.run(["pgrep", "-P", pane_pid], capture_output=True, text=True, timeout=5)
+            for pid in r2.stdout.strip().split("\n"):
+                if not pid:
+                    continue
+                r3 = subprocess.run(
+                    ["ps", "-o", "command=", "-p", pid],
+                    capture_output=True, text=True, timeout=5,
+                )
+                cmd = r3.stdout.strip()
+                if "claude" not in cmd:
+                    continue
+                parts = shlex.split(cmd) if cmd else []
+                for flag in ("--resume", "--session-id"):
+                    if flag in parts:
+                        idx = parts.index(flag)
+                        if idx + 1 < len(parts):
+                            return parts[idx + 1]
+    except Exception:
+        pass
+    if work_dir:
+        try:
+            return _find_latest_session_id(work_dir)
+        except Exception:
+            return ""
+    return ""
 
 
 _GLOBAL_MEM_FILE = CC_MEMORY / "_global.md"
@@ -31597,9 +31656,18 @@ return output
                 except Exception as e:
                     return self._json({"error": str(e)}, 500)
 
-            # POST /api/email/send — send email via Mail.app
+            # POST /api/email/send — send email via Mail.app (new messages only, NOT replies)
             if method == "POST" and path == "/api/email/send":
                 body = self._read_body()
+                # Reject threading headers — Mail.app blocks custom headers on outgoing
+                # messages (-10024). Use /api/email/reply for threaded replies.
+                for forbidden_key in ("in_reply_to", "references", "inReplyTo"):
+                    if body.get(forbidden_key):
+                        return self._json({
+                            "error": f"'{forbidden_key}' is not supported on /api/email/send — "
+                                     "Mail.app cannot set custom headers on outgoing messages. "
+                                     "Use POST /api/email/reply to reply in-thread."
+                        }, 400)
                 to = body.get("to", "").strip()
                 subject = body.get("subject", "").strip()
                 message = body.get("body", "").strip()
@@ -31607,7 +31675,6 @@ return output
                 from_acct = body.get("from", "").strip()
                 if not to or not subject or not message:
                     return self._json({"error": "to, subject, and body are required"}, 400)
-                # Basic email validation
                 if not re.match(r'^[^@\s]+@[^@\s]+\.[^@\s]+$', to):
                     return self._json({"error": f"invalid email address: {to}"}, 400)
                 if cc and not re.match(r'^[^@\s]+@[^@\s]+\.[^@\s]+$', cc):
@@ -31615,8 +31682,8 @@ return output
                 cc_line = f'\nset cc of new_msg to "{cc}"' if cc else ""
                 subj_safe = subject.replace('"', '\\"')
                 to_safe = to.replace('"', '\\"')
-                body_safe = message.replace('"', '\\"').replace('\n', '\\n')
-                # If from account specified, set the sender
+                body_expr = _ascript_str(message)
+                expected_len = len(message)
                 from_line = ""
                 if from_acct:
                     from_safe = from_acct.replace('"', '\\"')
@@ -31631,67 +31698,274 @@ return output
         end repeat"""
                 script = f"""
 tell application "Mail"
-    set new_msg to make new outgoing message with properties {{subject:"{subj_safe}", content:"{body_safe}", visible:false}}
+    set bodyText to {body_expr}
+    set new_msg to make new outgoing message with properties {{subject:"{subj_safe}", content:bodyText, visible:false}}
     tell new_msg
         make new to recipient with properties {{address:"{to_safe}"}}
         {cc_line}
     end tell
     {from_line}
+    -- Verify content was actually applied before sending
+    set actualLen to length of (content of new_msg)
+    if actualLen < {expected_len} then
+        error "Content verification failed: expected {expected_len} chars, got " & actualLen & " chars. Aborting send."
+    end if
     send new_msg
+    return actualLen as string
 end tell
 """
                 try:
                     r = subprocess.run(["osascript", "-e", script], capture_output=True, text=True, timeout=30)
                     if r.returncode != 0:
                         return self._json({"error": r.stderr.strip() or "AppleScript failed"}, 500)
-                    return self._json({"ok": True, "to": to, "subject": subject})
+                    actual_len = r.stdout.strip()
+                    return self._json({"ok": True, "to": to, "subject": subject,
+                                       "from": from_acct or "(default)", "cc": cc or None,
+                                       "body_length": int(actual_len) if actual_len.isdigit() else actual_len})
                 except Exception as e:
                     return self._json({"error": str(e)}, 500)
 
-            # POST /api/email/reply — reply to an existing email
+            # POST /api/email/reply — reply to an existing email in-thread
             if method == "POST" and path == "/api/email/reply":
                 body = self._read_body()
                 message_id = body.get("message_id", "").strip()
                 reply_body = body.get("body", "").strip()
                 reply_all = body.get("reply_all", False)
+                from_acct = body.get("from", "").strip()
                 if not message_id or not reply_body:
                     return self._json({"error": "message_id and body are required"}, 400)
                 msg_id_safe = message_id.replace('"', '\\"')
-                body_safe = reply_body.replace('"', '\\"').replace('\n', '\\n')
-                reply_cmd = "reply" if not reply_all else "reply with properties {reply to all: true}"
+                body_expr = _ascript_str(reply_body)
+                expected_len = len(reply_body)
+                reply_props = "reply to all: true" if reply_all else ""
+                reply_cmd = f"reply with properties {{{reply_props}}}" if reply_props else "reply"
+                from_block = ""
+                if from_acct:
+                    from_safe = from_acct.replace('"', '\\"')
+                    from_block = f"""
+    -- Set sender on reply
+    repeat with acct in accounts
+        repeat with addr in email addresses of acct
+            if address of addr is "{from_safe}" then
+                set sender of replyMsg to (address of addr as string)
+            end if
+        end repeat
+    end repeat"""
                 script = f"""
 tell application "Mail"
     set targetMsg to missing value
+    -- Search ALL mailboxes, not just INBOX
     repeat with acct in accounts
         try
             repeat with mb in mailboxes of acct
-                if name of mb is "INBOX" then
-                    set msgs to (messages of mb whose message id is "{msg_id_safe}")
-                    if (count of msgs) > 0 then
-                        set targetMsg to item 1 of msgs
-                        exit repeat
-                    end if
+                set msgs to (messages of mb whose message id is "{msg_id_safe}")
+                if (count of msgs) > 0 then
+                    set targetMsg to item 1 of msgs
+                    exit repeat
                 end if
             end repeat
         end try
         if targetMsg is not missing value then exit repeat
     end repeat
     if targetMsg is missing value then
-        error "Message not found"
+        error "Message not found in any mailbox"
     end if
     set replyMsg to {reply_cmd} targetMsg opening window no
-    set content of replyMsg to "{body_safe}" & return & return & (content of replyMsg)
+    delay 3
+    set replyBody to {body_expr}
+    set content of replyMsg to replyBody & linefeed & linefeed & (content of replyMsg)
+    {from_block}
+    -- Verify body was actually applied before sending
+    set finalContent to content of replyMsg
+    if not (finalContent starts with replyBody) then
+        error "Content verification failed: reply body was not applied. Aborting send."
+    end if
     send replyMsg
+    return (length of finalContent) as string
 end tell
 """
                 try:
-                    r = subprocess.run(["osascript", "-e", script], capture_output=True, text=True, timeout=30)
+                    r = subprocess.run(["osascript", "-e", script], capture_output=True, text=True, timeout=60)
                     if r.returncode != 0:
                         err = r.stderr.strip()
                         if "Message not found" in err:
-                            return self._json({"error": "message not found — check message_id"}, 404)
+                            return self._json({"error": "message not found in any mailbox — check message_id"}, 404)
+                        if "Content verification failed" in err:
+                            return self._json({"error": err}, 500)
                         return self._json({"error": err or "AppleScript failed"}, 500)
-                    return self._json({"ok": True, "message_id": message_id, "reply_all": reply_all})
+                    actual_len = r.stdout.strip()
+                    return self._json({"ok": True, "message_id": message_id, "reply_all": reply_all,
+                                       "from": from_acct or "(default)",
+                                       "body_length": int(actual_len) if actual_len.isdigit() else actual_len})
+                except subprocess.TimeoutExpired:
+                    return self._json({"error": "Mail.app timed out (60s) — message may be in a large mailbox"}, 504)
+                except Exception as e:
+                    return self._json({"error": str(e)}, 500)
+
+            # GET /api/email/search?q=...&account=...&limit=...&days=...&mailbox=...
+            if method == "GET" and path == "/api/email/search":
+                qs = parse_qs(urlparse(self.path).query)
+                q = (qs.get("q", [""])[0]).strip()
+                account = (qs.get("account", [""])[0]).strip()
+                limit = min(int(qs.get("limit", ["20"])[0]), 100)
+                days = int(qs.get("days", ["30"])[0])
+                mailbox = (qs.get("mailbox", [""])[0]).strip()
+                if not q:
+                    return self._json({"error": "q parameter is required"}, 400)
+                q_safe = q.replace('"', '\\"')
+                acct_filter = ""
+                if account:
+                    acct_safe = account.replace('"', '\\"')
+                    acct_filter = f'whose address of email addresses contains "{acct_safe}"'
+                # Default to INBOX only (fast). Use mailbox=all for exhaustive search.
+                if mailbox and mailbox.lower() == "all":
+                    mb_filter = "true"
+                elif mailbox:
+                    mb_safe = mailbox.replace('"', '\\"')
+                    mb_filter = f'name of mb is "{mb_safe}"'
+                else:
+                    mb_filter = 'name of mb is "INBOX"'
+                script = f"""
+set output to ""
+set matchCount to 0
+set maxResults to {limit}
+set cutoff to (current date) - ({days} * days)
+tell application "Mail"
+    repeat with acct in (accounts {acct_filter})
+        try
+            repeat with mb in mailboxes of acct
+                if {mb_filter} then
+                    try
+                        set msgs to (messages of mb whose (subject contains "{q_safe}" or sender contains "{q_safe}") and date received > cutoff)
+                        repeat with msg in msgs
+                            if matchCount >= maxResults then exit repeat
+                            set mid to message id of msg
+                            set msubj to subject of msg
+                            set mfrom to sender of msg
+                            set mto to ""
+                            try
+                                set mto to address of to recipient 1 of msg
+                            end try
+                            set mdate to date received of msg as string
+                            set mbox to name of mb
+                            set macct to name of acct
+                            set mbody to ""
+                            try
+                                set mbody to content of msg
+                                if (length of mbody) > 200 then set mbody to text 1 thru 200 of mbody
+                            end try
+                            set output to output & mid & "\\t" & msubj & "\\t" & mfrom & "\\t" & mto & "\\t" & mdate & "\\t" & mbox & "\\t" & macct & "\\t" & mbody & linefeed
+                            set matchCount to matchCount + 1
+                        end repeat
+                    end try
+                end if
+                if matchCount >= maxResults then exit repeat
+            end repeat
+        end try
+        if matchCount >= maxResults then exit repeat
+    end repeat
+end tell
+return output
+"""
+                try:
+                    r = subprocess.run(["osascript", "-e", script], capture_output=True, text=True, timeout=120)
+                    if r.returncode != 0:
+                        return self._json({"error": r.stderr.strip() or "AppleScript failed"}, 500)
+                    results = []
+                    for line in r.stdout.strip().split("\n"):
+                        if not line.strip():
+                            continue
+                        parts = line.split("\t")
+                        if len(parts) >= 7:
+                            results.append({
+                                "message_id": parts[0],
+                                "subject": parts[1],
+                                "from": parts[2],
+                                "to": parts[3],
+                                "date": parts[4],
+                                "mailbox": parts[5],
+                                "account": parts[6],
+                                "snippet": parts[7] if len(parts) > 7 else "",
+                            })
+                    return self._json(results)
+                except subprocess.TimeoutExpired:
+                    return self._json({"error": "search timed out (120s)"}, 504)
+                except Exception as e:
+                    return self._json({"error": str(e)}, 500)
+
+            # GET /api/email/message/<rfc822_message_id>
+            if method == "GET" and path.startswith("/api/email/message/"):
+                raw_mid = path[len("/api/email/message/"):]
+                mid = unquote(raw_mid).strip()
+                if not mid:
+                    return self._json({"error": "message_id is required"}, 400)
+                mid_safe = mid.replace('"', '\\"')
+                script = f"""
+set output to ""
+tell application "Mail"
+    repeat with acct in accounts
+        try
+            repeat with mb in mailboxes of acct
+                try
+                    set msgs to (messages of mb whose message id is "{mid_safe}")
+                    if (count of msgs) > 0 then
+                        set msg to item 1 of msgs
+                        set msubj to subject of msg
+                        set mfrom to sender of msg
+                        set mto to ""
+                        repeat with r in to recipients of msg
+                            set mto to mto & address of r & ","
+                        end repeat
+                        set mcc to ""
+                        try
+                            repeat with r in cc recipients of msg
+                                set mcc to mcc & address of r & ","
+                            end repeat
+                        end try
+                        set mdate to date received of msg as string
+                        set mbox to name of mb
+                        set macct to name of acct
+                        set mbody to content of msg
+                        set mirt to ""
+                        try
+                            set hdrs to headers of msg
+                            repeat with h in hdrs
+                                if name of h is "In-Reply-To" then set mirt to content of h
+                                if name of h is "References" then
+                                    set output to output & "references\\t" & content of h & linefeed
+                                end if
+                            end repeat
+                        end try
+                        set output to "found" & linefeed & "subject\\t" & msubj & linefeed & "from\\t" & mfrom & linefeed & "to\\t" & mto & linefeed & "cc\\t" & mcc & linefeed & "date\\t" & mdate & linefeed & "mailbox\\t" & mbox & linefeed & "account\\t" & macct & linefeed & "in_reply_to\\t" & mirt & linefeed & output & "body\\t" & mbody
+                        return output
+                    end if
+                end try
+            end repeat
+        end try
+    end repeat
+end tell
+return "not_found"
+"""
+                try:
+                    r = subprocess.run(["osascript", "-e", script], capture_output=True, text=True, timeout=60)
+                    if r.returncode != 0:
+                        return self._json({"error": r.stderr.strip() or "AppleScript failed"}, 500)
+                    raw = r.stdout.strip()
+                    if raw == "not_found" or not raw.startswith("found"):
+                        return self._json({"error": "message not found"}, 404)
+                    result = {}
+                    for line in raw.split("\n"):
+                        if "\t" in line:
+                            key, _, val = line.partition("\t")
+                            key = key.strip()
+                            if key == "found":
+                                continue
+                            if key == "to" or key == "cc":
+                                val = [a.strip() for a in val.split(",") if a.strip()]
+                            result[key] = val
+                    return self._json(result)
+                except subprocess.TimeoutExpired:
+                    return self._json({"error": "timed out (60s)"}, 504)
                 except Exception as e:
                     return self._json({"error": str(e)}, 500)
 
@@ -33386,16 +33660,35 @@ p{{color:#888;margin:12px 0 28px;font-size:0.9rem;line-height:1.5}}
                         flags = flags_no_model
                     cfg["CC_FLAGS"] = flags
                     _write_env(env_file, cfg)
-                    # Also send /model to running session so it takes effect immediately
-                    if is_running(name) and model_val:
+                    # Auto-restart the session so the new --model takes effect.
+                    # In-place /model switching via tmux send-keys is unreliable
+                    # (input gets eaten when the session is showing a prompt or
+                    # busy). Restart kills in-flight work but preserves the
+                    # conversation — next start uses --resume <conv-id>.
+                    restarted = False
+                    if is_running(name):
                         try:
-                            subprocess.run(
-                                ["tmux", "send-keys", "-t", tmux_target(name), f"/model {model_val}", "Enter"],
-                                capture_output=True, timeout=5,
-                            )
+                            # Capture the LIVE conversation id BEFORE killing
+                            # the tmux session. The stored meta value can be
+                            # stale (e.g. when a session is removed and re-
+                            # registered with the same name) — the running
+                            # process's argv/open-fds + the work_dir's most-
+                            # recent jsonl are authoritative for what
+                            # conversation is actually being used.
+                            work_dir_pre = str(Path(cfg.get("CC_DIR", str(Path.home()))).expanduser().resolve())
+                            conv_id = _live_conv_id(name, work_dir_pre)
+                            if conv_id:
+                                meta_pre = _load_meta(name)
+                                if meta_pre.get("cc_conversation_id") != conv_id:
+                                    meta_pre["cc_conversation_id"] = conv_id
+                                    _save_meta(name, meta_pre)
+                            stop_session(name)
+                            ok_r, _ = start_session(name)
+                            restarted = bool(ok_r)
                         except Exception:
                             pass
-                    return self._json({"ok": True, "message": f"model set to {model_val}"})
+                    suffix = " (session restarted)" if restarted else ""
+                    return self._json({"ok": True, "message": f"model set to {model_val}{suffix}"})
 
                 # Toggle YOLO
                 if body.get("toggle_yolo"):
