@@ -1,12 +1,12 @@
-<!doctype html>
-<html lang="en">
+<!DOCTYPE html>
+<html lang="en" data-theme="dark">
 <head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
 <meta name="theme-color" content="#1e2330">
 <title>amux — The Agent Control Plane</title>
-<link rel="icon" href="/icon.svg" type="image/svg+xml">
-<link rel="icon" type="image/png" sizes="180x180" href="/icon.png">
+<link rel="icon" href="icon.svg" type="image/svg+xml">
+<link rel="icon" type="image/png" sizes="180x180" href="icon.png">
 <meta name="description" content="Open-source control plane for AI agents. Run, monitor, and govern parallel agent sessions with a web dashboard, kanban board, and agent-to-agent orchestration. Self-healing, single-file.">
 <meta name="keywords" content="amux, agent control plane, agent infrastructure, agent fleet management, agent observability, claude code multiplexer, parallel AI coding agents, AI agent orchestration, self-healing AI agent, claude code dashboard, run multiple claude code, AI coding while you sleep, agent multiplexer, open source AI tools">
 <link rel="sitemap" type="application/xml" href="/sitemap.xml">
@@ -23,666 +23,1350 @@
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600;700&family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
-<link rel="stylesheet" href="/style.css">
 <style>
-  /* ── Homepage-specific styles ── */
-  .hp-hero {
-    position: relative;
-    padding: 64px 0 40px;
-    border-bottom: 1px solid var(--line);
-    overflow: hidden;
-  }
-  .hp-hero::before {
-    content: "";
-    position: absolute; inset: 0;
-    background-image:
-      linear-gradient(var(--line) 1px, transparent 1px),
-      linear-gradient(90deg, var(--line) 1px, transparent 1px);
-    background-size: 48px 48px;
-    background-position: -1px -1px;
-    opacity: 0.35;
-    mask-image: radial-gradient(ellipse 80% 70% at 50% 30%, #000 30%, transparent 75%);
-    pointer-events: none;
-  }
-  .hp-hero-in {
-    position: relative;
-    display: grid;
-    grid-template-columns: 1.05fr 1fr;
-    gap: 56px;
-    align-items: center;
-    max-width: var(--maxw);
-    margin: 0 auto;
-    padding: 0 28px;
-  }
-  .hp-eyebrow {
-    display: inline-flex; align-items: center; gap: 8px;
-    font-family: var(--font-mono); font-size: 12px;
-    color: var(--accent);
-    padding: 5px 10px;
-    border: 1px solid var(--accent);
-    border-radius: 99px;
-    background: var(--accent-dim);
-  }
-  .hp-eyebrow .dot { width: 6px; height: 6px; border-radius: 99px; background: var(--accent); box-shadow: 0 0 8px var(--accent); }
-  .hp-h1 {
-    font-family: var(--font-display);
-    font-weight: 700;
-    font-size: clamp(40px, 5.2vw, 64px);
-    line-height: 1.02;
-    letter-spacing: -0.035em;
-    margin: 20px 0 18px;
-    text-wrap: balance;
-    color: var(--fg);
-  }
-  .hp-h1 em { font-style: normal; color: var(--accent); }
-  .hp-sub {
-    font-size: 17px; line-height: 1.55;
-    color: var(--fg-dim);
-    max-width: 44ch;
-    margin: 0 0 28px;
-    text-wrap: pretty;
-  }
-  .hp-sub strong { color: var(--fg); font-weight: 500; }
-  .hp-install {
-    display: flex; align-items: stretch;
-    background: var(--bg-2);
-    border: 1px solid var(--line-2);
-    border-radius: var(--radius);
-    overflow: hidden;
-    max-width: 540px;
-    font-family: var(--font-mono);
-    box-shadow: 0 1px 0 0 oklch(1 0 0 / 0.03) inset, 0 24px 48px -24px oklch(0 0 0 / 0.6);
-  }
-  .hp-install .prompt {
-    padding: 14px 14px 14px 16px;
-    color: var(--accent);
-    font-size: 14px;
-    user-select: none;
-    border-right: 1px solid var(--line);
-    background: var(--bg-3);
-  }
-  .hp-install code {
-    padding: 14px 16px;
-    font-size: 13.5px;
-    color: var(--fg);
-    background: none;
-    border: none;
-    flex: 1;
-    white-space: nowrap;
-    overflow-x: auto;
-    scrollbar-width: none;
-  }
-  .hp-install code::-webkit-scrollbar { display: none; }
-  .hp-install button {
-    font-family: var(--font-mono); font-size: 12px;
-    padding: 0 16px;
-    background: transparent;
-    border: none; border-left: 1px solid var(--line);
-    color: var(--fg-dim);
-    cursor: pointer;
-    letter-spacing: 0.04em;
-  }
-  .hp-install button:hover { color: var(--accent); background: var(--accent-dim); }
-  .hp-install button.copied { color: var(--ok); }
-  .hp-sub-cta {
-    display: flex; gap: 18px;
-    margin-top: 14px;
-    font-family: var(--font-mono);
-    font-size: 12.5px;
-    color: var(--fg-mute);
-  }
-  .hp-sub-cta a { color: var(--fg-dim); border-bottom: 1px dashed var(--line-2); padding-bottom: 1px; text-decoration: none; }
-  .hp-sub-cta a:hover { color: var(--accent); border-color: var(--accent); }
+:root {
+  --bg: #ffffff;
+  --surface: #f7f7f8;
+  --surface-2: #efefef;
+  --border: #e2e2e5;
+  --border-bright: #d0d0d5;
+  --text: #0a0a0a;
+  --dim: #6b6b6b;
+  --muted: #9a9a9a;
+  --accent: #0a0a0a;
+  --green: #16a34a;
+  --green-dim: #15803d;
+  --green-glow: rgba(22,163,74,0.08);
+  --amber: #d97706;
+  --red: #dc2626;
+  --blue: #2563eb;
+  --sans: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+  --mono: 'JetBrains Mono', 'SF Mono', Consolas, monospace;
+  --nav-bg: rgba(255,255,255,0.92);
+  --terminal-bg: #1a1a1a;
+  --terminal-border: #2a2a2a;
+  --terminal-bar: #222;
+  --terminal-bar-border: #333;
+  --terminal-shadow: rgba(0,0,0,0.15);
+}
+html[data-theme="dark"] {
+  --bg: #0a0a0a;
+  --surface: #141414;
+  --surface-2: #1a1a1a;
+  --border: #2a2a2a;
+  --border-bright: #3a3a3a;
+  --text: #e8e8e8;
+  --dim: #a0a0a0;
+  --muted: #6b6b6b;
+  --accent: #e8e8e8;
+  --green: #4ade80;
+  --green-dim: #22c55e;
+  --green-glow: rgba(74,222,128,0.1);
+  --amber: #fbbf24;
+  --red: #f87171;
+  --blue: #60a5fa;
+  --nav-bg: rgba(10,10,10,0.92);
+  --terminal-bg: #111111;
+  --terminal-border: #222;
+  --terminal-bar: #181818;
+  --terminal-bar-border: #2a2a2a;
+  --terminal-shadow: rgba(0,0,0,0.4);
+}
 
-  /* Hero visual: phone mock */
-  .hp-visual {
-    position: relative;
-    display: flex;
-    justify-content: center;
-    align-items: center;
-  }
-  .hp-phone {
-    width: 280px;
-    aspect-ratio: 9 / 19;
-    background: #050709;
-    border: 2px solid oklch(0.32 0.01 250);
-    border-radius: 32px;
-    padding: 10px 8px;
-    box-shadow:
-      0 30px 60px -20px oklch(0 0 0 / 0.7),
-      0 0 0 1px oklch(0 0 0 / 0.5),
-      inset 0 1px 0 oklch(1 0 0 / 0.05);
-  }
-  .hp-phone-screen {
-    width: 100%; height: 100%;
-    background: var(--bg);
-    border-radius: 22px;
-    overflow: hidden;
-    display: flex; flex-direction: column;
-    position: relative;
-  }
-  .hp-phone-notch {
-    position: absolute; top: 6px; left: 50%; transform: translateX(-50%);
-    width: 40%; height: 16px; background: #000; border-radius: 99px; z-index: 2;
-  }
-  .hp-phone-status {
-    display: flex; justify-content: space-between;
-    padding: 6px 14px 4px;
-    font-family: var(--font-mono); font-size: 9px;
-    color: var(--fg);
-  }
-  .hp-phone-hdr {
-    display: flex; align-items: center; gap: 6px;
-    padding: 10px 12px 8px;
-    border-bottom: 1px solid var(--line);
-  }
-  .hp-phone-hdr .ttl { font-family: var(--font-mono); font-size: 13px; font-weight: 700; }
-  .hp-phone-hdr .live {
-    margin-left: auto;
-    font-family: var(--font-mono); font-size: 9px; color: var(--ok);
-    display: flex; align-items: center; gap: 4px;
-  }
-  .hp-phone-hdr .live::before { content:""; width: 5px; height: 5px; border-radius: 99px; background: var(--ok); box-shadow: 0 0 6px var(--ok); animation: pulse 1.8s infinite; }
-  @keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: .55; } }
-  .hp-phone-list {
-    padding: 8px; display: flex; flex-direction: column; gap: 6px;
-    overflow: hidden; flex: 1;
-  }
-  .hp-pcard {
-    background: var(--bg-2); border: 1px solid var(--line);
-    border-radius: 8px; padding: 7px 9px;
-  }
-  .hp-pcard .r {
-    display: flex; align-items: center; gap: 6px;
-    font-family: var(--font-mono); font-size: 10.5px;
-  }
-  .hp-pcard .dot { width: 6px; height: 6px; border-radius: 99px; }
-  .hp-pcard .dot.ok { background: var(--ok); box-shadow: 0 0 5px var(--ok); animation: pulse 1.8s infinite; }
-  .hp-pcard .dot.wt { background: var(--warn); }
-  .hp-pcard .dot.id { background: var(--line-2); }
-  .hp-pcard .p {
-    margin-top: 4px;
-    font-family: var(--font-mono); font-size: 9.5px;
-    color: var(--fg-dim); line-height: 1.4;
-    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
-  }
+*, *::before, *::after { margin: 0; padding: 0; box-sizing: border-box; }
+html { scroll-behavior: smooth; font-size: 16px; }
 
-  /* ── Sections ── */
-  .hp-section { padding: 72px 0; border-bottom: 1px solid var(--line); }
-  .hp-wrap { max-width: var(--maxw); margin: 0 auto; padding: 0 28px; }
-  .hp-kicker {
-    display: flex; align-items: center; gap: 10px;
-    font-family: var(--font-mono); font-size: 12px;
-    color: var(--fg-mute);
-    margin-bottom: 14px;
-    letter-spacing: 0.06em;
-    text-transform: uppercase;
-  }
-  .hp-kicker::before { content:""; width: 18px; height: 1px; background: var(--accent); }
-  .hp-h2 {
-    font-family: var(--font-display);
-    font-size: clamp(28px, 3.6vw, 42px);
-    letter-spacing: -0.028em;
-    line-height: 1.08;
-    margin: 0 0 18px;
-    font-weight: 700;
-    max-width: 22ch;
-    text-wrap: balance;
-    color: var(--fg);
-  }
-  .hp-lede { font-size: 17px; color: var(--fg-dim); max-width: 60ch; text-wrap: pretty; }
+body {
+  background: var(--bg);
+  color: var(--text);
+  font-family: var(--sans);
+  line-height: 1.6;
+  -webkit-font-smoothing: antialiased;
+}
 
-  /* Why grid */
-  .hp-grid {
-    margin-top: 36px;
-    display: grid;
-    grid-template-columns: repeat(3, 1fr);
-    gap: 1px;
-    background: var(--line);
-    border: 1px solid var(--line);
-    border-radius: 8px;
-    overflow: hidden;
-  }
-  .hp-cell {
-    background: var(--bg);
-    padding: 22px 22px 26px;
-    display: flex; flex-direction: column; gap: 10px;
-    min-height: 180px;
-  }
-  .hp-cell .idx { font-family: var(--font-mono); font-size: 11px; color: var(--accent); }
-  .hp-cell h3 {
-    font-family: var(--font-display);
-    font-size: 18px; font-weight: 700;
-    margin: 0; letter-spacing: -0.01em;
-  }
-  .hp-cell p { color: var(--fg-dim); font-size: 14px; margin: 0; line-height: 1.5; }
+::selection { background: var(--accent); color: var(--bg); }
+img { filter: none; transition: filter 0.2s; }
+html[data-theme="dark"] img { filter: brightness(0.9); }
+html[data-theme="dark"] .hero-ctas .primary { background: #e8e8e8; color: #0a0a0a; border-color: #e8e8e8; }
+html[data-theme="dark"] .hero-ctas .primary:hover { opacity: 0.85; color: #0a0a0a; }
+html[data-theme="dark"] .site-header nav a.nav-cta { background: #e8e8e8; color: #0a0a0a; }
+html[data-theme="dark"] .site-header nav a.nav-cta:hover { opacity: 0.8; color: #0a0a0a; }
+html[data-theme="dark"] .waitlist-btn { background: #e8e8e8; color: #0a0a0a; }
 
-  /* Overnight scene */
-  .hp-scene {
-    margin-top: 28px;
-    display: grid;
-    grid-template-columns: 1fr 1.25fr;
-    gap: 40px;
-    align-items: start;
-  }
-  .hp-stamp {
-    display: flex; align-items: baseline; gap: 14px;
-    padding: 14px 0;
-    border-top: 1px solid var(--line);
-  }
-  .hp-stamp:last-child { border-bottom: 1px solid var(--line); }
-  .hp-stamp .time { font-family: var(--font-mono); font-size: 12px; color: var(--accent); min-width: 78px; }
-  .hp-stamp .txt { color: var(--fg-dim); font-size: 14.5px; line-height: 1.5; }
-  .hp-stamp .txt b { color: var(--fg); font-weight: 500; }
+/* ── NAV ── */
+.site-header {
+  position: sticky; top: 0; z-index: 100;
+  display: flex; align-items: center;
+  padding: 0 2.5rem; height: 58px;
+  background: var(--nav-bg);
+  backdrop-filter: blur(20px);
+  border-bottom: 1px solid var(--border);
+  gap: 2.5rem;
+}
+.site-header a.logo {
+  font-size: 0.95rem; font-weight: 700; color: var(--text);
+  text-decoration: none; letter-spacing: -0.02em;
+  font-family: var(--sans); flex-shrink: 0;
+}
+.nav-links {
+  display: flex; align-items: center; gap: 1.75rem; flex: 1;
+}
+.nav-links a {
+  font-size: 0.84rem; color: var(--dim); text-decoration: none;
+  font-family: var(--sans); transition: color 0.15s; white-space: nowrap;
+}
+.nav-links a:hover { color: var(--text); }
+.nav-right {
+  display: flex; align-items: center; gap: 1rem; margin-left: auto; flex-shrink: 0;
+}
+.nav-gh {
+  display: inline-flex; align-items: center; gap: 0.4rem;
+  font-size: 0.84rem; color: var(--dim); text-decoration: none;
+  font-family: var(--sans); transition: color 0.15s;
+}
+.nav-gh:hover { color: var(--text); }
+.nav-gh-stars {
+  font-size: 0.78rem; font-weight: 600; color: var(--dim);
+  font-family: var(--sans);
+}
+.nav-cta-pill {
+  display: inline-flex; align-items: center; gap: 0.4rem;
+  font-size: 0.84rem; font-weight: 600; padding: 0.45rem 1.1rem;
+  border-radius: 999px; text-decoration: none; font-family: var(--sans);
+  background: var(--accent); color: #fff; border: none;
+  transition: opacity 0.15s; white-space: nowrap; cursor: pointer;
+}
+.nav-cta-pill:hover { opacity: 0.85; }
+html[data-theme="dark"] .nav-cta-pill { background: #e8e8e8; color: #0a0a0a; }
+.theme-toggle {
+  background: none; border: none; border-radius: 6px;
+  cursor: pointer; padding: 0.3rem; line-height: 1;
+  font-size: 0.95rem; color: var(--dim); transition: color 0.15s;
+  display: flex; align-items: center;
+}
+.theme-toggle:hover { color: var(--text); }
+.theme-toggle .icon-sun, .theme-toggle .icon-moon { display: none; }
+html:not([data-theme="dark"]) .theme-toggle .icon-moon { display: inline; }
+html[data-theme="dark"] .theme-toggle .icon-sun { display: inline; }
+body { overflow-x: hidden; }
+@media (max-width: 768px) {
+  .site-header { padding: 0 1rem; gap: 1rem; }
+  .nav-links a.hide-mobile { display: none; }
+  .section-wide, .section { padding-left: 1rem; padding-right: 1rem; }
+  .api-path { word-break: break-all; }
+  .terminal-body { font-size: 0.72rem; }
+  code { word-break: break-all; }
+}
+@media (max-width: 540px) {
+  .nav-gh-stars { display: none; }
+  .nav-links { display: none; }
+}
 
-  .hp-term {
-    background: var(--bg-2);
-    border: 1px solid var(--line-2);
-    border-radius: 8px;
-    overflow: hidden;
-    box-shadow: 0 30px 60px -20px oklch(0 0 0 / 0.6);
-  }
-  .hp-term-bar {
-    height: 30px; background: var(--bg-3);
-    border-bottom: 1px solid var(--line);
-    display: flex; align-items: center; gap: 6px;
-    padding: 0 12px;
-    font-family: var(--font-mono); font-size: 11px; color: var(--fg-mute);
-  }
-  .hp-term-bar .lbl { margin-left: auto; }
-  .hp-term-body {
-    padding: 16px 18px;
-    font-family: var(--font-mono); font-size: 12.5px;
-    line-height: 1.7;
-    min-height: 360px;
-    color: var(--fg);
-  }
-  .hp-line { display: flex; gap: 8px; }
-  .hp-line .ts { color: var(--fg-mute); }
-  .hp-line .sess { color: var(--accent); min-width: 9ch; }
-  .hp-line .msg { color: var(--fg-dim); }
-  .hp-line .msg b { color: var(--fg); font-weight: 600; }
-  .hp-line .msg .ok { color: var(--ok); }
-  .hp-cursor::after {
-    content: "▌"; color: var(--accent); margin-left: 4px;
-    animation: blink 1.1s steps(2) infinite;
-  }
+/* ── HERO ── */
+.hero {
+  display: flex; flex-direction: column;
+  align-items: flex-start; text-align: left;
+  padding: 6rem 2rem 4rem;
+  max-width: 820px; margin: 0 auto;
+}
+.hero-sub {
+  font-size: 1rem; color: var(--dim);
+  max-width: 560px; line-height: 1.7;
+  margin-bottom: 1.75rem;
+  font-family: var(--sans);
+}
+.hero-features {
+  list-style: none; display: flex; flex-direction: column;
+  gap: 0.5rem; margin: 1.5rem 0 2.5rem;
+  font-size: 0.9rem; color: var(--dim);
+  font-family: var(--sans);
+}
+.hero-features li::before {
+  content: '\2713'; color: var(--green);
+  margin-right: 0.6rem; font-weight: 700;
+}
+.hero-ctas {
+  display: flex; gap: 0.75rem; flex-wrap: wrap; justify-content: center;
+}
+.hero-ctas a, .hero-ctas button {
+  font-size: 0.85rem; font-weight: 500; padding: 0.6rem 1.5rem;
+  border-radius: 8px; text-decoration: none; font-family: var(--sans);
+  cursor: pointer; transition: all 0.15s;
+  border: 1px solid var(--border); color: var(--dim); background: transparent;
+  display: inline-flex; align-items: center; gap: 0.4rem;
+}
+.hero-ctas a:hover, .hero-ctas button:hover { color: var(--text); border-color: var(--border-bright); }
+.hero-ctas .primary {
+  background: var(--accent); color: #fff; border-color: var(--accent); font-weight: 600;
+}
+.hero-ctas .primary:hover { opacity: 0.85; color: #fff; }
+.site-header nav a.gh-nav-btn {
+  display: inline-flex; align-items: center; gap: 0.4rem;
+}
+.gh-iframe-nav {
+  vertical-align: middle;
+  border: none;
+  overflow: hidden;
+}
+.gh-iframe-hero {
+  vertical-align: middle;
+  border: none;
+  overflow: hidden;
+}
 
-  /* Install section */
-  .hp-quick {
-    margin-top: 28px;
-    display: grid;
-    grid-template-columns: 1fr 1fr;
-    gap: 20px;
-  }
-  .hp-block {
-    background: var(--bg-2);
-    border: 1px solid var(--line-2);
-    border-radius: 8px;
-    overflow: hidden;
-  }
-  .hp-block-h {
-    padding: 10px 14px;
-    background: var(--bg-3);
-    border-bottom: 1px solid var(--line);
-    font-family: var(--font-mono); font-size: 12px;
-    color: var(--fg-dim);
-    display: flex; align-items: center; gap: 10px;
-  }
-  .hp-block-h .n { color: var(--accent); }
-  .hp-block pre {
-    margin: 0; padding: 16px 18px;
-    font-family: var(--font-mono); font-size: 13px; line-height: 1.7;
-    color: var(--fg);
-    overflow-x: auto;
-    background: var(--bg-2);
-    border: none;
-    border-radius: 0;
-    box-shadow: none;
-  }
-  .hp-block pre .c { color: var(--fg-mute); }
-  .hp-block pre .k { color: var(--accent); }
-  .hp-block pre .s { color: var(--ok); }
+/* ── HERO TERMINAL HEADLINE ── */
+.hero-h1 {
+  font-family: var(--mono); font-size: clamp(1.7rem, 3.8vw, 2.8rem);
+  font-weight: 700; line-height: 1.25; letter-spacing: -0.02em;
+  margin-bottom: 1.25rem; color: var(--text); text-align: left;
+  max-width: 740px;
+}
+.hth-cursor {
+  display: inline-block; width: 0.5em; height: 1em;
+  background: var(--green); margin-left: 0.12em;
+  animation: blink 1.1s step-end infinite; vertical-align: text-bottom;
+}
+@keyframes blink { 0%,100%{opacity:1} 50%{opacity:0} }
+/* ── CTA PILLS ── */
+.hero-ctas { justify-content: flex-start; }
+.cta-pill {
+  display: inline-flex; align-items: center; gap: 0.45rem;
+  font-size: 0.9rem; font-weight: 500; padding: 0.65rem 1.4rem;
+  border-radius: 999px; text-decoration: none; font-family: var(--sans);
+  border: 1px solid var(--border); color: var(--text); background: var(--bg);
+  transition: background 0.15s, border-color 0.15s; cursor: pointer;
+  white-space: nowrap;
+}
+.cta-pill:hover { background: var(--surface); border-color: var(--border-bright); }
+.cta-pill-primary {
+  background: var(--accent); color: #fff; border-color: var(--accent); font-weight: 600;
+}
+.cta-pill-primary:hover { opacity: 0.85; background: var(--accent); }
+html[data-theme="dark"] .cta-pill-primary { background: #e8e8e8; color: #0a0a0a; border-color: #e8e8e8; }
+html[data-theme="dark"] .cta-pill-primary:hover { opacity: 0.85; }
+@media (max-width: 540px) {
+  .hero-ctas { flex-direction: column; align-items: flex-start; }
+  .cta-pill { width: 100%; justify-content: center; }
+}
 
-  /* Compare table */
-  .hp-diff { margin-top: 28px; overflow-x: auto; }
-  .hp-diff table { font-size: 13px; }
-  .hp-diff .has { color: var(--ok); }
-  .hp-diff .no { color: var(--fg-mute); }
-  .hp-diff .partial { color: var(--warn); }
-  .hp-diff .col-amux { color: var(--accent); font-weight: 600; }
+/* ── TERMINAL ── */
+.terminal-section {
+  max-width: 820px; margin: 0 auto;
+  padding: 0 2rem 5rem;
+}
+.terminal-section .terminal-window {
+  max-width: 620px; margin-left: 0;
+}
+.terminal-window {
+  background: var(--terminal-bg); border: 1px solid var(--terminal-border);
+  border-radius: 10px; overflow: hidden;
+  box-shadow: 0 20px 60px var(--terminal-shadow);
+}
+.terminal-bar {
+  display: flex; align-items: center; gap: 6px;
+  padding: 10px 14px;
+  background: var(--terminal-bar); border-bottom: 1px solid var(--terminal-bar-border);
+}
+.terminal-dot { width: 10px; height: 10px; border-radius: 50%; }
+.terminal-dot.r { background: #ff5f57; }
+.terminal-dot.y { background: #febc2e; }
+.terminal-dot.g { background: #28c840; }
+.terminal-bar-title {
+  font-size: 0.72rem; color: #888; margin-left: 8px; font-family: var(--mono);
+}
+.terminal-body {
+  padding: 1.2rem 1.4rem; font-size: 0.82rem; line-height: 1.9;
+  font-family: var(--mono);
+}
+.terminal-body .prompt { color: #6ee7b7; }
+.terminal-body .cmd { color: #e2e2e2; }
+.terminal-body .comment { color: #777; }
+.terminal-body .flag { color: #fbbf24; }
+.terminal-body .url { color: #93c5fd; }
+.terminal-body .ok { color: #6ee7b7; }
 
-  /* License banner */
-  .hp-license {
-    margin-top: 44px;
-    border: 1px solid var(--line-2);
-    border-radius: 8px;
-    padding: 18px 22px;
-    background:
-      repeating-linear-gradient(-45deg, transparent 0 8px, color-mix(in oklab, var(--accent) 4%, transparent) 8px 16px),
-      var(--bg-2);
-    display: flex; align-items: center; gap: 18px; flex-wrap: wrap;
-  }
-  .hp-license .mark {
-    font-family: var(--font-mono); font-size: 11px; font-weight: 700;
-    color: var(--bg); background: var(--accent);
-    padding: 5px 9px; border-radius: 3px; letter-spacing: 0.06em;
-  }
-  .hp-license .txt { font-family: var(--font-mono); font-size: 13.5px; color: var(--fg); }
-  .hp-license .txt span { color: var(--fg-dim); }
+/* ── DIVIDER ── */
+.divider { max-width: 720px; margin: 0 auto; border: none; border-top: 1px solid var(--border); }
 
-  /* Minimal footer */
-  .hp-foot {
-    padding: 32px 0 60px;
-    font-family: var(--font-mono); font-size: 12.5px;
-    color: var(--fg-mute);
-  }
-  .hp-foot-in { display: flex; align-items: center; gap: 18px; flex-wrap: wrap; }
-  .hp-foot-in .sep { color: var(--line-2); }
-  .hp-foot-in a { color: var(--fg-dim); text-decoration: none; }
-  .hp-foot-in a:hover { color: var(--accent); }
+/* ── SECTION ── */
+.section {
+  max-width: 720px; margin: 0 auto;
+  padding: 5rem 2rem;
+}
+.section-wide {
+  max-width: 1100px; margin: 0 auto;
+  padding: 5rem 2rem;
+}
+.section-label {
+  font-size: 0.72rem; color: var(--muted);
+  letter-spacing: 0.06em; text-transform: uppercase; margin-bottom: 0.6rem;
+  font-family: var(--sans);
+}
+.section-title {
+  font-size: clamp(1.4rem, 3vw, 2rem); font-weight: 700;
+  letter-spacing: -0.03em; line-height: 1.15; margin-bottom: 0.8rem;
+  font-family: var(--sans);
+}
+.section-desc {
+  color: var(--dim); max-width: 520px;
+  font-size: 0.95rem; line-height: 1.7; margin-bottom: 2.5rem;
+  font-family: var(--sans);
+}
+.section-center { text-align: center; }
+.section-center .section-desc { margin-left: auto; margin-right: auto; }
 
-  @media (max-width: 900px) {
-    .hp-hero-in { grid-template-columns: 1fr; gap: 40px; }
-    .hp-visual { max-width: 280px; margin: 0 auto; }
-    .hp-scene { grid-template-columns: 1fr; }
-    .hp-grid { grid-template-columns: 1fr; }
-    .hp-quick { grid-template-columns: 1fr; }
-  }
-  @media (max-width: 640px) {
-    .hp-hero { padding: 40px 0 28px; }
-    .hp-hero-in { padding: 0 16px; }
-    .hp-wrap { padding: 0 16px; }
-    .hp-section { padding: 48px 0; }
-    .hp-h1 { font-size: clamp(32px, 8vw, 44px); }
-    .hp-sub { font-size: 15px; }
-    .hp-sub-cta { flex-wrap: wrap; gap: 10px; }
-    .hp-install { max-width: 100%; }
-    .hp-phone { width: 220px; }
-    .hp-stamp { gap: 10px; }
-    .hp-stamp .time { min-width: 60px; font-size: 11px; }
-    .hp-stamp .txt { font-size: 13px; }
-  }
-  @media (max-width: 420px) {
-    .hp-sub-cta { flex-direction: column; }
-  }
+/* ── REVEAL ── */
+.reveal {
+  opacity: 0; transform: translateY(16px);
+  transition: opacity 0.45s ease, transform 0.45s ease;
+}
+.reveal.visible { opacity: 1; transform: none; }
+
+/* ── DIFF TABLE ── */
+.table-scroll { overflow-x: auto; -webkit-overflow-scrolling: touch; border-radius: 10px; }
+.diff-table {
+  width: 100%; min-width: 480px; border-collapse: collapse; font-size: 0.82rem;
+  border: 1px solid var(--border); border-radius: 10px; overflow: hidden;
+  font-family: var(--sans);
+}
+.diff-table th {
+  text-align: left; padding: 0.75rem 1rem;
+  background: var(--surface); border-bottom: 1px solid var(--border);
+  font-size: 0.68rem; letter-spacing: 0.06em; text-transform: uppercase;
+  color: var(--muted); font-weight: 500; white-space: nowrap;
+}
+.diff-table th.col-amux { color: var(--text); font-weight: 700; }
+.diff-table td {
+  padding: 0.65rem 1rem;
+  border-bottom: 1px solid var(--border);
+  vertical-align: top;
+}
+.diff-table tr:last-child td { border-bottom: none; }
+.diff-table tr:hover td { background: var(--surface); }
+.diff-table .row-label { color: var(--text); font-weight: 500; white-space: nowrap; }
+.diff-table .has { color: var(--green); }
+.diff-table .no { color: var(--muted); }
+.diff-table .partial { color: var(--amber); }
+
+/* ── PROBLEMS GRID ── */
+.problems-grid {
+  display: grid; grid-template-columns: 1fr 1fr;
+  gap: 1px; background: var(--border);
+  border: 1px solid var(--border); border-radius: 10px; overflow: hidden;
+}
+@media (max-width: 768px) { .problems-grid { grid-template-columns: 1fr; } }
+.problem-card { background: var(--bg); padding: 1.6rem; }
+.problem-card-label {
+  font-size: 0.65rem; color: var(--muted); letter-spacing: 0.06em;
+  margin-bottom: 0.7rem; text-transform: uppercase; font-family: var(--sans);
+}
+.problem-pain {
+  font-size: 0.88rem; color: var(--red); margin-bottom: 0.5rem;
+  display: flex; align-items: flex-start; gap: 0.5rem;
+  font-family: var(--sans);
+}
+.problem-pain::before { content: 'x'; flex-shrink: 0; font-size: 0.7rem; margin-top: 2px; }
+.problem-fix {
+  font-size: 0.88rem; color: var(--green);
+  display: flex; align-items: flex-start; gap: 0.5rem;
+  font-family: var(--sans);
+}
+.problem-fix::before { content: '->'; flex-shrink: 0; color: var(--green-dim); }
+
+/* ── FEATURES ── */
+.features-list {
+  display: flex; flex-direction: column;
+  border: 1px solid var(--border); border-radius: 10px; overflow: hidden;
+}
+.feat-item {
+  padding: 1rem 1.4rem;
+  background: var(--bg);
+  border-bottom: 1px solid var(--border);
+  font-size: 0.88rem; line-height: 1.6;
+  transition: background 0.15s;
+  font-family: var(--sans);
+}
+.feat-item:last-child { border-bottom: none; }
+.feat-item:hover { background: var(--surface); }
+.feat-item strong { color: var(--text); font-weight: 600; }
+.feat-item span { color: var(--dim); }
+.feat-item code {
+  font-family: var(--mono); font-size: 0.82em;
+  background: var(--surface); color: var(--text);
+  padding: 2px 6px; border-radius: 4px;
+  border: 1px solid var(--border);
+}
+
+/* ── SLIDESHOW ── */
+.slides-frame {
+  position: relative;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  overflow: hidden;
+  background: var(--surface);
+  aspect-ratio: 16 / 10;
+  cursor: pointer;
+  margin-top: 1.5rem;
+  box-shadow: 0 4px 24px rgba(0,0,0,0.06);
+}
+.slides-frame img {
+  position: absolute; inset: 0;
+  width: 100%; height: 100%;
+  object-fit: contain;
+  opacity: 0; transition: opacity 0.35s ease; display: block;
+}
+.slides-frame img.active { opacity: 1; }
+.slides-nav {
+  position: absolute; inset: 0;
+  display: flex; align-items: center; justify-content: space-between;
+  pointer-events: none;
+}
+.slides-nav button {
+  pointer-events: all;
+  background: rgba(0,0,0,0.4); border: none;
+  color: #fff; width: 32px; height: 48px;
+  cursor: pointer; font-size: 1rem;
+  opacity: 0; transition: opacity 0.15s;
+  font-family: var(--sans);
+}
+.slides-frame:hover .slides-nav button { opacity: 1; }
+.slides-nav button:hover { background: rgba(0,0,0,0.6); }
+.slides-meta { padding: 0.65rem 0 0; }
+.slides-label { font-size: 0.9rem; font-weight: 600; color: var(--text); margin-bottom: 0.15rem; font-family: var(--sans); }
+.slides-desc { font-size: 0.85rem; color: var(--dim); line-height: 1.55; font-family: var(--sans); }
+.slides-dots { display: flex; gap: 0.3rem; margin-top: 0.5rem; }
+.slides-dots button {
+  width: 6px; height: 6px; border-radius: 50%;
+  border: none; background: var(--border);
+  cursor: pointer; padding: 0; transition: background 0.15s;
+}
+.slides-dots button.active { background: var(--accent); }
+
+/* ── CLI TABLE ── */
+.cli-table { width: 100%; min-width: 400px; border-collapse: collapse; font-size: 0.85rem; font-family: var(--sans); }
+.cli-table th {
+  text-align: left; color: var(--muted); font-weight: 500;
+  font-size: 0.68rem; letter-spacing: 0.06em; text-transform: uppercase;
+  padding: 0.65rem 0.8rem; border-bottom: 1px solid var(--border);
+}
+.cli-table td {
+  padding: 0.6rem 0.8rem;
+  border-bottom: 1px solid var(--border); vertical-align: top;
+}
+.cli-table tr:hover td { background: var(--surface); }
+.cli-table .cmd-cell  { color: var(--text); font-family: var(--mono); font-size: 0.82rem; white-space: nowrap; }
+.cli-table .alias-cell { color: var(--muted); font-family: var(--mono); font-size: 0.82rem; white-space: nowrap; }
+.cli-table .desc-cell  { color: var(--dim); }
+
+/* ── API ── */
+.api-grid {
+  display: grid; grid-template-columns: 1fr 1fr; gap: 2rem; align-items: start;
+}
+@media (max-width: 768px) { .api-grid { grid-template-columns: 1fr; } }
+.api-endpoints { display: flex; flex-direction: column; gap: 0.25rem; }
+.api-endpoint {
+  display: flex; align-items: center; gap: 0.65rem;
+  padding: 0.4rem 0.6rem; border-radius: 6px;
+  font-size: 0.78rem; transition: background 0.15s;
+  font-family: var(--mono);
+}
+.api-endpoint:hover { background: var(--surface); }
+.api-method {
+  font-size: 0.62rem; font-weight: 700; letter-spacing: 0.05em;
+  min-width: 42px; text-align: center; padding: 2px 5px; border-radius: 4px;
+}
+.api-method.get    { color: var(--green); background: var(--green-glow); }
+.api-method.post   { color: var(--blue);  background: rgba(37,99,235,0.08); }
+.api-method.patch  { color: var(--amber); background: rgba(217,119,6,0.08); }
+.api-method.delete { color: var(--red);   background: rgba(220,38,38,0.08); }
+.api-path { color: var(--dim); }
+
+/* ── ARCH ── */
+.arch-visual {
+  display: flex; align-items: center; justify-content: center;
+  gap: 1rem; padding: 2rem 0; flex-wrap: wrap;
+}
+.arch-node {
+  background: var(--bg); border: 1px solid var(--border);
+  border-radius: 10px; padding: 1.2rem 1.6rem; text-align: center; min-width: 130px;
+  font-family: var(--sans);
+}
+.arch-node-label { font-size: 0.88rem; font-weight: 600; }
+.arch-node-sub   { font-size: 0.72rem; color: var(--muted); margin-top: 0.2rem; }
+.arch-arrow      { font-size: 1rem; color: var(--muted); }
+.arch-details {
+  display: grid; grid-template-columns: 1fr 1fr 1fr;
+  gap: 1px; background: var(--border);
+  border: 1px solid var(--border); border-radius: 10px; overflow: hidden; margin-top: 1.5rem;
+}
+@media (max-width: 640px) { .arch-details { grid-template-columns: 1fr; } }
+.arch-details-item { background: var(--bg); padding: 1.2rem; }
+.arch-details-label {
+  font-size: 0.65rem; color: var(--muted); letter-spacing: 0.06em;
+  text-transform: uppercase; margin-bottom: 0.4rem; font-family: var(--sans);
+}
+.arch-details-val { font-size: 0.85rem; color: var(--dim); font-family: var(--sans); }
+
+/* ── RESOURCES ── */
+.resources-grid {
+  display: grid; grid-template-columns: repeat(4, 1fr);
+  gap: 2rem; margin-bottom: 2rem;
+}
+@media (max-width: 640px) { .resources-grid { grid-template-columns: repeat(2, 1fr); } }
+.rg-group-label {
+  font-size: 0.65rem; font-weight: 600; letter-spacing: 0.06em;
+  text-transform: uppercase; color: var(--text); margin-bottom: 0.6rem;
+  font-family: var(--sans);
+}
+.rg-group ul { list-style: none; display: flex; flex-direction: column; gap: 0.4rem; }
+.rg-group ul a {
+  font-size: 0.85rem; color: var(--dim); text-decoration: none;
+  transition: color 0.15s; font-family: var(--sans);
+}
+.rg-group ul a:hover { color: var(--text); }
+
+/* ── CHANGELOG ── */
+.cl-entry {
+  display: flex; gap: 0.75rem; align-items: baseline;
+  padding: 0.5rem 0; border-bottom: 1px solid var(--border); font-size: 0.85rem;
+  font-family: var(--sans);
+}
+.cl-entry:last-child { border-bottom: none; }
+.cl-badge {
+  font-size: 0.62rem; font-weight: 600; padding: 2px 6px; border-radius: 4px;
+  font-family: var(--mono); text-transform: uppercase;
+  letter-spacing: 0.03em; flex-shrink: 0;
+}
+.cl-feat  { background: rgba(22,163,74,0.1); color: var(--green); }
+.cl-fix   { background: rgba(217,119,6,0.1);  color: var(--amber); }
+.cl-docs  { background: rgba(37,99,235,0.1);  color: var(--blue); }
+.cl-perf  { background: rgba(37,99,235,0.1);  color: var(--blue); }
+.cl-chore { background: var(--surface); color: var(--dim); }
+.cl-title { color: var(--text); flex: 1; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.cl-date  { color: var(--muted); font-size: 0.72rem; flex-shrink: 0; }
+
+/* ── WAITLIST ── */
+.waitlist-section {
+  padding: 5rem 2rem; border-top: 1px solid var(--border);
+  background: var(--surface);
+}
+.waitlist-container { max-width: 520px; margin: 0 auto; text-align: center; }
+.waitlist-eyebrow {
+  font-size: 0.72rem; color: var(--muted); letter-spacing: 0.06em;
+  text-transform: uppercase; margin-bottom: 0.6rem; font-family: var(--sans);
+}
+.waitlist-title {
+  font-size: clamp(1.4rem, 3vw, 2rem); font-weight: 700;
+  letter-spacing: -0.03em; line-height: 1.15; margin-bottom: 0.8rem;
+  font-family: var(--sans);
+}
+.waitlist-desc {
+  font-size: 0.95rem; color: var(--dim); line-height: 1.7;
+  margin-bottom: 2rem; font-family: var(--sans);
+}
+.waitlist-form {
+  display: flex; gap: 0.5rem; max-width: 420px; margin: 0 auto 0.8rem;
+}
+@media (max-width: 540px) { .waitlist-form { flex-direction: column; } }
+.waitlist-input {
+  flex: 1; padding: 0.6rem 1rem; font-size: 0.88rem;
+  background: var(--bg); border: 1px solid var(--border);
+  border-radius: 8px; color: var(--text); outline: none;
+  font-family: var(--sans); transition: border-color 0.2s;
+}
+.waitlist-input::placeholder { color: var(--muted); }
+.waitlist-input:focus { border-color: var(--accent); }
+.waitlist-btn {
+  padding: 0.6rem 1.4rem; font-size: 0.85rem; font-weight: 600;
+  background: var(--accent); color: #fff; border: none;
+  border-radius: 8px; cursor: pointer;
+  font-family: var(--sans); white-space: nowrap; transition: opacity 0.2s;
+}
+.waitlist-btn:hover { opacity: 0.85; }
+.waitlist-btn:disabled { opacity: 0.5; cursor: not-allowed; }
+.waitlist-success {
+  display: none; font-size: 0.88rem; color: var(--green);
+  padding: 0.65rem 0.9rem; border: 1px solid var(--green-glow);
+  border-radius: 8px; background: var(--green-glow); max-width: 420px; margin: 0 auto;
+  font-family: var(--sans);
+}
+.waitlist-error { display: none; font-size: 0.85rem; color: var(--red); margin-top: 0.4rem; font-family: var(--sans); }
+.waitlist-note { font-size: 0.72rem; color: var(--muted); margin-top: 0.6rem; font-family: var(--sans); }
+.waitlist-features {
+  display: grid; grid-template-columns: repeat(3, 1fr); gap: 1px;
+  background: var(--border); border: 1px solid var(--border);
+  border-radius: 10px; overflow: hidden; margin-top: 2.5rem; text-align: left;
+}
+@media (max-width: 640px) { .waitlist-features { grid-template-columns: 1fr; } }
+@media (max-width: 640px) { #white-label [style*="grid-template-columns"] { grid-template-columns: 1fr !important; } }
+.wf-item { background: var(--bg); padding: 1.2rem; }
+.wf-label { font-size: 0.65rem; color: var(--muted); letter-spacing: 0.06em; text-transform: uppercase; margin-bottom: 0.3rem; font-family: var(--sans); }
+.wf-val { font-size: 0.9rem; color: var(--text); font-weight: 600; font-family: var(--sans); }
+
+/* ── CTA SECTION ── */
+.cta-section {
+  max-width: 720px; margin: 0 auto;
+  padding: 5rem 2rem; text-align: center;
+}
+.cta-section p {
+  font-size: 0.88rem; color: var(--muted); margin-top: 1rem; font-family: var(--sans);
+}
+.cta-section p a { color: var(--dim); text-decoration: underline; transition: color 0.15s; }
+.cta-section p a:hover { color: var(--text); }
+
+/* ── VIDEO SHOWCASE ── */
+.video-showcase {
+  max-width: 1000px; margin: 0 auto;
+  padding: 0 2rem 5rem;
+}
+.video-tabs {
+  display: flex; gap: 0; margin-bottom: 1.25rem;
+  border: 1px solid var(--border); border-radius: 999px;
+  width: fit-content; overflow: hidden;
+}
+.video-tab {
+  padding: 0.5rem 1.4rem; font-size: 0.82rem; font-weight: 500;
+  font-family: var(--sans); background: transparent; border: none;
+  color: var(--dim); cursor: pointer; transition: all 0.15s;
+  display: flex; align-items: center; gap: 0.4rem;
+}
+.video-tab.active {
+  background: var(--accent); color: #fff;
+}
+html[data-theme="dark"] .video-tab.active { background: #e8e8e8; color: #0a0a0a; }
+.video-tab:not(.active):hover { background: var(--surface); }
+.video-panel { display: none; }
+.video-panel.active { display: block; }
+
+/* Desktop video */
+.desktop-video-wrap {
+  position: relative; border-radius: 12px; overflow: hidden;
+  background: #000; cursor: pointer;
+  box-shadow: 0 20px 60px rgba(0,0,0,0.15);
+  aspect-ratio: 4/3;
+}
+.desktop-video-wrap video {
+  width: 100%; height: 100%; display: block; object-fit: cover;
+}
+
+/* Mobile video — phone frame */
+.mobile-video-container {
+  display: flex; justify-content: center;
+}
+.phone-frame {
+  position: relative; width: 320px;
+  background: #111; border-radius: 40px;
+  padding: 12px;
+  box-shadow: 0 20px 60px rgba(0,0,0,0.25), inset 0 0 0 2px rgba(255,255,255,0.1);
+  cursor: pointer;
+}
+html[data-theme="dark"] .phone-frame { background: #1a1a1a; }
+.phone-frame-notch {
+  position: absolute; top: 12px; left: 50%; transform: translateX(-50%);
+  width: 120px; height: 28px; background: #111;
+  border-radius: 0 0 18px 18px; z-index: 2;
+}
+html[data-theme="dark"] .phone-frame-notch { background: #1a1a1a; }
+.phone-frame-inner {
+  border-radius: 30px; overflow: hidden;
+  aspect-ratio: 9/19.5; background: #000;
+}
+.phone-frame-inner video {
+  width: 100%; height: 100%; display: block; object-fit: cover;
+}
+
+/* Video play overlay */
+.video-play-overlay {
+  position: absolute; inset: 0;
+  display: flex; align-items: center; justify-content: center;
+  background: rgba(0,0,0,0.35); transition: opacity 0.2s;
+  pointer-events: none; border-radius: inherit;
+}
+.playing .video-play-overlay { opacity: 0; }
+.play-icon {
+  width: 64px; height: 64px; border-radius: 50%;
+  background: rgba(255,255,255,0.92);
+  display: flex; align-items: center; justify-content: center;
+  box-shadow: 0 4px 24px rgba(0,0,0,0.3);
+  transition: transform 0.15s, background 0.15s;
+}
+.phone-frame .play-icon { width: 52px; height: 52px; }
+.desktop-video-wrap:hover .play-icon,
+.phone-frame:hover .play-icon { transform: scale(1.08); background: #fff; }
+.play-icon svg { margin-left: 4px; }
+
+/* Mobile video fullscreen modal */
+#mobile-video-modal {
+  display: none; position: fixed; inset: 0; z-index: 2000;
+  background: rgba(0,0,0,0.92);
+  align-items: center; justify-content: center;
+  padding: 0;
+}
+#mobile-video-modal.open { display: flex; }
+#mobile-video-modal video {
+  max-height: 90vh; max-width: 100vw; width: auto;
+  border-radius: 0;
+}
+#mobile-modal-close {
+  position: fixed; top: 1rem; right: 1.25rem;
+  background: none; border: none; color: #fff;
+  font-size: 1.8rem; line-height: 1; cursor: pointer; opacity: 0.7;
+  font-family: var(--sans); z-index: 2001;
+}
+#mobile-modal-close:hover { opacity: 1; }
+
+@media (max-width: 600px) {
+  .phone-frame { width: 280px; border-radius: 34px; padding: 10px; }
+  .phone-frame-inner { border-radius: 26px; }
+  .phone-frame-notch { width: 100px; height: 24px; top: 10px; border-radius: 0 0 14px 14px; }
+  .video-tabs { width: 100%; }
+  .video-tab { flex: 1; justify-content: center; }
+}
+
+/* (lightbox removed — replaced by mobile video modal) */
+
+/* ── FOOTER ── */
+.site-footer { border-top: 1px solid var(--border); padding: 2.5rem 2rem; }
+.footer-inner {
+  max-width: 1100px; margin: 0 auto;
+}
+.footer-top {
+  display: grid; grid-template-columns: 1.5fr repeat(4, 1fr);
+  gap: 2rem; margin-bottom: 2rem;
+}
+@media (max-width: 768px) {
+  .footer-top { grid-template-columns: 1fr 1fr; gap: 1.5rem; }
+}
+@media (max-width: 480px) {
+  .footer-top { grid-template-columns: 1fr; }
+}
+.footer-brand-col p {
+  font-size: 0.85rem; color: var(--dim); line-height: 1.6; margin-top: 0.5rem;
+  font-family: var(--sans);
+}
+.footer-col-label {
+  font-size: 0.65rem; font-weight: 600; letter-spacing: 0.06em;
+  text-transform: uppercase; color: var(--text); margin-bottom: 0.6rem;
+  font-family: var(--sans);
+}
+.footer-col ul { list-style: none; display: flex; flex-direction: column; gap: 0.4rem; }
+.footer-col ul a {
+  font-size: 0.85rem; color: var(--dim); text-decoration: none; transition: color 0.15s;
+  font-family: var(--sans);
+}
+.footer-col ul a:hover { color: var(--text); }
+.footer-bottom {
+  border-top: 1px solid var(--border); padding-top: 1.25rem;
+  display: flex; justify-content: space-between; align-items: center;
+  flex-wrap: wrap; gap: 0.75rem;
+  font-size: 0.75rem; color: var(--muted); font-family: var(--sans);
+}
+.footer-bottom a { color: var(--dim); text-decoration: none; }
+.footer-bottom a:hover { color: var(--text); }
+.footer-bottom-links { display: flex; gap: 1.25rem; }
+
+/* ── HERO EYEBROW + SOCIAL ── */
+.hero-eyebrow {
+  font-size: 0.72rem; color: var(--muted); letter-spacing: 0.05em;
+  margin-bottom: 1.5rem; font-family: var(--sans);
+}
+.hero-social {
+  margin-top: 1.25rem; display: flex; justify-content: center;
+}
+/* iOS modal */
+.ios-modal-backdrop {
+  display: none; position: fixed; inset: 0; z-index: 2000;
+  background: rgba(0,0,0,0.6); align-items: center; justify-content: center;
+  padding: 20px;
+}
+.ios-modal-backdrop.open { display: flex; }
+.ios-modal {
+  background: var(--bg); border: 1px solid var(--border); border-radius: 16px;
+  padding: 2rem; max-width: 440px; width: 100%; position: relative;
+  box-shadow: 0 24px 64px rgba(0,0,0,0.45);
+}
+.ios-modal-close {
+  position: absolute; top: 14px; right: 16px;
+  background: none; border: none; color: var(--dim); cursor: pointer;
+  font-size: 1.3rem; line-height: 1; padding: 4px 6px; border-radius: 6px;
+}
+.ios-modal-close:hover { color: var(--text); background: var(--border); }
+.ios-modal-icon { font-size: 2rem; margin-bottom: 0.6rem; }
+.ios-modal-title { font-size: 1.15rem; font-weight: 700; margin-bottom: 0.4rem; color: var(--text); }
+.ios-modal-sub { font-size: 0.88rem; color: var(--dim); margin-bottom: 0.4rem; line-height: 1.5; }
+@media (max-width: 480px) {
+  .ios-modal { padding: 1.5rem; }
+}
 </style>
 </head>
 <body>
 
 <header class="site-header">
   <a class="logo" href="/">amux</a>
-  <nav>
-    <a href="/guides/" class="hide-mobile">guides</a>
-    <a href="/compare/" class="hide-mobile">compare</a>
-    <a href="/demos/" class="hide-mobile">demos</a>
-    <a href="/blog/" class="hide-mobile">blog</a>
-    <a href="https://apps.apple.com/us/app/amux-agent-multiplexer/id6760410435" target="_blank" rel="noopener" class="nav-cta-primary nav-cta">iOS app</a>
-    <a href="https://github.com/mixpeek/amux" target="_blank" rel="noopener" class="nav-cta">GitHub <span class="gh-stars" id="gh-stars"></span></a>
-  </nav>
+  <div class="nav-links">
+    <a href="/pricing/">Pricing</a>
+    <a href="/guides/" class="hide-mobile">Guides</a>
+    <a href="/blog/" class="hide-mobile">Blog</a>
+    <a href="/changelog/" class="hide-mobile">Changelog</a>
+    <a href="/compare/" class="hide-mobile">Compare</a>
+  </div>
+  <div class="nav-right">
+    <a href="https://github.com/mixpeek/amux" target="_blank" rel="noopener" class="nav-gh">
+      <svg width="15" height="15" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0016 8c0-4.42-3.58-8-8-8z"/></svg>
+      <span class="nav-gh-stars" id="nav-star-count">GitHub</span>
+    </a>
+    <a href="https://apps.apple.com/us/app/amux-agent-multiplexer/id6760410435" class="nav-cta-pill" target="_blank" rel="noopener">
+      <svg width="13" height="13" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M18.71 19.5c-.83 1.24-1.71 2.45-3.05 2.47-1.34.03-1.77-.79-3.29-.79-1.53 0-2 .77-3.27.82-1.31.05-2.3-1.32-3.14-2.53C4.25 17 2.94 12.45 4.7 9.39c.87-1.52 2.43-2.48 4.12-2.51 1.28-.02 2.5.87 3.29.87.78 0 2.26-1.07 3.8-.91.65.03 2.47.26 3.64 1.98-.09.06-2.17 1.28-2.15 3.81.03 3.02 2.65 4.03 2.68 4.04-.03.07-.42 1.44-1.38 2.83M13 3.5c.73-.83 1.94-1.46 2.94-1.5.13 1.17-.34 2.35-1.04 3.19-.69.85-1.83 1.51-2.95 1.42-.15-1.15.41-2.35 1.05-3.11z"/></svg>
+      iOS App
+    </a>
+  </div>
 </header>
 
-<!-- ═══════════ HERO ═══════════ -->
-<header class="hp-hero">
-  <div class="hp-hero-in">
-    <div>
-      <span class="hp-eyebrow"><span class="dot"></span> open source · MIT licensed</span>
-      <h1 class="hp-h1">
-        Run <em>30 agents</em> overnight<br>
-        without losing your mind.
-      </h1>
-      <p class="hp-sub">
-        I was running a dozen Claude Code sessions in tmux panes, SSH'd into my desktop from a plane, trying to remember which agent was stuck asking for permission and which one had silently exhausted its context three hours ago. <strong>amux is what I built instead.</strong>
-      </p>
+<!-- HERO -->
+<div class="hero">
+  <h1 class="hero-h1">Operate AI agents like production infrastructure<span class="hth-cursor"></span></h1>
+  <p class="hero-sub">The control plane for running, monitoring, and governing agent systems &mdash; without chaos or runaway costs.</p>
+  <ul class="hero-features">
+    <li>Self-healing runtime &mdash; auto-restart, context compaction, replay</li>
+    <li>Real-time observability &mdash; dashboard, token tracking, terminal peek</li>
+    <li>Cost control &mdash; per-session spend, daily budgets, kill switches</li>
+    <li>Orchestration &mdash; agent-to-agent messaging, atomic task claiming</li>
+  </ul>
+  <div class="hero-ctas">
+    <a class="cta-pill cta-pill-primary" href="https://cloud.amux.io">
+      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M18 10h-1.26A8 8 0 1 0 9 20h9a5 5 0 0 0 0-10z"/></svg>
+      Try Cloud Free
+    </a>
+    <a class="cta-pill" href="https://github.com/mixpeek/amux" target="_blank" rel="noopener">
+      <svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0016 8c0-4.42-3.58-8-8-8z"/></svg>
+      View on GitHub
+    </a>
+    <a class="cta-pill" href="https://apps.apple.com/us/app/amux-agent-multiplexer/id6760410435" target="_blank" rel="noopener">
+      <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M18.71 19.5c-.83 1.24-1.71 2.45-3.05 2.47-1.34.03-1.77-.79-3.29-.79-1.53 0-2 .77-3.27.82-1.31.05-2.3-1.32-3.14-2.53C4.25 17 2.94 12.45 4.7 9.39c.87-1.52 2.43-2.48 4.12-2.51 1.28-.02 2.5.87 3.29.87.78 0 2.26-1.07 3.8-.91.65.03 2.47.26 3.64 1.98-.09.06-2.17 1.28-2.15 3.81.03 3.02 2.65 4.03 2.68 4.04-.03.07-.42 1.44-1.38 2.83M13 3.5c.73-.83 1.94-1.46 2.94-1.5.13 1.17-.34 2.35-1.04 3.19-.69.85-1.83 1.51-2.95 1.42-.15-1.15.41-2.35 1.05-3.11z"/></svg>
+      Get iOS App
+    </a>
+  </div>
+</div>
 
-      <div class="hp-install" id="install-hero">
-        <span class="prompt">$</span>
-        <code id="install-cmd">git clone https://github.com/mixpeek/amux && cd amux && ./install.sh</code>
-        <button onclick="copyInstall(this)">COPY</button>
+<!-- VIDEO SHOWCASE -->
+<div class="video-showcase">
+  <div class="video-tabs">
+    <button class="video-tab active" data-panel="desktop-panel">
+      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="3" width="20" height="14" rx="2"/><line x1="8" y1="21" x2="16" y2="21"/><line x1="12" y1="17" x2="12" y2="21"/></svg>
+      Desktop
+    </button>
+    <button class="video-tab" data-panel="mobile-panel">
+      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="5" y="2" width="14" height="20" rx="2"/><line x1="12" y1="18" x2="12.01" y2="18"/></svg>
+      Mobile
+    </button>
+  </div>
+
+  <!-- Desktop panel -->
+  <div class="video-panel active" id="desktop-panel">
+    <div class="desktop-video-wrap" id="desktop-video-wrap">
+      <video id="desktop-video"
+        src="https://ethan-personal.s3.us-east-2.amazonaws.com/amux/videos/desktop_demo.mp4"
+        preload="none"
+        poster="https://ethan-personal.s3.us-east-2.amazonaws.com/amux/videos/desktop_poster.jpg"
+        playsinline controls loop muted></video>
+      <div class="video-play-overlay">
+        <div class="play-icon">
+          <svg width="22" height="22" viewBox="0 0 24 24" fill="#0a0a0a" aria-hidden="true"><polygon points="5,3 19,12 5,21"/></svg>
+        </div>
       </div>
-      <div class="hp-sub-cta">
-        <a href="https://apps.apple.com/us/app/amux-agent-multiplexer/id6760410435" target="_blank" rel="noopener">iOS app</a>
+    </div>
+  </div>
+
+  <!-- Mobile panel -->
+  <div class="video-panel" id="mobile-panel">
+    <div class="mobile-video-container">
+      <div class="phone-frame" id="phone-frame">
+        <div class="phone-frame-notch"></div>
+        <div class="phone-frame-inner">
+          <video id="mobile-video"
+            src="https://ethan-personal.s3.us-east-2.amazonaws.com/amux/videos/iphone_demo.mp4"
+            preload="none"
+            poster="https://ethan-personal.s3.us-east-2.amazonaws.com/amux/videos/iphone_poster.jpg"
+            playsinline muted></video>
+        </div>
+        <div class="video-play-overlay">
+          <div class="play-icon">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="#0a0a0a" aria-hidden="true"><polygon points="5,3 19,12 5,21"/></svg>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<hr class="divider">
+
+<!-- PROBLEMS -->
+<div class="section reveal" id="why">
+  <div class="section-label">Why amux</div>
+  <div class="section-title">Agents break at scale</div>
+  <div class="section-desc">One agent is a toy. Ten running overnight is an infrastructure problem.</div>
+  <div class="problems-grid">
+    <div class="problem-card">
+      <div class="problem-card-label">No fault tolerance</div>
+      <div class="problem-pain">Context overflow kills sessions overnight. You wake up to nothing done.</div>
+      <div class="problem-fix">Watchdog auto-compacts, restarts, and replays the last message. Truly unattended.</div>
+    </div>
+    <div class="problem-card">
+      <div class="problem-card-label">No observability</div>
+      <div class="problem-pain">Ten terminal tabs. No idea which agents are working, stuck, or idle.</div>
+      <div class="problem-fix">Live dashboard with status, token spend, peek mode, and mobile access from anywhere.</div>
+    </div>
+    <div class="problem-card">
+      <div class="problem-card-label">No task isolation</div>
+      <div class="problem-pain">Agents step on each other. Same task gets implemented twice.</div>
+      <div class="problem-fix">Kanban board with atomic SQLite task claiming. One agent, one task, no collisions.</div>
+    </div>
+    <div class="problem-card">
+      <div class="problem-card-label">No orchestration</div>
+      <div class="problem-pain">Agents are isolated. No way for one to delegate to or check on another.</div>
+      <div class="problem-fix">Channels for 1:1 chat, REST API for task delegation, and a shared board with atomic claiming.</div>
+    </div>
+    <div class="problem-card">
+      <div class="problem-card-label">No shared state</div>
+      <div class="problem-pain">Notes, contacts, emails, and browser sessions are scattered across tools. Agents can't access any of it.</div>
+      <div class="problem-fix">Built-in notes, CRM, email integration, browser automation, and slash-command skills &mdash; all accessible via the same REST API.</div>
+    </div>
+    <div class="problem-card">
+      <div class="problem-card-label">No scheduling</div>
+      <div class="problem-pain">You want agents to run a task every morning or check something hourly. No way to schedule it.</div>
+      <div class="problem-fix">Scheduler with named cron jobs. Define recurring agent work with a management UI and full history.</div>
+    </div>
+  </div>
+</div>
+
+<hr class="divider">
+
+<!-- DASHBOARD SLIDESHOW -->
+<div class="section-wide reveal" id="dashboard">
+  <div class="section-label">Dashboard</div>
+  <div class="section-title">Your fleet at a glance</div>
+  <div class="section-desc">Sessions, terminal peek, kanban board, notes, CRM, channels, files, scheduler, and a mobile PWA &mdash; all in one place.</div>
+  <div class="slides-frame" id="slides-frame">
+    <img src="https://ethan-personal.s3.us-east-2.amazonaws.com/amux/screenshots/sessions-overview.jpg" alt="Session Dashboard" class="active" loading="lazy">
+    <img src="https://ethan-personal.s3.us-east-2.amazonaws.com/amux/screenshots/session-expanded.jpg" alt="Session Card" loading="lazy">
+    <img src="https://ethan-personal.s3.us-east-2.amazonaws.com/amux/screenshots/search-and-send.jpg" alt="Search and Send" loading="lazy">
+    <img src="https://ethan-personal.s3.us-east-2.amazonaws.com/amux/screenshots/live-terminal.jpg" alt="Live Terminal" loading="lazy">
+    <img src="https://ethan-personal.s3.us-east-2.amazonaws.com/amux/screenshots/file-explorer.jpg" alt="File Explorer" loading="lazy">
+    <img src="https://ethan-personal.s3.us-east-2.amazonaws.com/amux/screenshots/session-memory.jpg" alt="Session Memory" loading="lazy">
+    <img src="https://ethan-personal.s3.us-east-2.amazonaws.com/amux/screenshots/kanban-board.jpg" alt="Kanban Board" loading="lazy">
+    <img src="https://ethan-personal.s3.us-east-2.amazonaws.com/amux/screenshots/calendar.jpg" alt="Calendar" loading="lazy">
+    <div class="slides-nav">
+      <button id="slides-prev" aria-label="Previous">&#8249;</button>
+      <button id="slides-next" aria-label="Next">&#8250;</button>
+    </div>
+  </div>
+  <div class="slides-meta">
+    <div class="slides-label" id="slides-label">Session Dashboard</div>
+    <div class="slides-desc" id="slides-desc">All running agents at a glance -- live status, token spend, model, and current task.</div>
+    <div class="slides-dots" id="slides-dots"></div>
+  </div>
+</div>
+
+<hr class="divider">
+
+<!-- WHITE-LABEL -->
+<div class="section reveal" id="white-label">
+  <div class="section-label" style="color:var(--green);">New</div>
+  <div class="section-title">White-label it. Make it yours.</div>
+  <div class="section-desc">Replace every trace of amux with your own brand &mdash; name, icon, logo, and accent color. One click, server-side, synced to every connected client.</div>
+  <div style="border:1px solid var(--border);border-radius:12px;overflow:hidden;margin-top:1.5rem;">
+    <div style="display:grid;grid-template-columns:1fr 1fr;gap:0;">
+      <div style="padding:1.5rem 1.8rem;border-right:1px solid var(--border);border-bottom:1px solid var(--border);">
+        <div style="font-weight:600;font-size:0.92rem;margin-bottom:0.4rem;">Custom name &amp; tagline</div>
+        <div style="color:var(--dim);font-size:0.84rem;line-height:1.5;">Replace &ldquo;amux&rdquo; everywhere &mdash; header, page title, PWA manifest, About panel. Your team sees your brand, not ours.</div>
+      </div>
+      <div style="padding:1.5rem 1.8rem;border-bottom:1px solid var(--border);">
+        <div style="font-weight:600;font-size:0.92rem;margin-bottom:0.4rem;">Icon &amp; logo upload</div>
+        <div style="color:var(--dim);font-size:0.84rem;line-height:1.5;">Upload a square icon (favicon, PWA, home screen) and a wide logo (About panel). Drag-and-drop or file picker. PNG, JPEG, SVG, WebP.</div>
+      </div>
+      <div style="padding:1.5rem 1.8rem;border-right:1px solid var(--border);">
+        <div style="font-weight:600;font-size:0.92rem;margin-bottom:0.4rem;">Accent color</div>
+        <div style="color:var(--dim);font-size:0.84rem;line-height:1.5;">Pick any color &mdash; buttons, tags, status indicators, and the entire UI theme update instantly across all tabs and devices.</div>
+      </div>
+      <div style="padding:1.5rem 1.8rem;">
+        <div style="font-weight:600;font-size:0.92rem;margin-bottom:0.4rem;">Server-side, synced everywhere</div>
+        <div style="color:var(--dim);font-size:0.84rem;line-height:1.5;">Branding is stored on the server and served to every client &mdash; desktop browser, mobile PWA, iOS app. Set it once, done.</div>
+      </div>
+    </div>
+  </div>
+  <div style="text-align:center;margin-top:1rem;">
+    <span style="font-family:var(--mono);font-size:0.78rem;color:var(--dim);">API: <code style="background:var(--surface);padding:2px 8px;border-radius:4px;border:1px solid var(--border);font-size:0.82em;">GET/POST/DELETE /api/branding</code></span>
+  </div>
+</div>
+
+<hr class="divider">
+
+<!-- FEATURES -->
+<div class="section reveal" id="features">
+  <div class="section-label">How it works</div>
+  <div class="section-title">Built for running agents at scale</div>
+  <div class="section-desc">Every piece exists because we hit the same wall operating agents in production.</div>
+  <div class="features-list">
+    <div class="feat-item"><strong>Self-healing watchdog</strong> <span>&mdash; context low &rarr; auto-compact; thinking-block corruption &rarr; restart + replay; stuck waiting &rarr; auto-respond. All silent, all night.</span></div>
+    <div class="feat-item"><strong>Agent-to-agent orchestration</strong> <span>&mdash; <code>$AMUX_SESSION</code> and <code>$AMUX_URL</code> injected at startup. A shared global memory file gives every agent the full REST API. Agents delegate work to each other in plain English.</span></div>
+    <div class="feat-item"><strong>Channels</strong> <span>&mdash; 1:1 inter-session messaging with @mentions. Agents chat, coordinate, and hand off context in real time without sharing a terminal.</span></div>
+    <div class="feat-item"><strong>Kanban board</strong> <span>&mdash; <code>POST /api/board/:id/claim</code> is a SQLite CAS. Dozens of agents race for the same queue with no Redis, no duplicated work. iCal sync for due dates.</span></div>
+    <div class="feat-item"><strong>Notes</strong> <span>&mdash; full markdown notes system with a rich Quill editor, find-in-page, and an API agents can read and write. Shared context that persists across sessions.</span></div>
+    <div class="feat-item"><strong>CRM</strong> <span>&mdash; contacts with company, role, email, phone, LinkedIn, interaction logs, tags, and follow-up tracking. Agents can look up people and log interactions via CLI or API.</span></div>
+    <div class="feat-item"><strong>Email integration</strong> <span>&mdash; send and read email through the Mail.app API. Agents can draft, send, and check inbox without leaving the terminal.</span></div>
+    <div class="feat-item"><strong>Browser automation</strong> <span>&mdash; shared Playwright instance with saved auth profiles, screenshots, click/type/eval actions, and an AI agent mode that drives the browser from plain English.</span></div>
+    <div class="feat-item"><strong>Skills / slash commands</strong> <span>&mdash; project-level custom commands like <code>/commit</code>, <code>/review-pr</code>, <code>/deploy</code>. Define once in the project, every agent can invoke them.</span></div>
+    <div class="feat-item"><strong>Scheduler</strong> <span>&mdash; named recurring jobs with cron expressions. Run nightly builds, morning reviews, or hourly checks on a schedule with a management UI.</span></div>
+    <div class="feat-item"><strong>File explorer + editor</strong> <span>&mdash; browse any session's working directory from the dashboard. Preview files with syntax highlighting, edit markdown with find-in-page.</span></div>
+    <div class="feat-item"><strong>Mobile PWA + iOS app</strong> <span>&mdash; installable PWA with Background Sync, plus a <a href="https://apps.apple.com/us/app/amux-agent-multiplexer/id6760410435" target="_blank" rel="noopener">native iOS app</a>. Manage your fleet from your phone.</span></div>
+    <div class="feat-item"><strong>Single Python file, zero build step</strong> <span>&mdash; server + full dashboard as inline HTML/CSS/JS. Edit it; it restarts via <code>os.execv</code> on save. Only deps: <code>python3</code> and <code>tmux</code>.</span></div>
+    <div class="feat-item"><strong>White-label branding</strong> <span>&mdash; replace the name, icon, logo, and accent color. Stored server-side, synced to every connected client. <a href="#white-label" style="color:var(--green);">See details &uarr;</a></span></div>
+  </div>
+</div>
+
+<hr class="divider">
+
+<!-- COMPARE -->
+<div class="section-wide reveal">
+  <div class="section-label">How it's different</div>
+  <div class="section-title">Not another agent wrapper</div>
+  <div class="section-desc">Most tools give you one agent per terminal. amux gives you the infrastructure around them.</div>
+  <div class="table-scroll">
+  <table class="diff-table">
+    <thead>
+      <tr>
+        <th></th>
+        <th class="col-amux">amux</th>
+        <th>Claude Code</th>
+        <th>Other wrappers</th>
+      </tr>
+    </thead>
+    <tbody>
+      <tr><td class="row-label">Parallel agents</td><td class="has">Unlimited, isolated</td><td class="no">One per terminal</td><td class="partial">Limited or manual</td></tr>
+      <tr><td class="row-label">Self-healing</td><td class="has">Watchdog auto-compacts + replays</td><td class="no">Crashes on context overflow</td><td class="partial">Basic restart only</td></tr>
+      <tr><td class="row-label">Agent coordination</td><td class="has">Channels, REST API, atomic task board</td><td class="no">None</td><td class="partial">Shared filesystem at best</td></tr>
+      <tr><td class="row-label">Notes &amp; CRM</td><td class="has">Built-in markdown notes, contacts, interactions</td><td class="no">Not available</td><td class="no">Not available</td></tr>
+      <tr><td class="row-label">Email &amp; browser</td><td class="has">Mail.app API + shared Playwright</td><td class="no">Not available</td><td class="no">Not available</td></tr>
+      <tr><td class="row-label">Skills / commands</td><td class="has">Project-level slash commands</td><td class="has">Built-in slash commands</td><td class="no">Not available</td></tr>
+      <tr><td class="row-label">Scheduler</td><td class="has">Named cron jobs with management UI</td><td class="no">Not available</td><td class="no">Not available</td></tr>
+      <tr><td class="row-label">Mobile management</td><td class="has">Native iOS app + PWA</td><td class="no">Terminal only</td><td class="no">Not available</td></tr>
+      <tr><td class="row-label">White-label</td><td class="has">Full branding: name, icon, logo, colors</td><td class="no">Not available</td><td class="no">Not available</td></tr>
+      <tr><td class="row-label">Setup</td><td class="has">git clone + ./install.sh, 0 deps</td><td class="has">pip install</td><td class="partial">Docker, config, API keys</td></tr>
+    </tbody>
+  </table>
+  </div>
+</div>
+
+<hr class="divider">
+
+<!-- CLOUD PRICING -->
+<div id="cloud" class="waitlist-section reveal">
+  <div class="waitlist-container" style="max-width:720px;">
+    <div class="waitlist-eyebrow">amux Cloud</div>
+    <div class="waitlist-title">amux without the setup</div>
+    <div class="waitlist-desc">Persistent cloud sessions, automatic backups, shareable links. 7-day free trial.</div>
+    <div style="display:grid;grid-template-columns:1fr 1fr;gap:1rem;margin:1.5rem 0;text-align:left;">
+      <div style="border:1px solid var(--border);border-radius:10px;padding:1.5rem;">
+        <div style="font-size:0.78rem;font-weight:600;text-transform:uppercase;letter-spacing:0.05em;color:var(--dim);margin-bottom:0.5rem;">Monthly</div>
+        <div style="font-size:2rem;font-weight:700;letter-spacing:-0.03em;">$20<span style="font-size:0.85rem;font-weight:400;color:var(--dim);">/mo</span></div>
+      </div>
+      <div style="border:1px solid var(--border);border-radius:10px;padding:1.5rem;">
+        <div style="font-size:0.78rem;font-weight:600;text-transform:uppercase;letter-spacing:0.05em;color:var(--dim);margin-bottom:0.5rem;">Annual <span style="background:var(--green-glow);color:var(--green);font-size:0.72rem;padding:0.1rem 0.4rem;border-radius:4px;">save 17%</span></div>
+        <div style="font-size:2rem;font-weight:700;letter-spacing:-0.03em;">$200<span style="font-size:0.85rem;font-weight:400;color:var(--dim);">/yr</span></div>
+      </div>
+    </div>
+    <a href="https://cloud.amux.io" class="waitlist-btn" style="display:inline-block;text-decoration:none;text-align:center;width:auto;padding:0.65rem 2rem;">start free trial</a>
+    <div class="waitlist-note" style="margin-top:0.75rem;"><a href="/pricing/" style="color:var(--dim);">See full pricing details</a></div>
+    <div id="uptime-monitor" style="margin-top:1.5rem;padding:1rem 1.2rem;border:1px solid var(--border);border-radius:8px;display:flex;align-items:center;gap:0.75rem;font-size:0.82rem;">
+      <span id="uptime-dot" style="width:8px;height:8px;border-radius:50%;background:var(--dim);flex-shrink:0;"></span>
+      <span id="uptime-text" style="color:var(--dim);">Checking cloud.amux.io&hellip;</span>
+      <span id="uptime-latency" style="margin-left:auto;color:var(--muted);font-family:'JetBrains Mono',monospace;font-size:0.75rem;"></span>
+    </div>
+  </div>
+</div>
+
+<!-- CTA -->
+<div class="cta-section">
+  <div class="hero-ctas">
+    <a class="primary" href="https://github.com/mixpeek/amux#install">get started &mdash; it's free &amp; open source</a>
+    <iframe src="https://ghbtns.com/github-btn.html?user=mixpeek&repo=amux&type=star&count=true&size=large" frameborder="0" scrolling="0" width="160" height="30" title="GitHub Stars" class="gh-iframe-hero"></iframe>
+  </div>
+  <p>Have questions? <a href="https://github.com/mixpeek/amux/issues">Open an issue</a> or email <a href="mailto:info@mixpeek.com">info@mixpeek.com</a></p>
+</div>
+
+<!-- FOOTER -->
+<footer class="site-footer">
+  <div class="footer-inner">
+    <div class="footer-top">
+      <div class="footer-brand-col">
+        <a href="/" style="font-size:0.92rem;font-weight:700;color:var(--text);text-decoration:none;">amux</a>
+        <p>Open-source control plane for AI agents. Runtime, observability, orchestration, and cost control — in one file.</p>
+      </div>
+      <div class="footer-col">
+        <div class="footer-col-label">Product</div>
+        <ul>
+          <li><a href="/pricing/">Pricing</a></li>
+          <li><a href="/features/web-dashboard/">Dashboard</a></li>
+          <li><a href="/features/self-healing/">Self-healing</a></li>
+          <li><a href="/features/mobile-pwa/">Mobile PWA</a></li>
+          <li><a href="/features/agent-coordination/">Coordination</a></li>
+          <li><a href="/features/single-file-architecture/">Architecture</a></li>
+        </ul>
+      </div>
+      <div class="footer-col">
+        <div class="footer-col-label">Resources</div>
+        <ul>
+          <li><a href="/guides/">Guides</a></li>
+          <li><a href="/blog/">Blog</a></li>
+          <li><a href="/demos/">Demos</a></li>
+          <li><a href="/faq/">FAQ</a></li>
+          <li><a href="/changelog/">Changelog</a></li>
+        </ul>
+      </div>
+      <div class="footer-col">
+        <div class="footer-col-label">Compare</div>
+        <ul>
+          <li><a href="/compare/amux-vs-cursor/">vs Cursor</a></li>
+          <li><a href="/compare/amux-vs-devin/">vs Devin</a></li>
+          <li><a href="/compare/amux-vs-aider/">vs Aider</a></li>
+          <li><a href="/compare/amux-vs-claude-code-agent-teams/">vs Agent Teams</a></li>
+          <li><a href="/compare/">All comparisons</a></li>
+        </ul>
+      </div>
+      <div class="footer-col">
+        <div class="footer-col-label">More</div>
+        <ul>
+          <li><a href="/use-cases/">Use Cases</a></li>
+          <li><a href="/solutions/">Solutions</a></li>
+          <li><a href="/for/">For your stack</a></li>
+          <li><a href="/glossary/">Glossary</a></li>
+          <li><a href="/release-notes/">Release Notes</a></li>
+        </ul>
+      </div>
+    </div>
+    <div class="footer-bottom">
+      <span>MIT + Commons Clause. Built by <a href="https://mixpeek.com">Mixpeek</a></span>
+      <div class="footer-bottom-links">
         <a href="https://github.com/mixpeek/amux" target="_blank" rel="noopener">GitHub</a>
-        <span>requires tmux + python3</span>
+        <a href="https://github.com/mixpeek/amux/issues">Issues</a>
+        <a href="/guides/">Docs</a>
+        <a href="/privacy/">Privacy</a>
       </div>
     </div>
-
-    <div class="hp-visual" aria-hidden="true">
-      <div class="hp-phone">
-        <div class="hp-phone-screen">
-          <div class="hp-phone-notch"></div>
-          <div class="hp-phone-status"><span>9:41</span><span></span></div>
-          <div class="hp-phone-hdr">
-            <span class="ttl">amux</span>
-            <span class="live">live</span>
-          </div>
-          <div class="hp-phone-list">
-            <div class="hp-pcard"><div class="r"><span class="dot ok"></span><span>api-refactor</span></div><div class="p">✎ src/auth/session.ts · +42 −18</div></div>
-            <div class="hp-pcard"><div class="r"><span class="dot ok"></span><span>worker-1</span></div><div class="p">→ @docs-sweep: update README</div></div>
-            <div class="hp-pcard"><div class="r"><span class="dot wt"></span><span>migrations</span></div><div class="p">drop users.legacy_id? (y/N)</div></div>
-            <div class="hp-pcard"><div class="r"><span class="dot ok"></span><span>landing-page</span></div><div class="p">building Tailwind classes…</div></div>
-            <div class="hp-pcard"><div class="r"><span class="dot id"></span><span>perf-audit</span></div><div class="p">idle · last run 23m</div></div>
-          </div>
-        </div>
-      </div>
-    </div>
-  </div>
-</header>
-
-<!-- ═══════════ WHY ═══════════ -->
-<section class="hp-section" id="why">
-  <div class="hp-wrap">
-    <div class="hp-kicker">/ 01 &nbsp; what it actually is</div>
-    <h2 class="hp-h2">A control plane for your agent farm.</h2>
-    <p class="hp-lede">
-      Not a framework. Not a cloud. A single Python file you run on your own machine that turns tmux + Claude Code into something you can actually manage — from your keyboard, your browser, or your phone in bed.
-    </p>
-    <div class="hp-grid">
-      <div class="hp-cell">
-        <span class="idx">/ parallel</span>
-        <h3>Dozens of sessions, one dashboard.</h3>
-        <p>Each session is its own headless Claude Code in its own tmux. Register, start, stop, peek, send — CLI or web, same state.</p>
-      </div>
-      <div class="hp-cell">
-        <span class="idx">/ self-healing</span>
-        <h3>Agents that survive the night.</h3>
-        <p>Context low → auto-compact. Thinking-block corruption → restart and replay. Stuck on a prompt → auto-respond. Silent, all night.</p>
-      </div>
-      <div class="hp-cell">
-        <span class="idx">/ agent-to-agent</span>
-        <h3>Agents talk. A kanban they race for.</h3>
-        <p><code>$AMUX_URL</code> injected at startup, a shared memory file, a SQLite-CAS board. Agents delegate work in plain English — no Redis, no duplicated work.</p>
-      </div>
-      <div class="hp-cell">
-        <span class="idx">/ mobile</span>
-        <h3>Your fleet, in your pocket.</h3>
-        <p>Installable PWA + native iOS app. Background Sync replays commands when you come back online. Send a prompt from the grocery store.</p>
-      </div>
-      <div class="hp-cell">
-        <span class="idx">/ skills + schedule</span>
-        <h3>Slash commands &amp; nightly cron.</h3>
-        <p><code>/commit</code>, <code>/review-pr</code>, <code>/deploy</code> defined once per project. Recurring jobs on cron. Morning reviews ship before coffee.</p>
-      </div>
-      <div class="hp-cell">
-        <span class="idx">/ one file</span>
-        <h3>One Python file. Edit it; it restarts.</h3>
-        <p>Server + full dashboard, inline HTML/CSS/JS, zero build step. No dependencies beyond Python 3 and tmux. Hack it until it's yours.</p>
-      </div>
-    </div>
-  </div>
-</section>
-
-<!-- ═══════════ OVERNIGHT ═══════════ -->
-<section class="hp-section" id="overnight">
-  <div class="hp-wrap">
-    <div class="hp-kicker">/ 02 &nbsp; a night in the life</div>
-    <h2 class="hp-h2">You go to bed. Work keeps happening.</h2>
-    <p class="hp-lede">
-      Eight sessions, one watchdog, zero pages at 3am.
-    </p>
-    <div class="hp-scene">
-      <div>
-        <div class="hp-stamp"><div class="time">23:14</div><div class="txt">You assign <b>8 sessions</b> from the kanban, hit start-all, close the laptop.</div></div>
-        <div class="hp-stamp"><div class="time">01:47</div><div class="txt"><b>api-refactor</b> hits 180k tokens. Watchdog auto-compacts. Keeps going.</div></div>
-        <div class="hp-stamp"><div class="time">02:33</div><div class="txt"><b>worker-1</b> finishes its branch and posts to <code style="border:none;background:none;padding:0;color:var(--accent);">@docs-sweep</code>: "update the README and examples."</div></div>
-        <div class="hp-stamp"><div class="time">03:52</div><div class="txt"><b>migrations</b> gets stuck on a permission prompt. Auto-respond unblocks it.</div></div>
-        <div class="hp-stamp"><div class="time">07:12</div><div class="txt">Phone buzzes. <b>Twelve</b> tickets on <span style="color:var(--ok)">Done</span>. One flagged for review. You roll over.</div></div>
-      </div>
-      <div class="hp-term" id="term">
-        <div class="hp-term-bar">
-          <span style="width:9px;height:9px;border-radius:99px;background:oklch(0.7 0.2 25);"></span>
-          <span style="width:9px;height:9px;border-radius:99px;background:oklch(0.85 0.18 85);"></span>
-          <span style="width:9px;height:9px;border-radius:99px;background:oklch(0.78 0.18 145);"></span>
-          <span class="lbl">~/ amux peek --all &nbsp;·&nbsp; live</span>
-        </div>
-        <div class="hp-term-body" id="term-body"></div>
-      </div>
-    </div>
-  </div>
-</section>
-
-<!-- ═══════════ INSTALL ═══════════ -->
-<section class="hp-section" id="install">
-  <div class="hp-wrap">
-    <div class="hp-kicker">/ 03 &nbsp; run it on your machine</div>
-    <h2 class="hp-h2">Three lines. Two dependencies. Yours.</h2>
-    <p class="hp-lede">Local-first means <em style="font-style:normal;color:var(--accent)">local</em>. Nothing talks home. Access it from your phone over Tailscale, or keep it on localhost forever.</p>
-    <div class="hp-quick">
-      <div class="hp-block">
-        <div class="hp-block-h"><span class="n">$</span> install</div>
-<pre><span class="c"># requires tmux + python3</span>
-<span class="k">git clone</span> https://github.com/mixpeek/amux
-<span class="k">cd</span> amux && ./install.sh
-
-<span class="c"># register a project</span>
-<span class="k">amux register</span> myproject \
-  <span class="s">--dir</span> ~/Dev/myproject <span class="s">--yolo</span>
-
-<span class="k">amux start</span> myproject
-<span class="k">amux serve</span>   <span class="c"># → :8822</span></pre>
-      </div>
-      <div class="hp-block">
-        <div class="hp-block-h"><span class="n">#</span> agents talk to agents</div>
-<pre><span class="c"># from inside any running session</span>
-curl -sk -X POST \
-  -d <span class="s">'{"text":"ship the login endpoint"}'</span> \
-  $AMUX_URL/api/sessions/worker-1/send
-
-<span class="c"># atomically claim a board item</span>
-curl -sk -X POST \
-  $AMUX_URL/api/board/PROJ-5/claim
-
-<span class="c"># watch another session</span>
-curl -sk $AMUX_URL/api/sessions/api/peek</pre>
-      </div>
-    </div>
-    <div class="hp-license">
-      <span class="mark">MIT</span>
-      <span class="txt">Free forever. <span>Use it, fork it, self-host it, run it on your phone.</span></span>
-    </div>
-  </div>
-</section>
-
-<!-- ═══════════ COMPARE ═══════════ -->
-<section class="hp-section" id="compare">
-  <div class="hp-wrap">
-    <div class="hp-kicker">/ 04 &nbsp; how it's different</div>
-    <h2 class="hp-h2">Not another agent wrapper.</h2>
-    <p class="hp-lede">Most tools give you one agent per terminal. amux gives you the infrastructure around them.</p>
-    <div class="hp-diff">
-      <table>
-        <thead>
-          <tr><th></th><th class="col-amux">amux</th><th>Claude Code</th><th>Other wrappers</th></tr>
-        </thead>
-        <tbody>
-          <tr><td><strong>Parallel agents</strong></td><td class="has">Unlimited, isolated</td><td class="no">One per terminal</td><td class="partial">Limited or manual</td></tr>
-          <tr><td><strong>Self-healing</strong></td><td class="has">Watchdog auto-compacts + replays</td><td class="no">Crashes on overflow</td><td class="partial">Basic restart only</td></tr>
-          <tr><td><strong>Agent coordination</strong></td><td class="has">Channels, REST API, atomic board</td><td class="no">None</td><td class="partial">Shared filesystem</td></tr>
-          <tr><td><strong>Notes &amp; CRM</strong></td><td class="has">Built-in markdown notes, contacts</td><td class="no">N/A</td><td class="no">N/A</td></tr>
-          <tr><td><strong>Email &amp; browser</strong></td><td class="has">Mail.app API + shared Playwright</td><td class="no">N/A</td><td class="no">N/A</td></tr>
-          <tr><td><strong>Scheduler</strong></td><td class="has">Named cron jobs + management UI</td><td class="no">N/A</td><td class="no">N/A</td></tr>
-          <tr><td><strong>Mobile</strong></td><td class="has">Native iOS app + PWA</td><td class="no">Terminal only</td><td class="no">N/A</td></tr>
-          <tr><td><strong>Setup</strong></td><td class="has">git clone + ./install.sh</td><td class="has">pip install</td><td class="partial">Docker, config, keys</td></tr>
-        </tbody>
-      </table>
-    </div>
-  </div>
-</section>
-
-<!-- ═══════════ FOOTER ═══════════ -->
-<footer class="hp-foot">
-  <div class="hp-wrap hp-foot-in">
-    <a class="logo" href="/" style="font-size:13px;display:flex;align-items:center;gap:8px;font-family:var(--font-mono);font-weight:700;color:var(--fg);text-decoration:none;">amux</a>
-    <span class="sep">/</span>
-    <span>built by <a href="https://mixpeek.com">mixpeek</a></span>
-    <span class="sep">/</span>
-    <a href="https://github.com/mixpeek/amux" target="_blank" rel="noopener">GitHub</a>
-    <span class="sep">/</span>
-    <a href="https://apps.apple.com/us/app/amux-agent-multiplexer/id6760410435" target="_blank" rel="noopener">iOS app</a>
-    <span class="sep">/</span>
-    <a href="/guides/">guides</a>
-    <span class="sep">/</span>
-    <a href="/blog/">blog</a>
-    <span class="sep" style="margin-left:auto;"></span>
-    <span>© 2026 · MIT License</span>
   </div>
 </footer>
 
+<!-- Mobile video fullscreen modal -->
+<div id="mobile-video-modal" onclick="closeMobileModal()">
+  <button id="mobile-modal-close" onclick="closeMobileModal()" aria-label="Close">&times;</button>
+  <video id="mobile-modal-video"
+    src="https://ethan-personal.s3.us-east-2.amazonaws.com/amux/videos/iphone_demo.mp4"
+    preload="none" loop muted playsinline controls
+    onclick="event.stopPropagation()"></video>
+</div>
+
 <script>
-function copyInstall(btn) {
-  var cmd = document.getElementById('install-cmd').textContent;
-  navigator.clipboard.writeText(cmd).then(function() {
-    var old = btn.textContent;
-    btn.textContent = "COPIED";
-    btn.classList.add('copied');
-    setTimeout(function() { btn.textContent = old; btn.classList.remove('copied'); }, 1500);
+// Scroll reveal
+var _ro = new IntersectionObserver(function(entries) {
+  entries.forEach(function(e) {
+    if (e.isIntersecting) { e.target.classList.add('visible'); _ro.unobserve(e.target); }
+  });
+}, { threshold: 0.08 });
+document.querySelectorAll('.reveal').forEach(function(el) { _ro.observe(el); });
+
+// Slideshow
+var CDN = 'https://ethan-personal.s3.us-east-2.amazonaws.com/amux/screenshots/';
+var slides = [
+  { img: CDN+'sessions-overview.jpg',  label: 'Session Dashboard',     desc: 'All running agents at a glance -- live status, token spend, model, and current task.' },
+  { img: CDN+'session-expanded.jpg',   label: 'Expanded Session Card', desc: 'Inline live output with quick-action chips and a send bar, without leaving the sessions list.' },
+  { img: CDN+'search-and-send.jpg',    label: 'Search & Send',         desc: 'Full-text search across all session output. Click a match to jump to it and send commands inline.' },
+  { img: CDN+'live-terminal.jpg',      label: 'Live Terminal Peek',    desc: 'Full scrollback with search, file previews, and syntax-highlighted diffs. No terminal attachment needed.' },
+  { img: CDN+'file-explorer.jpg',      label: 'File Explorer',         desc: "Browse the agent's working directory from the dashboard. Click any file to preview it." },
+  { img: CDN+'session-memory.jpg',     label: 'Session Memory',        desc: 'Per-session markdown context that persists across restarts. Global memory shared across all agents.' },
+  { img: CDN+'kanban-board.jpg',       label: 'Kanban Board',          desc: 'SQLite-backed board with auto-generated issue keys, tags, per-agent ownership, and custom columns.' },
+  { img: CDN+'calendar.jpg',           label: 'Calendar & Scheduler',  desc: 'Board items with due dates appear as calendar events. Built-in cron for recurring agent commands.' }
+];
+var si = 0, stimer;
+var imgs = document.querySelectorAll('#slides-frame img');
+var lbl = document.getElementById('slides-label');
+var dsc = document.getElementById('slides-desc');
+var dotsEl = document.getElementById('slides-dots');
+slides.forEach(function(_, i) {
+  var d = document.createElement('button');
+  if (i === 0) d.className = 'active';
+  d.addEventListener('click', function() { goTo(i); resetTimer(); });
+  dotsEl.appendChild(d);
+});
+var dots = dotsEl.querySelectorAll('button');
+function goTo(n) {
+  imgs[si].classList.remove('active'); dots[si].classList.remove('active');
+  si = (n + slides.length) % slides.length;
+  imgs[si].classList.add('active'); dots[si].classList.add('active');
+  lbl.textContent = slides[si].label;
+  dsc.textContent = slides[si].desc;
+}
+function resetTimer() { clearInterval(stimer); stimer = setInterval(function() { goTo(si + 1); }, 4000); }
+document.getElementById('slides-prev').addEventListener('click', function(e) { e.stopPropagation(); goTo(si - 1); resetTimer(); });
+document.getElementById('slides-next').addEventListener('click', function(e) { e.stopPropagation(); goTo(si + 1); resetTimer(); });
+resetTimer();
+
+// Video showcase tabs
+document.querySelectorAll('.video-tab').forEach(function(tab) {
+  tab.addEventListener('click', function() {
+    document.querySelectorAll('.video-tab').forEach(function(t) { t.classList.remove('active'); });
+    document.querySelectorAll('.video-panel').forEach(function(p) { p.classList.remove('active'); });
+    tab.classList.add('active');
+    document.getElementById(tab.dataset.panel).classList.add('active');
+    // Pause other videos when switching
+    document.querySelectorAll('.video-showcase video').forEach(function(v) { v.pause(); });
+  });
+});
+
+// Desktop video play overlay
+var desktopWrap = document.getElementById('desktop-video-wrap');
+var desktopVid = document.getElementById('desktop-video');
+desktopWrap.addEventListener('click', function(e) {
+  if (e.target.closest('video') && !desktopVid.paused) return; // let controls work
+  if (desktopVid.paused) {
+    desktopVid.play();
+    desktopWrap.classList.add('playing');
+  }
+});
+desktopVid.addEventListener('pause', function() { desktopWrap.classList.remove('playing'); });
+desktopVid.addEventListener('play', function() { desktopWrap.classList.add('playing'); });
+
+// Mobile video — tap phone to open fullscreen modal
+var phoneFrame = document.getElementById('phone-frame');
+var mobileVid = document.getElementById('mobile-video');
+var mobileModal = document.getElementById('mobile-video-modal');
+var mobileModalVid = document.getElementById('mobile-modal-video');
+phoneFrame.addEventListener('click', function() {
+  mobileModal.classList.add('open');
+  document.body.style.overflow = 'hidden';
+  mobileModalVid.currentTime = 0;
+  mobileModalVid.play();
+});
+function closeMobileModal() {
+  mobileModal.classList.remove('open');
+  document.body.style.overflow = '';
+  mobileModalVid.pause();
+}
+document.addEventListener('keydown', function(e) { if (e.key === 'Escape') closeMobileModal(); });
+
+// Cloud waitlist (only if elements exist)
+var _wlEmail = document.getElementById('waitlist-email');
+if (_wlEmail) {
+  _wlEmail.addEventListener('keydown', function(e) {
+    if (e.key === 'Enter') submitWaitlist();
   });
 }
-
-var logs = [
-  { ts: "23:14:02", sess: "system", msg: "start-all → 8 sessions queued" },
-  { ts: "23:14:07", sess: "api-refa", msg: "claimed AUT-4 · refactor session store" },
-  { ts: "23:14:09", sess: "worker-1", msg: "claimed DOC-2 · sweep examples" },
-  { ts: "23:14:11", sess: "migrati", msg: "claimed DB-8 · drop legacy columns" },
-  { ts: "01:47:33", sess: "watchd", msg: "api-refactor ctx=180k → /compact" },
-  { ts: "01:47:40", sess: "api-refa", msg: "<b>compacted.</b> resuming at turn 42" },
-  { ts: "02:33:18", sess: "worker-1", msg: "→ @docs-sweep: update README + examples" },
-  { ts: "02:33:19", sess: "docs-sw", msg: "acked. picking up in 2 files" },
-  { ts: "02:51:02", sess: "api-refa", msg: "tests: 247 passed <span class='ok'>✓</span>" },
-  { ts: "03:52:11", sess: "watchd", msg: "migrations stuck on prompt → auto-respond <b>N</b>" },
-  { ts: "03:52:14", sess: "migrati", msg: "noted. skipping destructive drop." },
-  { ts: "04:18:07", sess: "api-refa", msg: "pushed branch · opened PR #412" },
-  { ts: "06:40:55", sess: "schedul", msg: "morning-review cron → fired" },
-  { ts: "07:11:58", sess: "system", msg: "12 items <span class='ok'>DONE</span> · 1 flagged for review" }
-];
-var body = document.getElementById('term-body');
-var i = 0;
-function pushLine() {
-  var l = logs[i % logs.length];
-  var el = document.createElement('div');
-  el.className = 'hp-line';
-  el.innerHTML = '<span class="ts">' + l.ts + '</span><span class="sess">' + l.sess + '</span><span class="msg">' + l.msg + '</span>';
-  body.appendChild(el);
-  while (body.children.length > 14) body.removeChild(body.firstChild);
-  i++;
+function submitWaitlist() {
+  var emailEl = document.getElementById('waitlist-email');
+  var btn = document.getElementById('waitlist-btn');
+  var success = document.getElementById('waitlist-success');
+  var error = document.getElementById('waitlist-error');
+  if (!emailEl || !btn) return;
+  var email = emailEl.value.trim();
+  if (!email || email.indexOf('@') === -1) {
+    if (error) { error.textContent = 'Please enter a valid email address.'; error.style.display = 'block'; }
+    return;
+  }
+  btn.disabled = true;
+  if (error) error.style.display = 'none';
+  fetch('https://formspree.io/f/xgolboon', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', 'Accept': 'application/json' },
+    body: JSON.stringify({ email: email })
+  }).then(function(r) { return r.json().then(function(d) { return { ok: r.ok, d: d }; }); })
+    .then(function(res) {
+      if (res.ok) {
+        var form = document.getElementById('waitlist-form');
+        if (form) form.style.display = 'none';
+        if (success) success.style.display = 'block';
+      } else {
+        throw new Error((res.d.errors || [{}])[0].message || 'Request failed');
+      }
+    }).catch(function(e) {
+      if (error) { error.textContent = e.message || 'Something went wrong. Please try again.'; error.style.display = 'block'; }
+      btn.disabled = false;
+    });
 }
-for (var k = 0; k < 10; k++) pushLine();
-var cur = document.createElement('div');
-cur.className = 'hp-line hp-cursor';
-cur.innerHTML = '<span class="ts">&nbsp;</span><span class="sess">&nbsp;</span><span class="msg"></span>';
-body.appendChild(cur);
-setInterval(function() {
-  body.removeChild(cur);
-  pushLine();
-  body.appendChild(cur);
-}, 2400);
 
-fetch('https://api.github.com/repos/mixpeek/amux')
-  .then(function(r){return r.json()})
-  .then(function(d){
-    var el=document.getElementById('gh-stars');
-    if(el&&d.stargazers_count) el.textContent='★ '+d.stargazers_count;
-  }).catch(function(){});
+// Nav star count
+(function() {
+  var KEY = 'gh_stars_amux', TS = 'gh_stars_ts', TTL = 3600000;
+  var el = document.getElementById('nav-star-count');
+  if (!el) return;
+  function set(n) {
+    var label = n >= 1000 ? (n/1000).toFixed(1).replace(/\.0$/,'')+'k' : String(n);
+    el.textContent = label;
+  }
+  var c = localStorage.getItem(KEY), t = parseInt(localStorage.getItem(TS)||'0',10);
+  if (c && Date.now()-t < TTL) { set(parseInt(c,10)); return; }
+  fetch('https://api.github.com/repos/mixpeek/amux')
+    .then(function(r){return r.json();})
+    .then(function(d){
+      var s=d.stargazers_count||0;
+      localStorage.setItem(KEY,String(s)); localStorage.setItem(TS,String(Date.now())); set(s);
+    }).catch(function(){});
+})();
+
+// iOS modal
+function openIosModal() {
+  document.getElementById('ios-modal-backdrop').classList.add('open');
+  document.body.style.overflow = 'hidden';
+}
+function closeIosModal() {
+  document.getElementById('ios-modal-backdrop').classList.remove('open');
+  document.body.style.overflow = '';
+}
+document.addEventListener('keydown', function(e) { if (e.key === 'Escape') closeIosModal(); });
+document.addEventListener('DOMContentLoaded', function() {
+  var backdrop = document.getElementById('ios-modal-backdrop');
+  if (backdrop) backdrop.addEventListener('click', function(e) { if (e.target === this) closeIosModal(); });
+});
+
+// Uptime monitor for cloud.amux.io
+(function() {
+  var dot = document.getElementById('uptime-dot');
+  var txt = document.getElementById('uptime-text');
+  var lat = document.getElementById('uptime-latency');
+  if (!dot || !txt) return;
+  function up(ms) {
+    dot.style.background = '#22c55e';
+    dot.style.boxShadow = '0 0 6px #22c55e80';
+    txt.textContent = 'cloud.amux.io — operational';
+    txt.style.color = 'var(--text)';
+    lat.textContent = ms + 'ms';
+  }
+  function down() {
+    dot.style.background = '#ef4444';
+    dot.style.boxShadow = '0 0 6px #ef444480';
+    txt.textContent = 'cloud.amux.io — unreachable';
+    txt.style.color = 'var(--text)';
+    lat.textContent = '';
+  }
+  var t0 = performance.now();
+  fetch('https://cloud.amux.io/health', { mode: 'no-cors', cache: 'no-store' })
+    .then(function() { up(Math.round(performance.now() - t0)); })
+    .catch(down);
+})();
 </script>
+
+<!-- iOS App Modal -->
+<div class="ios-modal-backdrop" id="ios-modal-backdrop">
+  <div class="ios-modal" role="dialog" aria-modal="true" aria-labelledby="ios-modal-title">
+    <button class="ios-modal-close" onclick="closeIosModal()" aria-label="Close">&times;</button>
+    <div class="ios-modal-icon">📱</div>
+    <div class="ios-modal-title" id="ios-modal-title">amux on your phone</div>
+    <div class="ios-modal-sub">Download the native iOS app from the App Store.</div>
+    <a href="https://apps.apple.com/us/app/amux-agent-multiplexer/id6760410435" target="_blank" rel="noopener" style="display:inline-flex;align-items:center;gap:8px;background:var(--text);color:var(--bg);padding:10px 20px;border-radius:8px;font-size:0.95rem;font-weight:600;text-decoration:none;margin:0.8rem 0 1.2rem;">
+      <svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M18.71 19.5c-.83 1.24-1.71 2.45-3.05 2.47-1.34.03-1.77-.79-3.29-.79-1.53 0-2 .77-3.27.82-1.31.05-2.3-1.32-3.14-2.53C4.25 17 2.94 12.45 4.7 9.39c.87-1.52 2.43-2.48 4.12-2.51 1.28-.02 2.5.87 3.29.87.78 0 2.26-1.07 3.8-.91.65.03 2.47.26 3.64 1.98-.09.06-2.17 1.28-2.15 3.81.03 3.02 2.65 4.03 2.68 4.04-.03.07-.42 1.44-1.38 2.83M13 3.5c.73-.83 1.94-1.46 2.94-1.5.13 1.17-.34 2.35-1.04 3.19-.69.85-1.83 1.51-2.95 1.42-.15-1.15.41-2.35 1.05-3.11z"/></svg>
+      Download on the App Store
+    </a>
+    <div style="font-size:0.78rem;color:var(--dim);">Or install as a PWA: open your amux dashboard in Safari, tap Share, then "Add to Home Screen".</div>
+  </div>
+</div>
 </body>
 </html>
