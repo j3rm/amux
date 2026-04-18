@@ -1,11 +1,11 @@
 <!DOCTYPE html>
-<html lang="en">
+<html lang="en" data-theme="dark">
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="theme-color" content="#1e2330">
   <title>Session Cards Overview — amux</title>
-  <script>(function(){var t=localStorage.getItem('theme');if(t==='dark'||(t!=='light'&&matchMedia('(prefers-color-scheme:dark)').matches))document.documentElement.setAttribute('data-theme','dark')})()</script>
-  <link rel="icon" href="/icon.svg" type="image/svg+xml">
+    <link rel="icon" href="/icon.svg" type="image/svg+xml">
   <meta name="description" content="See all your Claude Code agents at a glance — live status, token spend, current task, and model on every card.">
   <meta name="keywords" content="amux session dashboard, claude code monitoring, AI agent status overview, parallel agent management">
   <link rel="canonical" href="https://amux.io/demos/session-cards-overview/">
@@ -18,7 +18,7 @@
   <meta name="twitter:image" content="https://amux.io/demos/session-cards-overview/demo.mp4">
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-  <link href="https://fonts.googleapis.com/css2?family=Geist:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500;600;700&display=swap" rel="stylesheet">
+  <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600;700&family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
   <link rel="stylesheet" href="/style.css">
   </head>
 <body>
@@ -29,8 +29,8 @@
       <a href="/compare/" class="hide-mobile">compare</a>
       <a href="/demos/" class="hide-mobile">demos</a>
       <a href="/blog/" class="hide-mobile">blog</a>
-      <button class="theme-toggle" id="theme-toggle" aria-label="Toggle dark mode"><span class="icon-sun">&#9788;</span><span class="icon-moon">&#9790;</span></button>
-      <a href="https://github.com/mixpeek/amux" target="_blank" rel="noopener" class="nav-cta">sign up</a>
+      <a href="https://apps.apple.com/us/app/amux-agent-multiplexer/id6760410435" target="_blank" rel="noopener" class="nav-cta-primary nav-cta">iOS app</a>
+      <a href="https://github.com/mixpeek/amux" target="_blank" rel="noopener" class="nav-cta">GitHub</a>
     </nav>
   </header>
   <main>
@@ -74,12 +74,12 @@ amux serve  # → https://localhost:8822</code></pre>
   <a class="btn" href="/guides/getting-started/">Getting started →</a>
 </div>
   </main>
-  <footer>
+  <footer class="sub-footer">
     <div class="footer-inner">
       <div class="footer-top">
         <div class="footer-brand-col">
-          <a href="/" style="font-size:0.92rem;font-weight:700;color:var(--text);text-decoration:none;">amux</a>
-          <p>Open-source agent multiplexer for Claude Code.</p>
+          <a href="/" class="footer-logo">amux</a>
+          <p>Open-source control plane for AI agents.</p>
         </div>
         <div class="footer-col">
           <div class="footer-col-label">Resources</div>
@@ -113,23 +113,12 @@ amux serve  # → https://localhost:8822</code></pre>
       <div class="footer-bottom">
         <span>MIT License. Built by <a href="https://mixpeek.com">Mixpeek</a></span>
         <div class="footer-bottom-links">
+          <a href="https://apps.apple.com/us/app/amux-agent-multiplexer/id6760410435" target="_blank" rel="noopener">iOS App</a>
           <a href="https://github.com/mixpeek/amux" target="_blank" rel="noopener">GitHub</a>
-          <a href="https://github.com/mixpeek/amux/issues">Issues</a>
         </div>
       </div>
     </div>
   </footer>
-<script>
-document.getElementById('theme-toggle').addEventListener('click', function() {
-  var isDark = document.documentElement.getAttribute('data-theme') === 'dark';
-  if (isDark) {
-    document.documentElement.removeAttribute('data-theme');
-    localStorage.setItem('theme', 'light');
-  } else {
-    document.documentElement.setAttribute('data-theme', 'dark');
-    localStorage.setItem('theme', 'dark');
-  }
-});
-</script>
+
 </body>
 </html>

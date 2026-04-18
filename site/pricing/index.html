@@ -3,9 +3,9 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="theme-color" content="#1e2330">
   <title>Pricing — amux</title>
-  <script>(function(){var t=localStorage.getItem('theme');if(t==='dark'||(t!=='light'&&matchMedia('(prefers-color-scheme:dark)').matches))document.documentElement.setAttribute('data-theme','dark')})()</script>
-  <link rel="icon" href="/icon.svg" type="image/svg+xml">
+    <link rel="icon" href="/icon.svg" type="image/svg+xml">
   <meta name="description" content="amux pricing — free and open source self-hosted, or amux Cloud starting at $20/month with a 7-day free trial.">
   <link rel="canonical" href="https://amux.io/pricing/">
   <meta property="og:title" content="Pricing — amux">
@@ -16,7 +16,7 @@
   <meta name="twitter:card" content="summary_large_image">
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-  <link href="https://fonts.googleapis.com/css2?family=Geist:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500;600;700&display=swap" rel="stylesheet">
+  <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600;700&family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
   <link rel="stylesheet" href="/style.css">
   <style>
     .pricing-hero {
@@ -196,9 +196,8 @@
       <a href="/pricing/">pricing</a>
       <a href="/guides/" class="hide-mobile">guides</a>
       <a href="/compare/" class="hide-mobile">compare</a>
-      <a href="/blog/" class="hide-mobile">blog</a>
-      <button class="theme-toggle" id="theme-toggle" aria-label="Toggle dark mode"><span class="icon-sun">&#9788;</span><span class="icon-moon">&#9790;</span></button>
-      <a href="https://cloud.amux.io" target="_blank" rel="noopener" class="nav-cta">sign up</a>
+      <a href="/blog/" class="hide-mobile">blog</a>      <a href="https://apps.apple.com/us/app/amux-agent-multiplexer/id6760410435" target="_blank" rel="noopener" class="nav-cta-primary nav-cta">iOS app</a>
+      <a href="https://github.com/mixpeek/amux" target="_blank" rel="noopener" class="nav-cta">GitHub</a>
     </nav>
   </header>
 
@@ -294,13 +293,6 @@
     </div>
   </footer>
 
-  <script>
-    document.getElementById('theme-toggle').addEventListener('click', function() {
-      var d = document.documentElement;
-      var isDark = d.getAttribute('data-theme') === 'dark';
-      d.setAttribute('data-theme', isDark ? 'light' : 'dark');
-      localStorage.setItem('theme', isDark ? 'light' : 'dark');
-    });
-  </script>
+  
 </body>
 </html>

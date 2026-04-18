@@ -1,11 +1,11 @@
 <!DOCTYPE html>
-<html lang="en">
+<html lang="en" data-theme="dark">
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="theme-color" content="#1e2330">
   <title>CLAUDE.md Templates: 20+ Ready-to-Use Configs for Every Project Type</title>
-  <script>(function(){var t=localStorage.getItem('theme');if(t==='dark'||(t!=='light'&&matchMedia('(prefers-color-scheme:dark)').matches))document.documentElement.setAttribute('data-theme','dark')})()</script>
-  <link rel="icon" href="/icon.svg" type="image/svg+xml">
+    <link rel="icon" href="/icon.svg" type="image/svg+xml">
   <meta name="description" content="Copy-paste CLAUDE.md templates for Python APIs, React apps, monorepos, data pipelines, mobile apps, CLI tools, and more. Each template is battle-tested and explained line by line.">
   <meta name="keywords" content="CLAUDE.md template, CLAUDE.md examples, CLAUDE.md best practices, claude code config, claude code project instructions, CLAUDE.md file, how to write CLAUDE.md, CLAUDE.md guide, CLAUDE.md for monorepo, CLAUDE.md for React, CLAUDE.md for Python">
   <link rel="canonical" href="https://amux.io/guides/claude-md-templates/">
@@ -20,7 +20,7 @@
   <link rel="alternate" type="application/rss+xml" title="amux Blog" href="https://amux.io/blog/rss.xml">
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-  <link href="https://fonts.googleapis.com/css2?family=Geist:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500;600;700&display=swap" rel="stylesheet">
+  <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600;700&family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
   <link rel="stylesheet" href="/style.css">
   <script type="application/ld+json">{"@context":"https://schema.org","@type":"Article","headline":"CLAUDE.md Templates: 20+ Ready-to-Use Configs for Every Project Type","description":"Copy-paste CLAUDE.md templates for Python APIs, React apps, monorepos, data pipelines, mobile apps, CLI tools, and more.","datePublished":"2026-04-12","dateModified":"2026-04-12","author":{"@type":"Organization","name":"amux"},"publisher":{"@type":"Organization","name":"amux","logo":{"@type":"ImageObject","url":"https://amux.io/icon-512.png"}},"image":"https://amux.io/og-image.png","mainEntityOfPage":{"@type":"WebPage","@id":"https://amux.io/guides/claude-md-templates/"}}</script>
   <script type="application/ld+json">{"@context":"https://schema.org","@type":"FAQPage","mainEntity":[{"@type":"Question","name":"What is a CLAUDE.md file?","acceptedAnswer":{"@type":"Answer","text":"CLAUDE.md is a markdown file placed in your project root (or ~/.claude/CLAUDE.md for global settings) that gives Claude Code persistent instructions about your project. It defines coding conventions, test commands, deployment workflows, forbidden patterns, and architectural context. Claude reads it at the start of every conversation, so you don't have to repeat yourself."}},{"@type":"Question","name":"Where should I put CLAUDE.md?","acceptedAnswer":{"@type":"Answer","text":"There are three levels: (1) ~/.claude/CLAUDE.md for global personal preferences that apply to all projects, (2) PROJECT_ROOT/CLAUDE.md for project-wide instructions checked into git, and (3) PROJECT_ROOT/subdir/CLAUDE.md for directory-scoped overrides. Claude loads all three, with more specific files taking precedence."}},{"@type":"Question","name":"How long should CLAUDE.md be?","acceptedAnswer":{"@type":"Answer","text":"Keep it under 500 lines. Every line in CLAUDE.md consumes context tokens on every conversation, so conciseness matters. Focus on things Claude gets wrong without the instruction — don't document what it already does correctly. A good CLAUDE.md is 50-200 lines of high-signal rules, not a comprehensive wiki."}},{"@type":"Question","name":"What's the difference between CLAUDE.md and a system prompt?","acceptedAnswer":{"@type":"Answer","text":"CLAUDE.md is file-based and version-controlled. It lives in your repo, gets reviewed in PRs, and evolves with your codebase. A system prompt is set at the API level and can't be inspected by teammates. CLAUDE.md is the standard way to configure Claude Code project behavior — it's loaded automatically without any API configuration."}},{"@type":"Question","name":"Can I use CLAUDE.md with amux multi-agent sessions?","acceptedAnswer":{"@type":"Answer","text":"Yes. Every amux session runs Claude Code in your project directory, so all sessions automatically inherit the same CLAUDE.md. This is one of the key benefits of CLAUDE.md for multi-agent workflows: you define conventions once and every parallel agent follows them. For agent-specific overrides, use subdirectory CLAUDE.md files or per-session hooks."}},{"@type":"Question","name":"Should I commit CLAUDE.md to version control?","acceptedAnswer":{"@type":"Answer","text":"Yes, always commit project-level CLAUDE.md files. They're part of your project's development infrastructure, just like .eslintrc or pyproject.toml. Teammates benefit from the same instructions, and changes are tracked in git history. Only ~/.claude/CLAUDE.md (personal global preferences) stays uncommitted."}}]}</script>
@@ -52,8 +52,8 @@
       <a href="/compare/" class="hide-mobile">compare</a>
       <a href="/demos/" class="hide-mobile">demos</a>
       <a href="/blog/" class="hide-mobile">blog</a>
-      <button class="theme-toggle" id="theme-toggle" aria-label="Toggle dark mode"><span class="icon-sun">&#9788;</span><span class="icon-moon">&#9790;</span></button>
-      <a href="https://github.com/mixpeek/amux" target="_blank" rel="noopener" class="nav-cta">sign up</a>
+      <a href="https://apps.apple.com/us/app/amux-agent-multiplexer/id6760410435" target="_blank" rel="noopener" class="nav-cta-primary nav-cta">iOS app</a>
+      <a href="https://github.com/mixpeek/amux" target="_blank" rel="noopener" class="nav-cta">GitHub</a>
     </nav>
   </header>
   <main>
@@ -805,16 +805,6 @@ amux serve  # &rarr; https://localhost:8822</code></pre><a class="btn btn-primar
     </div>
   </footer>
 <script>
-document.getElementById('theme-toggle').addEventListener('click', function() {
-  var isDark = document.documentElement.getAttribute('data-theme') === 'dark';
-  if (isDark) {
-    document.documentElement.removeAttribute('data-theme');
-    localStorage.setItem('theme', 'light');
-  } else {
-    document.documentElement.setAttribute('data-theme', 'dark');
-    localStorage.setItem('theme', 'dark');
-  }
-});
 (function() {
   var grid = document.getElementById('tmpl-grid');
   var btns = document.querySelectorAll('.filter-btn');
