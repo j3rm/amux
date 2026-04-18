@@ -33,7 +33,7 @@
       <a href="/demos/" class="hide-mobile">demos</a>
       <a href="/blog/" class="hide-mobile">blog</a>
       <a href="https://apps.apple.com/us/app/amux-agent-multiplexer/id6760410435" target="_blank" rel="noopener" class="nav-cta-primary nav-cta">iOS app</a>
-      <a href="https://github.com/mixpeek/amux" target="_blank" rel="noopener" class="nav-cta">GitHub</a>
+      <a href="https://github.com/mixpeek/amux" target="_blank" rel="noopener" class="nav-cta">GitHub <span class="gh-stars" id="gh-stars"></span></a>
     </nav>
   </header>
   <main>
@@ -393,5 +393,6 @@ Friday:    Pipeline — ship: merge branches, deploy, cleanup</code></pre>
   </main>
   <footer class="site-footer"><div class="footer-inner"><p>&copy; 2026 <a href="https://mixpeek.com">Mixpeek</a>. MIT + Commons Clause.</p></div></footer>
   
+<script>fetch('https://api.github.com/repos/mixpeek/amux').then(function(r){return r.json()}).then(function(d){var el=document.getElementById('gh-stars');if(el&&d.stargazers_count) el.textContent='\u2605 '+d.stargazers_count}).catch(function(){})</script>
 </body>
 </html>
