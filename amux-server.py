@@ -4416,7 +4416,7 @@ def list_sessions() -> list:
             "pinned": cfg.get("CC_PINNED", "") == "1",
             "archived": cfg.get("CC_ARCHIVED", "") == "1",
             "auto_continue": cfg.get("CC_AUTO_CONTINUE") in ("1", "true", "yes"),
-            "steering": len(_steering_queue.get(name, [])),
+            "steering": _steering_queue.get(name, []),
             "tags": [t.strip() for t in cfg.get("CC_TAGS", "").split(",") if t.strip()],
             "flags": cfg.get("CC_FLAGS", ""),
             "creator": cfg.get("CC_CREATOR", ""),
@@ -12464,6 +12464,15 @@ function render() {
   // Skip render if a menu or edit overlay is open to prevent DOM clobbering
   if (openMenu || editState || document.getElementById('edit-overlay').classList.contains('active')) return;
   updatePeekStatus();
+  if (peekSession) {
+    const ps = (sessions || []).find(s => s.name === peekSession);
+    const bar = document.getElementById('peek-steer-bar');
+    if (bar && ps) {
+      const q = ps.steering || [];
+      if (q.length) { bar.style.display = 'flex'; document.getElementById('peek-steer-text').textContent = q.map(m => m.text).join(' → '); }
+      else { bar.style.display = 'none'; }
+    }
+  }
   const el = document.getElementById('cards');
   // Skip re-render while user has focus inside any card input/textarea — prevents cursor reset and value loss
   const _active = document.activeElement;
@@ -12579,7 +12588,7 @@ function render() {
           ${s.status === 'active' ? '<span class="status-badge active">working</span>' : ''}
           ${s.status === 'waiting' ? '<span class="status-badge waiting">needs input</span>' : ''}
           ${s.status === 'idle' ? '<span class="status-badge idle">idle</span>' : ''}
-          ${s.steering ? '<span class="status-badge" style="background:rgba(210,153,34,0.2);color:var(--yellow);">&#x1F4E8; steering queued</span>' : ''}
+          ${s.steering && s.steering.length ? '<span class="status-badge" style="background:rgba(210,153,34,0.2);color:var(--yellow);">&#x1F4E8; steering (' + s.steering.length + ')</span>' : ''}
           ${s.tokens ? `<span class="token-count">${fmtTokens(s.tokens)}</span>` : ''}
           ${s.last_activity ? `<span class="last-active">${timeAgo(s.last_activity)}</span>` : ''}
           ${!online ? '<span class="cached-badge">cached</span>' : ''}
@@ -12590,6 +12599,7 @@ function render() {
       ${s.dir ? _renderBranchBadge(s.name, s.branch) : ''}
       ${isExp && s.desc ? `<div class="card-desc">${esc(s.desc)}</div>` : ''}
       ${!isExp && s.task_name ? `<div class="card-preview">${esc(s.task_name)}</div>` : ''}
+      ${s.steering && s.steering.length ? `<div style="font-size:0.75rem;color:var(--yellow);padding:4px 0;display:flex;align-items:start;gap:4px;"><span style="flex-shrink:0;">&#x1F4E8;</span><span style="opacity:0.85;overflow:hidden;text-overflow:ellipsis;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;">${s.steering.map(m => esc(m.text)).join(' → ')}</span></div>` : ''}
       ${isExp && s.preview ? `<div class="card-preview">${esc(s.preview)}</div>` : ''}
       ${logSearchMode && _logMatches[s.name] ? (() => {
         const hits = _logMatches[s.name];
