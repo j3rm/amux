@@ -10959,6 +10959,7 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
   <!-- Tab bar -->
   <div class="peek-tabs">
     <button class="peek-tab active" id="peek-tab-terminal" onclick="setPeekTab('terminal')">Terminal</button>
+    <button class="peek-tab" id="peek-tab-steering" onclick="setPeekTab('steering')">Steering<span class="peek-tab-count" id="peek-tab-steering-count"></span></button>
     <button class="peek-tab" id="peek-tab-issues" onclick="setPeekTab('issues')">Issues</button>
     <button class="peek-tab" id="peek-tab-git" onclick="setPeekTab('git')">Worktree</button>
     <button class="peek-tab" id="peek-tab-commits" onclick="setPeekTab('commits')">Commits</button>
@@ -11021,6 +11022,14 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
     <div id="psf-body" class="peek-split-files-body"></div>
   </div>
   </div><!-- /peek-split-wrap -->
+  <!-- Steering queue panel -->
+  <div id="peek-steering-panel" class="peek-tasks-panel">
+    <div class="peek-tasks-add" style="gap:10px;">
+      <span id="peek-steering-count" style="flex:1;font-size:0.82rem;color:var(--dim);align-self:center;"></span>
+      <button class="btn" style="font-size:0.8rem;padding:5px 12px;" onclick="_steeringClearAll()">Clear all</button>
+    </div>
+    <div class="peek-tasks-list" id="peek-steering-list" style="gap:6px;"></div>
+  </div>
   <!-- Issues panel (board issues for this session) -->
   <div id="peek-issues-panel" class="peek-tasks-panel">
     <div class="peek-tasks-add" style="gap:10px;">
@@ -12472,6 +12481,7 @@ function render() {
       if (q.length) { bar.style.display = 'flex'; document.getElementById('peek-steer-text').textContent = q.map(m => m.text).join(' → '); }
       else { bar.style.display = 'none'; }
     }
+    if (_peekTab === 'steering') { _steeringRender(); _steeringUpdateBadge(); }
   }
   const el = document.getElementById('cards');
   // Skip re-render while user has focus inside any card input/textarea — prevents cursor reset and value loss
@@ -13814,6 +13824,7 @@ function setPeekTab(tab) {
     clearTimeout(_peekNotesSaveTimer); _peekNotesSaveTimer = null; _peekNotesSave();
   }
   document.getElementById('peek-tab-terminal').classList.toggle('active', tab === 'terminal');
+  document.getElementById('peek-tab-steering').classList.toggle('active', tab === 'steering');
   document.getElementById('peek-tab-issues').classList.toggle('active', tab === 'issues');
   document.getElementById('peek-tab-git').classList.toggle('active', tab === 'git');
   document.getElementById('peek-tab-commits').classList.toggle('active', tab === 'commits');
@@ -13821,6 +13832,9 @@ function setPeekTab(tab) {
   document.getElementById('peek-tab-notes').classList.toggle('active', tab === 'notes');
   document.getElementById('peek-terminal-panel').style.display = tab === 'terminal' ? '' : 'none';
   document.getElementById('peek-split-wrap').style.display = tab === 'terminal' ? '' : 'none';
+  const steering = document.getElementById('peek-steering-panel');
+  if (tab === 'steering') { steering.classList.add('active'); _steeringRender(); }
+  else { steering.classList.remove('active'); }
   const issues = document.getElementById('peek-issues-panel');
   if (tab === 'issues') { issues.classList.add('active'); renderPeekIssues(); }
   else { issues.classList.remove('active'); }
@@ -13836,6 +13850,60 @@ function setPeekTab(tab) {
   const notes = document.getElementById('peek-notes-panel');
   if (tab === 'notes') { notes.classList.add('active'); _peekNotesLoad(); }
   else { notes.classList.remove('active'); }
+}
+
+// ── Steering panel ──
+function _steeringRender() {
+  if (!peekSession) return;
+  const sess = sessions.find(s => s.name === peekSession);
+  const queue = (sess && sess.steering) || [];
+  const countEl = document.getElementById('peek-steering-count');
+  const list = document.getElementById('peek-steering-list');
+  countEl.textContent = queue.length ? queue.length + ' queued' : 'No queued messages';
+  if (!queue.length) {
+    list.innerHTML = '<div style="color:var(--dim);font-size:0.85rem;padding:20px 0;text-align:center;">No steering messages queued.<br>Send a message while the session is active to queue it.</div>';
+    return;
+  }
+  list.innerHTML = queue.map(m => {
+    const ago = timeAgo(m.queued_at);
+    return `<div style="display:flex;align-items:flex-start;gap:10px;padding:10px 12px;background:var(--card-bg);border:1px solid var(--border);border-radius:8px;">
+      <div style="flex:1;min-width:0;">
+        <div style="font-size:0.85rem;color:var(--fg);white-space:pre-wrap;word-break:break-word;">${esc(m.text)}</div>
+        <div style="font-size:0.75rem;color:var(--dim);margin-top:4px;">Queued ${ago}</div>
+      </div>
+      <button class="btn" style="font-size:0.7rem;padding:2px 8px;flex-shrink:0;" onclick="_steeringCancel('${m.id}')">✕</button>
+    </div>`;
+  }).join('');
+}
+
+function _steeringUpdateBadge() {
+  const sess = sessions.find(s => s.name === peekSession);
+  const queue = (sess && sess.steering) || [];
+  const badge = document.getElementById('peek-tab-steering-count');
+  if (badge) badge.textContent = queue.length ? ' (' + queue.length + ')' : '';
+}
+
+async function _steeringCancel(msgId) {
+  if (!peekSession) return;
+  try {
+    await fetch(API + '/api/sessions/' + encodeURIComponent(peekSession) + '/steer', {
+      method: 'DELETE', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({id: msgId})
+    });
+    await fetchSessions();
+    _steeringRender();
+    _steeringUpdateBadge();
+  } catch(e) { showToast('Failed to cancel message'); }
+}
+
+async function _steeringClearAll() {
+  if (!peekSession) return;
+  try {
+    await fetch(API + '/api/sessions/' + encodeURIComponent(peekSession) + '/steer', { method: 'DELETE', headers: {'Content-Type': 'application/json'}, body: '{}' });
+    await fetchSessions();
+    _steeringRender();
+    _steeringUpdateBadge();
+  } catch(e) { showToast('Failed to clear queue'); }
 }
 
 // ── Commits panel ──
@@ -14280,6 +14348,11 @@ async function _peekUpdateTabCounts() {
     if (n > 0) { el.textContent = n; el.classList.add('has-count'); }
     else { el.textContent = ''; el.classList.remove('has-count'); }
   };
+  {
+    const s = sessions.find(s => s.name === sess);
+    const sq = (s && s.steering) || [];
+    setCount('peek-tab-steering-count', sq.length);
+  }
   try {
     const r = await fetch(API + '/api/schedules');
     if (peekSession !== sess) return;
@@ -14870,6 +14943,7 @@ function openPeek(name, opts) {
   document.getElementById('peek-terminal-panel').style.display = '';
   document.getElementById('peek-split-wrap').style.display = '';
   document.getElementById('peek-memory-panel').classList.remove('active');
+  document.getElementById('peek-steering-panel').classList.remove('active');
   document.getElementById('peek-git-panel').classList.remove('active');
   document.getElementById('peek-commits-panel').classList.remove('active');
   document.getElementById('peek-schedules-panel').classList.remove('active');
@@ -14898,7 +14972,7 @@ function openPeek(name, opts) {
   updateSteerBar(name);
   document.getElementById('peek-body').innerHTML = '<span style="color:var(--dim)">Loading...</span>';
   // Reset tab badges; will be repopulated by _peekUpdateTabCounts
-  ['peek-tab-schedules-count','peek-tab-notes-count'].forEach(id => {
+  ['peek-tab-steering-count','peek-tab-schedules-count','peek-tab-notes-count'].forEach(id => {
     const el = document.getElementById(id);
     if (el) { el.textContent = ''; el.classList.remove('has-count'); }
   });
@@ -33521,6 +33595,10 @@ p{{color:#888;margin:12px 0 28px;font-size:0.9rem;line-height:1.5}}
                     _ensure_memory(name, wd)
                 content = mem_file.read_text(errors="replace") if mem_file.exists() else ""
                 return self._json({"content": content, "path": str(mem_file)})
+            if action == "steer":
+                with _steering_lock:
+                    queue = list(_steering_queue.get(name, []))
+                return self._json(queue)
             return self._json({"error": "not found"}, 404)
 
         if action == "tracked-files" and method in ("POST", "DELETE"):
@@ -33542,6 +33620,31 @@ p{{color:#888;margin:12px 0 28px;font-size:0.9rem;line-height:1.5}}
             meta["tracked_files"] = tracked
             _save_meta(name, meta)
             return self._json({"ok": True, "files": tracked})
+
+        if action == "steer":
+            if method == "DELETE":
+                body = self._read_body()
+                msg_id = body.get("id", "")
+                with _steering_lock:
+                    if msg_id:
+                        q = _steering_queue.get(name, [])
+                        _steering_queue[name] = [m for m in q if m["id"] != msg_id]
+                        removed = len(q) - len(_steering_queue[name])
+                    else:
+                        removed = len(_steering_queue.get(name, []))
+                        _steering_queue[name] = []
+                return self._json({"ok": True, "cleared": removed})
+            if method == "POST":
+                body = self._read_body()
+                text = body.get("text", "")
+                if not text:
+                    return self._json({"error": "missing 'text'"}, 400)
+                msg_id = f"steer-{int(time.time()*1000)}"
+                entry = {"id": msg_id, "text": text, "queued_at": time.time()}
+                with _steering_lock:
+                    _steering_queue.setdefault(name, []).append(entry)
+                return self._json({"ok": True, "id": msg_id, "message": "queued for next turn boundary"})
+            return self._json({"error": "method not allowed"}, 405)
 
         if method == "POST":
             if action == "transcripts":
@@ -33579,25 +33682,6 @@ p{{color:#888;margin:12px 0 28px;font-size:0.9rem;line-height:1.5}}
                     _update_meta(name, last_send=int(time.time()))
                 code = 200 if ok else (409 if msg == "not running" else 500)
                 return self._json({"ok": ok, "message": msg}, code)
-            if action == "steer":
-                if method == "GET":
-                    with _steering_lock:
-                        queue = list(_steering_queue.get(name, []))
-                    return self._json(queue)
-                if method == "DELETE":
-                    with _steering_lock:
-                        removed = len(_steering_queue.get(name, []))
-                        _steering_queue[name] = []
-                    return self._json({"ok": True, "cleared": removed})
-                body = self._read_body()
-                text = body.get("text", "")
-                if not text:
-                    return self._json({"error": "missing 'text'"}, 400)
-                msg_id = f"steer-{int(time.time()*1000)}"
-                entry = {"id": msg_id, "text": text, "queued_at": time.time()}
-                with _steering_lock:
-                    _steering_queue.setdefault(name, []).append(entry)
-                return self._json({"ok": True, "id": msg_id, "message": "queued for next turn boundary"})
             if action == "memory":
                 body = self._read_body()
                 content = body.get("content", "")
