@@ -118,6 +118,81 @@ is_running() {
   tmux has-session -t "$(tmux_name "$1")" 2>/dev/null
 }
 
+# ─── Shell-safe flag quoting ─────────────────────────────────────────────────
+#
+# Common runner: spawn python3, isolate stderr to a temp file, check exit
+# code, surface diagnostic on failure. Used by both quote_flags (one-string
+# form) and quote_argv (multi-arg form) so the stderr-isolation pattern
+# lives in one place. SECURITY: never echoes the input arguments back on
+# failure — they may contain secrets — only the input length and python's
+# stderr.
+_run_py_safe() {
+  local script="$1"
+  shift
+  local result err err_file
+  local rc=0
+  err_file=$(mktemp) || {
+    echo "amux: error: mktemp failed (cannot create temp file for python3 stderr)" >&2
+    return 1
+  }
+  # `|| rc=$?` is critical: under set -e (which the source-guard makes
+  # possible if a sourcing script enables it), a naked `result=$(...); rc=$?`
+  # would abort the function on python3 failure BEFORE rc is captured,
+  # bypassing the error handler.
+  result=$(python3 -c "$script" "$@" 2>"$err_file") || rc=$?
+  if (( rc != 0 )); then
+    err=$(<"$err_file")
+    rm -f "$err_file"
+    local n_args=$#
+    echo "amux: error: python3 helper failed (exit $rc, $n_args input args): $err" >&2
+    return 1
+  fi
+  rm -f "$err_file"
+  printf '%s' "$result"
+}
+
+# Tokenize a stored flag string and re-quote each token shell-safely.
+# Mirror of _shell_quote_flags() in amux-server.py — see that function for
+# full rationale. Required because zsh glob-expands unquoted '[1m]' in
+# model IDs like 'claude-opus-4-6[1m]', failing with 'no matches found'
+# before claude is even invoked.
+#
+# Implementation note: this delegates to python3's shlex rather than using
+# native bash word-splitting. Bash's IFS-based splitting (arr=( $s ),
+# read -ra) ignores embedded quotes in multi-word flag values AND triggers
+# pathname expansion (globbing) on the input. xargs has subtle escape-rule
+# differences from shlex on macOS vs GNU. Using python3 guarantees 100%
+# parity with the server's _shell_quote_flags so the same test fixtures
+# verify both code paths.
+#
+# PERFORMANCE: each invocation spawns a python interpreter (~30-50ms).
+# Acceptable for a once-per-session-spawn helper. Do NOT call this inside
+# loops or hot paths.
+quote_flags() {
+  local s="$1"
+  [[ -z "$s" ]] && return 0
+  _run_py_safe '
+import sys, shlex
+s = sys.argv[1]
+try:
+    print(" ".join(shlex.quote(t) for t in shlex.split(s)))
+except ValueError:
+    print(shlex.quote(s))
+' "$s"
+}
+
+# Quote a list of already-tokenized argv elements (each $1, $2, ... is one
+# argument). Used in cmd_start for inline arguments passed via
+# `amux start NAME -- ...`. printf '%q' uses bash-only $'...' syntax that
+# breaks under dash; shlex.quote uses universal POSIX single-quoting.
+quote_argv() {
+  (( $# == 0 )) && return 0
+  _run_py_safe '
+import sys, shlex
+print(" ".join(shlex.quote(a) for a in sys.argv[1:]))
+' "$@"
+}
+
 # Parse Claude Code flags from args, split into CC_FLAGS array and remaining args
 # Sets: CC_FLAGS_STR (for storage), CC_DIR, CC_EXTRA_ARGS
 parse_claude_flags() {
@@ -231,19 +306,32 @@ cmd_start() {
   esac
   [[ -d "$dir" ]] || die "directory not found: $dir"
 
-  # Build claude command
+  # Build claude command. Each component is shell-quoted before
+  # concatenation so the nested shell tmux invokes (the user's default
+  # shell) sees one literal token per argument — preventing zsh nomatch
+  # on '[1m]' globbing AND nested-shell command injection via $* token
+  # boundary loss. See quote_flags / quote_argv comments for details.
   local cmd="claude"
-  # Apply global defaults
+  # Apply global defaults from defaults.env
   if [[ -n "${CC_DEFAULT_FLAGS:-}" ]]; then
-    cmd="$cmd $CC_DEFAULT_FLAGS"
+    local q
+    q=$(quote_flags "$CC_DEFAULT_FLAGS") || die "failed to quote CC_DEFAULT_FLAGS"
+    [[ -n "$q" ]] && cmd="$cmd $q"
   fi
-  # Apply session flags
+  # Apply session flags from <name>.env
   if [[ -n "${CC_FLAGS:-}" ]]; then
-    cmd="$cmd $CC_FLAGS"
+    local q
+    q=$(quote_flags "$CC_FLAGS") || die "failed to quote CC_FLAGS"
+    [[ -n "$q" ]] && cmd="$cmd $q"
   fi
-  # Apply any extra inline args
+  # Apply any extra inline args from `amux start NAME -- ...`. These are
+  # already tokenized argv (the user's outer shell parsed them), so we
+  # quote each token via quote_argv. Without this, the v1 plan's $*
+  # would lose quoting boundaries when re-evaluated by the nested shell.
   if [[ $# -gt 0 ]]; then
-    cmd="$cmd $*"
+    local q
+    q=$(quote_argv "$@") || die "failed to quote inline arguments"
+    [[ -n "$q" ]] && cmd="$cmd $q"
   fi
 
   # Create tmux session and attach
@@ -683,34 +771,41 @@ EOF
 }
 
 # ── Main dispatch ────────────────────────────────────────────────────────────
+#
+# Source guard: when this script is run normally as `amux ...`, BASH_SOURCE[0]
+# equals $0 and the dispatch block runs. When sourced (e.g. from tests via
+# `source amux`), $0 is the parent shell's $0 and the guard skips dispatch.
+# This lets the test suite source the script to access helper functions
+# without triggering CLI side effects.
+if [[ "${BASH_SOURCE[0]:-$0}" == "${0}" ]]; then
+  ensure_dirs
 
-ensure_dirs
-
-case "${1:-}" in
-  register|reg)     shift; cmd_register "$@" ;;
-  start)            shift; cmd_start "$@" ;;
-  exec|run)         shift; cmd_exec "$@" ;;
-  attach|a)         shift; cmd_attach "$@" ;;
-  peek|p)           shift; cmd_peek "$@" ;;
-  send)             shift; cmd_send "$@" ;;
-  stop|kill)        shift; cmd_stop "$@" ;;
-  rm|remove|del)    shift; cmd_rm "$@" ;;
-  ls|list)          shift; cmd_ls "$@" ;;
-  info)             shift; cmd_info "$@" ;;
-  defaults|config)  shift; cmd_defaults "$@" ;;
-  start-all)        cmd_start_all ;;
-  stop-all)         cmd_stop_all ;;
-  serve|web)        shift; cmd_serve "$@" ;;
-  board|b)           shift; cmd_board "$@" ;;
-  help|--help|-h)   cmd_help ;;
-  version|--version|-v) echo "amux v${CC_VERSION}" ;;
-  "")               cmd_dashboard ;;
-  *)
-    # Try as session name shortcut
-    name=$(resolve_session "$1" 2>/dev/null) && cmd_attach "$name" || {
-      echo "${RED}unknown command:${RESET} $1"
-      echo "Run ${BOLD}amux help${RESET} for usage"
-      exit 1
-    }
-    ;;
-esac
+  case "${1:-}" in
+    register|reg)     shift; cmd_register "$@" ;;
+    start)            shift; cmd_start "$@" ;;
+    exec|run)         shift; cmd_exec "$@" ;;
+    attach|a)         shift; cmd_attach "$@" ;;
+    peek|p)           shift; cmd_peek "$@" ;;
+    send)             shift; cmd_send "$@" ;;
+    stop|kill)        shift; cmd_stop "$@" ;;
+    rm|remove|del)    shift; cmd_rm "$@" ;;
+    ls|list)          shift; cmd_ls "$@" ;;
+    info)             shift; cmd_info "$@" ;;
+    defaults|config)  shift; cmd_defaults "$@" ;;
+    start-all)        cmd_start_all ;;
+    stop-all)         cmd_stop_all ;;
+    serve|web)        shift; cmd_serve "$@" ;;
+    board|b)          shift; cmd_board "$@" ;;
+    help|--help|-h)   cmd_help ;;
+    version|--version|-v) echo "amux v${CC_VERSION}" ;;
+    "")               cmd_dashboard ;;
+    *)
+      # Try as session name shortcut
+      name=$(resolve_session "$1" 2>/dev/null) && cmd_attach "$name" || {
+        echo "${RED}unknown command:${RESET} $1"
+        echo "Run ${BOLD}amux help${RESET} for usage"
+        exit 1
+      }
+      ;;
+  esac
+fi

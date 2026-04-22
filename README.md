@@ -1,6 +1,6 @@
-<img src="site/github-header.svg" alt="amux — Claude Code Multiplexer" width="1280"/>
+<img src="site/github-header.svg" alt="amux — The Agent Control Plane" width="1280"/>
 
-**Open-source Claude Code agent multiplexer.** Run dozens of parallel AI coding agents, unattended, from your browser or phone. Self-healing watchdog, shared kanban board, agent-to-agent orchestration — no build step, no external services. Python 3 + tmux.
+**Open-source control plane for AI agents.** Run dozens of parallel agent sessions from your browser or phone — with a web dashboard, kanban board, notes, CRM, email, browser automation, slash-command skills, and agent-to-agent orchestration. Self-healing, single-file, zero external dependencies. Currently supports Claude Code via tmux.
 
 > **[amux.io](https://amux.io)** · [Getting started](https://amux.io/guides/getting-started/) · [FAQ](https://amux.io/faq/) · [Blog](https://amux.io/blog/)
 
@@ -24,24 +24,42 @@ amux serve   # → https://localhost:8822
 | Claude Code crashes at 3am from context compaction | **[Self-healing watchdog](https://amux.io/features/self-healing/)** — auto-compacts, restarts, replays last message |
 | Can't monitor 10+ sessions from one place | **[Web dashboard](https://amux.io/features/web-dashboard/)** — live status, token spend, peek into any session |
 | Agents duplicate work on the same task | **Kanban board** with atomic task claiming (SQLite CAS) |
-| No way to manage agents from your phone | **[Mobile PWA](https://amux.io/features/mobile-pwa/)** — works on iOS/Android, offline support with Background Sync |
+| No way to manage agents from your phone | **[Mobile PWA](https://amux.io/features/mobile-pwa/)** + native iOS app — works anywhere, offline support |
 | Agents can't coordinate with each other | **[REST API orchestration](https://amux.io/features/agent-coordination/)** — send messages, peek output, claim tasks between sessions |
+| Agents operate in a vacuum — no shared context | **Channels** — 1:1 inter-session chat with @mentions so agents can coordinate in real time |
+| No persistent knowledge between sessions | **Notes** — markdown documents agents can read, write, and reference across sessions |
+| No way to automate recurring work | **Scheduler** — named cron-style recurring jobs with built-in management UI |
 
 ---
 
 ## Key Features
 
+### Agent infrastructure
 - **Self-healing** — auto-compacts context, restarts on corruption, unblocks stuck prompts. [Learn more →](https://amux.io/features/self-healing/)
 - **Parallel agents** — run dozens of sessions, each with a UUID that survives stop/start
-- **Web dashboard** — session cards, live terminal peek, file explorer, search across all output. [Learn more →](https://amux.io/features/web-dashboard/)
-- **Kanban board** — SQLite-backed with auto-generated keys, atomic claiming, custom columns, iCal sync
 - **Agent orchestration** — agents discover peers and delegate work via REST API + shared global memory. [Learn more →](https://amux.io/features/agent-coordination/)
-- **Mobile PWA** — installable on iOS/Android, Background Sync replays commands on reconnect. [Learn more →](https://amux.io/features/mobile-pwa/)
-- **Token tracking** — per-session daily spend with cache reads broken out
+- **Channels** — 1:1 inter-session messaging with @mentions so agents can chat, delegate, and coordinate in real time
+- **Kanban board** — SQLite-backed with auto-generated keys, atomic claiming, custom columns, iCal sync
 - **Conversation fork** — clone session history to new sessions on separate branches
 - **Git conflict detection** — warns when agents share a dir + branch, one-click isolation
-- **Built-in cron** — schedule recurring commands, computed atomically in SQLite
-- **Single file** — ~23,000 lines of Python + inline HTML/CSS/JS. Edit it; it restarts on save. [Learn more →](https://amux.io/features/single-file-architecture/)
+- **Token tracking** — per-session daily spend with cache reads broken out
+
+### Dashboard & mobile
+- **Web dashboard** — session cards, live terminal peek, file explorer with markdown editor, search across all output. [Learn more →](https://amux.io/features/web-dashboard/)
+- **Mobile PWA** — installable on iOS/Android, Background Sync replays commands on reconnect. [Learn more →](https://amux.io/features/mobile-pwa/)
+- **Native iOS app** — [available on the App Store](https://apps.apple.com/us/app/amux-agent-multiplexer/id6760410435)
+
+### Built-in tools
+- **Notes** — full markdown notes system with rich editor, find-in-page, and inter-session sharing
+- **CRM** — contacts, companies, interaction logs, follow-up tracking, and tags
+- **Email** — send and read email through the Mail.app API integration
+- **Browser automation** — shared Playwright instance with saved auth profiles, screenshots, and an AI agent mode
+- **Skills / slash commands** — project-level custom commands (e.g. `/commit`, `/review-pr`) that agents can invoke
+- **Scheduler** — named recurring jobs with cron expressions and a management UI
+- **File explorer** — browse agent working directories, preview files, edit markdown with in-page search
+
+### Architecture
+- **Single file** — one Python file with inline HTML/CSS/JS. Edit it; it restarts on save. [Learn more →](https://amux.io/features/single-file-architecture/)
 
 ---
 
@@ -55,7 +73,7 @@ Parses ANSI-stripped tmux output — no hooks, no patches, no modifications to C
 
 | Condition | Action |
 |-----------|--------|
-| Context < 20% | Sends `/compact` (5-min cooldown) |
+| Context < 50% | Sends `/compact` (5-min cooldown) |
 | `redacted_thinking … cannot be modified` | Restarts + replays last message |
 | Stuck waiting + `CC_AUTO_CONTINUE=1` | Auto-responds based on prompt type |
 | YOLO session + safety prompt | Auto-answers (never fires on model questions) |
@@ -86,6 +104,11 @@ Agents get the full API reference in their global memory, so plain-English orche
 - **Peek mode** — full scrollback with search, file previews, and a send bar
 - **Workspace** — full-screen tiled layout to watch multiple agents side by side
 - **Board** — kanban backed by SQLite, with atomic task claiming, iCal sync, and custom columns
+- **Notes** — markdown documents with rich Quill editor, find-in-page, and inter-session sharing
+- **CRM** — contacts with company, role, email, phone, LinkedIn, interaction history, and follow-up tracking
+- **Channels** — 1:1 inter-session chat with @mentions for real-time agent coordination
+- **Files** — browse and edit files in any session's working directory, with syntax highlighting and in-page search
+- **Scheduler** — create, edit, and monitor recurring cron-style agent jobs
 - **Reports** — pluggable spend dashboards pulling from vendor billing APIs
 
 ---
@@ -102,6 +125,17 @@ amux send <name> <text>     # send text to a session
 amux exec <name> -- <prompt> # register + start + send in one shot
 amux ls                     # list sessions
 amux serve                  # start web dashboard
+
+# Board
+amux board add "task title"  # create a board item
+amux board doing PROJ-1      # mark in progress
+amux board done PROJ-1       # mark done
+
+# CRM
+amux crm add "Name" company=X email=Y role=Z
+amux crm list               # list contacts
+amux crm log PPL-1 "met at conference"
+amux crm fu                 # show pending follow-ups
 ```
 
 Session names support prefix matching — `amux attach my` resolves to `myproject` if unambiguous.
@@ -156,6 +190,7 @@ Then open `http://<your-ip>:8888` on your phone (use your Tailscale IP if on Tai
 
 See how amux compares to other AI coding tools:
 
+- [amux vs Claude Managed Agents](https://amux.io/compare/amux-vs-claude-managed-agents/) — self-hosted alternative at $0/session-hour
 - [amux vs Claude Code Agent Teams](https://amux.io/compare/amux-vs-claude-code-agent-teams/) — built-in sub-agents vs. independent session fleet
 - [amux vs Cursor](https://amux.io/compare/amux-vs-cursor/) — AI IDE vs. headless agent orchestrator
 - [amux vs Aider](https://amux.io/compare/amux-vs-aider/) — single-session pair programming vs. parallel agents

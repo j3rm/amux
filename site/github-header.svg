@@ -115,7 +115,7 @@
     x="240" y="345"
     font-family="-apple-system, BlinkMacSystemFont, 'Inter', 'Segoe UI', sans-serif"
     font-size="19" font-weight="400" letter-spacing="0.6"
-    fill="#4E7090">Claude Code Multiplexer</text>
+    fill="#4E7090">The Agent Control Plane</text>
 
   <!-- Feature pill row 1 -->
   <rect x="240" y="372" width="128" height="27" rx="5.5" fill="rgba(0,212,176,0.07)" stroke="rgba(0,212,176,0.22)" stroke-width="1"/>

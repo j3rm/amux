@@ -1,11 +1,11 @@
 <!DOCTYPE html>
-<html lang="en">
+<html lang="en" data-theme="dark">
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="theme-color" content="#1e2330">
   <title>Guides — amux</title>
-  <script>(function(){var t=localStorage.getItem('theme');if(t==='dark'||(t!=='light'&&matchMedia('(prefers-color-scheme:dark)').matches))document.documentElement.setAttribute('data-theme','dark')})()</script>
-  <link rel="icon" href="/icon.svg" type="image/svg+xml">
+    <link rel="icon" href="/icon.svg" type="image/svg+xml">
   <meta name="description" content="Step-by-step guides for getting the most out of amux.">
   <meta name="keywords" content="amux, guides, claude code, AI coding">
   <link rel="canonical" href="https://amux.io/guides/">
@@ -18,7 +18,7 @@
   <link rel="alternate" type="application/rss+xml" title="amux Blog" href="https://amux.io/blog/rss.xml">
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-  <link href="https://fonts.googleapis.com/css2?family=Geist:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500;600;700&display=swap" rel="stylesheet">
+  <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600;700&family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
   <link rel="stylesheet" href="/style.css">
   </head>
 <body>
@@ -29,13 +29,22 @@
       <a href="/compare/" class="hide-mobile">compare</a>
       <a href="/demos/" class="hide-mobile">demos</a>
       <a href="/blog/" class="hide-mobile">blog</a>
-      <button class="theme-toggle" id="theme-toggle" aria-label="Toggle dark mode"><span class="icon-sun">&#9788;</span><span class="icon-moon">&#9790;</span></button>
-      <a href="https://github.com/mixpeek/amux" target="_blank" rel="noopener" class="nav-cta">sign up</a>
+      <a href="https://apps.apple.com/us/app/amux-agent-multiplexer/id6760410435" target="_blank" rel="noopener" class="nav-cta-primary nav-cta">iOS app</a>
+      <a href="https://github.com/mixpeek/amux" target="_blank" rel="noopener" class="nav-cta">GitHub <span class="gh-stars" id="gh-stars"></span></a>
     </nav>
   </header>
   <main>
     <div class="breadcrumb"><a href="/">amux</a> <span class="sep">›</span> <span>Guides</span></div>
-    <h1>Guides</h1><p class="subtitle">Step-by-step guides for getting the most out of amux.</p><ul style="list-style:none;margin-left:0"><li style="margin-bottom:1rem"><a href="/guides/spec-driven-development/" style="font-weight:500;color:var(--green);">NEW: Spec-Driven Development with AI Coding Agents</a><br><span style="color:var(--muted);font-size:0.85rem">Write specs first, let agents implement in parallel, review against acceptance criteria. 7 copy-paste spec templates, decomposition patterns, and the full SDD workflow.</span></li>
+    <h1>Guides</h1><p class="subtitle">Step-by-step guides for getting the most out of amux.</p><ul style="list-style:none;margin-left:0"><li style="margin-bottom:1rem"><a href="/guides/ai-coding-agent-costs/" style="font-weight:500;color:var(--green);">NEW: AI Coding Agent Costs in 2026 &mdash; The Complete Breakdown</a><br><span style="color:var(--muted);font-size:0.85rem">Real dollar figures for running AI coding agents. Max plans vs API keys, model routing savings, per-agent cost tracking, and the five hidden costs that quietly double your bill. Includes pricing tables, breakeven analysis, and a 10-point optimization checklist.</span></li>
+<li style="margin-bottom:1rem"><a href="/guides/multi-agent-orchestrator-architecture/" style="font-weight:500">How to Build a Multi-Agent Coding Orchestrator</a><br><span style="color:var(--muted);font-size:0.85rem">The missing infrastructure layer for parallel AI coding agents. Task boards with atomic claiming, inter-agent messaging, self-healing watchdogs, and cost control &mdash; the architecture that turns parallel agents into a coordinated system.</span></li>
+<li style="margin-bottom:1rem"><a href="/guides/parallel-security-audit/" style="font-weight:500">How to Run a Parallel Security Audit with Claude Code Agents</a><br><span style="color:var(--muted);font-size:0.85rem">One agent finds surface bugs. Ten agents in parallel find the vulnerabilities that matter. Decompose by module, run focused audits, aggregate findings on a shared board &mdash; with security prompts, triage workflow, and comparison with traditional scanners.</span></li>
+<li style="margin-bottom:1rem"><a href="/guides/claude-code-routines/" style="font-weight:500">Claude Code Routines vs Self-Hosted Automation</a><br><span style="color:var(--muted);font-size:0.85rem">Anthropic launched Routines on April 14. OpenAI shipped Codex background agents on April 16. Both have hard limits. Here&rsquo;s when to use them, when to self-host, and how to migrate &mdash; with a full comparison table and decision matrix.</span></li>
+<li style="margin-bottom:1rem"><a href="/guides/claude-code-headless/" style="font-weight:500">Claude Code Headless Mode &mdash; The Complete Self-Hosting Guide</a><br><span style="color:var(--muted);font-size:0.85rem">How to run Claude Code without the interactive terminal &mdash; for CI/CD, overnight batches, parallel agent fleets, and API-driven workflows. Auth options, permission modes, cost tracking, Docker, and supervision patterns.</span></li>
+<li style="margin-bottom:1rem"><a href="/guides/agent-control-plane/" style="font-weight:500">What Is an Agent Control Plane?</a><br><span style="color:var(--muted);font-size:0.85rem">The missing infrastructure layer for AI agents. Five pillars &mdash; lifecycle management, observability, fault tolerance, orchestration, and governance &mdash; explained with real examples and a comparison of the 2026 landscape.</span></li>
+<li style="margin-bottom:1rem"><a href="/guides/claude-code-max-plan/" style="font-weight:500">How to Get 10x More Out of Your Claude Code Max Plan</a><br><span style="color:var(--muted);font-size:0.85rem">Rate limited by Wednesday? Model routing, parallel agents, context discipline, task pipelining, and API fallback — 7 strategies to 10x your effective throughput within the same quota.</span></li>
+<li style="margin-bottom:1rem"><a href="/guides/agentic-engineering/" style="font-weight:500">Agentic Engineering &mdash; The Practical Guide</a><br><span style="color:var(--muted);font-size:0.85rem">Go from 1 agent to 10+ running in parallel. Task decomposition, git isolation, coordination patterns, overnight operation, and review workflows. The step-by-step guide to the Karpathy-coined discipline.</span></li>
+<li style="margin-bottom:1rem"><a href="/guides/claude-md-templates/" style="font-weight:500">CLAUDE.md Templates &mdash; 20+ Ready-to-Use Configs</a><br><span style="color:var(--muted);font-size:0.85rem">Copy-paste CLAUDE.md templates for Python APIs, React apps, Go services, monorepos, data pipelines, Terraform, mobile apps, and more. Filterable gallery with one-click copy.</span></li>
+<li style="margin-bottom:1rem"><a href="/guides/spec-driven-development/" style="font-weight:500">Spec-Driven Development with AI Coding Agents</a><br><span style="color:var(--muted);font-size:0.85rem">Write specs first, let agents implement in parallel, review against acceptance criteria. 7 copy-paste spec templates, decomposition patterns, and the full SDD workflow.</span></li>
 <li style="margin-bottom:1rem"><a href="/guides/context-engineering/" style="font-weight:500">Context Engineering for AI Coding Agents</a><br><span style="color:var(--muted);font-size:0.85rem">The complete guide to structuring what your agents see — CLAUDE.md, hooks, skills, subagents, memory, and specs — so they produce reliable output at scale.</span></li>
 <li style="margin-bottom:1rem"><a href="/guides/claude-code-subagents/" style="font-weight:500">Claude Code Subagents — The Complete Guide</a><br><span style="color:var(--muted);font-size:0.85rem">What subagents actually are, when they help, when they hurt, how to write good ones, and how they relate to running many Claude Code sessions in parallel.</span></li>
 <li style="margin-bottom:1rem"><a href="/guides/agentmaxxing/" style="font-weight:500">The Definitive Guide to Agentmaxxing</a><br><span style="color:var(--muted);font-size:0.85rem">Run 5, 10, or 50+ AI coding agents in parallel — task splitting, git isolation, fleet monitoring, cost optimization, and tool comparison.</span></li>
@@ -61,12 +70,12 @@
 <li style="margin-bottom:1rem"><a href="/guides/cost-optimization/" style="font-weight:500">Optimizing Token Costs with Parallel Agents</a><br><span style="color:var(--muted);font-size:0.85rem">Strategies to get maximum output per dollar when running many Claude Code agents in parallel.</span></li>
 <li style="margin-bottom:1rem"><a href="/guides/agent-debugging/" style="font-weight:500">Debugging Agent Fleets with amux</a><br><span style="color:var(--muted);font-size:0.85rem">Tools and techniques for diagnosing stuck, looping, or wrong-output agents in a fleet.</span></li></ul>
   </main>
-  <footer>
+  <footer class="sub-footer">
     <div class="footer-inner">
       <div class="footer-top">
         <div class="footer-brand-col">
-          <a href="/" style="font-size:0.92rem;font-weight:700;color:var(--text);text-decoration:none;">amux</a>
-          <p>Open-source agent multiplexer for Claude Code.</p>
+          <a href="/" class="footer-logo">amux</a>
+          <p>Open-source control plane for AI agents.</p>
         </div>
         <div class="footer-col">
           <div class="footer-col-label">Resources</div>
@@ -100,23 +109,13 @@
       <div class="footer-bottom">
         <span>MIT License. Built by <a href="https://mixpeek.com">Mixpeek</a></span>
         <div class="footer-bottom-links">
+          <a href="https://apps.apple.com/us/app/amux-agent-multiplexer/id6760410435" target="_blank" rel="noopener">iOS App</a>
           <a href="https://github.com/mixpeek/amux" target="_blank" rel="noopener">GitHub</a>
-          <a href="https://github.com/mixpeek/amux/issues">Issues</a>
         </div>
       </div>
     </div>
   </footer>
-<script>
-document.getElementById('theme-toggle').addEventListener('click', function() {
-  var isDark = document.documentElement.getAttribute('data-theme') === 'dark';
-  if (isDark) {
-    document.documentElement.removeAttribute('data-theme');
-    localStorage.setItem('theme', 'light');
-  } else {
-    document.documentElement.setAttribute('data-theme', 'dark');
-    localStorage.setItem('theme', 'dark');
-  }
-});
-</script>
+
+<script>fetch('https://api.github.com/repos/mixpeek/amux').then(function(r){return r.json()}).then(function(d){var el=document.getElementById('gh-stars');if(el&&d.stargazers_count) el.textContent='\u2605 '+d.stargazers_count}).catch(function(){})</script>
 </body>
 </html>

@@ -160,6 +160,33 @@ systemctl daemon-reload
 systemctl enable amux-watchdog
 systemctl start amux-watchdog
 
+# ── Health watchdog (Claude-powered auto-fix) ──
+cat > /etc/systemd/system/amux-health-watchdog.service <<HWEOF
+[Unit]
+Description=amux health watchdog (Claude-powered)
+After=amux.service
+Wants=amux.service
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=$AMUX_DIR
+ExecStart=/usr/bin/python3 $AMUX_DIR/scripts/watchdog.py
+Restart=always
+RestartSec=10
+Environment=HOME=/root
+Environment=WATCHDOG_HEALTH_URL=http://localhost:8822/health
+Environment=WATCHDOG_AMUX_DIR=$AMUX_DIR
+Environment=PATH=/usr/local/bin:/usr/bin:/bin
+
+[Install]
+WantedBy=multi-user.target
+HWEOF
+
+systemctl daemon-reload
+systemctl enable amux-health-watchdog
+# Don't start yet — watchdog.py hasn't been deployed
+
 # ── Cert renewal cron (weekly) ──
 if [ -n "$TS_HOSTNAME" ]; then
   cat > /etc/cron.weekly/amux-cert-renew <<CRONEOF

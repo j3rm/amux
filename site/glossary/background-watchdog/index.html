@@ -1,11 +1,11 @@
 <!DOCTYPE html>
-<html lang="en">
+<html lang="en" data-theme="dark">
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="theme-color" content="#1e2330">
   <title>Background Watchdog — amux</title>
-  <script>(function(){var t=localStorage.getItem('theme');if(t==='dark'||(t!=='light'&&matchMedia('(prefers-color-scheme:dark)').matches))document.documentElement.setAttribute('data-theme','dark')})()</script>
-  <link rel="icon" href="/icon.svg" type="image/svg+xml">
+    <link rel="icon" href="/icon.svg" type="image/svg+xml">
   <meta name="description" content="Background Watchdog: A monitoring process that detects and recovers from AI agent failures automatically.">
   <meta name="keywords" content="background watchdog, AI agent glossary, amux, claude code">
   <link rel="canonical" href="https://amux.io/glossary/background-watchdog/">
@@ -18,7 +18,7 @@
   <link rel="alternate" type="application/rss+xml" title="amux Blog" href="https://amux.io/blog/rss.xml">
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-  <link href="https://fonts.googleapis.com/css2?family=Geist:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500;600;700&display=swap" rel="stylesheet">
+  <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600;700&family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
   <link rel="stylesheet" href="/style.css">
   <script type="application/ld+json">{"@context":"https://schema.org","@type":"BreadcrumbList","itemListElement":[{"@type":"ListItem","position":1,"name":"amux","item":"https://amux.io/"},{"@type":"ListItem","position":2,"name":"Glossary","item":"https://amux.io/glossary/"},{"@type":"ListItem","position":3,"name":"Background Watchdog","item":"https://amux.io/glossary/background-watchdog/"}]}</script>
   <script type="application/ld+json">{"@context":"https://schema.org","@type":"DefinedTerm","name":"Background Watchdog","description":"Background Watchdog: A monitoring process that detects and recovers from AI agent failures automatically.","url":"https://amux.io/glossary/background-watchdog/","inDefinedTermSet":{"@type":"DefinedTermSet","name":"amux Glossary","url":"https://amux.io/glossary/"}}</script>
@@ -31,20 +31,20 @@
       <a href="/compare/" class="hide-mobile">compare</a>
       <a href="/demos/" class="hide-mobile">demos</a>
       <a href="/blog/" class="hide-mobile">blog</a>
-      <button class="theme-toggle" id="theme-toggle" aria-label="Toggle dark mode"><span class="icon-sun">&#9788;</span><span class="icon-moon">&#9790;</span></button>
-      <a href="https://github.com/mixpeek/amux" target="_blank" rel="noopener" class="nav-cta">sign up</a>
+      <a href="https://apps.apple.com/us/app/amux-agent-multiplexer/id6760410435" target="_blank" rel="noopener" class="nav-cta-primary nav-cta">iOS app</a>
+      <a href="https://github.com/mixpeek/amux" target="_blank" rel="noopener" class="nav-cta">GitHub <span class="gh-stars" id="gh-stars"></span></a>
     </nav>
   </header>
   <main>
     <div class="breadcrumb"><a href="/">amux</a> <span class="sep">›</span> <a href="/glossary/">Glossary</a> <span class="sep">›</span> <span>Background Watchdog</span></div>
     <h1>Background Watchdog</h1><p class="subtitle">A monitoring process that detects and recovers from AI agent failures automatically.</p><p>amux's watchdog runs on every status check cycle. It monitors terminal output for known failure patterns and takes corrective action — compacting context, restarting sessions, or auto-responding to stuck prompts.</p><p><a href="/glossary/">← Back to glossary</a></p>
   </main>
-  <footer>
+  <footer class="sub-footer">
     <div class="footer-inner">
       <div class="footer-top">
         <div class="footer-brand-col">
-          <a href="/" style="font-size:0.92rem;font-weight:700;color:var(--text);text-decoration:none;">amux</a>
-          <p>Open-source agent multiplexer for Claude Code.</p>
+          <a href="/" class="footer-logo">amux</a>
+          <p>Open-source control plane for AI agents.</p>
         </div>
         <div class="footer-col">
           <div class="footer-col-label">Resources</div>
@@ -78,23 +78,13 @@
       <div class="footer-bottom">
         <span>MIT License. Built by <a href="https://mixpeek.com">Mixpeek</a></span>
         <div class="footer-bottom-links">
+          <a href="https://apps.apple.com/us/app/amux-agent-multiplexer/id6760410435" target="_blank" rel="noopener">iOS App</a>
           <a href="https://github.com/mixpeek/amux" target="_blank" rel="noopener">GitHub</a>
-          <a href="https://github.com/mixpeek/amux/issues">Issues</a>
         </div>
       </div>
     </div>
   </footer>
-<script>
-document.getElementById('theme-toggle').addEventListener('click', function() {
-  var isDark = document.documentElement.getAttribute('data-theme') === 'dark';
-  if (isDark) {
-    document.documentElement.removeAttribute('data-theme');
-    localStorage.setItem('theme', 'light');
-  } else {
-    document.documentElement.setAttribute('data-theme', 'dark');
-    localStorage.setItem('theme', 'dark');
-  }
-});
-</script>
+
+<script>fetch('https://api.github.com/repos/mixpeek/amux').then(function(r){return r.json()}).then(function(d){var el=document.getElementById('gh-stars');if(el&&d.stargazers_count) el.textContent='\u2605 '+d.stargazers_count}).catch(function(){})</script>
 </body>
 </html>

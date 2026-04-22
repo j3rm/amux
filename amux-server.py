@@ -21,7 +21,7 @@ import time
 import uuid
 from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
 from pathlib import Path
-from urllib.parse import urlparse, parse_qs
+from urllib.parse import urlparse, parse_qs, unquote
 
 # Strip Claude Code env vars so child processes (new sessions) don't inherit them
 for _cv in ("CLAUDECODE", "CLAUDE_CODE_ENTRYPOINT"):
@@ -61,6 +61,7 @@ CC_TRANSCRIPTS = CC_HOME / "transcripts"  # per-session JSONL backups
 CC_GMAIL = CC_HOME / "gmail-tokens"        # per-account Gmail OAuth tokens
 CC_BRANDING = CC_HOME / "branding"         # white-label assets (icon, logo)
 CC_JOURNAL_MEDIA = CC_HOME / "journal-media"  # journal photo/media files
+CC_CHANNELS = CC_HOME / "channels"            # pairwise session-to-session message threads (jsonl)
 TEMPLATES_DIR = Path(__file__).parent / "templates"
 
 def _safe_note_path(note_rel: str, base: Path = None) -> Path | None:
@@ -132,6 +133,36 @@ def _load_or_create_auth_token() -> str:
 
 AUTH_TOKEN = _load_or_create_auth_token()
 
+
+# ── PostHog server-side telemetry ────────────────────────────────────────────
+# Emits events for signals only the backend observes (YOLO auto-answers,
+# stale-session restarts, crashes). No-op when POSTHOG_KEY is unset.
+def _posthog_emit(event: str, props: dict = None, distinct_id: str = ""):
+    key = os.environ.get("POSTHOG_KEY", "")
+    if not key:
+        return
+    try:
+        import urllib.request as _ur, json as _j, ssl as _ssl
+        host = os.environ.get("POSTHOG_HOST", "https://us.i.posthog.com").rstrip("/")
+        payload = {
+            "api_key": key,
+            "event": event,
+            "distinct_id": distinct_id or "amux-server",
+            "properties": {"source": "amux-server", **(props or {})},
+        }
+        req = _ur.Request(
+            f"{host}/capture/",
+            data=_j.dumps(payload).encode(),
+            headers={"Content-Type": "application/json"},
+        )
+        ctx = _ssl.create_default_context()
+        ctx.check_hostname = False
+        ctx.verify_mode = _ssl.CERT_NONE
+        _ur.urlopen(req, timeout=3, context=ctx).read()
+    except Exception:
+        pass
+
+
 _PUBLIC_PATHS = frozenset({"/", "/manifest.json", "/sw.js", "/icon.svg", "/icon.png",
                            "/icon-192.png", "/icon-512.png", "/ca", "/release-notes",
                            "/api/release-notes", "/api/calendar.ics"})
@@ -147,7 +178,6 @@ CC_GMAIL.mkdir(parents=True, exist_ok=True)
 CC_BRANDING.mkdir(parents=True, exist_ok=True)
 CC_JOURNAL_MEDIA.mkdir(parents=True, exist_ok=True)
 
-UPLOAD_ALLOWED_EXTS = None  # None = allow all file types
 UPLOAD_MAX_BYTES = 20 * 1024 * 1024  # 20 MB
 CLAUDE_HOME = Path.home() / ".claude"
 
@@ -180,6 +210,87 @@ def slog(*args):
                 f.write(line)
     except Exception:
         pass
+
+_server_start_time = time.time()
+
+# Cached process info — updated by background thread, never blocks request handlers
+_proc_info_cache: dict = {}
+_proc_info_lock = threading.Lock()
+_proc_info_last_update: float = 0.0
+_PROC_INFO_TTL = 10.0  # refresh every 10s
+
+def _build_proc_info() -> dict:
+    """Gather process-level diagnostics (blocks ~500ms for CPU sampling)."""
+    info = {}
+    try:
+        # Longer sample window + actual elapsed time divisor: a 100ms window was
+        # small enough that any brief multi-thread burst inflated the reading to
+        # 150-200%, triggering false watchdog alerts.
+        t1 = os.times()
+        w1 = time.monotonic()
+        time.sleep(0.5)
+        t2 = os.times()
+        elapsed = max(time.monotonic() - w1, 0.001)
+        cpu_seconds = (t2.user - t1.user) + (t2.system - t1.system)
+        info["cpu_percent"] = round(cpu_seconds / elapsed * 100, 1)
+    except Exception:
+        pass
+    try:
+        import resource as _res
+        ru = _res.getrusage(_res.RUSAGE_SELF)
+        info["memory_mb"] = round(ru.ru_maxrss / (1024 * 1024), 1) if sys.platform == "darwin" else round(ru.ru_maxrss / 1024, 1)
+    except Exception:
+        pass
+    try:
+        info["fd_count"] = len(os.listdir(f"/dev/fd"))
+    except Exception:
+        pass
+    try:
+        import subprocess
+        out = subprocess.check_output(["tmux", "list-sessions", "-F", "#{session_name}"], stderr=subprocess.DEVNULL, timeout=5)
+        info["session_count"] = len([l for l in out.decode().strip().splitlines() if l])
+    except Exception:
+        info["session_count"] = -1
+    return info
+
+def psutil_process_info():
+    """Return cached process info (non-blocking). Triggers background refresh if stale."""
+    global _proc_info_last_update
+    now = time.time()
+    with _proc_info_lock:
+        cached = dict(_proc_info_cache)
+        age = now - _proc_info_last_update
+    if age > _PROC_INFO_TTL:
+        def _refresh():
+            global _proc_info_last_update
+            data = _build_proc_info()
+            with _proc_info_lock:
+                _proc_info_cache.update(data)
+                _proc_info_last_update = time.time()
+        if not cached:
+            # Cold start: build synchronously so first call returns real data
+            _refresh()
+            with _proc_info_lock:
+                return dict(_proc_info_cache)
+        threading.Thread(target=_refresh, daemon=True).start()
+    return cached
+
+def _log_resource_snapshot(label="snapshot"):
+    """Log a resource snapshot to server.log."""
+    info = psutil_process_info()
+    slog(f"[{label}] pid={os.getpid()} cpu={info.get('cpu_percent','?')}% mem={info.get('memory_mb','?')}MB fds={info.get('fd_count','?')} threads={threading.active_count()} sessions={info.get('session_count','?')} requests={_server_request_count}")
+
+def _install_signal_handlers():
+    """Install signal handlers that log before exit."""
+    import signal
+    def _sig_handler(signum, frame):
+        sig_name = signal.Signals(signum).name
+        slog(f"[SIGNAL] received {sig_name} ({signum}) — logging diagnostics before exit")
+        _log_resource_snapshot("crash-dump")
+        slog(f"[SIGNAL] exiting due to {sig_name}")
+        sys.exit(128 + signum)
+    for sig in (signal.SIGTERM, signal.SIGHUP):
+        signal.signal(sig, _sig_handler)
 
 # ── Torrent (aria2c RPC) helpers ──────────────────────────────────────────────
 _ARIA2_RPC_PORT = 6800
@@ -277,28 +388,47 @@ def _aria2_list_all():
 # ── Browser automation helpers (browser-use CLI) ─────────────────────────────
 _BROWSER_USE_BIN = shutil.which("browser-use") or "/usr/local/bin/browser-use"
 _browser_session_activity: dict[str, float] = {}  # session_name -> last_activity epoch
+_browser_locks: dict[str, threading.Lock] = {}     # per-session lock to serialize subprocess calls
+_browser_locks_mu = threading.Lock()               # protects _browser_locks dict
+
+def _browser_lock_for(session: str) -> threading.Lock:
+    """Return (or create) the per-session lock for browser-use calls."""
+    with _browser_locks_mu:
+        if session not in _browser_locks:
+            _browser_locks[session] = threading.Lock()
+        return _browser_locks[session]
 
 def _browser_touch(session: str = "amux"):
     """Record activity for a browser-use session (called on every _bu_call)."""
     _browser_session_activity[session] = time.time()
 
 def _bu_call(args: list, timeout_s: int = 30, session: str = "amux") -> dict:
-    """Run a browser-use CLI command, return parsed JSON result."""
-    if args and args[0] != "close":
-        _browser_touch(session)
-    cmd = [_BROWSER_USE_BIN, "--json", "--session", session] + args
+    """Run a browser-use CLI command, return parsed JSON result.
+
+    Serialized per-session via lock to prevent concurrent subprocess spawning
+    (multiple Chromium launches cause sustained high CPU).
+    """
+    lock = _browser_lock_for(session)
+    if not lock.acquire(timeout=timeout_s + 5):
+        return {"error": "browser session busy, try again later"}
     try:
-        r = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout_s)
-        out = r.stdout.strip()
-        if not out:
-            return {"error": r.stderr.strip() or f"browser-use exited {r.returncode}"}
-        return json.loads(out)
-    except subprocess.TimeoutExpired:
-        return {"error": "browser operation timed out"}
-    except json.JSONDecodeError:
-        return {"error": r.stdout.strip()[:200] if r.stdout else "invalid JSON"}
-    except Exception as e:
-        return {"error": str(e)}
+        if args and args[0] != "close":
+            _browser_touch(session)
+        cmd = [_BROWSER_USE_BIN, "--json", "--session", session] + args
+        try:
+            r = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout_s)
+            out = r.stdout.strip()
+            if not out:
+                return {"error": r.stderr.strip() or f"browser-use exited {r.returncode}"}
+            return json.loads(out)
+        except subprocess.TimeoutExpired:
+            return {"error": "browser operation timed out"}
+        except json.JSONDecodeError:
+            return {"error": r.stdout.strip()[:200] if r.stdout else "invalid JSON"}
+        except Exception as e:
+            return {"error": str(e)}
+    finally:
+        lock.release()
 
 def _bu_list_profiles() -> list:
     """List available Chrome profiles via browser-use."""
@@ -320,17 +450,23 @@ def _bu_list_profiles() -> list:
     except Exception:
         return []
 
-def _bu_screenshot(session: str = "amux", path: str = "") -> dict:
-    """Take a screenshot, return {path, size}."""
+def _bu_screenshot(session: str = "amux", path: str = "", retries: int = 3) -> dict:
+    """Take a screenshot, return {path, size}. Retries on SessionManager errors."""
     dest = path or str(Path.home() / ".amux" / "browser-screenshots" / "latest.jpg")
     Path(dest).parent.mkdir(parents=True, exist_ok=True)
-    result = _bu_call(["screenshot", dest], session=session)
-    if result.get("success"):
-        try:
-            size = Path(dest).stat().st_size
-        except Exception:
-            size = 0
-        return {"path": dest, "size": size}
+    for attempt in range(retries):
+        result = _bu_call(["screenshot", dest], session=session)
+        if result.get("success"):
+            try:
+                size = Path(dest).stat().st_size
+            except Exception:
+                size = 0
+            return {"path": dest, "size": size}
+        err = result.get("error", "")
+        if "SessionManager" in err and attempt < retries - 1:
+            import time as _t; _t.sleep(1.5)
+            continue
+        return result
     return result
 
 def _bu_agent_run(task: str, session: str = "amux-agent", profile: str = "",
@@ -636,8 +772,8 @@ _sse_cache_lock = threading.Lock()  # prevents thundering herd on cache refresh
 _SSE_CACHE_TTL = 2  # seconds
 
 # ── Structured event log (in-memory ring buffer, 2 000 events) ─────────────────
-import collections as _col
-_event_log: "collections.deque[dict]" = _col.deque(maxlen=2000)
+import collections
+_event_log: "collections.deque[dict]" = collections.deque(maxlen=2000)
 _event_log_lock = threading.Lock()
 _req_tl = threading.local()  # per-request enrichment (set by handlers, read by _route)
 
@@ -740,7 +876,7 @@ def _refresh_token_cache():
     now = time.time()
     if now - _token_cache["time"] < _TOKEN_CACHE_TTL:
         return
-    from datetime import datetime, timezone
+    from datetime import datetime
     result = {}
     ts_result = {}
     projects_dir = Path.home() / ".claude" / "projects"
@@ -856,12 +992,58 @@ def parse_env_file(path: Path) -> dict:
     return data
 
 
+def _atomic_write_secure(path: Path, content: str) -> None:
+    """Atomically and durably write content to path with mode 0o600.
+
+    Uses NamedTemporaryFile (which calls mkstemp under the hood, defaulting
+    to mode 0o600) plus flush + fsync + os.replace for a crash-safe atomic
+    write. The result file at `path` never exists with permissions other
+    than 0o600 — even briefly. After this function returns successfully,
+    the data is durably persisted to disk: a system crash cannot leave
+    `path` empty or partially-written.
+
+    Use this for any .env file that may contain secrets or per-user config.
+    """
+    import tempfile
+    dir_path = str(path.parent)
+    with tempfile.NamedTemporaryFile(
+        mode="w",
+        encoding="utf-8",
+        dir=dir_path,
+        prefix=f".{path.name}.",
+        suffix=".tmp",
+        delete=False,
+    ) as tmp:
+        tmp.write(content)
+        # Flush Python's userspace buffer to the OS kernel buffer, then
+        # flush the kernel buffer to disk. Without this, a system crash
+        # after os.replace() could leave the file at `path` with empty
+        # or stale contents — the rename succeeded but the data wasn't
+        # yet persisted. fsync is the canonical durability barrier.
+        tmp.flush()
+        os.fsync(tmp.fileno())
+        tmp_path = tmp.name
+    try:
+        os.replace(tmp_path, str(path))
+    except Exception:
+        try:
+            os.unlink(tmp_path)
+        except FileNotFoundError:
+            pass
+        raise
+
+
 def _write_env(path: Path, cfg: dict):
-    """Write a cfg dict back to a amux .env file."""
+    """Write a cfg dict back to a amux .env file with secure permissions.
+
+    Uses _atomic_write_secure to ensure the file is created with mode 0o600,
+    preventing world-readable .env files that may contain secrets like
+    ANTHROPIC_API_KEY or per-session credentials.
+    """
     lines = [f'# updated: {__import__("datetime").datetime.now().isoformat()}']
     for k, v in cfg.items():
         lines.append(f'{k}="{v}"')
-    path.write_text("\n".join(lines) + "\n")
+    _atomic_write_secure(path, "\n".join(lines) + "\n")
 
 
 # ═══════════════════════════════════════════
@@ -931,10 +1113,25 @@ def _log_path(session: str) -> Path:
     return CC_LOGS / f"{session}.log"
 
 
-def save_session_log(session: str, content: str):
-    """Append content to session log, trimming from the front when > MAX_LOG_BYTES."""
+_last_log_save: dict[str, float] = {}  # session -> monotonic time of last save
+_LOG_SAVE_INTERVAL = 30  # seconds between saves per session
+
+
+def save_session_log(session: str, content: str, force: bool = False):
+    """Append content to session log, trimming from the front when > MAX_LOG_BYTES.
+
+    Throttled to once per _LOG_SAVE_INTERVAL seconds per session to avoid
+    continuous 10MB read/write cycles when clients poll peek frequently.
+    Pass force=True to bypass the throttle (e.g. on session stop).
+    """
     if not content.strip():
         return
+    now = time.monotonic()
+    if not force:
+        last = _last_log_save.get(session, 0)
+        if now - last < _LOG_SAVE_INTERVAL:
+            return
+    _last_log_save[session] = now
     lp = _log_path(session)
     CC_LOGS.mkdir(parents=True, exist_ok=True)
     try:
@@ -954,11 +1151,22 @@ def save_session_log(session: str, content: str):
         pass
 
 
-def load_session_log(session: str) -> str:
-    """Load saved session log from disk."""
+def load_session_log(session: str, tail_bytes: int = 0) -> str:
+    """Load saved session log from disk.
+
+    If tail_bytes > 0, read only the last tail_bytes of the file to avoid
+    loading multi-MB logs into memory when only the end is needed.
+    """
     lp = _log_path(session)
     if lp.exists():
         try:
+            if tail_bytes > 0:
+                size = lp.stat().st_size
+                if size <= tail_bytes:
+                    return lp.read_text(errors="replace")
+                with lp.open("rb") as f:
+                    f.seek(size - tail_bytes)
+                    return f.read().decode("utf-8", errors="replace")
             return lp.read_text(errors="replace")
         except Exception:
             pass
@@ -1064,10 +1272,21 @@ _yolo_last_responded: dict = {}
 def _yolo_auto_respond():
     """Check yolo sessions for known blocking prompts and auto-answer them."""
     now = time.time()
+    # Fetch running tmux sessions once to avoid spawning a subprocess per session
+    running_sessions = set()
+    try:
+        r = subprocess.run(
+            ["tmux", "list-sessions", "-F", "#{session_name}"],
+            capture_output=True, text=True, timeout=5,
+        )
+        if r.returncode == 0:
+            running_sessions = set(r.stdout.splitlines())
+    except Exception:
+        return  # tmux not available, nothing to do
     for f in CC_SESSIONS.glob("*.env"):
         name = f.stem
         try:
-            if not is_running(name):
+            if tmux_name(name) not in running_sessions:
                 continue
             if now - _yolo_last_responded.get(name, 0) < _YOLO_COOLDOWN:
                 continue
@@ -1078,10 +1297,15 @@ def _yolo_auto_respond():
             if not raw:
                 continue
             clean = re.sub(r'\x1b\[[0-9;?]*[a-zA-Z]|\x1b[^a-zA-Z]*[a-zA-Z]', '', raw)
-            for pattern, response in _YOLO_PROMPTS:
+            for i, (pattern, response) in enumerate(_YOLO_PROMPTS):
                 if pattern.search(clean):
                     send_text(name, response)
                     _yolo_last_responded[name] = now
+                    _posthog_emit("yolo_auto_answered", {
+                        "session": name,
+                        "pattern_idx": i,
+                        "response": response,
+                    }, distinct_id=name)
                     break
         except Exception:
             pass
@@ -1128,43 +1352,55 @@ def _send_pushover(title: str, message: str, priority: int = 0) -> None:
     threading.Thread(target=_send, daemon=True).start()
 
 
-# ── Event log (persistent, streamed via SSE) ─────────────────────────
-_log_ring: list = []   # in-memory ring buffer for SSE push
-_log_ring_lock = threading.Lock()
+def _read_jsonl_tail(filepath: Path, max_bytes: int = 5_000_000) -> list:
+    """Read the last max_bytes of a JSONL file and return parsed lines.
 
-def _log_event(category: str, action: str, *, session: str = None,
-               actor: str = None, detail: str = None, level: str = "info"):
-    """Write an event to the logs table and push to SSE clients."""
-    ts = int(time.time())
+    Avoids reading entire multi-hundred-MB files into memory when only
+    recent entries are needed. Skips the first (likely partial) line
+    when seeking into the middle of a file.
+    """
     try:
-        db = get_db()
-        db.execute(
-            "INSERT INTO logs (ts, category, action, session, actor, detail, level) "
-            "VALUES (?,?,?,?,?,?,?)",
-            (ts, category, action, session, actor, detail, level))
-        db.commit()
+        size = filepath.stat().st_size
+    except OSError:
+        return []
+    lines = []
+    try:
+        with filepath.open("rb") as fh:
+            if size > max_bytes:
+                fh.seek(size - max_bytes)
+                fh.readline()  # discard partial first line
+            for raw in fh:
+                try:
+                    lines.append(json.loads(raw))
+                except (json.JSONDecodeError, ValueError):
+                    continue
     except Exception:
         pass
-    evt = {"ts": ts, "category": category, "action": action,
-           "type": category, "target": detail,  # aliases for _event_log schema compat
-           "session": session, "actor": actor, "detail": detail, "level": level}
-    with _log_ring_lock:
-        _log_ring.append(evt)
-        if len(_log_ring) > 100:
-            _log_ring[:] = _log_ring[-100:]
-    # Also push to the SSE event log ring so the Logs tab receives it live
-    with _event_log_lock:
-        _event_log.append(evt)
-    # Auto-log meaningful actions to the session's active board issue
-    if session and category in ("session", "board", "memory", "git"):
-        _SKIP_ACTIONS = {"peeked", "message-sent"}  # noisy / already captured
-        if action not in _SKIP_ACTIONS:
-            issue_id = _session_board_issue_id(session)
-            if issue_id:
-                msg = f"**{action}**"
-                if detail:
-                    msg += f" — {detail[:200]}"
-                threading.Thread(target=_append_board_log, args=(issue_id, msg), daemon=True).start()
+    return lines
+
+
+def _iter_jsonl_tail(filepath: Path, max_bytes: int = 5_000_000):
+    """Iterate over parsed entries from the tail of a JSONL file.
+
+    Unlike _read_jsonl_tail, this yields entries one at a time instead of
+    accumulating them all in a list — much less memory for large files.
+    """
+    try:
+        size = filepath.stat().st_size
+    except OSError:
+        return
+    try:
+        with filepath.open("rb") as fh:
+            if size > max_bytes:
+                fh.seek(size - max_bytes)
+                fh.readline()  # discard partial first line
+            for raw in fh:
+                try:
+                    yield json.loads(raw)
+                except (json.JSONDecodeError, ValueError):
+                    continue
+    except Exception:
+        pass
 
 
 def _last_meaningful_user_message(work_dir: str) -> str:
@@ -1180,9 +1416,8 @@ def _last_meaningful_user_message(work_dir: str) -> str:
         return ""
     last_msg = ""
     try:
-        for line in jsonl_files[0].read_text(errors="replace").splitlines():
+        for entry in _iter_jsonl_tail(jsonl_files[0], max_bytes=2_000_000):
             try:
-                entry = json.loads(line)
                 msg = entry.get("message", {})
                 if msg.get("role") == "user":
                     content = msg.get("content", [])
@@ -1242,7 +1477,7 @@ def _snapshot_all_sessions():
 
     Session output is streamed to disk in real-time via tmux pipe-pane (set up
     in start_session). This loop only reads output for health-check logic:
-    1. Proactive: if context < 20% remaining before auto-compact, send /compact
+    1. Proactive: if context < 50% remaining before auto-compact, send /compact
     2. Reactive: if thinking-block corruption error detected, restart conversation
        and replay the last meaningful user message automatically.
     3. Auto-continue: if CC_AUTO_CONTINUE=1 and session is stuck waiting for user
@@ -1250,9 +1485,20 @@ def _snapshot_all_sessions():
     4. Auto-restart: if CC_AUTO_CONTINUE=1 and Claude has exited to a shell prompt,
        restart it automatically (handles context-limit exits mid-task).
     """
+    # Fetch running tmux sessions once to avoid spawning a subprocess per session
+    running_sessions = set()
+    try:
+        r = subprocess.run(
+            ["tmux", "list-sessions", "-F", "#{session_name}"],
+            capture_output=True, text=True, timeout=5,
+        )
+        if r.returncode == 0:
+            running_sessions = set(r.stdout.splitlines())
+    except Exception:
+        return
     for f in CC_SESSIONS.glob("*.env"):
         name = f.stem
-        if not is_running(name):
+        if tmux_name(name) not in running_sessions:
             continue
         try:
             output = tmux_capture(name, 5000)
@@ -1274,7 +1520,7 @@ def _snapshot_all_sessions():
                 if pct < 30 and now - actions.get("last_backup", 0) > 120:
                     actions["last_backup"] = now
                     threading.Thread(target=backup_session_jsonl, args=(name, "pre_compact"), daemon=True).start()
-                if _ac_enabled and pct < 20 and now - actions.get("last_compact", 0) > 300:
+                if _ac_enabled and pct < 50 and now - actions.get("last_compact", 0) > 300:
                     actions["last_compact"] = now
                     actions["post_compact_continue"] = True  # send continuation when compact finishes
                     send_text(name, "/compact")
@@ -1598,7 +1844,11 @@ def _kill_stale_ray():
 
 
 def get_claude_stats(work_dir: str) -> dict:
-    """Get token usage and last activity from Claude Code session files for a directory."""
+    """Get token usage and last activity from Claude Code session files for a directory.
+
+    Only reads the tail of the JSONL file (last 5MB) to avoid loading
+    hundreds of MB into memory for long-running sessions.
+    """
     if not work_dir:
         return {"tokens": 0, "last_active": ""}
     # Map dir path to Claude project directory name
@@ -1610,28 +1860,23 @@ def get_claude_stats(work_dir: str) -> dict:
     jsonl_files = sorted(project_dir.glob("*.jsonl"), key=lambda f: f.stat().st_mtime, reverse=True)
     if not jsonl_files:
         return {"tokens": 0, "last_active": ""}
-    # Sum tokens from most recent session, get last timestamp
+    # Sum tokens from tail of most recent session, get last timestamp
     total_in = 0
     total_out = 0
     last_ts = ""
-    try:
-        with jsonl_files[0].open() as f:
-            for line in f:
-                try:
-                    entry = json.loads(line)
-                    ts = entry.get("timestamp", "")
-                    if ts:
-                        last_ts = ts
-                    msg = entry.get("message", {})
-                    usage = msg.get("usage", {})
-                    if usage:
-                        total_in += usage.get("input_tokens", 0)
-                        total_in += usage.get("cache_read_input_tokens", 0)
-                        total_out += usage.get("output_tokens", 0)
-                except (json.JSONDecodeError, AttributeError):
-                    continue
-    except Exception:
-        pass
+    for entry in _iter_jsonl_tail(jsonl_files[0], max_bytes=5_000_000):
+        try:
+            ts = entry.get("timestamp", "")
+            if ts:
+                last_ts = ts
+            msg = entry.get("message", {})
+            usage = msg.get("usage", {})
+            if usage:
+                total_in += usage.get("input_tokens", 0)
+                total_in += usage.get("cache_read_input_tokens", 0)
+                total_out += usage.get("output_tokens", 0)
+        except (json.JSONDecodeError, AttributeError):
+            continue
     return {"tokens": total_in + total_out, "last_active": last_ts}
 
 
@@ -2287,7 +2532,7 @@ esac
 def _sync_skills_to_commands():
     """Write a single skill to ~/.claude/commands/ after save."""
     try:
-        import pathlib as _p, json as _j
+        import pathlib as _p
         commands_dir = _p.Path.home() / ".claude" / "commands"
         commands_dir.mkdir(parents=True, exist_ok=True)
         db = get_db()
@@ -2406,7 +2651,7 @@ def _report_fetch_render(cfg):
 
 
 def _report_fetch_mongo(cfg):
-    import json as _j, urllib.request as _ur, urllib.parse as _up
+    import json as _j, urllib.parse as _up
     import hashlib as _hl, http.client as _hc, ssl as _ssl, time as _t
     pub  = os.environ.get("AMUX_MONGO_PUBLIC_KEY", "")
     priv = os.environ.get("AMUX_MONGO_PRIVATE_KEY", "")
@@ -2881,30 +3126,55 @@ _DEFAULT_STATUSES = [
 ]
 
 
-def _load_board() -> list:
-    """Load all non-deleted issues from SQLite, with tags joined."""
+def _load_board(done_limit: int = 100) -> list:
+    """Load non-deleted issues from SQLite, with tags joined.
+
+    To keep payloads manageable, only the most recent `done_limit` items in
+    terminal statuses (done/discarded) are returned.  Pass done_limit=0 for
+    unlimited (all items).
+    """
     db = get_db()
-    rows = db.execute(
-        """SELECT i.id, i.title, i.desc, i.status, i.session, i.creator,
-                  i.due, i.due_time, i.created, i.updated, i.owner_type,
-                  COALESCE(i.pinned, 0) AS pinned,
-                  COALESCE(i.pos, 0) AS pos,
-                  GROUP_CONCAT(t.tag) AS tags_csv
-           FROM issues i
-           LEFT JOIN issue_tags t ON t.issue_id = i.id
-           WHERE i.deleted IS NULL
-           GROUP BY i.id
-           ORDER BY COALESCE(i.pinned, 0) DESC,
-                    CASE WHEN COALESCE(i.pos, 0) = 0 THEN 1 ELSE 0 END,
-                    COALESCE(i.pos, 0) ASC,
-                    i.updated DESC"""
-    ).fetchall()
+    _COLS = """i.id, i.title, i.desc, i.status, i.session, i.creator,
+               i.due, i.due_time, i.created, i.updated, i.owner_type,
+               COALESCE(i.pinned, 0) AS pinned,
+               COALESCE(i.pos, 0) AS pos,
+               GROUP_CONCAT(t.tag) AS tags_csv"""
+    if done_limit > 0:
+        # Active items (unlimited) UNION most recent done/discarded
+        rows = db.execute(
+            f"""SELECT {_COLS}
+                FROM issues i LEFT JOIN issue_tags t ON t.issue_id = i.id
+                WHERE i.deleted IS NULL AND i.status NOT IN ('done','discarded')
+                GROUP BY i.id
+              UNION ALL
+              SELECT * FROM (
+                SELECT {_COLS}
+                FROM issues i LEFT JOIN issue_tags t ON t.issue_id = i.id
+                WHERE i.deleted IS NULL AND i.status IN ('done','discarded')
+                GROUP BY i.id
+                ORDER BY i.updated DESC
+                LIMIT ?
+              )""",
+            (done_limit,),
+        ).fetchall()
+    else:
+        rows = db.execute(
+            f"""SELECT {_COLS}
+                FROM issues i LEFT JOIN issue_tags t ON t.issue_id = i.id
+                WHERE i.deleted IS NULL
+                GROUP BY i.id""",
+        ).fetchall()
+    # Sort in Python: pinned first, then by pos, then by updated
     result = []
     for row in rows:
         item = dict(row)
         tags_csv = item.pop("tags_csv") or ""
         item["tags"] = [t for t in tags_csv.split(",") if t]
         result.append(item)
+    result.sort(key=lambda x: (-x.get("pinned", 0),
+                                0 if x.get("pos", 0) == 0 else -1,
+                                x.get("pos", 0),
+                                -(x.get("updated", 0) or 0)))
     return result
 
 
@@ -3102,7 +3372,6 @@ def _gcal_sync_item(item_id: str, title: str = "", due: str = "", due_time: str 
 
 def _cron_next_run(parts: list, base) -> str | None:
     """Compute next fire time for a 5-field cron spec (MIN HOUR DOM MON DOW)."""
-    from datetime import timedelta
 
     def _matches(value: int, spec: str) -> bool:
         if spec == '*':
@@ -3515,7 +3784,7 @@ def _gcal_sync_bg(item_id, **kwargs):
 
 def get_daily_token_stats() -> dict:
     """Get today's token usage across all Claude Code sessions and amux sessions."""
-    from datetime import datetime, timezone
+    from datetime import datetime
     today = datetime.now().strftime("%Y-%m-%d")
     projects_dir = CLAUDE_HOME / "projects"
     if not projects_dir.is_dir():
@@ -3549,35 +3818,36 @@ def get_daily_token_stats() -> dict:
                 continue
             try:
                 prev_usage_sig = None
-                with jf.open() as f:
-                    for line in f:
-                        try:
-                            entry = json.loads(line)
-                            ts = entry.get("timestamp", "")
-                            if not ts or not ts.startswith(today):
-                                msg = entry.get("message", {})
-                                if not msg.get("usage"):
-                                    prev_usage_sig = None
-                                continue
+                # Stream entries from the tail — today's entries are at the end.
+                # 20MB covers a full day's usage even for heavy sessions.
+                # Uses _iter_jsonl_tail to avoid accumulating all entries in memory.
+                for entry in _iter_jsonl_tail(jf, max_bytes=20_000_000):
+                    try:
+                        ts = entry.get("timestamp", "")
+                        if not ts or not ts.startswith(today):
                             msg = entry.get("message", {})
-                            usage = msg.get("usage", {})
-                            if usage:
-                                # Deduplicate: Claude Code logs thinking + tool_use
-                                # as separate entries with identical usage
-                                sig = (usage.get("input_tokens", 0),
-                                       usage.get("cache_read_input_tokens", 0),
-                                       usage.get("output_tokens", 0))
-                                if sig == prev_usage_sig:
-                                    continue
-                                prev_usage_sig = sig
-                                proj_in += usage.get("input_tokens", 0)
-                                proj_in += usage.get("cache_creation_input_tokens", 0)
-                                proj_in += usage.get("cache_read_input_tokens", 0)
-                                proj_out += usage.get("output_tokens", 0)
-                            else:
+                            if not msg.get("usage"):
                                 prev_usage_sig = None
-                        except (json.JSONDecodeError, AttributeError):
                             continue
+                        msg = entry.get("message", {})
+                        usage = msg.get("usage", {})
+                        if usage:
+                            # Deduplicate: Claude Code logs thinking + tool_use
+                            # as separate entries with identical usage
+                            sig = (usage.get("input_tokens", 0),
+                                   usage.get("cache_read_input_tokens", 0),
+                                   usage.get("output_tokens", 0))
+                            if sig == prev_usage_sig:
+                                continue
+                            prev_usage_sig = sig
+                            proj_in += usage.get("input_tokens", 0)
+                            proj_in += usage.get("cache_creation_input_tokens", 0)
+                            proj_in += usage.get("cache_read_input_tokens", 0)
+                            proj_out += usage.get("output_tokens", 0)
+                        else:
+                            prev_usage_sig = None
+                    except (json.JSONDecodeError, AttributeError):
+                        continue
             except Exception:
                 continue
         if proj_in + proj_out > 0:
@@ -3631,21 +3901,28 @@ def get_daily_token_stats() -> dict:
 _metrics_cache: dict = {}
 _metrics_cache_lock = threading.Lock()
 _metrics_cache_ts: float = 0.0
+_metrics_refreshing = False
 _METRICS_TTL = 8.0  # seconds
 
 
 def _refresh_metrics_cache() -> None:
     """Build metrics in a background thread and store in cache."""
-    global _metrics_cache, _metrics_cache_ts
-    data = _build_system_metrics()
-    with _metrics_cache_lock:
-        _metrics_cache = data
-        _metrics_cache_ts = time.time()
+    global _metrics_cache, _metrics_cache_ts, _metrics_refreshing
+    try:
+        import gc
+        data = _build_system_metrics()
+        with _metrics_cache_lock:
+            _metrics_cache = data
+            _metrics_cache_ts = time.time()
+        gc.collect()  # reclaim memory from JSONL parsing
+    finally:
+        with _metrics_cache_lock:
+            _metrics_refreshing = False
 
 
 def get_system_metrics() -> dict:
     """Return cached metrics (stale-while-revalidate). First call blocks briefly."""
-    global _metrics_cache, _metrics_cache_ts
+    global _metrics_cache, _metrics_cache_ts, _metrics_refreshing
     now = time.time()
     with _metrics_cache_lock:
         cache_age = now - _metrics_cache_ts
@@ -3659,10 +3936,15 @@ def get_system_metrics() -> dict:
             _metrics_cache_ts = time.time()
         return data
 
-    # Trigger background refresh if stale
+    # Trigger background refresh if stale (but only one at a time)
     if cache_age > _METRICS_TTL:
-        t = threading.Thread(target=_refresh_metrics_cache, daemon=True)
-        t.start()
+        with _metrics_cache_lock:
+            if _metrics_refreshing:
+                pass  # another thread already started a refresh
+            else:
+                _metrics_refreshing = True
+                t = threading.Thread(target=_refresh_metrics_cache, daemon=True)
+                t.start()
 
     cached["cache_age_seconds"] = round(cache_age, 1)
     return cached
@@ -3918,8 +4200,13 @@ def _detect_claude_status(raw_output: str) -> str:
             break
 
     # "esc to interrupt" (may be truncated to "esc to" or "esc t…") → active
-    if status_bar and re.search(r"esc t", status_bar):
-        return "active"
+    # Scan the last few lines directly instead of gating on status_bar detection:
+    # in background-tasks mode the "esc to interrupt · ctrl+t to hide tasks" line
+    # REPLACES the ⏵⏵/bypass-permissions status bar, so status_bar will be empty
+    # even though Claude is actively working.
+    for l in lines[-5:]:
+        if re.search(r"esc t", l.lower()):
+            return "active"
 
     # ── 2. Scan last 12 lines bottom-up for the most recent signal ──
     for l in reversed(lines[-12:]):
@@ -4070,13 +4357,13 @@ def list_sessions() -> list:
         meta = _load_meta(name)
         last_activity = meta.get("last_send", 0) or meta.get("last_started", 0)
         session_created = tinfo.get("created", 0)
-        pane_title = tinfo.get("pane_title", "")
         raw = ""
         if running:
             raw = captures.get(name, "")
         elif _log_path(name).exists():
             # Load saved log for stopped sessions (last 30 lines worth)
-            saved = load_session_log(name)
+            # Only read tail 16KB — avoid loading multi-MB logs into memory
+            saved = load_session_log(name, tail_bytes=16_384)
             if saved:
                 raw = "\n".join(saved.splitlines()[-30:])
         if raw:
@@ -4200,26 +4487,69 @@ def _find_latest_session_id(work_dir: str) -> str:
     return ""
 
 
+def _ascript_str(s: str) -> str:
+    """Convert a Python string to an AppleScript expression with proper linefeed handling.
+    Returns an expression like: ("line1" & linefeed & "line2")
+    Handles quotes, backslashes, and newlines safely."""
+    lines = s.split("\n")
+    escaped = []
+    for line in lines:
+        escaped.append('"' + line.replace("\\", "\\\\").replace('"', '\\"') + '"')
+    if len(escaped) == 1:
+        return escaped[0]
+    return "(" + " & linefeed & ".join(escaped) + ")"
+
+
 def _project_name(work_dir: str) -> str:
     """Return the Claude project folder name for a given work dir (mirrors Claude's own encoding)."""
     resolved = str(Path(work_dir).expanduser().resolve())
     return resolved.replace("/", "-")
 
 
-def _session_actual_cwd(name: str) -> str | None:
-    """Return the actual CWD of a running session's tmux pane, or None if not running."""
+def _live_conv_id(name: str, work_dir: str = "") -> str:
+    """Return the conversation id of the running claude process for a session.
+
+    Sources, in order of authority:
+      1. Argv of the running claude process — definitive when --session-id or
+         --resume is set (i.e. when start_session launched it).
+      2. Most-recently-modified jsonl in the work_dir's project folder.
+         Unreliable when multiple amux sessions share a work_dir, but the only
+         option for sessions started via the bash CLI (which doesn't set the
+         flag — Claude generates the id internally and doesn't expose it).
+    Empty string if nothing can be determined.
+    """
     try:
         r = subprocess.run(
-            ["tmux", "display-message", "-t", tmux_target(name), "-p", "#{pane_current_path}"],
-            capture_output=True, text=True, timeout=3,
+            ["tmux", "list-panes", "-t", tmux_target(name), "-F", "#{pane_pid}"],
+            capture_output=True, text=True, timeout=5,
         )
-        if r.returncode == 0:
-            cwd = r.stdout.strip()
-            if cwd:
-                return cwd
+        pane_pid = r.stdout.strip().split("\n")[0] if r.returncode == 0 else ""
+        if pane_pid:
+            r2 = subprocess.run(["pgrep", "-P", pane_pid], capture_output=True, text=True, timeout=5)
+            for pid in r2.stdout.strip().split("\n"):
+                if not pid:
+                    continue
+                r3 = subprocess.run(
+                    ["ps", "-o", "command=", "-p", pid],
+                    capture_output=True, text=True, timeout=5,
+                )
+                cmd = r3.stdout.strip()
+                if "claude" not in cmd:
+                    continue
+                parts = shlex.split(cmd) if cmd else []
+                for flag in ("--resume", "--session-id"):
+                    if flag in parts:
+                        idx = parts.index(flag)
+                        if idx + 1 < len(parts):
+                            return parts[idx + 1]
     except Exception:
         pass
-    return None
+    if work_dir:
+        try:
+            return _find_latest_session_id(work_dir)
+        except Exception:
+            return ""
+    return ""
 
 
 _GLOBAL_MEM_FILE = CC_MEMORY / "_global.md"
@@ -4371,47 +4701,11 @@ def _session_work_dir(name: str) -> str:
     return ""
 
 
-def _auto_create_branch(name: str, work_dir: str, env_file: "Path") -> bool:
-    """Auto-create a git branch for a session if work_dir is a git repo.
-    Returns True if a branch was created, False otherwise.
-    Sessions share the same working directory but get their own branch."""
-    try:
-        r = subprocess.run(
-            ["git", "-C", work_dir, "rev-parse", "--show-toplevel"],
-            capture_output=True, text=True, timeout=3,
-        )
-        if r.returncode != 0:
-            return False
-        branch = "session/" + re.sub(r"[^a-zA-Z0-9\-]", "-", name).strip("-")
-        # Check if branch already exists
-        rb = subprocess.run(
-            ["git", "-C", work_dir, "show-ref", "--verify", f"refs/heads/{branch}"],
-            capture_output=True, text=True, timeout=3,
-        )
-        if rb.returncode == 0:
-            slog(f"[branch] {branch} already exists for {name}")
-            return True  # branch exists, session can use it
-        # Create branch from current HEAD
-        r2 = subprocess.run(
-            ["git", "-C", work_dir, "branch", branch],
-            capture_output=True, text=True, timeout=5,
-        )
-        if r2.returncode != 0:
-            slog(f"[branch] create failed for {name}: {r2.stderr.strip()}")
-            return False
-        cfg = parse_env_file(env_file)
-        cfg["CC_BRANCH"] = branch
-        _write_env(env_file, cfg)
-        slog(f"[branch] created {branch} for session {name}")
-        return True
-    except Exception as e:
-        slog(f"[branch] auto-create error for {name}: {e}")
-        return False
-
-
 _git_info_cache: dict[str, tuple[float, dict]] = {}  # work_dir -> (timestamp, result)
-_GIT_INFO_TTL = 15  # seconds — git status doesn't change that fast
+_GIT_INFO_TTL = 30  # seconds — branch names don't change that fast
+_git_subprocess_sem = threading.Semaphore(4)  # limit concurrent git subprocesses
 _GIT_INFO_DETAIL_TTL = 10  # seconds — detail view can be slightly fresher
+_GIT_INFO_CACHE_MAX_AGE = 300  # evict entries older than 5 min to prevent unbounded growth
 
 
 def _git_info(work_dir: str, detail: bool = False) -> dict:
@@ -4424,7 +4718,14 @@ def _git_info(work_dir: str, detail: bool = False) -> dict:
     cached = _git_info_cache.get(cache_key)
     if cached and time.time() - cached[0] < ttl:
         return cached[1]
+    _git_subprocess_sem.acquire()
     try:
+        # Re-check cache after acquiring semaphore — another thread may have
+        # populated it while we were waiting (prevents 80 threads all re-running
+        # git when they simultaneously see an expired cache entry).
+        cached = _git_info_cache.get(cache_key)
+        if cached and time.time() - cached[0] < ttl:
+            return cached[1]
         rb = subprocess.run(
             ["git", "-C", work_dir, "branch", "--show-current"],
             capture_output=True, text=True, timeout=2,
@@ -4493,6 +4794,43 @@ def _git_info(work_dir: str, detail: bool = False) -> dict:
         return result
     except Exception:
         return {"branch": "", "repo": ""}
+    finally:
+        _git_subprocess_sem.release()
+
+
+def _evict_stale_caches():
+    """Periodically prune expired entries from in-memory caches to prevent unbounded growth."""
+    now = time.time()
+    # Evict _git_info_cache entries older than max age
+    stale_git = [k for k, (ts, _) in list(_git_info_cache.items())
+                 if now - ts > _GIT_INFO_CACHE_MAX_AGE]
+    for k in stale_git:
+        _git_info_cache.pop(k, None)
+    # Evict _model_cache entries older than 5 min
+    stale_model = [k for k, (_, _, ts) in list(_model_cache.items())
+                   if now - ts > 300]
+    for k in stale_model:
+        _model_cache.pop(k, None)
+    # Prune session-keyed dicts for sessions that no longer have .env files
+    live_sessions = {f.stem for f in CC_SESSIONS.glob("*.env")}
+    for d in (_session_auto_actions, _yolo_last_responded, _last_jsonl_backup, _session_prev_status):
+        stale_keys = [k for k in d if k not in live_sessions]
+        for k in stale_keys:
+            d.pop(k, None)
+    with _send_locks_lock:
+        stale_locks = [k for k in _send_locks if k not in live_sessions]
+        for k in stale_locks:
+            _send_locks.pop(k, None)
+
+
+def _cleanup_session_state(name: str):
+    """Remove per-session in-memory state for a deleted session."""
+    _session_auto_actions.pop(name, None)
+    _yolo_last_responded.pop(name, None)
+    _last_jsonl_backup.pop(name, None)
+    _session_prev_status.pop(name, None)
+    with _send_locks_lock:
+        _send_locks.pop(name, None)
 
 
 def _init_default_sessions():
@@ -4681,6 +5019,177 @@ def _ensure_memory(name: str, work_dir: str):
     _write_claude_memory(name, work_dir)
 
 
+# Permissive model-name validator. The negative lookahead (?!-) explicitly
+# rejects values starting with '-' which would be re-parsed as a flag by
+# claude's argv parser even after shell-quoting (application-level argument
+# injection — e.g. '-p', '--api-key', '--dangerously-skip-permissions').
+# All other leading characters are allowed including '.', '/', '[' so local
+# model paths like './model' or '/opt/local-model' work for users who use
+# amux to drive non-Anthropic LLM CLIs. The body character class permits
+# the '[1m]' suffix (1M context variants), slash/at-sign forms used by
+# Bedrock/Vertex/OpenRouter (e.g. anthropic/claude-3-opus, claude-3@latest),
+# and '+' for HuggingFace-style variants. Rejects shell metacharacters
+# (; | $ ` > < & ( ) { } \ space \n).
+#
+# Defense in depth — the spawn-side _shell_quote_flags is the load-bearing
+# fix; this just stops obviously malformed or injection-attempting data from
+# being persisted in the first place.
+_MODEL_ID_RE = re.compile(r'^(?!-)[A-Za-z0-9._:\[\]@/+-]+$')
+_MODEL_ID_MAX_LEN = 255  # bound to prevent DoS via huge JSON payloads
+
+
+def _strip_model_from_flags(flags: str) -> str:
+    """Remove any --model X or --model=X tokens from a flag string.
+
+    Uses shlex tokenization to correctly handle both space-separated
+    (`--model X`) and equals-separated (`--model=X`) forms, plus quoted
+    multi-word values that a naive regex would miss or corrupt.
+
+    Returns the remaining flags as a shell-safe string (each token
+    re-quoted via shlex.quote) so the result can be safely stored
+    back in a .env file.
+
+    Raises ValueError if `flags` cannot be tokenized (e.g. unbalanced
+    quotes in a hand-edited config file). Callers MUST catch this and
+    surface a clear error to the user — silently returning the empty
+    string here would wipe out all the user's other flags during a
+    routine model update, which is a data-loss bug.
+
+    Used by both PATCH endpoints (/api/settings/default-model and
+    /api/sessions/{name}) so the substitution semantics are identical.
+    """
+    if not flags:
+        return ""
+    tokens = shlex.split(flags)  # raises ValueError on malformed input
+    filtered = []
+    i = 0
+    while i < len(tokens):
+        t = tokens[i]
+        if t == "--model" and i + 1 < len(tokens):
+            i += 2  # skip --model and its value
+            continue
+        if t.startswith("--model="):
+            i += 1  # skip the --model=X form
+            continue
+        filtered.append(t)
+        i += 1
+    return " ".join(shlex.quote(t) for t in filtered)
+
+
+def _extract_model_from_flags(flags: str) -> str:
+    """Return the --model value from a flag string, or empty string if none.
+
+    Mirror of _strip_model_from_flags but for extraction. Handles both
+    `--model X` and `--model=X` forms via shlex tokenization. On malformed
+    input (unbalanced quotes etc.) returns empty string — this is a
+    read-only display helper, so silent fallback is appropriate.
+    """
+    if not flags:
+        return ""
+    try:
+        tokens = shlex.split(flags)
+    except ValueError:
+        return ""
+    i = 0
+    while i < len(tokens):
+        t = tokens[i]
+        if t == "--model" and i + 1 < len(tokens):
+            return tokens[i + 1]
+        if t.startswith("--model="):
+            return t[len("--model="):]
+        i += 1
+    return ""
+
+
+def _validate_model_name(value) -> tuple[bool, str, str]:
+    """Validate a model name field from a PATCH body.
+
+    Returns (ok, normalized_value, error_message). Used by both PATCH
+    endpoints (/api/settings/default-model and /api/sessions/{name})
+    so the type/length/regex checks are defined in exactly one place.
+
+    Empty string is permitted at this level — callers decide whether
+    empty means "clear the override" or "missing required field" based
+    on endpoint semantics.
+    """
+    if not isinstance(value, str):
+        return False, "", "model must be a string"
+    normalized = value.strip()
+    if len(normalized) > _MODEL_ID_MAX_LEN:
+        return False, "", f"model name too long (max {_MODEL_ID_MAX_LEN} chars)"
+    if normalized and not _MODEL_ID_RE.match(normalized):
+        return False, "", "invalid model name (allowed: alphanumeric and ._:[]@/+-, no leading hyphen)"
+    return True, normalized, ""
+
+
+def _shell_quote_flags(s: str) -> str:
+    """Tokenize a stored flag string and re-quote each token shell-safely.
+
+    Flag strings come from .env files written by various paths (settings UI,
+    REST API, bash CLI, hand edits) and are concatenated into a shell command
+    in start_session(). Stored values may contain shell metacharacters — most
+    notably '[1m]' in the 1M-context model IDs 'claude-opus-4-6[1m]' and
+    'claude-sonnet-4-6[1m]', which zsh treats as a glob character class and
+    fails with 'no matches found' under nomatch. Round-tripping through shlex
+    enforces the invariant: every flag token reaches /bin/sh as a single
+    literal argument, never interpreted by the shell.
+
+    On malformed input (e.g. unbalanced quote in a hand-edited env file),
+    shlex.split raises ValueError. The fallback wraps the entire raw string
+    as a single shlex.quote()'d literal — the shell still receives one safe
+    token, claude itself rejects the bogus flag with a clear error message,
+    and the spawn doesn't brick. The security invariant (shell never
+    interprets stored data) is preserved on every code path.
+
+    NOTE on shlex.split's `#`-handling: by default shlex.split treats an
+    unquoted `#` as the start of a comment and strips the rest of the
+    token (e.g. `--model opus # my note` becomes `['--model', 'opus']`).
+    This is standard shlex behavior. amux config files don't typically
+    use inline comments, so this is unlikely to surprise users.
+
+    BEHAVIOR CHANGE from pre-fix amux: stored flag values are now treated
+    as literal data, NOT as shell expressions. If a user previously stored
+    `CC_FLAGS="--api-key $MY_API_KEY"` expecting the shell to expand
+    $MY_API_KEY at spawn time, that pattern no longer works — the value
+    will be passed to claude as the literal string `$MY_API_KEY`. This is
+    intentional: stored shell fragments are exactly the kind of injection
+    vector this fix exists to neutralize. Users wanting dynamic secrets
+    should set them in their shell profile (e.g. `~/.zprofile`) so they
+    appear as environment variables in the spawned tmux session, not
+    embedded in stored flag strings.
+
+    SECURITY NOTE: this helper makes the shell-command string injection-safe,
+    but flag VALUES still appear in `ps aux` output because tmux runs them as
+    argv. Do not store secrets (API keys, tokens) in CC_FLAGS or
+    CC_DEFAULT_FLAGS. A future refactor to pass sensitive flags via
+    environment variables would close this gap.
+    """
+    if not s:
+        return ""
+    try:
+        return " ".join(shlex.quote(t) for t in shlex.split(s))
+    except ValueError:
+        # Malformed input — quote the whole raw string so it reaches the
+        # shell as one literal argument. claude will reject it with a
+        # clearer error than aborting spawn would give us.
+        return shlex.quote(s)
+
+
+def _get_default_model() -> str:
+    """Return the default model from defaults.env, or 'sonnet' as fallback.
+
+    Uses _extract_model_from_flags so both --model X and --model=X forms
+    are correctly recognized, and quoted multi-word values aren't truncated.
+    """
+    defaults_file = CC_HOME / "defaults.env"
+    if defaults_file.exists():
+        dcfg = parse_env_file(defaults_file)
+        model = _extract_model_from_flags(dcfg.get("CC_DEFAULT_FLAGS", ""))
+        if model:
+            return model
+    return "sonnet"
+
+
 def start_session(name: str, extra_flags: str = "", _skip_conv_id: bool = False) -> tuple[bool, str]:
     """Start a session headless (no attach). Returns (success, message)."""
     f = CC_SESSIONS / f"{name}.env"
@@ -4734,13 +5243,13 @@ def start_session(name: str, extra_flags: str = "", _skip_conv_id: bool = False)
 
     cmd = "claude"
     if default_flags:
-        cmd += f" {default_flags}"
+        cmd += f" {_shell_quote_flags(default_flags)}"
     if flags:
-        cmd += f" {flags}"
+        cmd += f" {_shell_quote_flags(flags)}"
     if session_flag:
-        cmd += f" {session_flag}"
+        cmd += f" {_shell_quote_flags(session_flag)}"
     if extra_flags:
-        cmd += f" {extra_flags}"
+        cmd += f" {_shell_quote_flags(extra_flags)}"
     # Inject --mcp-config based on CC_MCP setting (chrome or empty)
     mcp_val = cfg.get("CC_MCP", "").strip().lower()
     mcp_dir = CC_HOME  # ~/.amux
@@ -4963,6 +5472,115 @@ def send_text(name: str, text: str) -> tuple[bool, str]:
 
 
 # Allowed tmux key names for send_keys (control sequences, not arbitrary text)
+# ── Pairwise session channels ───────────────────────────────────────────────
+# A "channel" is a persistent message thread between two sessions, stored as
+# JSONL on disk. Both sessions read/write the same file. When a message is
+# posted, it's appended to the file AND PTY-injected into the recipient with
+# sender attribution + the literal reply command, so the receiving agent can
+# talk back without knowing any URL by heart.
+
+_VALID_SESSION_NAME_RE = re.compile(r'^[a-zA-Z0-9_.\-]+$')
+
+def _channel_id(a: str, b: str) -> str:
+    """Stable channel id = sorted pair joined by '__'. Order-independent."""
+    return "__".join(sorted([a, b]))
+
+def _channel_file(a: str, b: str) -> Path:
+    CC_CHANNELS.mkdir(parents=True, exist_ok=True)
+    return CC_CHANNELS / f"{_channel_id(a, b)}.jsonl"
+
+def _channel_history(a: str, b: str) -> list:
+    f = _channel_file(a, b)
+    if not f.exists():
+        return []
+    out = []
+    for line in f.read_text(encoding="utf-8").splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            out.append(json.loads(line))
+        except json.JSONDecodeError:
+            continue
+    return out
+
+def _channel_append(sender: str, recipient: str, text: str) -> dict:
+    f = _channel_file(sender, recipient)
+    msg = {"ts": int(time.time()), "from": sender, "to": recipient, "text": text}
+    with open(f, "a", encoding="utf-8") as fp:
+        fp.write(json.dumps(msg, ensure_ascii=False) + "\n")
+    return msg
+
+def _channel_list_for(session: str) -> list:
+    """Return list of channels involving `session`, newest-first."""
+    if not CC_CHANNELS.exists():
+        return []
+    out = []
+    for f in CC_CHANNELS.glob("*.jsonl"):
+        parts = f.stem.split("__")
+        if len(parts) != 2 or session not in parts:
+            continue
+        other = parts[0] if parts[1] == session else parts[1]
+        last = None
+        count = 0
+        try:
+            for line in f.read_text(encoding="utf-8").splitlines():
+                if not line.strip():
+                    continue
+                try:
+                    last = json.loads(line)
+                    count += 1
+                except json.JSONDecodeError:
+                    continue
+        except OSError:
+            continue
+        out.append({
+            "other": other,
+            "last_ts": (last or {}).get("ts", 0),
+            "last_from": (last or {}).get("from", ""),
+            "last_text": (last or {}).get("text", "")[:200],
+            "count": count,
+        })
+    out.sort(key=lambda c: c["last_ts"], reverse=True)
+    return out
+
+def _channel_deliver(sender: str, recipient: str, text: str) -> tuple[bool, str]:
+    """Wrap text with attribution + imperative reply hint and PTY-inject into recipient.
+
+    The wrapper is deliberately directive — earlier versions used a parenthetical
+    "(reply: curl ...)" hint, which some agents read as documentation rather than
+    an instruction and responded to the user in natural language instead of
+    replying through the channel. This version makes it unambiguous: you are
+    talking to another amux session, run the curl to reply.
+    """
+    safe_sender = sender if _VALID_SESSION_NAME_RE.match(sender) else "unknown"
+    wrapped = (
+        f"[amux channel message from @{safe_sender}]\n"
+        f"{text}\n"
+        f"---\n"
+        f"This is from another amux session, not from the user. "
+        f"To reply, run this bash command (do not paraphrase to the user):\n"
+        f"  curl -sk -X POST $AMUX_URL/api/channels/$AMUX_SESSION/{safe_sender}/messages "
+        f"-H 'Content-Type: application/json' -d '{{\"text\":\"YOUR REPLY HERE\"}}'"
+    )
+    return send_text(recipient, wrapped)
+
+
+def _channel_end(closer: str, other: str) -> tuple[bool, str]:
+    """End a channel: notify the other side without a reply hint, then delete the file."""
+    safe_closer = closer if _VALID_SESSION_NAME_RE.match(closer) else "unknown"
+    notice = f"[channel ended by @{safe_closer}] no reply needed — the channel has been closed."
+    if is_running(other):
+        send_text(other, notice)
+    f = _channel_file(closer, other)
+    try:
+        if f.exists():
+            f.unlink()
+    except OSError as e:
+        return False, f"could not delete channel file: {e}"
+    return True, "ended"
+
+
 _ALLOWED_TMUX_KEYS = frozenset({
     "Enter", "Escape", "Tab", "BTab", "Space", "BSpace",
     "Up", "Down", "Left", "Right", "Home", "End",
@@ -5899,13 +6517,61 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
 <meta name="mobile-web-app-capable" content="yes">
 <meta name="theme-color" content="#0d1117">
 <link rel="manifest" href="/manifest.json">
 <title>amux</title>
+<script>
+  // PostHog — frustration/issue telemetry. No-op when key unset (local/OSS).
+  // Full feature set: autocapture, session replay, rage clicks, dead clicks,
+  // heatmaps, exception capture, web vitals. Identifies user by gateway email.
+  (function() {
+    if (!window._AMUX_POSTHOG_KEY) return;
+    !function(t,e){var o,n,p,r;e.__SV||(window.posthog=e,e._i=[],e.init=function(i,s,a){function g(t,e){var o=e.split(".");2==o.length&&(t=t[o[0]],e=o[1]),t[e]=function(){t.push([e].concat(Array.prototype.slice.call(arguments,0)))}}(p=t.createElement("script")).type="text/javascript",p.crossOrigin="anonymous",p.async=!0,p.src=s.api_host.replace(".i.posthog.com","-assets.i.posthog.com")+"/static/array.js",(r=t.getElementsByTagName("script")[0]).parentNode.insertBefore(p,r);var u=e;for(void 0!==a?u=e[a]=[]:a="posthog",u.people=u.people||[],u.toString=function(t){var e="posthog";return"posthog"!==a&&(e+="."+a),t||(e+=" (stub)"),e},u.people.toString=function(){return u.toString(1)+".people (stub)"},o="init capture register register_once register_for_session unregister unregister_for_session getFeatureFlag getFeatureFlagPayload isFeatureEnabled reloadFeatureFlags updateEarlyAccessFeatureEnrollment getEarlyAccessFeatures on onFeatureFlags onSessionId getSurveys getActiveMatchingSurveys renderSurvey canRenderSurvey identify setPersonProperties group resetGroups setPersonPropertiesForFlags resetPersonPropertiesForFlags setGroupPropertiesForFlags resetGroupPropertiesForFlags reset get_distinct_id getGroups get_session_id get_session_replay_url alias set_config startSessionRecording stopSessionRecording sessionRecordingStarted captureException loadToolbar get_property getSessionProperty createPersonProfile opt_in_capturing opt_out_capturing has_opted_in_capturing has_opted_out_capturing clear_opt_in_out_capturing debug getPageViewId".split(" "),n=0;n<o.length;n++)g(u,o[n]);e._i.push([i,s,a])},e.__SV=1)}(document,window.posthog||[]);
+    posthog.init(window._AMUX_POSTHOG_KEY, {
+      api_host: window._AMUX_POSTHOG_HOST || 'https://us.i.posthog.com',
+      person_profiles: 'identified_only',
+      capture_pageview: true,
+      capture_pageleave: true,
+      autocapture: true,
+      rageclick: true,
+      capture_dead_clicks: true,
+      capture_exceptions: true,
+      capture_performance: true,
+      session_recording: {
+        maskAllInputs: false,
+        maskInputOptions: { password: true, email: false },
+        recordCrossOriginIframes: false,
+      },
+      loaded: function(ph) {
+        // Identify user from gateway-injected headers
+        var email = window._AMUX_USER_EMAIL || '';
+        var uid = window._AMUX_USER_ID || email || '';
+        if (uid) {
+          ph.identify(uid, { email: email, $email: email });
+        }
+        // Global props on every event — hostname helps distinguish cloud vs local
+        ph.register({ host: location.hostname, amux_version: '1' });
+      }
+    });
+    // Helper: safe track wrapper. Usage: amuxTrack('event_name', {prop: val})
+    window.amuxTrack = function(name, props) {
+      try { if (window.posthog && posthog.capture) posthog.capture(name, props || {}); } catch(e) {}
+    };
+    // Auto-track unhandled JS errors (beyond PostHog's exception capture)
+    window.addEventListener('error', function(e) {
+      amuxTrack('js_error', { message: e.message, src: e.filename, line: e.lineno, col: e.colno });
+    });
+    window.addEventListener('unhandledrejection', function(e) {
+      amuxTrack('promise_rejection', { reason: String(e.reason || '').slice(0, 500) });
+    });
+  })();
+  // No-op fallback so code that calls amuxTrack() works even when PostHog is disabled
+  if (!window.amuxTrack) window.amuxTrack = function() {};
+</script>
 <link rel="icon" type="image/svg+xml" href="/icon.svg">
 <link rel="icon" type="image/png" sizes="180x180" href="/icon.png">
 <link rel="apple-touch-icon" href="/icon.png">
@@ -5962,6 +6628,9 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
   body.light .gp-header { background: var(--card); }
   body.light .gp-send { background: var(--card); }
   body.light .gp-close, body.light .gp-peek-btn { color: var(--dim); }
+  body.light #gridstack-container .grid-stack-item-content { background: var(--card); }
+  body.light .gp-body { color: var(--text); }
+  body.light .gp-send .chips .chip { background: var(--bg); color: var(--text); border-color: var(--border); }
   /* File/explore overlay — hardcoded near-black backdrop + body need light overrides */
   body.light .file-overlay { background: rgba(240,242,245,0.97); }
   body.light .file-overlay-header h2 { color: var(--text); }
@@ -6343,6 +7012,14 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
   .overlay-body .md-link { color: var(--yellow); text-decoration: none; border-bottom: 1px dashed var(--yellow); cursor: pointer; }
   .overlay-body .md-link:active { color: #e8c547; }
   .overlay-status { color: var(--dim); font-size: 0.75rem; margin-top: 6px; flex-shrink: 0; text-align: center; }
+  .scroll-lock-badge {
+    position: sticky; bottom: 0; left: 0; right: 0;
+    text-align: center; padding: 6px 0;
+    background: linear-gradient(transparent, rgba(0,0,0,0.85) 40%);
+    color: var(--accent); font-size: 0.75rem; cursor: pointer;
+    z-index: 5; pointer-events: auto;
+  }
+  body.light .scroll-lock-badge { background: linear-gradient(transparent, rgba(255,255,255,0.9) 40%); }
 
   /* File preview overlay */
   .file-overlay {
@@ -6417,14 +7094,34 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
     .csv-table th.csv-rownum,.csv-table td.csv-rownum { width:36px;min-width:36px;max-width:36px;padding:10px 4px; }
   }
   @media (max-width: 600px) {
-    .file-overlay-header { flex-wrap: wrap; gap: 6px; }
-    .file-overlay-header h2 { font-size: 0.88rem; flex-basis: calc(100% - 50px); }
-    .file-overlay-header .btn { min-width: 40px; min-height: 40px; font-size: 1.1rem;
-      display: flex; align-items: center; justify-content: center; }
-    .file-view-tabs { overflow-x: auto; -webkit-overflow-scrolling: touch; scrollbar-width: none; flex-wrap: nowrap; }
+    .file-overlay-header { flex-wrap: nowrap; gap: 6px; align-items: center; }
+    .file-overlay-header h2 { font-size: 0.82rem; flex: 0 1 auto; min-width: 0; max-width: 32vw; margin-right: 4px; }
+    .file-overlay-header .btn,
+    .file-overlay-header #file-save-btn,
+    .file-overlay-header #file-download-btn {
+      min-width: 40px; min-height: 40px; font-size: 0.95rem; padding: 6px 10px;
+      display: inline-flex; align-items: center; justify-content: center; flex-shrink: 0;
+    }
+    .file-view-tabs { flex: 1 1 auto; min-width: 0; overflow-x: auto; -webkit-overflow-scrolling: touch; scrollbar-width: none; flex-wrap: nowrap; gap: 4px; padding-bottom: 2px; }
     .file-view-tabs::-webkit-scrollbar { display: none; }
-    .file-view-tab { flex-shrink: 0; min-height: 36px; padding: 6px 12px; }
+    .file-view-tab { flex-shrink: 0; min-height: 40px; padding: 6px 12px; font-size: 0.82rem; }
+    #md-search-row { padding: 8px 4px; }
+    #md-search-input { font-size: 16px; min-height: 40px; }
+    #md-search-row .btn { min-width: 40px; min-height: 40px; }
   }
+  /* Markdown in-page search */
+  #md-search-row { display: none; align-items: center; gap: 6px; padding: 6px 2px; flex-shrink: 0; }
+  #md-search-row.active { display: flex; }
+  #md-search-input {
+    flex: 1; min-width: 0; background: var(--input, var(--card));
+    border: 1px solid var(--border); border-radius: 6px; padding: 6px 10px;
+    font-size: 0.85rem; color: var(--text); outline: none;
+  }
+  #md-search-input:focus { border-color: var(--accent); }
+  #md-search-count { font-size: 0.72rem; color: var(--dim); white-space: nowrap; padding: 0 4px; min-width: 44px; text-align: right; }
+  #md-search-row .btn { padding: 4px 10px; font-size: 0.78rem; }
+  mark.md-search-hit { background: rgba(255, 215, 0, 0.35); color: inherit; border-radius: 2px; padding: 0 1px; }
+  mark.md-search-hit.current { background: #ffb000; color: #000; }
   /* Unified markdown content styling — used everywhere renderMarkdown() output appears */
   .md-content { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif; font-size: 0.88rem; line-height: 1.6; }
   .md-content > *:first-child { margin-top: 0 !important; }
@@ -6622,17 +7319,28 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
   #fc-container .fc .fc-daygrid-day-frame { min-height: 80px; }
   #fc-container .fc-subscribe-button { font-size: 0.78rem !important; padding: 4px 10px !important; }
   @media (max-width: 600px) {
-    #fc-container .fc .fc-toolbar { flex-direction: column; align-items: stretch; padding: 6px 4px; gap: 4px; }
-    #fc-container .fc .fc-toolbar-chunk { display: flex; justify-content: center; }
-    #fc-container .fc .fc-toolbar-title { font-size: 0.95rem; }
-    #fc-container .fc .fc-button { font-size: 0.78rem; padding: 6px 10px; min-height: 34px; }
-    #fc-container .fc .fc-daygrid-day-frame { min-height: 48px; }
-    #fc-container .fc .fc-daygrid-day-number { font-size: 0.75rem; padding: 3px 5px; }
-    #fc-container .fc .fc-event { font-size: 0.72rem; padding: 2px 4px; min-height: 22px; line-height: 1.3; }
+    #calendar-view { height: calc(100dvh - 60px); }
+    #fc-container { padding: 0 !important; }
+    #fc-container .fc .fc-toolbar { padding: 8px 6px; gap: 4px; flex-wrap: wrap; justify-content: space-between; }
+    #fc-container .fc .fc-toolbar-chunk { display: flex; align-items: center; gap: 4px; }
+    #fc-container .fc .fc-toolbar-chunk:first-child { order: 1; }
+    #fc-container .fc .fc-toolbar-chunk:nth-child(2) { order: 0; width: 100%; justify-content: center; }
+    #fc-container .fc .fc-toolbar-chunk:last-child { order: 2; }
+    #fc-container .fc .fc-toolbar-title { font-size: 1.05rem; font-weight: 700; }
+    #fc-container .fc .fc-button { font-size: 0.78rem; padding: 8px 12px; min-height: 38px; -webkit-tap-highlight-color: transparent; touch-action: manipulation; }
+    #fc-container .fc .fc-button-group { flex-wrap: nowrap; }
+    #fc-container .fc .fc-daygrid-day-frame { min-height: 52px; }
+    #fc-container .fc .fc-daygrid-day-number { font-size: 0.78rem; padding: 4px 6px; }
+    #fc-container .fc .fc-event { font-size: 0.75rem; padding: 3px 6px; min-height: 26px; line-height: 1.4; border-radius: 5px; }
     #fc-container .fc .fc-col-header-cell { font-size: 0.68rem; padding: 6px 0; }
-    #fc-container .fc .fc-timegrid-slot { height: 3em; }
+    #fc-container .fc .fc-timegrid-slot { height: 3.5em; }
+    #fc-container .fc .fc-timegrid-event { min-height: 28px; }
     #fc-container .fc .fc-scrollgrid { border: none; }
     #fc-container .fc .fc-subscribe-button { display: none; }
+    #fc-container .fc .fc-list-event { font-size: 0.85rem; }
+    #fc-container .fc .fc-list-event td { padding: 10px 8px; }
+    #fc-container .fc .fc-list-day-cushion { padding: 8px; font-size: 0.82rem; }
+    #fc-container .fc .fc-list-empty-cushion { font-size: 0.85rem; padding: 40px 16px; }
   }
   /* Board collapse */
   .board-col-collapse { background: none; border: none; cursor: pointer; color: var(--dim);
@@ -7121,11 +7829,34 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
     margin-bottom: -1px; -webkit-tap-highlight-color: transparent; flex-shrink: 0; white-space: nowrap; }
   .peek-tab.active { color: var(--text); border-bottom-color: var(--accent); }
   .peek-tab:hover { color: var(--text); }
+  .peek-tab-count { display: none; margin-left: 6px; font-size: 0.68rem; padding: 1px 6px;
+    border-radius: 9px; background: rgba(88,166,255,0.14); color: var(--accent);
+    border: 1px solid rgba(88,166,255,0.28); vertical-align: 1px; line-height: 1.2; }
+  .peek-tab-count.has-count { display: inline-block; }
   .peek-dir-bar { display: flex; align-items: center; gap: 8px; padding: 6px 14px;
     font-size: 0.75rem; color: var(--dim); border-bottom: 1px solid var(--border);
     flex-shrink: 0; min-width: 0; overflow: hidden; }
   .peek-dir-bar span { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 0; font-family: "SF Mono","Fira Code",monospace; }
   .peek-terminal-panel { display: flex; flex-direction: column; flex: 1; min-height: 0; }
+  /* Split pane wrapper — reuses fe-row / fe-cell-* from the Files tab */
+  .peek-split-wrap { display: flex; flex-direction: column; flex: 1; min-height: 0; }
+  .peek-split-wrap.split-active { flex-direction: row; gap: 0; }
+  .peek-split-wrap.split-active > .peek-terminal-panel { flex: 1; min-width: 0; }
+  .peek-split-wrap.split-active > .peek-split-files { display: flex; flex: 1; min-width: 0; flex-direction: column;
+    border-left: 1px solid var(--border); background: var(--bg); }
+  .peek-split-files { display: none; }
+  .peek-split-files-header { display: flex; align-items: center; gap: 6px; padding: 6px 10px;
+    border-bottom: 1px solid var(--border); flex-shrink: 0; font-size: 0.8rem; min-width: 0; }
+  .peek-split-files-header .psf-crumb { color: var(--accent); cursor: pointer; white-space: nowrap; }
+  .peek-split-files-header .psf-crumb:hover { text-decoration: underline; }
+  .peek-split-files-body { flex: 1; min-height: 0; overflow-y: auto; }
+  .peek-split-btn.active { background: var(--accent); color: #000; border-color: var(--accent); }
+  /* Split pane file content — match the file preview overlay styles */
+  #peek-split-files .file-overlay-body.markdown { background: var(--bg); color: var(--text); }
+  #peek-split-files .file-overlay-body.file-image { background: var(--bg); }
+  body.light #peek-split-files .file-overlay-body { background: #1c2128; color: #cdd9e5; }
+  body.light #peek-split-files .file-overlay-body.markdown,
+  body.light #peek-split-files .file-overlay-body.file-image { background: var(--bg); color: var(--text); }
   .peek-memory-editor { display: none; flex-direction: column; flex: 1; min-height: 0;
     padding: 14px 16px; gap: 10px; overflow: hidden; }
   .peek-memory-editor.active { display: flex; }
@@ -7368,6 +8099,74 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
   .modal-msg { font-size: 0.95rem; color: var(--text); margin-bottom: 20px; line-height: 1.5; }
   .modal-btns { display: flex; gap: 10px; justify-content: center; }
   .modal-btns .btn { min-width: 80px; }
+
+  /* Channel drawer — Slack-style DM between two sessions */
+  .channel-drawer {
+    display: none; position: fixed; inset: 0; z-index: 700;
+    background: rgba(0,0,0,0.55); align-items: stretch; justify-content: flex-end;
+  }
+  .channel-drawer.open { display: flex; }
+  .channel-panel {
+    background: var(--bg); border-left: 1px solid var(--border);
+    width: min(440px, 100vw); height: 100%;
+    display: flex; flex-direction: column;
+    box-shadow: -8px 0 24px rgba(0,0,0,0.4);
+  }
+  .channel-header {
+    display: flex; align-items: center; justify-content: space-between;
+    padding: 12px 14px; border-bottom: 1px solid var(--border);
+    background: var(--card);
+  }
+  .channel-header-title {
+    display: flex; align-items: center; gap: 8px;
+    font-size: 0.95rem; font-weight: 600; color: var(--text);
+    min-width: 0;
+  }
+  .channel-header-icon {
+    color: var(--accent); font-weight: 700; font-size: 1.05rem;
+  }
+  .channel-thread {
+    flex: 1; overflow-y: auto; padding: 14px;
+    display: flex; flex-direction: column; gap: 10px;
+    background: var(--bg);
+  }
+  .channel-msg {
+    display: flex; flex-direction: column; gap: 3px;
+    max-width: 88%;
+  }
+  .channel-msg.mine { align-self: flex-end; align-items: flex-end; }
+  .channel-msg.theirs { align-self: flex-start; align-items: flex-start; }
+  .channel-msg-meta {
+    font-size: 0.65rem; color: var(--dim); padding: 0 6px;
+  }
+  .channel-msg-bubble {
+    padding: 8px 12px; border-radius: 14px; font-size: 0.88rem;
+    line-height: 1.4; word-wrap: break-word; white-space: pre-wrap;
+    border: 1px solid var(--border); background: var(--card); color: var(--text);
+  }
+  .channel-msg.mine .channel-msg-bubble {
+    background: var(--accent); color: #fff; border-color: transparent;
+  }
+  .channel-empty {
+    color: var(--dim); font-size: 0.85rem; text-align: center;
+    padding: 30px 16px; line-height: 1.5;
+  }
+  .channel-input-row {
+    display: flex; gap: 8px; padding: 10px 12px;
+    border-top: 1px solid var(--border); background: var(--card);
+    align-items: flex-end;
+  }
+  .channel-input {
+    flex: 1; min-height: 36px; max-height: 140px; resize: none;
+    padding: 8px 10px; border: 1px solid var(--border); border-radius: 8px;
+    background: var(--bg); color: var(--text); font: inherit; font-size: 0.88rem;
+    outline: none;
+  }
+  .channel-input:focus { border-color: var(--accent); }
+  #channel-send-btn { font-size: 0.85rem; padding: 8px 16px; }
+  @media (max-width: 520px) {
+    .channel-panel { width: 100vw; border-left: none; }
+  }
 
   /* Connection status indicator — pill button */
   .conn-status {
@@ -9004,14 +9803,7 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
     <button id="notif-btn" onclick="toggleNotifications()" title="Session notifications" style="background:none;border:none;cursor:pointer;padding:2px 4px;font-size:1rem;opacity:0.5;line-height:1;" aria-label="Toggle notifications">&#x1F514;</button>
   </div>
   <div style="display:flex;gap:8px;align-items:center;">
-    <div id="org-switcher-wrap" style="display:none;position:relative;">
-      <button id="org-switcher-btn" onclick="event.stopPropagation();toggleOrgDropdown()"
-        style="background:var(--bg2);border:1px solid var(--border);border-radius:6px;padding:3px 10px 3px 8px;font-size:0.72rem;color:var(--fg);cursor:pointer;display:flex;align-items:center;gap:5px;white-space:nowrap;max-width:200px;overflow:hidden;">
-        <span id="org-switcher-label" style="overflow:hidden;text-overflow:ellipsis;flex:1;">My workspace</span>
-        <span style="flex-shrink:0;">&#x25BE;</span>
-      </button>
-      <div id="org-switcher-menu" style="display:none;position:absolute;right:0;top:calc(100% + 4px);background:var(--bg2);border:1px solid var(--border);border-radius:8px;min-width:220px;z-index:500;box-shadow:0 4px 16px rgba(0,0,0,0.4);padding:4px;"></div>
-    </div>
+    <div id="org-switcher-wrap" style="display:none;"></div>
     <div class="active-wrap">
       <button class="btn-active" id="active-btn" onclick="event.stopPropagation();toggleActiveDropdown()">
         <span class="active-dot"></span>
@@ -9053,7 +9845,25 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
               <span class="theme-track"><span class="theme-thumb"></span></span>
             </label>
           </div>
-          <div style="font-size:0.68rem;color:var(--dim);margin-top:3px;">Send /compact when context &lt; 20%</div>
+          <div style="font-size:0.68rem;color:var(--dim);margin-top:3px;">Send /compact when context &lt; 50%</div>
+        </div>
+        <div class="settings-sep"></div>
+        <div class="settings-section">
+          <div class="settings-section-label">Default Model</div>
+          <div style="font-size:0.72rem;color:var(--dim);margin-bottom:6px;">Applied to new sessions without an explicit model</div>
+          <select id="settings-default-model" onchange="saveDefaultModel(this.value)"
+            style="width:100%;font-size:0.85rem;padding:5px 8px;border-radius:6px;border:1px solid var(--border);background:var(--card);color:var(--fg);">
+            <option value="sonnet">sonnet</option>
+            <option value="opus">opus</option>
+            <option value="haiku">haiku</option>
+            <option value="claude-opus-4-7">claude-opus-4-7</option>
+            <option value="claude-opus-4-7[1m]">claude-opus-4-7 [1M]</option>
+            <option value="claude-opus-4-6">claude-opus-4-6</option>
+            <option value="claude-opus-4-6[1m]">claude-opus-4-6 [1M]</option>
+            <option value="claude-sonnet-4-6">claude-sonnet-4-6</option>
+            <option value="claude-sonnet-4-6[1m]">claude-sonnet-4-6 [1M]</option>
+            <option value="claude-haiku-4-5-20251001">claude-haiku-4-5-20251001</option>
+          </select>
         </div>
         <div class="settings-sep"></div>
         <div class="settings-section">
@@ -9120,6 +9930,11 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
               onblur="saveOrgName(this.value)" onkeydown="if(event.key==='Enter')this.blur()">
           </div>
           <div id="settings-members-list" style="font-size:0.78rem;color:var(--dim);"></div>
+        </div>
+        <div class="settings-sep" id="settings-workspace-sep" style="display:none;"></div>
+        <div class="settings-section" id="settings-workspace-section" style="display:none;">
+          <div class="settings-section-label">Workspace</div>
+          <div id="settings-workspace-list" style="display:flex;flex-direction:column;gap:4px;"></div>
         </div>
         <div class="settings-sep"></div>
         <div class="settings-section" id="settings-connections-section">
@@ -10151,7 +10966,7 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
         <button class="peek-nav-btn" onclick="peekSearchNext()" title="Next match (Enter)">&#x2193;</button>
         <button class="search-clear" onclick="event.stopPropagation();clearPeekSearch()">&#x2715;</button>
       </div>
-      <button class="btn" id="peek-explore-btn" onclick="openExplore(peekSessionDir,peekSession)" title="Browse files">&#x1F4C2;</button>
+      <button class="btn peek-split-btn" id="peek-split-toggle" onclick="togglePeekSplit()" title="Split: file browser">&#x1F4C2;</button>
       <button class="btn" onclick="togglePeekFocus()" id="peek-focus-btn" title="Focus mode — hide controls">&#x25B4;</button>
       <button class="btn" onclick="closePeek()">Close</button>
     </div>
@@ -10168,8 +10983,8 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
     <button class="peek-tab" id="peek-tab-issues" onclick="setPeekTab('issues')">Issues</button>
     <button class="peek-tab" id="peek-tab-git" onclick="setPeekTab('git')">Worktree</button>
     <button class="peek-tab" id="peek-tab-commits" onclick="setPeekTab('commits')">Commits</button>
-    <button class="peek-tab" id="peek-tab-schedules" onclick="setPeekTab('schedules')">Schedules</button>
-    <button class="peek-tab" id="peek-tab-notes" onclick="setPeekTab('notes')">Notes</button>
+    <button class="peek-tab" id="peek-tab-schedules" onclick="setPeekTab('schedules')">Schedules<span class="peek-tab-count" id="peek-tab-schedules-count"></span></button>
+    <button class="peek-tab" id="peek-tab-notes" onclick="setPeekTab('notes')">Notes<span class="peek-tab-count" id="peek-tab-notes-count"></span></button>
   </div>
   <!-- Working directory bar -->
   <div class="peek-dir-bar">
@@ -10178,6 +10993,8 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
     <span class="card-dir-edit" onclick="peekSessionDir&&_copyFileDeeplink(peekSessionDir)" title="Copy link to this directory" style="opacity:0.6;font-size:0.85rem;">&#x1F517;</span>
     <span class="card-dir-edit" id="peek-dir-edit" onclick="editField(peekSession,'dir',peekSessionDir)" title="Change directory">&#x270E;</span>
   </div>
+  <!-- Split wrap: terminal + optional file browser side-by-side -->
+  <div id="peek-split-wrap" class="peek-split-wrap">
   <!-- Terminal panel -->
   <div id="peek-terminal-panel" class="peek-terminal-panel">
     <div style="position:relative;flex:1;min-height:0;">
@@ -10211,6 +11028,15 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
       <div class="peek-drag-hint" style="display:none;">&#128206; Drop to attach</div>
     </div>
   </div>
+  <!-- Split files panel -->
+  <div id="peek-split-files" class="peek-split-files">
+    <div class="peek-split-files-header">
+      <div id="psf-breadcrumb" style="flex:1;min-width:0;overflow:hidden;white-space:nowrap;text-overflow:ellipsis;"></div>
+      <button class="btn" style="font-size:0.7rem;padding:2px 8px;" onclick="togglePeekSplit()">&#x2715;</button>
+    </div>
+    <div id="psf-body" class="peek-split-files-body"></div>
+  </div>
+  </div><!-- /peek-split-wrap -->
   <!-- Issues panel (board issues for this session) -->
   <div id="peek-issues-panel" class="peek-tasks-panel">
     <div class="peek-tasks-add" style="gap:10px;">
@@ -10354,12 +11180,16 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
       <div id="edit-ac-list" class="ac-list"></div>
     </div>
     <select id="edit-select" style="display:none;" onchange="submitEdit()">
-      <option value="">Default (sonnet)</option>
+      <option value="" id="model-default-opt">Default</option>
       <option value="opus">opus</option>
       <option value="sonnet">sonnet</option>
       <option value="haiku">haiku</option>
+      <option value="claude-opus-4-7">claude-opus-4-7</option>
+      <option value="claude-opus-4-7[1m]">claude-opus-4-7 [1M]</option>
       <option value="claude-opus-4-6">claude-opus-4-6</option>
+      <option value="claude-opus-4-6[1m]">claude-opus-4-6 [1M]</option>
       <option value="claude-sonnet-4-6">claude-sonnet-4-6</option>
+      <option value="claude-sonnet-4-6[1m]">claude-sonnet-4-6 [1M]</option>
       <option value="claude-haiku-4-5-20251001">claude-haiku-4-5-20251001</option>
     </select>
     <div class="edit-actions">
@@ -10498,6 +11328,28 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
   </div>
 </div>
 
+<!-- Channel drawer (session-to-session DM) -->
+<div id="channel-drawer" class="channel-drawer" onmousedown="this.dataset.bdMousedown=event.target===this?'1':''" onclick="if(event.target===this&&this.dataset.bdMousedown==='1'&&!this.dataset.justOpened)channelClose();this.dataset.bdMousedown=''">
+  <div class="channel-panel" role="dialog" aria-label="Session channel">
+    <div class="channel-header">
+      <div class="channel-header-title">
+        <span class="channel-header-icon">#</span>
+        <span id="channel-header-pair">channel</span>
+      </div>
+      <div style="display:flex;gap:6px;">
+        <button class="btn" onclick="channelEnd()" aria-label="End channel" title="End channel and clear history" style="font-size:0.78rem;padding:4px 10px;color:var(--red,#f85149);">End</button>
+        <button class="btn" onclick="channelClose()" aria-label="Close" style="font-size:1rem;padding:4px 10px;">&#x2715;</button>
+      </div>
+    </div>
+    <div id="channel-thread" class="channel-thread"></div>
+    <form class="channel-input-row" onsubmit="event.preventDefault(); channelSend();">
+      <textarea id="channel-input" class="channel-input" placeholder="Message..." rows="1"
+        onkeydown="if(event.key==='Enter'&&!event.shiftKey){event.preventDefault();channelSend();}"></textarea>
+      <button type="submit" class="btn primary" id="channel-send-btn">Send</button>
+    </form>
+  </div>
+</div>
+
 <!-- Confirm / alert modal -->
 <div id="modal-backdrop" class="modal-backdrop" onclick="_modalBgClick(event)">
   <div class="modal-box">
@@ -10550,12 +11402,22 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
       <button class="file-view-tab" id="file-tab-edit" onclick="setFileViewMode('edit')" style="display:none;">Edit</button>
       <button class="file-view-tab" id="file-tab-raw" onclick="setFileViewMode('raw')">Raw</button>
       <button class="file-view-tab" id="file-tab-teleprompter" onclick="_filesOpenTeleprompter()" title="Teleprompter mode" style="display:none;">&#x25B6; Teleprompter</button>
+      <button class="file-view-tab" id="file-tab-search" onclick="_mdSearchToggle()" title="Find in markdown" style="display:none;">&#x1F50D; Find</button>
       <button class="file-view-tab" id="file-tab-copy" onclick="copyFileContent()" title="Copy to clipboard">Copy</button>
       <button class="file-view-tab" id="file-tab-link" onclick="_copyFileDeeplink(_fileData&&_fileData.path||'')" title="Copy deep link">Link</button>
     </div>
     <button id="file-save-btn" onclick="_fileSave()" style="display:none;">Save</button>
     <button id="file-download-btn" onclick="_fileDownload()" style="display:none;font-size:0.72rem;padding:3px 10px;border:1px solid var(--border);border-radius:6px;color:var(--accent);background:transparent;cursor:pointer;white-space:nowrap;flex-shrink:0;">&#x2B07; Download</button>
     <button class="btn" onclick="closeFilePreview()" style="flex-shrink:0;">&#x2715;</button>
+  </div>
+  <div id="md-search-row">
+    <input id="md-search-input" type="search" placeholder="Find in document…" autocomplete="off"
+      oninput="_mdSearchApply(this.value)"
+      onkeydown="if(event.key==='Enter'){event.preventDefault();_mdSearchStep(event.shiftKey?-1:1);}else if(event.key==='Escape'){event.preventDefault();_mdSearchClose();}">
+    <span id="md-search-count"></span>
+    <button class="btn" onclick="_mdSearchStep(-1)" title="Previous match">&#x2191;</button>
+    <button class="btn" onclick="_mdSearchStep(1)" title="Next match">&#x2193;</button>
+    <button class="btn" onclick="_mdSearchClose()" title="Close search">&#x2715;</button>
   </div>
   <div id="file-body" class="file-overlay-body"></div>
   <div id="file-edit-wrap"><textarea id="file-edit-ta" class="file-edit-ta" spellcheck="false" onkeydown="if((event.ctrlKey||event.metaKey)&&event.key==='s'){event.preventDefault();_fileSave();}"></textarea></div>
@@ -10579,6 +11441,30 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
 </div>
 
 <script>
+// ── Auth token injection (must be first — before any fetch calls) ──
+const _authToken = window._AMUX_AUTH_TOKEN || '';
+function _authHeaders(headers) {
+  const h = headers ? { ...headers } : {};
+  if (_authToken) h['Authorization'] = 'Bearer ' + _authToken;
+  return h;
+}
+function _authUrl(url) {
+  if (!_authToken) return url;
+  const sep = url.includes('?') ? '&' : '?';
+  return url + sep + '_token=' + encodeURIComponent(_authToken);
+}
+if (_authToken) {
+  const _origFetchForAuth = window.fetch;
+  window.fetch = function(input, init) {
+    const url = typeof input === 'string' ? input : (input instanceof Request ? input.url : '');
+    if (url.startsWith('/') || url.startsWith(location.origin)) {
+      init = init || {};
+      init.headers = _authHeaders(init.headers instanceof Headers ? Object.fromEntries(init.headers) : init.headers);
+    }
+    return _origFetchForAuth.call(this, input, init);
+  };
+}
+
 // ── Theme ──
 function _applyTheme(light) {
   document.body.classList.toggle('light', light);
@@ -10834,45 +11720,46 @@ async function _loadGatewayOrgs() {
 }
 
 function _renderOrgSwitcher() {
-  const wrap = document.getElementById('org-switcher-wrap');
-  const label = document.getElementById('org-switcher-label');
-  const menu = document.getElementById('org-switcher-menu');
   const orgBanner = document.getElementById('org-banner');
   const orgBannerText = document.getElementById('org-banner-text');
   const inviteBanner = document.getElementById('org-invite-banner');
   const inviteBannerText = document.getElementById('org-invite-banner-text');
-  if (!wrap || !_gatewayOrgs.length) return;
+  const wsSection = document.getElementById('settings-workspace-section');
+  const wsSep = document.getElementById('settings-workspace-sep');
+  const wsList = document.getElementById('settings-workspace-list');
+  if (!_gatewayOrgs.length) return;
 
-  const otherOrgs = _gatewayOrgs.filter(o => !o.is_own);
-  const cookieOrg = document.cookie.split(';').map(c => c.trim())
-    .find(c => c.startsWith('amux_org='))?.split('=')[1] || '';
-  const current = _gatewayOrgs.find(o => o.id === cookieOrg) || _gatewayOrgs.find(o => o.is_own);
-  const inOtherOrg = current && !current.is_own;
+  const otherOrgs = _gatewayOrgs.filter(o => !o.is_personal);
+  const current = _gatewayOrgs.find(o => o.active) || _gatewayOrgs.find(o => o.is_personal);
+  const inOtherOrg = current && !current.is_personal;
 
-  // Hide switcher if only own workspace
-  if (_gatewayOrgs.length <= 1) { wrap.style.display = 'none'; return; }
-  wrap.style.display = '';
-
-  // Highlight button when viewing another workspace
-  const btn = document.getElementById('org-switcher-btn');
-  if (btn) {
-    if (inOtherOrg) {
-      btn.style.borderColor = '#4338ca';
-      btn.style.background = '#1e1b4b';
-      btn.style.color = '#c7d2fe';
-    } else {
-      btn.style.borderColor = '';
-      btn.style.background = '';
-      btn.style.color = '';
-    }
+  // Show workspace section in settings if user has access to multiple orgs
+  if (wsSection && wsSep && wsList && _gatewayOrgs.length > 1) {
+    wsSection.style.display = '';
+    wsSep.style.display = '';
+    wsList.innerHTML = _gatewayOrgs.map(o => {
+      const isCurrent = current && o.id === current.id;
+      const label = o.is_personal ? 'My workspace' : (o.name || o.id);
+      return `<div onclick="_switchOrg('${esc(o.id)}');closeSettings();" style="padding:8px 12px;border-radius:6px;cursor:pointer;font-size:0.82rem;${isCurrent ? 'background:rgba(56,139,253,0.12);font-weight:600;border:1px solid var(--accent);' : 'border:1px solid var(--border);'}display:flex;justify-content:space-between;align-items:center;-webkit-tap-highlight-color:transparent;" onmouseover="if(!${isCurrent})this.style.background='var(--bg3)'" onmouseout="if(!${isCurrent})this.style.background=''">
+        <span style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${esc(label)}</span>
+        ${isCurrent ? '<span style="color:var(--accent);font-size:0.65rem;">current</span>' : ''}
+      </div>`;
+    }).join('');
+  } else if (wsSection && wsSep) {
+    wsSection.style.display = 'none';
+    wsSep.style.display = 'none';
   }
 
-  if (label) label.textContent = inOtherOrg ? (current.email || current.id) : 'My workspace';
+  // Tint settings gear when viewing another workspace
+  const settingsBtn = document.getElementById('settings-btn');
+  if (settingsBtn) {
+    settingsBtn.style.color = inOtherOrg ? '#818cf8' : '';
+  }
 
   // Banner: viewing another workspace
   if (orgBanner && orgBannerText) {
     if (inOtherOrg) {
-      orgBannerText.textContent = `Viewing ${current.email || current.id}'s workspace`;
+      orgBannerText.textContent = `Viewing ${current.name || current.id}'s workspace`;
       orgBanner.style.display = '';
     } else {
       orgBanner.style.display = 'none';
@@ -10883,11 +11770,11 @@ function _renderOrgSwitcher() {
   const dismissed = JSON.parse(localStorage.getItem('amux_dismissed_org_banners') || '[]');
   const undismissedOrgs = otherOrgs.filter(o => !dismissed.includes(o.id));
   if (inviteBanner && inviteBannerText && !inOtherOrg && undismissedOrgs.length > 0) {
-    const names = undismissedOrgs.map(o => o.email || o.id).join(', ');
+    const names = undismissedOrgs.map(o => o.name || o.id).join(', ');
     inviteBannerText.innerHTML = `You have access to: <strong>${esc(names)}</strong> &nbsp;`;
     undismissedOrgs.forEach(o => {
       const btn = document.createElement('button');
-      btn.textContent = `Switch to ${o.email || o.id}`;
+      btn.textContent = `Switch to ${o.name || o.id}`;
       btn.style.cssText = 'background:#16a34a;color:#fff;border:none;border-radius:4px;padding:2px 10px;font-size:0.78rem;cursor:pointer;margin-left:4px;';
       btn.onclick = () => _switchOrg(o.id);
       inviteBannerText.appendChild(btn);
@@ -10896,31 +11783,9 @@ function _renderOrgSwitcher() {
   } else if (inviteBanner) {
     inviteBanner.style.display = 'none';
   }
-
-  if (menu) {
-    menu.innerHTML = _gatewayOrgs.map(o => {
-      const isCurrent = current && o.id === current.id;
-      return `<div onclick="_switchOrg('${esc(o.id)}')" style="padding:8px 12px;border-radius:6px;cursor:pointer;font-size:0.8rem;${isCurrent ? 'background:var(--accent10);font-weight:600;' : ''}display:flex;justify-content:space-between;align-items:center;" onmouseover="this.style.background='var(--bg3)'" onmouseout="this.style.background='${isCurrent ? 'var(--accent10)' : ''}'">
-        <span style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${esc(o.is_own ? 'My workspace' : (o.email || o.id))}</span>
-        ${isCurrent ? '<span style="color:var(--accent);font-size:0.65rem;">current</span>' : ''}
-      </div>`;
-    }).join('');
-  }
-}
-
-function toggleOrgDropdown() {
-  const menu = document.getElementById('org-switcher-menu');
-  if (!menu) return;
-  const open = menu.style.display === 'none' || !menu.style.display;
-  menu.style.display = open ? '' : 'none';
-  if (open) {
-    const close = () => { menu.style.display = 'none'; document.removeEventListener('click', close); };
-    setTimeout(() => document.addEventListener('click', close), 0);
-  }
 }
 
 async function _switchOrg(orgId) {
-  document.getElementById('org-switcher-menu').style.display = 'none';
   await fetch('/api/gateway/switch-org', {
     method: 'POST',
     headers: {'Content-Type': 'application/json'},
@@ -10935,7 +11800,7 @@ function _dismissOrgBanner() {
   if (banner) banner.style.display = 'none';
   // Store dismissed org IDs so banner stays closed
   const dismissed = JSON.parse(localStorage.getItem('amux_dismissed_org_banners') || '[]');
-  (_gatewayOrgs || []).filter(o => !o.is_own).forEach(o => {
+  (_gatewayOrgs || []).filter(o => !o.is_personal).forEach(o => {
     if (!dismissed.includes(o.id)) dismissed.push(o.id);
   });
   localStorage.setItem('amux_dismissed_org_banners', JSON.stringify(dismissed));
@@ -11394,30 +12259,6 @@ document.addEventListener('visibilitychange', () => {
   }
 });
 
-// ── Auth token injection ──
-const _authToken = window._AMUX_AUTH_TOKEN || '';
-function _authHeaders(headers) {
-  const h = headers ? { ...headers } : {};
-  if (_authToken) h['Authorization'] = 'Bearer ' + _authToken;
-  return h;
-}
-function _authUrl(url) {
-  if (!_authToken) return url;
-  const sep = url.includes('?') ? '&' : '?';
-  return url + sep + '_token=' + encodeURIComponent(_authToken);
-}
-if (_authToken) {
-  const _origFetchForAuth = window.fetch;
-  window.fetch = function(input, init) {
-    const url = typeof input === 'string' ? input : (input instanceof Request ? input.url : '');
-    if (url.startsWith('/') || url.startsWith(location.origin)) {
-      init = init || {};
-      init.headers = _authHeaders(init.headers instanceof Headers ? Object.fromEntries(init.headers) : init.headers);
-    }
-    return _origFetchForAuth.call(this, input, init);
-  };
-}
-
 // apiCall — wraps mutation fetches; queues when offline or server unreachable
 async function apiCall(url, options) {
   if (!online) {
@@ -11430,6 +12271,7 @@ async function apiCall(url, options) {
     const r = await fetch(url, options);
     if (!r.ok) {
       showToast('Error: ' + r.status);
+      amuxTrack('api_error', { url: url.split('?')[0], status: r.status, method: options.method || 'GET' });
       return null;
     }
     consecutiveFailures = 0;
@@ -11439,6 +12281,7 @@ async function apiCall(url, options) {
     console.error('apiCall failed:', e);
     consecutiveFailures++;
     if (consecutiveFailures >= 2) setOnline(false);
+    amuxTrack('api_unreachable', { url: url.split('?')[0], err: String(e).slice(0, 200) });
     _queueOp(url, options);
     return null;
   }
@@ -11560,12 +12403,14 @@ function _checkSessionTransitions(newData) {
     if (statusChanged) {
       if (s.status === 'waiting') {
         _fireSessionNotif(s.name, s.name + ' needs input', s.task_name || 'Waiting for a response');
+        amuxTrack('session_waiting', { session: s.name, task: s.task_name || '', auto_continue: !!s.auto_continue });
       } else if (s.status === 'active' && prev.status !== 'active') {
         _fireSessionNotif(s.name, s.name + ' started working', s.task_name || '');
       }
     }
     if (stoppedNow && prev.status !== '') {
       _fireSessionNotif(s.name, s.name + ' stopped', '');
+      amuxTrack('session_stopped', { session: s.name, prev_status: prev.status });
     }
     _prevSessionState[s.name] = { status: s.status, running: s.running };
   }
@@ -11948,16 +12793,12 @@ function _renderBranchBadge(name, sessionBranch) {
 async function _fetchGitBranches(sess) {
   const withDir = (sess || []).filter(s => s.dir);
   if (!withDir.length) return;
-  const results = await Promise.allSettled(
-    withDir.map(s =>
-      fetch(API + '/api/sessions/' + encodeURIComponent(s.name) + '/git')
-        .then(r => r.json()).then(d => ({name: s.name, ...d}))
-    )
-  );
-  const newInfo = {};
-  for (const r of results) {
-    if (r.status === 'fulfilled' && r.value.name) newInfo[r.value.name] = r.value;
-  }
+  // Single bulk request — server handles concurrency control
+  let newInfo = {};
+  try {
+    const r = await fetch(API + '/api/sessions-git');
+    newInfo = await r.json();
+  } catch(e) { console.error('bulk git fetch:', e); return; }
   // Detect conflicts: two sessions on same branch in same repo
   // Use session's CC_BRANCH if set (sessions have their own branch even if repo is on main)
   const byKey = {};
@@ -12164,8 +13005,8 @@ let hiddenTabs = (function() {
     const s = localStorage.getItem('amux_hidden_tabs');
     if (s !== null) return new Set(JSON.parse(s));
   } catch(e) {}
-  // Default visible tabs: sessions, files, scheduler, board, workspace, notes
-  return new Set(['logs','browser','metrics','crm','torrents','terminal']);
+  // Default visible tabs: sessions, files, scheduler, board, workspace, notes, browser
+  return new Set(['logs','metrics','crm','torrents','terminal']);
 })();
 
 let tabOrder = (function() {
@@ -12448,6 +13289,12 @@ function closeAddMenu() {
   if (!addMenuOpen) return;
   document.getElementById('add-menu').classList.remove('open');
   addMenuOpen = false;
+}
+
+// ── Set default model label from server config ──
+if (window._AMUX_DEFAULT_MODEL) {
+  const defOpt = document.getElementById('model-default-opt');
+  if (defOpt) defOpt.textContent = 'Default (' + window._AMUX_DEFAULT_MODEL + ')';
 }
 
 // ── Edit modal ──
@@ -12845,6 +13692,7 @@ async function doSend(name, text) {
   showSendingIndicator();
   // Slash commands (e.g. /clear, /compact) must be sent verbatim — no timestamp prefix
   const isSlashCmd = /^\/[a-z]/.test(text.trim());
+  amuxTrack('message_sent', { session: name, is_slash: isSlashCmd, cmd: isSlashCmd ? text.trim().split(/\s+/)[0] : null, length: text.length });
   let payload = text;
   if (!isSlashCmd) {
     const now = new Date();
@@ -12918,16 +13766,19 @@ async function sendFromInput(name) {
   const inp = document.getElementById('input-' + name);
   if (!inp || !inp.value.trim()) return;
   const text = inp.value.trim();
+  const routed = _atRoute(text);
+  if (routed) {
+    // @mention opens a persistent channel drawer instead of fire-and-forget routing.
+    // The message is pre-filled so the user can review/edit before sending.
+    inp.value = '';
+    inp.style.height = 'auto';
+    channelOpen(name, routed.target, routed.message);
+    return;
+  }
   cmdHistoryAdd(text);
   inp.value = '';
   inp.style.height = 'auto';
-  const routed = _atRoute(text);
-  if (routed) {
-    await doSend(routed.target, routed.message);
-    showToast('Sent to @' + routed.target);
-  } else {
-    await doSend(name, _expandAtMentions(text));
-  }
+  await doSend(name, _expandAtMentions(text));
   inp.style.borderColor = 'var(--green)';
   setTimeout(() => { inp.style.borderColor = ''; }, 400);
 }
@@ -13397,6 +14248,32 @@ function renderPeekIssues() {
   }).join('');
 }
 // ── Peek Schedules (scheduler tasks for this session) ────────────────────────
+async function _peekUpdateTabCounts() {
+  if (!peekSession) return;
+  const sess = peekSession;
+  const setCount = (id, n) => {
+    const el = document.getElementById(id);
+    if (!el) return;
+    if (n > 0) { el.textContent = n; el.classList.add('has-count'); }
+    else { el.textContent = ''; el.classList.remove('has-count'); }
+  };
+  try {
+    const r = await fetch(API + '/api/schedules');
+    if (peekSession !== sess) return;
+    const all = await r.json();
+    const n = all.filter(s => s.session === sess && !s.deleted).length;
+    setCount('peek-tab-schedules-count', n);
+  } catch(e) {}
+  try {
+    const r = await fetch(API + '/api/notes');
+    if (peekSession !== sess) return;
+    const all = await r.json();
+    const folder = '_sessions/' + sess + '/';
+    const n = all.filter(x => x.path && x.path.startsWith(folder)).length;
+    setCount('peek-tab-notes-count', n);
+  } catch(e) {}
+}
+
 async function _peekLoadSchedules() {
   const list = document.getElementById('peek-schedules-list');
   const count = document.getElementById('peek-schedules-count');
@@ -13407,6 +14284,11 @@ async function _peekLoadSchedules() {
     const all = await r.json();
     const items = all.filter(s => s.session === peekSession && !s.deleted);
     count.textContent = items.length ? items.length + ' schedule' + (items.length === 1 ? '' : 's') : '';
+    const tabCount = document.getElementById('peek-tab-schedules-count');
+    if (tabCount) {
+      if (items.length > 0) { tabCount.textContent = items.length; tabCount.classList.add('has-count'); }
+      else { tabCount.textContent = ''; tabCount.classList.remove('has-count'); }
+    }
     if (!items.length) {
       list.innerHTML = '<div style="color:var(--dim);font-size:0.85rem;padding:12px 4px;">No schedules for this session.</div>';
       return;
@@ -13514,6 +14396,11 @@ async function _peekNotesLoad() {
     const folder = _peekNotesFolder() + '/';
     _peekNotesAll = all.filter(n => n.path.startsWith(folder));
     _peekNotesRenderList(_peekNotesAll);
+    const tabCount = document.getElementById('peek-tab-notes-count');
+    if (tabCount) {
+      if (_peekNotesAll.length > 0) { tabCount.textContent = _peekNotesAll.length; tabCount.classList.add('has-count'); }
+      else { tabCount.textContent = ''; tabCount.classList.remove('has-count'); }
+    }
     // Auto-open first note if none active
     if (!_peekNotesActive && _peekNotesAll.length) {
       _peekNotesOpen(_peekNotesAll[0].path);
@@ -13692,6 +14579,7 @@ async function _peekNotesNew() {
   await _peekNotesOpen(filename);
   const ti = document.getElementById('peek-notes-title');
   if (ti) { ti.focus(); ti.select(); }
+  _peekUpdateTabCounts();
 }
 
 function _peekNotesSaveDebounce() {
@@ -13756,6 +14644,7 @@ async function _peekNotesDelete() {
     _peekNotesShowEmpty();
     _peekNotesRenderList([]);
   }
+  _peekUpdateTabCounts();
 }
 
 function _peekNotesSwitchMode(mode) {
@@ -13948,6 +14837,7 @@ function openPeek(name, opts) {
   if (peekTimer) { clearInterval(peekTimer); peekTimer = null; }
   clearPeekFiles();  // clear any stale attachments from previous peek
   peekSession = name;
+  _peekScrollLocked = false;
   peekSessionDir = (sessions.find(s => s.name === name) || {}).dir || '';
   // Reset to terminal tab
   _peekGitData = null;
@@ -13982,6 +14872,12 @@ function openPeek(name, opts) {
   document.getElementById('peek-title').textContent = name;
   updatePeekStatus();
   document.getElementById('peek-body').innerHTML = '<span style="color:var(--dim)">Loading...</span>';
+  // Reset tab badges; will be repopulated by _peekUpdateTabCounts
+  ['peek-tab-schedules-count','peek-tab-notes-count'].forEach(id => {
+    const el = document.getElementById(id);
+    if (el) { el.textContent = ''; el.classList.remove('has-count'); }
+  });
+  _peekUpdateTabCounts();
   updateConnectionStatus();
   const peekOv = document.getElementById('peek-overlay');
   peekOv.classList.add('active');
@@ -14004,6 +14900,7 @@ function openPeek(name, opts) {
   });
   refreshPeek();
   peekTimer = setInterval(refreshPeek, 3000);
+  _savePeekState();
 }
 
 function copyPeekContent() {
@@ -14032,11 +14929,144 @@ function closePeek() {
   peekSearchQuery = '';
   lastPeekHTML = '';
   clearPeekFiles();
+  // Close split pane if open
+  const splitWrap = document.getElementById('peek-split-wrap');
+  if (splitWrap) splitWrap.classList.remove('split-active');
+  const splitBtn = document.getElementById('peek-split-toggle');
+  if (splitBtn) splitBtn.classList.remove('active');
   const ov = document.getElementById('peek-overlay');
   ov.classList.remove('active', 'vv-compact', 'peek-focus');
   ov.style.height = '';
   ov.style.top = '';
   if (peekTimer) { clearInterval(peekTimer); peekTimer = null; }
+  sessionStorage.removeItem('peekState');
+}
+
+// ── Peek split pane (file browser) ──
+let _peekSplitPath = null;
+
+function _savePeekState() {
+  if (peekSession) {
+    const state = { session: peekSession };
+    const wrap = document.getElementById('peek-split-wrap');
+    if (wrap && wrap.classList.contains('split-active')) {
+      state.split = true;
+      state.splitPath = _peekSplitPath || peekSessionDir || '/';
+    }
+    sessionStorage.setItem('peekState', JSON.stringify(state));
+  } else {
+    sessionStorage.removeItem('peekState');
+  }
+}
+
+function togglePeekSplit() {
+  // On mobile, open full-screen Files view instead of split pane
+  if (window.innerWidth <= 600) {
+    openExplore(peekSessionDir, peekSession);
+    return;
+  }
+  const wrap = document.getElementById('peek-split-wrap');
+  const btn = document.getElementById('peek-split-toggle');
+  const active = wrap.classList.toggle('split-active');
+  if (btn) btn.classList.toggle('active', active);
+  if (active) {
+    _peekSplitPath = peekSessionDir || '/';
+    _psfLoad(_peekSplitPath);
+  }
+  _savePeekState();
+}
+
+async function _psfLoad(dirPath) {
+  _peekSplitPath = dirPath;
+  _savePeekState();
+  const body = document.getElementById('psf-body');
+  const bc = document.getElementById('psf-breadcrumb');
+  // Breadcrumb
+  const parts = dirPath.split('/').filter(Boolean);
+  let crumbHtml = '<span class="psf-crumb" onclick="_psfLoad(\'/\')">/</span>';
+  let cum = '';
+  for (const part of parts) {
+    cum += '/' + part;
+    const cp = cum;
+    crumbHtml += '<span style="color:var(--dim)"> › </span><span class="psf-crumb" onclick="_psfLoad(\'' + cp.replace(/'/g, "\\'") + '\')">' + esc(part) + '</span>';
+  }
+  bc.innerHTML = crumbHtml;
+  body.innerHTML = '<div style="padding:12px;color:var(--dim)">Loading...</div>';
+  try {
+    const r = await fetch(API + '/api/ls?path=' + encodeURIComponent(dirPath));
+    const data = await r.json();
+    if (data.error) { body.innerHTML = '<div style="padding:12px;color:var(--dim)">' + esc(data.error) + '</div>'; return; }
+    body.innerHTML = '';
+    // Parent row — uses same fe-back-row class as Files tab
+    if (data.parent && data.parent !== data.path) {
+      const back = document.createElement('div');
+      back.className = 'fe-back-row';
+      back.innerHTML = `<div class="fe-cell-name"><svg width="14" height="14" viewBox="0 0 14 14" fill="none"><path d="M9 11 5 7l4-4" stroke="var(--dim)" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg><span style="color:var(--dim);font-size:0.83rem;">.. (parent)</span></div><div></div><div></div><div></div>`;
+      back.onclick = () => _psfLoad(data.parent);
+      body.appendChild(back);
+    }
+    for (const entry of data.entries) {
+      const entryPath = dirPath.replace(/\/$/, '') + '/' + entry.name;
+      const row = document.createElement('div');
+      row.className = 'fe-row' + (entry.type === 'dir' ? ' fe-dir' : '');
+      const icon = _fileTypeIcon(entry.name, entry.type);
+      const sizeStr = entry.type === 'dir' ? '' : _fmtSize(entry.size);
+      const dateStr = entry.modified ? timeAgo(entry.modified) : '';
+      const slash = entry.type === 'dir' ? '<span style="color:var(--dim)">/</span>' : '';
+      row.innerHTML =
+        `<div class="fe-cell-name">${icon}<span>${esc(entry.name)}${slash}</span></div>` +
+        `<div class="fe-cell-size">${sizeStr}</div>` +
+        `<div class="fe-cell-date">${dateStr}</div>` +
+        `<div class="fe-cell-actions"></div>`;
+      row.onclick = entry.type === 'dir' ? () => _psfLoad(entryPath) : () => _psfViewFile(entryPath);
+      body.appendChild(row);
+    }
+    if (!data.entries.length) {
+      body.innerHTML = '<div style="padding:16px;color:var(--dim);text-align:center;font-size:0.82rem;">Empty folder</div>';
+    }
+  } catch(e) {
+    body.innerHTML = '<div style="padding:12px;color:var(--dim)">Error: ' + esc(e.message) + '</div>';
+  }
+}
+
+async function _psfViewFile(filePath) {
+  const body = document.getElementById('psf-body');
+  const bc = document.getElementById('psf-breadcrumb');
+  const dir = filePath.substring(0, filePath.lastIndexOf('/')) || '/';
+  const fname = filePath.split('/').pop();
+  bc.innerHTML = '<span class="psf-crumb" onclick="_psfLoad(\'' + dir.replace(/'/g, "\\'") + '\')">← back</span><span style="color:var(--dim)"> / </span><span style="color:var(--text)">' + esc(fname) + '</span>';
+  body.innerHTML = '<div style="padding:12px;color:var(--dim)">Loading...</div>';
+  try {
+    let url = API + '/api/file?path=' + encodeURIComponent(filePath);
+    if (peekSessionDir) url += '&cwd=' + encodeURIComponent(peekSessionDir);
+    const r = await fetch(url);
+    const data = await r.json();
+    if (data.error) { body.innerHTML = '<div style="padding:12px;color:var(--dim)">Error: ' + esc(data.error) + '</div>'; return; }
+    body.innerHTML = '';
+    const content = document.createElement('div');
+    content.className = 'file-overlay-body';
+    content.style.cssText = 'flex:1;min-height:0;margin:0;border-radius:0;';
+    if (data.is_image) {
+      content.className = 'file-overlay-body file-image';
+      const img = document.createElement('img');
+      img.src = data.data_url;
+      img.style.cssText = 'max-width:100%;height:auto;border-radius:4px;display:block;margin:auto;';
+      content.appendChild(img);
+    } else if (data.is_markdown) {
+      content.className = 'file-overlay-body markdown md-content';
+      content.innerHTML = renderMarkdown(data.content);
+    } else if (data.is_csv) {
+      content.className = 'file-overlay-body file-csv';
+      content.innerHTML = renderCsvTable(data.content);
+    } else if (data.content != null) {
+      content.textContent = data.content;
+    } else {
+      content.textContent = '(binary file)';
+    }
+    body.appendChild(content);
+  } catch(e) {
+    body.innerHTML = '<div style="padding:12px;color:var(--dim)">Error: ' + esc(e.message) + '</div>';
+  }
 }
 
 // Keep peek overlay fitted to the visual viewport so it stays visible
@@ -14188,10 +15218,32 @@ function linkifyOutput(text) {
 }
 
 let peekSelecting = false;
+let _peekScrollLocked = false;
+
+function _isScrolledToBottom(el, threshold) {
+  return el.scrollHeight - el.scrollTop - el.clientHeight < (threshold || 40);
+}
+
+function _showScrollLockBadge(scrollEl, onClickResume) {
+  let badge = scrollEl.querySelector('.scroll-lock-badge');
+  if (!badge) {
+    badge = document.createElement('div');
+    badge.className = 'scroll-lock-badge';
+    badge.textContent = 'Scrolled up \u2014 click to resume';
+    badge.onclick = (e) => { e.stopPropagation(); onClickResume(); };
+    scrollEl.appendChild(badge);
+  }
+  badge.style.display = '';
+}
+
+function _hideScrollLockBadge(scrollEl) {
+  const badge = scrollEl.querySelector('.scroll-lock-badge');
+  if (badge) badge.style.display = 'none';
+}
+
 async function refreshPeek() {
   const name = peekSession;
   if (!name) return;
-  // Skip refresh while user is selecting text
   if (peekSelecting) return;
   const sel = window.getSelection();
   if (sel && sel.toString().length > 0) return;
@@ -14200,28 +15252,25 @@ async function refreshPeek() {
   try {
     const r = await fetch(API + '/api/sessions/' + name + '/peek?lines=500');
     const data = await r.json();
-    // Session changed while fetch was in flight — discard stale response
     if (peekSession !== name) return;
     const output = data.output || '(no output)';
-    const atBottom = body.scrollHeight - body.scrollTop - body.clientHeight < 40;
-    // Anchor on distance-from-bottom, not scrollTop. Peek returns the
-    // tail of the buffer, so when new lines append, old lines roll off
-    // the top — every visible line shifts up by N. Preserving scrollTop
-    // would slide the user's reading position; preserving distance from
-    // the bottom keeps the same content under their eye.
-    const distFromBottom = body.scrollHeight - body.scrollTop - body.clientHeight;
+    const atBottom = _isScrolledToBottom(body);
+    if (atBottom) _peekScrollLocked = false;
     const newHTML = linkifyOutput(stripAnsi(output));
-    // Re-check: user may have started selecting text during the async fetch
     if (peekSelecting || (window.getSelection()?.toString().length > 0)) return;
-    // Clear sending indicator when output changes
     if (_sendingSnapshot && newHTML !== _sendingSnapshot) clearSendingIndicator();
     lastPeekHTML = newHTML;
     const hasSearch = peekSearchQuery.trim().length > 0;
-    applyPeekSearch(hasSearch);  // keepIndex=true when search is active
-    if (atBottom && !hasSearch) {
+    applyPeekSearch(hasSearch);
+    if (!_peekScrollLocked && atBottom && !hasSearch) {
       body.scrollTop = body.scrollHeight;
-    } else {
-      body.scrollTop = Math.max(0, body.scrollHeight - body.clientHeight - distFromBottom);
+      _hideScrollLockBadge(body);
+    } else if (_peekScrollLocked) {
+      _showScrollLockBadge(body, () => {
+        _peekScrollLocked = false;
+        body.scrollTop = body.scrollHeight;
+        _hideScrollLockBadge(body);
+      });
     }
     statusEl.textContent = (data.saved ? 'Saved log' : 'Updated') + ' ' + new Date().toLocaleTimeString();
     // Cache peek output for offline browsing
@@ -14476,13 +15525,23 @@ async function sendPeekCmd() {
     const refs = files.map(f => '@' + f.path).join(' ');
     message = text ? `${text} ${refs}` : refs;
   }
+  // @-route at start of message → open channel drawer prefilled
+  const routed = _atRoute(message);
+  if (routed && routed.target !== peekSession) {
+    inp.value = '';
+    inp.style.height = 'auto';
+    delete _peekDrafts[peekSession];
+    clearPeekFiles();
+    channelOpen(peekSession, routed.target, routed.message);
+    return;
+  }
+
   inp.value = '';
   inp.style.height = 'auto';
   delete _peekDrafts[peekSession];
   clearPeekFiles();
 
-  // In peek view, always send to the current session (don't route @mentions away).
-  // @mentions are expanded as API hints so Claude knows how to reach them.
+  // @mentions in the middle of a message stay as text + API hints (Claude can reach them).
   message = _expandAtMentions(message);
   await doSend(peekSession, message);
   inp.style.borderColor = 'var(--green)';
@@ -14506,6 +15565,33 @@ function peekDownloadLog() {
   a.href = API + '/api/sessions/' + encodeURIComponent(peekSession) + '/log';
   a.download = peekSession + '.log';
   a.click();
+}
+
+// Tell the active peek session to read its own full log from ~/.amux/logs/<name>.log
+// as context. Sends a clear instruction so Claude uses its Read tool — much cheaper
+// than streaming the whole (potentially huge) log inline.
+async function peekLoadLogIntoSession() {
+  if (!peekSession) return;
+  const sess = peekSession;
+  // Get the resolved log size first so we can warn on huge logs.
+  let sizeNote = '';
+  try {
+    const r = await fetch(API + '/api/sessions/' + encodeURIComponent(sess) + '/log/info');
+    if (r.ok) {
+      const d = await r.json();
+      if (d && typeof d.size === 'number') {
+        const mb = d.size / (1024 * 1024);
+        sizeNote = mb >= 1 ? ` (~${mb.toFixed(1)} MB)` : ` (~${Math.round(d.size/1024)} KB)`;
+        if (mb > 5 && !confirm('Your session log is ' + mb.toFixed(1) + ' MB. Loading it will eat a lot of context. Continue?')) return;
+      }
+    }
+  } catch(e) {}
+  const msg = 'Please use your Read tool to read your full session log at ~/.amux/logs/' + sess + '.log' + sizeNote +
+    ' — this is the complete terminal history of everything you have done in this amux session. ' +
+    'Use it as context for what we work on next. If the file is large, read it in chunks.';
+  await doSend(sess, msg);
+  showToast('Asked ' + sess + ' to read its full log');
+  setTimeout(refreshPeek, 500);
 }
 
 async function peekShowTranscripts() {
@@ -14548,39 +15634,182 @@ async function peekShowTranscripts() {
   document.getElementById('modal-backdrop').classList.add('open');
 }
 
+// ── Channel drawer (session-to-session DM) ──
+let _channelMe = null;
+let _channelOther = null;
+let _channelPollTimer = null;
+let _channelLastTs = 0;
+
+function channelOpen(me, other, prefillText) {
+  if (!me || !other || me === other) {
+    showToast('Cannot open channel: ' + (!me?'no source':!other?'no target':'same session'));
+    return;
+  }
+  _channelMe = me;
+  _channelOther = other;
+  _channelLastTs = 0;
+  document.getElementById('channel-header-pair').textContent = me + ' ↔ ' + other;
+  document.getElementById('channel-thread').innerHTML =
+    '<div class="channel-empty">Loading…</div>';
+  const drawer = document.getElementById('channel-drawer');
+  drawer.classList.add('open');
+  // Suppress backdrop-close from the click that opened us — the original
+  // mousedown was on a card-input dropdown item, but the click event that
+  // follows may now land on this drawer's backdrop (since we're on top).
+  drawer.dataset.justOpened = '1';
+  drawer.dataset.bdMousedown = '';
+  setTimeout(() => { delete drawer.dataset.justOpened; }, 400);
+  const inp = document.getElementById('channel-input');
+  inp.value = prefillText || '';
+  setTimeout(() => inp.focus(), 100);
+  channelRefresh();
+  if (_channelPollTimer) clearInterval(_channelPollTimer);
+  _channelPollTimer = setInterval(channelRefresh, 2500);
+}
+
+function channelClose() {
+  const drawer = document.getElementById('channel-drawer');
+  drawer.classList.remove('open');
+  delete drawer.dataset.justOpened;
+  drawer.dataset.bdMousedown = '';
+  if (_channelPollTimer) { clearInterval(_channelPollTimer); _channelPollTimer = null; }
+  _channelMe = null; _channelOther = null;
+}
+
+async function channelRefresh() {
+  if (!_channelMe || !_channelOther) return;
+  try {
+    const r = await fetch(API + '/api/channels/' + encodeURIComponent(_channelMe) +
+      '/' + encodeURIComponent(_channelOther) + '/messages');
+    if (!r.ok) return;
+    const d = await r.json();
+    channelRender(d.messages || []);
+  } catch (e) { /* network blip — keep polling */ }
+}
+
+function channelRender(messages) {
+  const thread = document.getElementById('channel-thread');
+  if (!messages.length) {
+    thread.innerHTML =
+      '<div class="channel-empty">No messages yet.<br>Say hi to <b>@' +
+      esc(_channelOther) + '</b> — they will see your message in their terminal.</div>';
+    return;
+  }
+  // Skip re-render if nothing new
+  const newest = messages[messages.length - 1];
+  if (newest.ts === _channelLastTs && thread.children.length === messages.length) return;
+  _channelLastTs = newest.ts;
+  const html = messages.map(m => {
+    const mine = m.from === _channelMe;
+    const when = new Date((m.ts || 0) * 1000).toLocaleTimeString([],
+      { hour: 'numeric', minute: '2-digit' });
+    return '<div class="channel-msg ' + (mine ? 'mine' : 'theirs') + '">' +
+      '<div class="channel-msg-meta">' + esc(m.from) + ' · ' + when + '</div>' +
+      '<div class="channel-msg-bubble">' + esc(m.text || '') + '</div>' +
+      '</div>';
+  }).join('');
+  thread.innerHTML = html;
+  thread.scrollTop = thread.scrollHeight;
+}
+
+async function channelEnd() {
+  if (!_channelMe || !_channelOther) return;
+  const me = _channelMe, other = _channelOther;
+  const ok = await showConfirm(
+    `End channel with @${other}?\n\nThis clears the history and notifies @${other} that the conversation is over.`,
+    'End channel', true);
+  if (!ok) return;
+  try {
+    const r = await fetch(API + '/api/channels/' + encodeURIComponent(me) +
+      '/' + encodeURIComponent(other) + '/messages', { method: 'DELETE' });
+    const d = await r.json();
+    if (r.ok && d.ok) {
+      showToast('Channel with @' + other + ' ended');
+      channelClose();
+    } else {
+      showToast('End failed: ' + (d.error || r.status));
+    }
+  } catch (e) {
+    showToast('End error: ' + e.message);
+  }
+}
+
+async function channelSend() {
+  if (!_channelMe || !_channelOther) return;
+  const inp = document.getElementById('channel-input');
+  const text = inp.value.trim();
+  if (!text) return;
+  inp.value = '';
+  inp.style.height = 'auto';
+  const btn = document.getElementById('channel-send-btn');
+  btn.disabled = true;
+  try {
+    const r = await fetch(API + '/api/channels/' + encodeURIComponent(_channelMe) +
+      '/' + encodeURIComponent(_channelOther) + '/messages',
+      { method: 'POST', headers: {'Content-Type':'application/json'},
+        body: JSON.stringify({ text }) });
+    const d = await r.json();
+    if (!r.ok || !d.ok) {
+      showToast('Send failed: ' + (d.error || r.status));
+    } else if (!d.delivered) {
+      showToast('Saved, but ' + _channelOther + ' is not running');
+    }
+    await channelRefresh();
+  } catch (e) {
+    showToast('Send error: ' + e.message);
+  } finally {
+    btn.disabled = false;
+    inp.focus();
+  }
+}
+
 // ── @mention routing ──
 // If a message starts with @sessionname, auto-route to that session.
 // Returns {target, message} where target may differ from the sending session.
+// Matching is case-insensitive and falls back to unique prefix match — important
+// because if we miss the routing, the literal "@name" gets shipped to Claude
+// and Claude interprets it as a file/directory reference (the "directory thing").
 function _atRoute(text) {
   const known = (sessions || []).map(s => s.name);
   const m = text.match(/^@([\w][\w.-]*)([\s\S]*)$/);
-  if (m && known.includes(m[1])) {
-    const target = m[1];
-    const rest = m[2].trim();
-    return { target, message: rest || text };
+  if (!m) return null;
+  const typed = m[1];
+  const typedLower = typed.toLowerCase();
+  let target = known.find(n => n === typed)
+            || known.find(n => n.toLowerCase() === typedLower);
+  if (!target) {
+    const prefixMatches = known.filter(n => n.toLowerCase().startsWith(typedLower));
+    if (prefixMatches.length === 1) target = prefixMatches[0];
   }
-  return null;
+  if (!target) return null;
+  const rest = m[2].trim();
+  return { target, message: rest };
 }
 
 // ── @mention → HTTP API hint ──
-// When a message contains @session-name mentions, append a compact API hint
-// so Claude knows to use the HTTP API for delegation (not tmux directly).
+// When a message contains @session-name mentions:
+//   1. Wrap the mention in backticks so Claude does NOT interpret @name as a
+//      file/directory path lookup.
+//   2. Append a compact API hint so Claude uses HTTP for delegation (not tmux).
 function _expandAtMentions(text) {
-  const known = (window._sessions || []).map(s => s.name);
-  // find all @word tokens that match a known session name
+  const known = (sessions || []).map(s => s.name);
+  if (!known.length) return text;
+  const lowerToReal = {};
+  for (const n of known) lowerToReal[n.toLowerCase()] = n;
   const mentioned = [];
-  const re = /@([\w][\w.-]*)/g;
-  let m;
-  while ((m = re.exec(text)) !== null) {
-    const n = m[1];
-    if (known.includes(n) && !mentioned.includes(n)) mentioned.push(n);
-  }
+  const rewritten = text.replace(/(^|[^`\w])@([\w][\w.-]*)/g, (full, lead, name) => {
+    const real = lowerToReal[name.toLowerCase()];
+    if (!real) return full;
+    if (!mentioned.includes(real)) mentioned.push(real);
+    // Backtick the mention so Claude does not file-resolve it.
+    return `${lead}\`@${real}\``;
+  });
   if (mentioned.length === 0) return text;
   const base = '$AMUX_URL';
   const hints = mentioned.map(n =>
     `  @${n} → POST ${base}/api/sessions/${n}/send  {"text":"<msg>"}`
   ).join('\n');
-  return text + '\n\n[amux: use HTTP API to reach @-mentioned sessions — never tmux directly]\n' + hints;
+  return rewritten + '\n\n[amux: @-mentions above are amux sessions, NOT files. Reach them via HTTP API, never tmux directly]\n' + hints;
 }
 
 // ── @mention helpers ──
@@ -14603,7 +15832,7 @@ function _atRender(inp, el, pickCall) {
   el.innerHTML = matches.map((s, i) =>
     `<div class="ac-item at-item" onmousedown="${pickCall}(${i})">` +
     `<span class="at-at">@</span>${esc(s.name)}` +
-    `<span class="ac-desc">${s.running ? '● running' : '○ stopped'}</span></div>`
+    `<span class="ac-desc">${s.running ? '● ' : '○ '}open channel &rarr;</span></div>`
   ).join('');
   el._atItems = matches;
   el.classList.add('open');
@@ -14689,6 +15918,7 @@ const ALL_CHIPS = [
     { id: 'yes', label: 'Yes', action: 'send', value: 'yes', desc: 'Send "yes"' },
     { id: 'no', label: 'No', action: 'send', value: 'no', desc: 'Send "no"' },
     { id: 'log', label: '\uD83D\uDCC4 Log', action: 'special', value: 'downloadLog', desc: 'Download terminal log' },
+    { id: 'sendlog', label: '\uD83D\uDCE5 Load log', action: 'special', value: 'sendLog', desc: 'Tell the session to read its full ~/.amux/logs file as context' },
     { id: 'transcripts', label: '\uD83D\uDCBE Transcripts', action: 'special', value: 'showTranscripts', desc: 'Conversation transcripts' },
   ]},
 ];
@@ -14729,12 +15959,18 @@ function _chipAction(chip, sessionName, isPeek) {
       const inp = document.getElementById('peek-cmd-input');
       if (inp) { inp.value = chip.value; inp.focus({ preventScroll: true }); autoGrow(inp); slashAcUpdate(); }
     } else {
-      chipToInput(sessionName, chip.value);
+      // Try card input first, then workspace pane input
+      const cardInp = document.getElementById('input-' + sessionName);
+      const gpInp = document.getElementById(_gpSafeId(sessionName) + '-input');
+      const inp = cardInp || gpInp;
+      if (inp) { inp.value = chip.value; inp.focus({ preventScroll: true }); autoGrow(inp); }
+      if (cardInp) cardSlashAcUpdate(sessionName);
     }
   } else if (chip.action === 'special') {
     if (chip.value === 'gitPush') gitPush(isPeek ? peekSession : sessionName, event);
     else if (chip.value === 'downloadLog' && isPeek) peekDownloadLog();
     else if (chip.value === 'showTranscripts' && isPeek) peekShowTranscripts();
+    else if (chip.value === 'sendLog' && isPeek) peekLoadLogIntoSession();
   }
 }
 
@@ -15357,6 +16593,12 @@ function refreshAllChipBars() {
     const name = el.id.replace('card-chips-', '');
     if (name) renderChips(el, name, false);
   });
+  // Refresh workspace grid pane chip bars
+  Object.keys(_gridPanes).forEach(name => {
+    const sid = _gpSafeId(name);
+    const el = document.getElementById(sid + '-chips');
+    if (el) renderChips(el, name, false);
+  });
 }
 // Initialize peek chip bar now that renderChips is defined
 (function(){ var c = document.getElementById('peek-chips'); if (c) renderChips(c, '', true); })();
@@ -15385,7 +16627,18 @@ function slashAcUpdate() {
 function slashAcPick(i) {
   const inp = document.getElementById('peek-cmd-input');
   const el = document.getElementById('slash-ac-list');
-  if (el._atItems) {
+  if (el._atItems && el._atItems[i]) {
+    const target = el._atItems[i].name;
+    // If @ is at the start of the input, open the channel drawer instead of
+    // inserting text. peekSession is the "me" side of the channel.
+    if (peekSession && target !== peekSession && inp.value.trimStart().startsWith('@')) {
+      const after = inp.value.replace(/^\s*@[\w][\w.-]*\s*/, '').trim();
+      inp.value = '';
+      inp.style.height = 'auto';
+      el.classList.remove('open'); el._atItems = null; el._atSel = -1;
+      channelOpen(peekSession, target, after);
+      return;
+    }
     el._atSel = i;
     _atInsert(inp, el);
     inp.focus({ preventScroll: true });
@@ -15564,7 +16817,19 @@ function cardAtPick(i) {
   const name = _cardAcName;
   const inp = document.getElementById('input-' + name);
   const el = document.getElementById('card-ac-' + name);
-  if (!inp || !el) return;
+  if (!inp || !el || !el._atItems || !el._atItems[i]) return;
+  const target = el._atItems[i].name;
+  // If @ is at the start of the input, this is a routing intent — open the
+  // channel drawer immediately instead of just inserting "@name " as text.
+  // Any text already typed after "@partial" is carried as the drafted message.
+  if (inp.value.trimStart().startsWith('@') && target !== name) {
+    const after = inp.value.replace(/^\s*@[\w][\w.-]*\s*/, '').trim();
+    inp.value = '';
+    inp.style.height = 'auto';
+    el.classList.remove('open'); el._atItems = null; el._atSel = -1;
+    channelOpen(name, target, after);
+    return;
+  }
   el._atSel = i;
   _atInsert(inp, el);
   inp.focus({ preventScroll: true });
@@ -15574,13 +16839,14 @@ function cardSlashAcPick(name, i) {
   const inp = document.getElementById('input-' + name);
   const el = document.getElementById('card-ac-' + name);
   if (el && el._atItems) {
-    el._atSel = i;
-    _atInsert(inp, el);
-  } else {
-    inp.value = _cardAcItems[i].cmd;
-    if (el) el.classList.remove('open');
-    _cardAcItems = [];
+    // Route through cardAtPick so keyboard-pick has the same drawer behavior as click-pick
+    _cardAcName = name;
+    cardAtPick(i);
+    return;
   }
+  inp.value = _cardAcItems[i].cmd;
+  if (el) el.classList.remove('open');
+  _cardAcItems = [];
   inp.focus({ preventScroll: true });
 }
 
@@ -15671,32 +16937,21 @@ function toggleLogSearch() {
 }
 
 async function _runLogSearch() {
-  const q = searchQuery.toLowerCase().trim();
+  const q = searchQuery.trim();
   if (!q || !logSearchMode) { _logMatches = {}; render(); return; }
   // Cancel any in-flight search
   if (_logSearchAbort) _logSearchAbort.abort();
   _logSearchAbort = new AbortController();
   const sig = _logSearchAbort.signal;
-  const sessionList = sessions || [];
-  const results = await Promise.allSettled(
-    sessionList.map(s =>
-      fetch(API + '/api/sessions/' + encodeURIComponent(s.name) + '/peek?lines=500', { signal: sig })
-        .then(r => r.json())
-        .then(data => {
-          const output = data.output || '';
-          const lines = output.split('\n');
-          const hits = [];
-          lines.forEach((l, i) => { if (l.toLowerCase().includes(q)) hits.push({ line: i + 1, text: l.replace(/\x1b\[[0-9;?]*m/g, '').trim() }); });
-          if (!hits.length) return null;
-          return { name: s.name, hits };
-        })
-        .catch(() => null)
-    )
-  );
-  if (sig.aborted) return;
-  _logMatches = {};
-  results.forEach(r => { if (r.status === 'fulfilled' && r.value) _logMatches[r.value.name] = r.value.hits; });
-  render();
+  try {
+    const r = await fetch(API + '/api/log-search?q=' + encodeURIComponent(q) + '&max=50', { signal: sig });
+    if (sig.aborted) return;
+    const d = await r.json();
+    _logMatches = d.matches || {};
+    render();
+  } catch (e) {
+    if (e.name !== 'AbortError') { _logMatches = {}; render(); }
+  }
 }
 function clearPeekSearch() {
   const inp = document.getElementById('peek-search');
@@ -15877,6 +17132,8 @@ let _fileData = null;
 let _fileViewMode = 'preview';
 
 function _renderFileBody(data, mode) {
+  // Tear down any active markdown-search highlights before re-rendering
+  if (_mdSearchHits && _mdSearchHits.length) { _mdSearchHits = []; _mdSearchIdx = -1; }
   const body = document.getElementById('file-body');
   // Binary — no tabs, just render
   if (data.is_image) {
@@ -15922,7 +17179,7 @@ function _renderFileBody(data, mode) {
     const fname = data.path.split('/').pop();
     const sizeMB = data.size ? (data.size / 1048576).toFixed(1) + ' MB' : '';
     const rawUrl = API + '/api/file/raw?path=' + encodeURIComponent(data.path) + (peekSessionDir ? '&cwd=' + encodeURIComponent(peekSessionDir) : '');
-    body.innerHTML = `<div style="display:flex;flex-direction:column;align-items:center;gap:12px;padding:32px;"><div style="font-size:2.5rem;">📦</div><div style="font-size:0.95rem;color:var(--muted);">${fname}${sizeMB ? ' · ' + sizeMB : ''}${data.ext ? ' · ' + data.ext : ''}</div><a href="${rawUrl}" download="${fname}" style="padding:8px 18px;background:var(--green);color:#fff;border-radius:6px;font-size:0.85rem;font-weight:600;text-decoration:none;">Download</a></div>`;
+    body.innerHTML = `<div style="display:flex;flex-direction:column;align-items:center;gap:12px;padding:32px;"><div style="font-size:2.5rem;">📦</div><div style="font-size:0.95rem;color:var(--muted);">${fname}${sizeMB ? ' · ' + sizeMB : ''}${data.ext ? ' · ' + data.ext : ''}</div><a href="${_authUrl(rawUrl)}" download="${fname}" style="padding:8px 18px;background:var(--green);color:#fff;border-radius:6px;font-size:0.85rem;font-weight:600;text-decoration:none;">Download</a></div>`;
     return;
   }
   // Text files — Raw / Edit / Preview
@@ -16007,7 +17264,112 @@ function setFileViewMode(mode) {
   const editTab = document.getElementById('file-tab-edit');
   if (editTab) editTab.classList.toggle('active', mode === 'edit');
   document.getElementById('file-save-btn').style.display = (mode === 'edit' && _fileData && (_fileData.is_markdown || _fileData._isNew)) ? '' : 'none';
+  // Search button only valid in markdown preview mode
+  const searchTab = document.getElementById('file-tab-search');
+  if (searchTab) {
+    searchTab.style.display = (_fileData && _fileData.is_markdown && mode === 'preview') ? '' : 'none';
+  }
+  if (mode !== 'preview') _mdSearchClose();
   if (_fileData) _renderFileBody(_fileData, mode);
+}
+
+// ---------- Markdown in-page search ----------
+let _mdSearchHits = [];
+let _mdSearchIdx = -1;
+
+function _mdSearchToggle() {
+  const row = document.getElementById('md-search-row');
+  if (row.classList.contains('active')) { _mdSearchClose(); return; }
+  _mdSearchOpen();
+}
+function _mdSearchOpen() {
+  const row = document.getElementById('md-search-row');
+  row.classList.add('active');
+  const input = document.getElementById('md-search-input');
+  input.focus();
+  input.select();
+  if (input.value) _mdSearchApply(input.value);
+}
+function _mdSearchClose() {
+  const row = document.getElementById('md-search-row');
+  row.classList.remove('active');
+  _mdSearchClear();
+}
+function _mdSearchClear() {
+  const body = document.getElementById('file-body');
+  if (body) {
+    body.querySelectorAll('mark.md-search-hit').forEach(m => {
+      const parent = m.parentNode;
+      if (!parent) return;
+      parent.replaceChild(document.createTextNode(m.textContent), m);
+      parent.normalize();
+    });
+  }
+  _mdSearchHits = [];
+  _mdSearchIdx = -1;
+  const c = document.getElementById('md-search-count');
+  if (c) c.textContent = '';
+}
+function _mdSearchApply(query) {
+  _mdSearchClear();
+  const q = (query || '').trim();
+  const countEl = document.getElementById('md-search-count');
+  if (!q) { if (countEl) countEl.textContent = ''; return; }
+  const body = document.getElementById('file-body');
+  if (!body || !body.classList.contains('md-content')) return;
+  const ql = q.toLowerCase();
+  // Walk text nodes (skip script/style/already-marked nodes)
+  const walker = document.createTreeWalker(body, NodeFilter.SHOW_TEXT, {
+    acceptNode(n) {
+      if (!n.nodeValue || !n.nodeValue.trim()) return NodeFilter.FILTER_REJECT;
+      const p = n.parentNode;
+      if (!p) return NodeFilter.FILTER_REJECT;
+      const tag = p.nodeName;
+      if (tag === 'SCRIPT' || tag === 'STYLE' || tag === 'MARK') return NodeFilter.FILTER_REJECT;
+      return n.nodeValue.toLowerCase().includes(ql) ? NodeFilter.FILTER_ACCEPT : NodeFilter.FILTER_REJECT;
+    }
+  });
+  const targets = [];
+  let n;
+  while ((n = walker.nextNode())) targets.push(n);
+  for (const node of targets) {
+    const text = node.nodeValue;
+    const lower = text.toLowerCase();
+    const frag = document.createDocumentFragment();
+    let i = 0;
+    while (i < text.length) {
+      const found = lower.indexOf(ql, i);
+      if (found < 0) {
+        frag.appendChild(document.createTextNode(text.slice(i)));
+        break;
+      }
+      if (found > i) frag.appendChild(document.createTextNode(text.slice(i, found)));
+      const mark = document.createElement('mark');
+      mark.className = 'md-search-hit';
+      mark.textContent = text.slice(found, found + ql.length);
+      frag.appendChild(mark);
+      _mdSearchHits.push(mark);
+      i = found + ql.length;
+    }
+    if (node.parentNode) node.parentNode.replaceChild(frag, node);
+  }
+  if (countEl) countEl.textContent = _mdSearchHits.length ? '1/' + _mdSearchHits.length : '0/0';
+  if (_mdSearchHits.length) {
+    _mdSearchIdx = 0;
+    _mdSearchHighlightCurrent();
+  }
+}
+function _mdSearchStep(dir) {
+  if (!_mdSearchHits.length) return;
+  _mdSearchIdx = (_mdSearchIdx + dir + _mdSearchHits.length) % _mdSearchHits.length;
+  _mdSearchHighlightCurrent();
+  const c = document.getElementById('md-search-count');
+  if (c) c.textContent = (_mdSearchIdx + 1) + '/' + _mdSearchHits.length;
+}
+function _mdSearchHighlightCurrent() {
+  _mdSearchHits.forEach((m, i) => m.classList.toggle('current', i === _mdSearchIdx));
+  const cur = _mdSearchHits[_mdSearchIdx];
+  if (cur && cur.scrollIntoView) cur.scrollIntoView({ block: 'center', behavior: 'smooth' });
 }
 
 async function openFilePreview(path) {
@@ -16038,6 +17400,9 @@ async function openFilePreview(path) {
       // Show Edit tab only for markdown
       document.getElementById('file-tab-edit').style.display = data.is_markdown ? '' : 'none';
       document.getElementById('file-tab-teleprompter').style.display = data.is_markdown ? '' : 'none';
+      // Show Find tab only for markdown
+      const searchTab = document.getElementById('file-tab-search');
+      if (searchTab) searchTab.style.display = (data.is_markdown && _fileViewMode === 'preview') ? '' : 'none';
     }
     // Show download button for all files
     const dlBtn = document.getElementById('file-download-btn');
@@ -16069,11 +17434,14 @@ async function openFilePreview(path) {
 function closeFilePreview() {
   const v = document.querySelector('#file-body video');
   if (v) { v.pause(); v.src = ''; }
+  _mdSearchClose();
   document.getElementById('file-overlay').classList.remove('active');
   document.getElementById('file-download-btn').style.display = 'none';
   document.getElementById('file-save-btn').style.display = 'none';
   const tpTab = document.getElementById('file-tab-teleprompter');
   if (tpTab) tpTab.style.display = 'none';
+  const searchTab = document.getElementById('file-tab-search');
+  if (searchTab) searchTab.style.display = 'none';
   document.getElementById('file-edit-wrap').style.display = 'none';
   document.getElementById('file-body').style.display = '';
   _fileData = null;
@@ -16715,6 +18083,22 @@ function _showFilesMenu(path, btn, type) {
   linkItem.textContent = 'Copy link';
   linkItem.onclick = () => { popup.remove(); _copyFileDeeplink(path); };
   popup.appendChild(linkItem);
+  // Download (files only)
+  if (type !== 'directory') {
+    const dlItem = document.createElement('button');
+    dlItem.className = 'explore-menu-item';
+    dlItem.textContent = 'Download';
+    dlItem.onclick = () => {
+      popup.remove();
+      const a = document.createElement('a');
+      a.href = API + '/api/file?path=' + encodeURIComponent(path);
+      a.download = path.split('/').pop();
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+    };
+    popup.appendChild(dlItem);
+  }
   // Delete
   const delItem = document.createElement('button');
   delItem.className = 'explore-menu-item';
@@ -17399,6 +18783,14 @@ function peekCheckSelection() {
 }
 document.getElementById('peek-body').addEventListener('mousedown', () => { peekSelecting = true; clearTimeout(peekSelectTimer); });
 document.getElementById('peek-body').addEventListener('touchstart', () => { peekSelecting = true; clearTimeout(peekSelectTimer); }, {passive: true});
+document.getElementById('peek-body').addEventListener('scroll', function() {
+  if (_isScrolledToBottom(this)) {
+    _peekScrollLocked = false;
+    _hideScrollLockBadge(this);
+  } else {
+    _peekScrollLocked = true;
+  }
+}, {passive: true});
 // Force URLs in peek output to open in the system browser (PWA desktop + mobile).
 // Handle both click (desktop) and touchend (iOS/Android) for reliability.
 function _peekOpenLink(e) {
@@ -20371,17 +21763,20 @@ function _fcInit() {
   if (!['dayGridMonth','timeGridWeek','timeGridDay'].includes(savedView)) savedView = 'dayGridMonth';
   const isDark = document.documentElement.getAttribute('data-theme') === 'dark' || (!document.body.classList.contains('light'));
   const isMobile = window.innerWidth <= 600;
+  const mobileViews = ['listWeek','dayGridMonth','timeGridDay'];
+  const mobileDefault = mobileViews.includes(savedView) ? savedView : 'listWeek';
   _fcInstance = new FullCalendar.Calendar(el, {
-    initialView: isMobile ? 'timeGridDay' : savedView,
+    initialView: isMobile ? mobileDefault : savedView,
     headerToolbar: isMobile ? {
       left: 'prev,next today',
       center: 'title',
-      right: 'dayGridMonth,timeGridWeek,timeGridDay',
+      right: 'listWeek,dayGridMonth,timeGridDay',
     } : {
       left: 'prev,today,next',
       center: 'title',
       right: 'dayGridMonth,timeGridWeek,timeGridDay subscribe',
     },
+    buttonText: isMobile ? { listWeek: 'List', dayGridMonth: 'Month', timeGridDay: 'Day', today: 'Today' } : {},
     customButtons: {
       subscribe: {
         text: 'Subscribe',
@@ -20389,7 +21784,7 @@ function _fcInit() {
       },
     },
     events: function(info, successCallback) { successCallback(_fcGetEvents()); },
-    height: window.innerHeight - el.getBoundingClientRect().top,
+    height: isMobile ? (window.visualViewport ? window.visualViewport.height : window.innerHeight) - el.getBoundingClientRect().top : window.innerHeight - el.getBoundingClientRect().top,
     nowIndicator: true,
     navLinks: true,
     editable: false,
@@ -20528,6 +21923,28 @@ function enterGridMode() {
   }
 }
 
+function wsToggleFullscreen() {
+  const view = document.getElementById('grid-view');
+  const fs = view.classList.toggle('ws-fullscreen');
+  const btn = document.getElementById('ws-fullscreen-btn');
+  if (btn) btn.title = fs ? 'Exit fullscreen' : 'Toggle fullscreen';
+  if (fs) {
+    view.style.top = '0';
+    document.querySelector('.header-row')?.style.setProperty('display', 'none');
+    document.querySelector('.tab-bar-outer')?.style.setProperty('display', 'none');
+  } else {
+    // Restore normal position below tab bar
+    const tabBar = document.querySelector('.tab-bar-outer');
+    const ref = tabBar || document.querySelector('.header-row');
+    if (ref) { ref.style.display = ''; document.querySelector('.header-row')?.style.setProperty('display', ''); }
+    if (tabBar) tabBar.style.display = '';
+    const rect = (tabBar || ref)?.getBoundingClientRect();
+    if (rect) view.style.top = rect.bottom + 'px';
+  }
+  // Trigger gridstack relayout
+  if (_grid) setTimeout(() => _grid.onParentResize(), 50);
+}
+
 function exitGridMode() {
   // Save current layout, then pause timers — keep grid alive to avoid re-init bugs
   _gridSaveLayout();
@@ -20537,7 +21954,14 @@ function exitGridMode() {
     const pane = _notePanes[nid];
     if (pane.saveTimer) { clearTimeout(pane.saveTimer); pane.saveTimer = null; _saveNotePaneContent(nid); }
   });
-  document.getElementById('grid-view').classList.remove('active');
+  // Exit fullscreen if active
+  const gv = document.getElementById('grid-view');
+  if (gv.classList.contains('ws-fullscreen')) {
+    gv.classList.remove('ws-fullscreen');
+    document.querySelector('.header-row')?.style.setProperty('display', '');
+    document.querySelector('.tab-bar-outer')?.style.setProperty('display', '');
+  }
+  gv.classList.remove('active');
   document.getElementById('tab-grid').classList.remove('active');
   document.getElementById('tab-' + (activeView || 'sessions')).classList.add('active');
 }
@@ -20569,19 +21993,7 @@ function addGridPane(name, x, y, w, h) {
     '</div>' +
     '<div class="gp-body overlay-body" id="' + sid + '-body" onclick="_lastActivePane=\'' + safeName + '\'">Loading\u2026</div>' +
     '<div class="gp-send">' +
-      '<div class="chips">' +
-        '<div class="chip" onclick="doSend(\'' + safeName + '\',\'continue\')">continue</div>' +
-        '<div class="chip" onclick="gpDoKeys(\'' + safeName + '\',\'Enter\')">Enter</div>' +
-        '<div class="chip" onclick="gpDoKeys(\'' + safeName + '\',\'Up\')">&#x2191;</div>' +
-        '<div class="chip" onclick="gpDoKeys(\'' + safeName + '\',\'Down\')">&#x2193;</div>' +
-        '<div class="chip" onclick="gpChipToInput(\'' + safeName + '\',\'/status\')">/status</div>' +
-        '<div class="chip" onclick="gpChipToInput(\'' + safeName + '\',\'/model\')">/model</div>' +
-        '<div class="chip" onclick="gpChipToInput(\'' + safeName + '\',\'/mcp\')">/mcp</div>' +
-        '<div class="chip danger" onclick="gpDoKeys(\'' + safeName + '\',\'C-c\')">Ctrl+C</div>' +
-        '<div class="chip" onclick="gpDoKeys(\'' + safeName + '\',\'C-o\')">Ctrl+O</div>' +
-        '<div class="chip" onclick="gpChipToInput(\'' + safeName + '\',\'/clear\')">/clear</div>' +
-        '<div class="chip" onclick="gpChipToInput(\'' + safeName + '\',\'/compact\')">/compact</div>' +
-      '</div>' +
+      '<div class="chips" id="' + sid + '-chips"></div>' +
       '<div class="send-row">' +
         '<textarea class="send-input" id="' + sid + '-input" rows="1" placeholder="Send\u2026"' +
           ' oninput="autoGrow(this);cmdHistoryReset()"' +
@@ -20597,7 +22009,17 @@ function addGridPane(name, x, y, w, h) {
   if (gpBody) {
     gpBody.addEventListener('click', _peekOpenLink);
     gpBody.addEventListener('touchend', _peekOpenLink, {passive: false});
+    gpBody.addEventListener('scroll', function() {
+      if (_isScrolledToBottom(this)) {
+        this._scrollLocked = false;
+        _hideScrollLockBadge(this);
+      } else {
+        this._scrollLocked = true;
+      }
+    }, {passive: true});
   }
+  const gpChips = document.getElementById(sid + '-chips');
+  if (gpChips) renderChips(gpChips, name, false);
   _updateGridPane(name);
   _renderGridChips();
   _gridSaveLayout();
@@ -20620,9 +22042,19 @@ async function _updateGridPane(name) {
   if (!body) { removeGridPane(name); return; }
   try {
     const data = await fetch(API + '/api/sessions/' + encodeURIComponent(name) + '/peek?lines=500').then(r => r.json());
-    const atBottom = body.scrollHeight - body.scrollTop - body.clientHeight < 40;
+    const atBottom = _isScrolledToBottom(body);
+    const locked = body._scrollLocked;
     body.innerHTML = linkifyOutput(stripAnsi(data.output || ''));
-    if (atBottom) body.scrollTop = body.scrollHeight;
+    if (!locked && atBottom) {
+      body.scrollTop = body.scrollHeight;
+      _hideScrollLockBadge(body);
+    } else if (locked) {
+      _showScrollLockBadge(body, () => {
+        body._scrollLocked = false;
+        body.scrollTop = body.scrollHeight;
+        _hideScrollLockBadge(body);
+      });
+    }
     if (dot) {
       const s = (sessions || []).find(s => s.name === name);
       dot.className = 'gp-dot' + (!s || !s.running ? '' : s.status === 'active' ? ' working' : s.status === 'waiting' ? ' waiting' : ' idle');
@@ -20787,10 +22219,15 @@ function _wsClosePresetMenu(e) {
 function wsApplyPreset(preset) {
   document.getElementById('ws-preset-menu')?.classList.remove('open');
   if (!_grid) return;
-  // Get active session pane names (or all sessions if none open)
   let names = Object.keys(_gridPanes);
   if (!names.length) {
-    names = (sessions || []).map(s => s.name);
+    if (preset === 'auto') {
+      // Auto: prefer running/active sessions, fall back to all
+      const running = (sessions || []).filter(s => s.running || s.status === 'active' || s.status === 'waiting');
+      names = running.length ? running.map(s => s.name) : (sessions || []).map(s => s.name);
+    } else {
+      names = (sessions || []).map(s => s.name);
+    }
   }
   if (!names.length) return;
 
@@ -20815,6 +22252,16 @@ function wsApplyPreset(preset) {
 function _wsCalcPreset(preset, count) {
   const items = [];
   switch (preset) {
+    case 'auto': {
+      const wide = window.innerWidth >= 1200;
+      const mid = window.innerWidth >= 800;
+      if (count === 1) return _wsCalcPreset('focus', count);
+      if (count === 2) return _wsCalcPreset(wide ? 'split' : 'focus', count);
+      if (count === 3) return _wsCalcPreset(wide ? 'tri' : mid ? 'main-side' : 'focus', count);
+      if (count <= 4) return _wsCalcPreset(wide ? 'grid-2x2' : mid ? 'split' : 'focus', count);
+      if (count <= 6) return _wsCalcPreset(wide ? 'tri' : 'split', count);
+      return _wsCalcPreset(wide ? 'tri' : 'split', count);
+    }
     case 'focus':
       // Single column, all stacked full-width
       for (let i = 0; i < count; i++)
@@ -21279,8 +22726,12 @@ function connectSSE() {
     if (_initialLoad) { _initialLoad = false; render(); }
     if (!_liveSSE) { _liveSSE = true; updateConnectionStatus(); }
     if (!online) setOnline(true);
-    // On reconnect after being offline: run delta sync to catch any missed changes
-    if (wasOffline && _sseRetries > 0) setTimeout(_runDeltaSync, 500);
+    // On reconnect after being offline / zombie: catch up on anything we missed.
+    // Note: _sseRetries is reset above, so we key off wasOffline alone.
+    if (wasOffline) {
+      setTimeout(_runDeltaSync, 200);
+      setTimeout(() => { fetchSessions(); fetchBoard(); }, 250);
+    }
     try {
       const msg = JSON.parse(e.data);
       if (msg.type === 'sessions') {
@@ -21336,6 +22787,8 @@ function connectSSE() {
             if (activeView === 'journal') _journalLoad();
           }
         }
+      } else if (msg.type === 'ping') {
+        // Liveness signal — _lastDataTime already updated above. Nothing else to do.
       }
     } catch(err) { console.error('SSE parse:', err); }
   };
@@ -21359,9 +22812,61 @@ function connectSSE() {
 function enablePollingFallback() {
   _sseFallback = true;
   if (_sse) { _sse.close(); _sse = null; }
-  fetchSessions();
-  if (!_pollTimer) _pollTimer = setInterval(fetchSessions, 5000);
+  fetchSessions(); fetchBoard(); _runDeltaSync();
+  if (!_pollTimer) _pollTimer = setInterval(() => {
+    fetchSessions(); fetchBoard();
+  }, 5000);
 }
+
+// ── Freshness watchdog & resume handlers ───────────────────────────────────
+// Goal: every client always has the most up-to-date state, even after the OS
+// pauses the tab (iOS Safari background, macOS App Nap, sleep/wake, BFCache).
+//
+// Strategy:
+//   1. Server pings every 10s as a real data event → _lastDataTime ticks.
+//   2. A watchdog interval checks staleness only while the page is visible.
+//   3. visibilitychange / pageshow / focus / online → force a reconnect-and-resync
+//      if we look stale, otherwise just kick a fetch.
+const _SSE_STALE_MS = 18000;     // declared zombie if no data this long
+const _SSE_REFRESH_MS = 4000;    // visibility-resume refresh threshold
+
+function _sseLooksStale() {
+  return _lastDataTime && (Date.now() - _lastDataTime > _SSE_STALE_MS);
+}
+function _forceSseReconnect(reason) {
+  _dbgLog('SSE reconnect: ' + reason);
+  if (_sse) { try { _sse.close(); } catch(e) {} _sse = null; }
+  _sseRetries = 0;
+  _liveSSE = false;
+  updateConnectionStatus();
+  connectSSE();
+}
+function _resyncEverything() {
+  fetchSessions();
+  fetchBoard();
+  _runDeltaSync();
+}
+function _onClientResume(reason) {
+  if (document.hidden) return;
+  // Always pull fresh state — cheap and the user expects up-to-date data.
+  if (_lastDataTime && Date.now() - _lastDataTime > _SSE_REFRESH_MS) {
+    _resyncEverything();
+  }
+  // If the SSE connection looks dead (zombie after iOS background), bounce it.
+  if (!_sseFallback && (_sseLooksStale() || !_sse)) {
+    _forceSseReconnect(reason);
+  }
+}
+document.addEventListener('visibilitychange', () => _onClientResume('visibility'));
+window.addEventListener('pageshow',  e => _onClientResume(e.persisted ? 'bfcache' : 'pageshow'));
+window.addEventListener('focus',     () => _onClientResume('focus'));
+window.addEventListener('online',    () => _onClientResume('online'));
+// Periodic stale-watchdog — only fires when visible, so it's cheap on phones.
+setInterval(() => {
+  if (document.hidden) return;
+  if (_sseFallback) return;
+  if (_sseLooksStale()) _forceSseReconnect('watchdog stale ' + Math.round((Date.now() - _lastDataTime)/1000) + 's');
+}, 5000);
 
 // Start SSE (falls back to polling on failure)
 connectSSE();
@@ -21913,15 +23418,7 @@ function _switchServerUrl(idx, evt) {
     deviceName: localStorage.getItem('amux_device_name') || ''
   }));
   const url = s.url.replace(/\/+$/, '') + '/?_sync=' + encodeURIComponent(payload);
-  // Same-origin: navigate in place. Cross-origin: open new tab so PWA stays accessible
-  // if the destination is unreachable from this device (e.g. localhost from mobile).
-  // In native iOS WKWebView, window.open is blocked — always navigate in place.
-  try {
-    const destOrigin = new URL(url).origin;
-    const isNativeApp = window.navigator.standalone || /AmuxApp/.test(navigator.userAgent) || !window.open;
-    if (destOrigin === location.origin || isNativeApp) { location.href = url; }
-    else { window.open(url, '_blank') || (location.href = url); }
-  } catch(e) { location.href = url; }
+  location.href = url;
 }
 
 function switchServer(idx) {
@@ -21939,14 +23436,7 @@ function switchServer(idx) {
     deviceName: localStorage.getItem('amux_device_name') || ''
   }));
   const url = s.url + '/?_sync=' + encodeURIComponent(payload);
-  // Same-origin: navigate in place. Cross-origin: open new tab to keep current PWA accessible.
-  // In native iOS WKWebView, window.open is blocked — always navigate in place.
-  try {
-    const destOrigin = new URL(url).origin;
-    const isNativeApp = window.navigator.standalone || /AmuxApp/.test(navigator.userAgent) || !window.open;
-    if (destOrigin === location.origin || isNativeApp) { location.href = url; }
-    else { window.open(url, '_blank') || (location.href = url); }
-  } catch(e) { location.href = url; }
+  location.href = url;
 }
 
 // ═══════ SETTINGS DROPDOWN ═══════
@@ -21955,6 +23445,7 @@ function toggleSettings() {
   const open = menu.classList.toggle('open');
   if (open) {
     _renderInstanceSwitcher();
+    loadDefaultModel();
     // Apply cloud identity (email) or device name
     _applyIdentityToSettings();
     if (!_cloudEmail) {
@@ -22071,6 +23562,34 @@ document.addEventListener('click', function(e) {
   const wrap = document.querySelector('.settings-wrap');
   if (wrap && !wrap.contains(e.target)) closeSettings();
 });
+
+// ── Default Model ────────────────────────────────────────────────────────────
+function loadDefaultModel() {
+  const sel = document.getElementById('settings-default-model');
+  if (sel && window._AMUX_DEFAULT_MODEL) {
+    if (!Array.from(sel.options).some(o => o.value === window._AMUX_DEFAULT_MODEL)) {
+      const opt = document.createElement('option');
+      opt.value = window._AMUX_DEFAULT_MODEL;
+      opt.textContent = window._AMUX_DEFAULT_MODEL;
+      sel.appendChild(opt);
+    }
+    sel.value = window._AMUX_DEFAULT_MODEL;
+  }
+}
+async function saveDefaultModel(val) {
+  try {
+    const r = await fetch('/api/settings/default-model', {
+      method: 'PATCH', headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({model: val})
+    });
+    if (r.ok) {
+      window._AMUX_DEFAULT_MODEL = val;
+      const defOpt = document.getElementById('model-default-opt');
+      if (defOpt) defOpt.textContent = 'Default (' + val + ')';
+      showToast('Default model: ' + val);
+    }
+  } catch(e) { showToast('Error: ' + e.message); }
+}
 
 // ── API Keys ───────────────────────────────────────────────────────────────────
 async function loadApiKeys() {
@@ -22375,6 +23894,24 @@ async function _handleDeeplink(hash) {
 }
 // On page load
 _handleDeeplink(location.hash);
+// Restore peek state from sessionStorage (survives refresh)
+try {
+  const _ps = JSON.parse(sessionStorage.getItem('peekState') || 'null');
+  if (_ps && _ps.session) {
+    setTimeout(() => {
+      openPeek(_ps.session);
+      if (_ps.split && window.innerWidth > 600) {
+        setTimeout(() => {
+          const wrap = document.getElementById('peek-split-wrap');
+          const btn = document.getElementById('peek-split-toggle');
+          if (wrap) wrap.classList.add('split-active');
+          if (btn) btn.classList.add('active');
+          _psfLoad(_ps.splitPath || peekSessionDir || '/');
+        }, 300);
+      }
+    }, 200);
+  }
+} catch(e) {}
 // On hash change (e.g. paste URL into address bar while app already open — no page reload)
 window.addEventListener('hashchange', () => _handleDeeplink(location.hash));
 
@@ -26212,14 +27749,15 @@ async function _bwGo() {
     else if (profile && profile.startsWith('pw:')) body.profile = profile.slice(3);
     const r = await fetch('/api/browser/start', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify(body) });
     const d = await r.json();
-    if (d.success === false && d.error) { _bwStatus('Error: ' + d.error); return; }
+    if (d.error) { _bwStatus('Error: ' + d.error); return; }
     _bwStatus('Navigated');
     // Auto-screenshot after a delay
-    setTimeout(() => _bwScreenshot(), 2000);
+    setTimeout(() => _bwScreenshot(2), 2000);
   } catch(e) { _bwStatus('Error: ' + e.message); }
 }
 
-async function _bwScreenshot() {
+async function _bwScreenshot(retries) {
+  retries = retries || 0;
   _bwStatus('Taking screenshot...');
   try {
     const r = await fetch('/api/browser/screenshot?session=' + _bwSession + '&t=' + Date.now());
@@ -26227,14 +27765,24 @@ async function _bwScreenshot() {
     if (d.path) {
       // Load via file raw API
       const img = document.getElementById('bw-img');
-      img.src = '/api/file/raw?path=' + encodeURIComponent(d.path) + '&t=' + Date.now();
+      img.src = _authUrl('/api/file/raw?path=' + encodeURIComponent(d.path) + '&t=' + Date.now());
       img.style.display = '';
       document.getElementById('bw-placeholder').style.display = 'none';
       _bwStatus('Screenshot taken');
+    } else if (retries > 0) {
+      _bwStatus('Retrying screenshot...');
+      setTimeout(() => _bwScreenshot(retries - 1), 2000);
     } else {
       _bwStatus(d.error || 'Screenshot failed');
     }
-  } catch(e) { _bwStatus('Error: ' + e.message); }
+  } catch(e) {
+    if (retries > 0) {
+      _bwStatus('Retrying screenshot...');
+      setTimeout(() => _bwScreenshot(retries - 1), 2000);
+    } else {
+      _bwStatus('Error: ' + e.message);
+    }
+  }
 }
 
 async function _bwClick(event) {
@@ -26248,7 +27796,7 @@ async function _bwClick(event) {
   _bwStatus('Clicking ' + x + ',' + y + '...');
   try {
     await fetch('/api/browser/action', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({ action: 'click', x, y, session: _bwSession }) });
-    setTimeout(() => _bwScreenshot(), 1000);
+    setTimeout(() => _bwScreenshot(1), 1000);
   } catch(e) { _bwStatus('Error: ' + e.message); }
 }
 
@@ -26256,7 +27804,7 @@ async function _bwBack() {
   _bwStatus('Going back...');
   try {
     await fetch('/api/browser/action', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({ action: 'back', session: _bwSession }) });
-    setTimeout(() => _bwScreenshot(), 1000);
+    setTimeout(() => _bwScreenshot(1), 1000);
   } catch(e) { _bwStatus('Error: ' + e.message); }
 }
 
@@ -26783,6 +28331,7 @@ async function _jrnlSaveConfig() {
     <div class="ws-preset-dropdown" id="ws-preset-dropdown">
       <button class="ws-preset-btn" onclick="wsTogglePresetMenu()" title="Apply a layout preset">&#x25A6; Layout</button>
       <div class="ws-preset-menu" id="ws-preset-menu">
+        <button onclick="wsApplyPreset('auto')"><span class="preset-icon">&#x2728;</span> Auto</button>
         <button onclick="wsApplyPreset('focus')"><span class="preset-icon">&#x25A0;</span> Focus (1 col)</button>
         <button onclick="wsApplyPreset('split')"><span class="preset-icon">&#x25EB;</span> Split (2 col)</button>
         <button onclick="wsApplyPreset('tri')"><span class="preset-icon">&#x2630;</span> 3 Columns</button>
@@ -26792,6 +28341,7 @@ async function _jrnlSaveConfig() {
       </div>
     </div>
     <button class="btn" onclick="wsClearWorkspace()" style="flex-shrink:0;font-size:0.75rem;padding:4px 10px;color:var(--dim);" title="Remove all panes">Clear</button>
+    <button class="btn" id="ws-fullscreen-btn" onclick="wsToggleFullscreen()" style="flex-shrink:0;font-size:0.75rem;padding:4px 10px;" title="Toggle fullscreen">&#x26F6;</button>
     <button class="btn" onclick="exitGridMode()" style="flex-shrink:0;font-size:0.75rem;padding:4px 10px;">&#x2715; Exit</button>
   </div>
   <div id="gridstack-container">
@@ -27345,10 +28895,14 @@ class CCHandler(BaseHTTPRequestHandler):
                     self.wfile.write(f"data: {json.dumps({'type': 'invalidate', 'keys': invalidated})}\n\n".encode())
                     self.wfile.flush()
 
-                # Heartbeat every 15s (7-8 iterations at 2s sleep)
+                # Ping every 10s as a real data event so client onmessage fires
+                # and _lastDataTime ticks. Plain SSE comments do NOT trigger
+                # onmessage, so we'd otherwise be unable to distinguish a quiet
+                # stream from a zombie connection (iOS Safari pauses EventSource
+                # in the background without firing error).
                 heartbeat_counter += 1
-                if heartbeat_counter >= 8:
-                    self.wfile.write(b": heartbeat\n\n")
+                if heartbeat_counter >= 5:
+                    self.wfile.write(f"data: {json.dumps({'type': 'ping', 'ts': int(now)})}\n\n".encode())
                     self.wfile.flush()
                     heartbeat_counter = 0
 
@@ -27441,19 +28995,38 @@ class CCHandler(BaseHTTPRequestHandler):
         # GET /
         if method == "GET" and path == "/":
             import json as _json
+            _user_email = self.headers.get("X-Amux-User-Email", "")
+            _user_id = self.headers.get("X-Amux-User-Id", "")
             page = DASHBOARD_HTML.replace(
                 "</head>",
                 f'<script>window._AMUX_S3_ICAL_URL={_json.dumps(_S3_CAL_URL)};'
                 f'window._AMUX_AUTH_TOKEN={_json.dumps(AUTH_TOKEN)};'
                 f'window._AMUX_HOME={_json.dumps(str(Path.home()))};'
-                f'window._GOOGLE_API_KEY={_json.dumps(os.environ.get("GOOGLE_API_KEY",""))};</script></head>',
+                f'window._GOOGLE_API_KEY={_json.dumps(os.environ.get("GOOGLE_API_KEY",""))};'
+                f'window._AMUX_POSTHOG_KEY={_json.dumps(os.environ.get("POSTHOG_KEY",""))};'
+                f'window._AMUX_POSTHOG_HOST={_json.dumps(os.environ.get("POSTHOG_HOST","https://us.i.posthog.com"))};'
+                f'window._AMUX_USER_EMAIL={_json.dumps(_user_email)};'
+                f'window._AMUX_USER_ID={_json.dumps(_user_id)};'
+                f'window._AMUX_DEFAULT_MODEL={_json.dumps(_get_default_model())};</script></head>',
                 1,
             )
             return self._html(page)
 
         # GET /health — lightweight uptime check (no auth required)
         if method == "GET" and path == "/health":
-            return self._json({"status": "ok"})
+            import resource as _res
+            _proc = psutil_process_info()
+            return self._json({
+                "status": "ok",
+                "pid": os.getpid(),
+                "uptime_s": int(time.time() - _server_start_time),
+                "requests": _server_request_count,
+                "threads": threading.active_count(),
+                "cpu_percent": _proc.get("cpu_percent", -1),
+                "memory_mb": _proc.get("memory_mb", -1),
+                "fd_count": _proc.get("fd_count", -1),
+                "sessions": _proc.get("session_count", -1),
+            })
 
         # GET /release-notes — standalone SEO-indexable release notes page
         if method == "GET" and path == "/release-notes":
@@ -27521,8 +29094,9 @@ class CCHandler(BaseHTTPRequestHandler):
             if not proxy_port.isdigit():
                 return self._json({"error": "invalid port"}, 400)
             proxy_url = f"http://127.0.0.1:{proxy_port}{proxy_path}"
-            if qs:
-                proxy_url += "?" + qs
+            raw_qs = urlparse(self.path).query
+            if raw_qs:
+                proxy_url += "?" + raw_qs
             try:
                 length = int(self.headers.get("Content-Length", 0))
                 body = self.rfile.read(length) if length else None
@@ -27532,17 +29106,23 @@ class CCHandler(BaseHTTPRequestHandler):
                 resp = _ureq.urlopen(req, timeout=30)
                 ct = resp.headers.get("Content-Type", "")
                 resp_body = resp.read()
-                # Inject <base> tag in HTML so all relative/absolute URLs route through the proxy
+                # Rewrite absolute paths in HTML so assets & links route through the proxy.
+                # <base> only affects relative URLs; absolute paths like /foo must be rewritten.
                 if "text/html" in ct:
-                    prefix = f"/proxy/{proxy_port}/"
+                    prefix = f"/proxy/{proxy_port}"
                     text = resp_body.decode("utf-8", errors="replace")
-                    base_tag = f'<base href="{prefix}">'
-                    if "<head>" in text:
-                        text = text.replace("<head>", f"<head>{base_tag}", 1)
-                    elif "<HEAD>" in text:
-                        text = text.replace("<HEAD>", f"<HEAD>{base_tag}", 1)
-                    else:
-                        text = base_tag + text
+                    # Rewrite src="/...", href="/...", action="/..." (but not //protocol-relative)
+                    text = re.sub(
+                        r'(\s(?:src|href|action)=")(/(?!/))([^"]*")',
+                        lambda m: m.group(1) + prefix + m.group(2) + m.group(3),
+                        text,
+                    )
+                    # Rewrite src='...', href='...', action='...' (single-quoted)
+                    text = re.sub(
+                        r"(\s(?:src|href|action)=')(/(?!/))([^']*')",
+                        lambda m: m.group(1) + prefix + m.group(2) + m.group(3),
+                        text,
+                    )
                     resp_body = text.encode("utf-8")
                 self.send_response(resp.status)
                 for k, v in resp.headers.items():
@@ -27588,7 +29168,7 @@ class CCHandler(BaseHTTPRequestHandler):
                 lines = int(qs.get("lines", ["200"])[0])
                 output = tmux_capture(session_name, lines)
                 if not output:
-                    output = load_session_log(session_name) or "(no output)"
+                    output = load_session_log(session_name, tail_bytes=65_536) or "(no output)"
                 return self._json({"name": session_name, "output": output})
 
             if method == "GET" and action == "info":
@@ -27825,6 +29405,27 @@ class CCHandler(BaseHTTPRequestHandler):
                         if sc["data"] is not None:
                             break
             return self._json(sc["data"] if sc["data"] is not None else [])
+
+        # GET /api/sessions-git — bulk git info for all sessions (avoids 80+ individual requests)
+        if method == "GET" and path == "/api/sessions-git":
+            from concurrent.futures import ThreadPoolExecutor
+            sc = _sse_cache["sessions"]
+            sess_list = sc["data"] if sc["data"] is not None else []
+            def _get_git(s):
+                name = s.get("name", "")
+                wd = s.get("dir", "")
+                if not wd:
+                    return None
+                info = _git_info(wd)
+                if info.get("branch"):
+                    return {"name": name, **info}
+                return None
+            results = {}
+            with ThreadPoolExecutor(max_workers=4) as pool:
+                for r in pool.map(_get_git, sess_list):
+                    if r:
+                        results[r["name"]] = r
+            return self._json(results)
 
         # GET/POST /api/memory/global
         if path == "/api/memory/global":
@@ -29016,9 +30617,11 @@ class CCHandler(BaseHTTPRequestHandler):
         if path == "/api/board" or path.startswith("/api/board/"):
             db = get_db()
 
-            # GET /api/board — list all non-deleted issues
+            # GET /api/board — list non-deleted issues
+            # ?done_limit=N  limits returned done/discarded items (default 100, 0=all)
             if method == "GET" and path == "/api/board":
-                return self._json(_load_board())
+                done_limit = int(qs.get("done_limit", ["100"])[0])
+                return self._json(_load_board(done_limit=done_limit))
 
             # POST /api/board — create issue
             if method == "POST" and path == "/api/board":
@@ -29461,7 +31064,7 @@ class CCHandler(BaseHTTPRequestHandler):
 
         # ── Reports API ───────────────────────────────────────────────────────
         if path == "/api/reports" or path.startswith("/api/reports/"):
-            import json as _json_r, time as _tr, urllib.request as _ur, urllib.error as _ue
+            import json as _json_r, time as _tr
             db = get_db()
 
             def _reports_list():
@@ -30235,9 +31838,18 @@ return output
                 except Exception as e:
                     return self._json({"error": str(e)}, 500)
 
-            # POST /api/email/send — send email via Mail.app
+            # POST /api/email/send — send email via Mail.app (new messages only, NOT replies)
             if method == "POST" and path == "/api/email/send":
                 body = self._read_body()
+                # Reject threading headers — Mail.app blocks custom headers on outgoing
+                # messages (-10024). Use /api/email/reply for threaded replies.
+                for forbidden_key in ("in_reply_to", "references", "inReplyTo"):
+                    if body.get(forbidden_key):
+                        return self._json({
+                            "error": f"'{forbidden_key}' is not supported on /api/email/send — "
+                                     "Mail.app cannot set custom headers on outgoing messages. "
+                                     "Use POST /api/email/reply to reply in-thread."
+                        }, 400)
                 to = body.get("to", "").strip()
                 subject = body.get("subject", "").strip()
                 message = body.get("body", "").strip()
@@ -30245,7 +31857,6 @@ return output
                 from_acct = body.get("from", "").strip()
                 if not to or not subject or not message:
                     return self._json({"error": "to, subject, and body are required"}, 400)
-                # Basic email validation
                 if not re.match(r'^[^@\s]+@[^@\s]+\.[^@\s]+$', to):
                     return self._json({"error": f"invalid email address: {to}"}, 400)
                 if cc and not re.match(r'^[^@\s]+@[^@\s]+\.[^@\s]+$', cc):
@@ -30253,8 +31864,8 @@ return output
                 cc_line = f'\nset cc of new_msg to "{cc}"' if cc else ""
                 subj_safe = subject.replace('"', '\\"')
                 to_safe = to.replace('"', '\\"')
-                body_safe = message.replace('"', '\\"').replace('\n', '\\n')
-                # If from account specified, set the sender
+                body_expr = _ascript_str(message)
+                expected_len = len(message)
                 from_line = ""
                 if from_acct:
                     from_safe = from_acct.replace('"', '\\"')
@@ -30269,67 +31880,274 @@ return output
         end repeat"""
                 script = f"""
 tell application "Mail"
-    set new_msg to make new outgoing message with properties {{subject:"{subj_safe}", content:"{body_safe}", visible:false}}
+    set bodyText to {body_expr}
+    set new_msg to make new outgoing message with properties {{subject:"{subj_safe}", content:bodyText, visible:false}}
     tell new_msg
         make new to recipient with properties {{address:"{to_safe}"}}
         {cc_line}
     end tell
     {from_line}
+    -- Verify content was actually applied before sending
+    set actualLen to length of (content of new_msg)
+    if actualLen < {expected_len} then
+        error "Content verification failed: expected {expected_len} chars, got " & actualLen & " chars. Aborting send."
+    end if
     send new_msg
+    return actualLen as string
 end tell
 """
                 try:
                     r = subprocess.run(["osascript", "-e", script], capture_output=True, text=True, timeout=30)
                     if r.returncode != 0:
                         return self._json({"error": r.stderr.strip() or "AppleScript failed"}, 500)
-                    return self._json({"ok": True, "to": to, "subject": subject})
+                    actual_len = r.stdout.strip()
+                    return self._json({"ok": True, "to": to, "subject": subject,
+                                       "from": from_acct or "(default)", "cc": cc or None,
+                                       "body_length": int(actual_len) if actual_len.isdigit() else actual_len})
                 except Exception as e:
                     return self._json({"error": str(e)}, 500)
 
-            # POST /api/email/reply — reply to an existing email
+            # POST /api/email/reply — reply to an existing email in-thread
             if method == "POST" and path == "/api/email/reply":
                 body = self._read_body()
                 message_id = body.get("message_id", "").strip()
                 reply_body = body.get("body", "").strip()
                 reply_all = body.get("reply_all", False)
+                from_acct = body.get("from", "").strip()
                 if not message_id or not reply_body:
                     return self._json({"error": "message_id and body are required"}, 400)
                 msg_id_safe = message_id.replace('"', '\\"')
-                body_safe = reply_body.replace('"', '\\"').replace('\n', '\\n')
-                reply_cmd = "reply" if not reply_all else "reply with properties {reply to all: true}"
+                body_expr = _ascript_str(reply_body)
+                expected_len = len(reply_body)
+                reply_props = "reply to all: true" if reply_all else ""
+                reply_cmd = f"reply with properties {{{reply_props}}}" if reply_props else "reply"
+                from_block = ""
+                if from_acct:
+                    from_safe = from_acct.replace('"', '\\"')
+                    from_block = f"""
+    -- Set sender on reply
+    repeat with acct in accounts
+        repeat with addr in email addresses of acct
+            if address of addr is "{from_safe}" then
+                set sender of replyMsg to (address of addr as string)
+            end if
+        end repeat
+    end repeat"""
                 script = f"""
 tell application "Mail"
     set targetMsg to missing value
+    -- Search ALL mailboxes, not just INBOX
     repeat with acct in accounts
         try
             repeat with mb in mailboxes of acct
-                if name of mb is "INBOX" then
-                    set msgs to (messages of mb whose message id is "{msg_id_safe}")
-                    if (count of msgs) > 0 then
-                        set targetMsg to item 1 of msgs
-                        exit repeat
-                    end if
+                set msgs to (messages of mb whose message id is "{msg_id_safe}")
+                if (count of msgs) > 0 then
+                    set targetMsg to item 1 of msgs
+                    exit repeat
                 end if
             end repeat
         end try
         if targetMsg is not missing value then exit repeat
     end repeat
     if targetMsg is missing value then
-        error "Message not found"
+        error "Message not found in any mailbox"
     end if
     set replyMsg to {reply_cmd} targetMsg opening window no
-    set content of replyMsg to "{body_safe}" & return & return & (content of replyMsg)
+    delay 3
+    set replyBody to {body_expr}
+    set content of replyMsg to replyBody & linefeed & linefeed & (content of replyMsg)
+    {from_block}
+    -- Verify body was actually applied before sending
+    set finalContent to content of replyMsg
+    if not (finalContent starts with replyBody) then
+        error "Content verification failed: reply body was not applied. Aborting send."
+    end if
     send replyMsg
+    return (length of finalContent) as string
 end tell
 """
                 try:
-                    r = subprocess.run(["osascript", "-e", script], capture_output=True, text=True, timeout=30)
+                    r = subprocess.run(["osascript", "-e", script], capture_output=True, text=True, timeout=60)
                     if r.returncode != 0:
                         err = r.stderr.strip()
                         if "Message not found" in err:
-                            return self._json({"error": "message not found — check message_id"}, 404)
+                            return self._json({"error": "message not found in any mailbox — check message_id"}, 404)
+                        if "Content verification failed" in err:
+                            return self._json({"error": err}, 500)
                         return self._json({"error": err or "AppleScript failed"}, 500)
-                    return self._json({"ok": True, "message_id": message_id, "reply_all": reply_all})
+                    actual_len = r.stdout.strip()
+                    return self._json({"ok": True, "message_id": message_id, "reply_all": reply_all,
+                                       "from": from_acct or "(default)",
+                                       "body_length": int(actual_len) if actual_len.isdigit() else actual_len})
+                except subprocess.TimeoutExpired:
+                    return self._json({"error": "Mail.app timed out (60s) — message may be in a large mailbox"}, 504)
+                except Exception as e:
+                    return self._json({"error": str(e)}, 500)
+
+            # GET /api/email/search?q=...&account=...&limit=...&days=...&mailbox=...
+            if method == "GET" and path == "/api/email/search":
+                qs = parse_qs(urlparse(self.path).query)
+                q = (qs.get("q", [""])[0]).strip()
+                account = (qs.get("account", [""])[0]).strip()
+                limit = min(int(qs.get("limit", ["20"])[0]), 100)
+                days = int(qs.get("days", ["30"])[0])
+                mailbox = (qs.get("mailbox", [""])[0]).strip()
+                if not q:
+                    return self._json({"error": "q parameter is required"}, 400)
+                q_safe = q.replace('"', '\\"')
+                acct_filter = ""
+                if account:
+                    acct_safe = account.replace('"', '\\"')
+                    acct_filter = f'whose address of email addresses contains "{acct_safe}"'
+                # Default to INBOX only (fast). Use mailbox=all for exhaustive search.
+                if mailbox and mailbox.lower() == "all":
+                    mb_filter = "true"
+                elif mailbox:
+                    mb_safe = mailbox.replace('"', '\\"')
+                    mb_filter = f'name of mb is "{mb_safe}"'
+                else:
+                    mb_filter = 'name of mb is "INBOX"'
+                script = f"""
+set output to ""
+set matchCount to 0
+set maxResults to {limit}
+set cutoff to (current date) - ({days} * days)
+tell application "Mail"
+    repeat with acct in (accounts {acct_filter})
+        try
+            repeat with mb in mailboxes of acct
+                if {mb_filter} then
+                    try
+                        set msgs to (messages of mb whose (subject contains "{q_safe}" or sender contains "{q_safe}") and date received > cutoff)
+                        repeat with msg in msgs
+                            if matchCount >= maxResults then exit repeat
+                            set mid to message id of msg
+                            set msubj to subject of msg
+                            set mfrom to sender of msg
+                            set mto to ""
+                            try
+                                set mto to address of to recipient 1 of msg
+                            end try
+                            set mdate to date received of msg as string
+                            set mbox to name of mb
+                            set macct to name of acct
+                            set mbody to ""
+                            try
+                                set mbody to content of msg
+                                if (length of mbody) > 200 then set mbody to text 1 thru 200 of mbody
+                            end try
+                            set output to output & mid & "\\t" & msubj & "\\t" & mfrom & "\\t" & mto & "\\t" & mdate & "\\t" & mbox & "\\t" & macct & "\\t" & mbody & linefeed
+                            set matchCount to matchCount + 1
+                        end repeat
+                    end try
+                end if
+                if matchCount >= maxResults then exit repeat
+            end repeat
+        end try
+        if matchCount >= maxResults then exit repeat
+    end repeat
+end tell
+return output
+"""
+                try:
+                    r = subprocess.run(["osascript", "-e", script], capture_output=True, text=True, timeout=120)
+                    if r.returncode != 0:
+                        return self._json({"error": r.stderr.strip() or "AppleScript failed"}, 500)
+                    results = []
+                    for line in r.stdout.strip().split("\n"):
+                        if not line.strip():
+                            continue
+                        parts = line.split("\t")
+                        if len(parts) >= 7:
+                            results.append({
+                                "message_id": parts[0],
+                                "subject": parts[1],
+                                "from": parts[2],
+                                "to": parts[3],
+                                "date": parts[4],
+                                "mailbox": parts[5],
+                                "account": parts[6],
+                                "snippet": parts[7] if len(parts) > 7 else "",
+                            })
+                    return self._json(results)
+                except subprocess.TimeoutExpired:
+                    return self._json({"error": "search timed out (120s)"}, 504)
+                except Exception as e:
+                    return self._json({"error": str(e)}, 500)
+
+            # GET /api/email/message/<rfc822_message_id>
+            if method == "GET" and path.startswith("/api/email/message/"):
+                raw_mid = path[len("/api/email/message/"):]
+                mid = unquote(raw_mid).strip()
+                if not mid:
+                    return self._json({"error": "message_id is required"}, 400)
+                mid_safe = mid.replace('"', '\\"')
+                script = f"""
+set output to ""
+tell application "Mail"
+    repeat with acct in accounts
+        try
+            repeat with mb in mailboxes of acct
+                try
+                    set msgs to (messages of mb whose message id is "{mid_safe}")
+                    if (count of msgs) > 0 then
+                        set msg to item 1 of msgs
+                        set msubj to subject of msg
+                        set mfrom to sender of msg
+                        set mto to ""
+                        repeat with r in to recipients of msg
+                            set mto to mto & address of r & ","
+                        end repeat
+                        set mcc to ""
+                        try
+                            repeat with r in cc recipients of msg
+                                set mcc to mcc & address of r & ","
+                            end repeat
+                        end try
+                        set mdate to date received of msg as string
+                        set mbox to name of mb
+                        set macct to name of acct
+                        set mbody to content of msg
+                        set mirt to ""
+                        try
+                            set hdrs to headers of msg
+                            repeat with h in hdrs
+                                if name of h is "In-Reply-To" then set mirt to content of h
+                                if name of h is "References" then
+                                    set output to output & "references\\t" & content of h & linefeed
+                                end if
+                            end repeat
+                        end try
+                        set output to "found" & linefeed & "subject\\t" & msubj & linefeed & "from\\t" & mfrom & linefeed & "to\\t" & mto & linefeed & "cc\\t" & mcc & linefeed & "date\\t" & mdate & linefeed & "mailbox\\t" & mbox & linefeed & "account\\t" & macct & linefeed & "in_reply_to\\t" & mirt & linefeed & output & "body\\t" & mbody
+                        return output
+                    end if
+                end try
+            end repeat
+        end try
+    end repeat
+end tell
+return "not_found"
+"""
+                try:
+                    r = subprocess.run(["osascript", "-e", script], capture_output=True, text=True, timeout=60)
+                    if r.returncode != 0:
+                        return self._json({"error": r.stderr.strip() or "AppleScript failed"}, 500)
+                    raw = r.stdout.strip()
+                    if raw == "not_found" or not raw.startswith("found"):
+                        return self._json({"error": "message not found"}, 404)
+                    result = {}
+                    for line in raw.split("\n"):
+                        if "\t" in line:
+                            key, _, val = line.partition("\t")
+                            key = key.strip()
+                            if key == "found":
+                                continue
+                            if key == "to" or key == "cc":
+                                val = [a.strip() for a in val.split(",") if a.strip()]
+                            result[key] = val
+                    return self._json(result)
+                except subprocess.TimeoutExpired:
+                    return self._json({"error": "timed out (60s)"}, 504)
                 except Exception as e:
                     return self._json({"error": str(e)}, 500)
 
@@ -30414,6 +32232,73 @@ end tell
             db.execute("DELETE FROM layout_presets WHERE name=?", (name,))
             db.commit()
             return self._json({"ok": True})
+
+        # ── Default model (reads/writes defaults.env) ──────────────────────────
+        if path == "/api/settings/default-model":
+            defaults_file = CC_HOME / "defaults.env"
+            if method == "GET":
+                return self._json({"model": _get_default_model()})
+            if method == "PATCH":
+                body = self._read_body()
+                if not isinstance(body, dict):
+                    return self._json({"error": "payload must be a JSON object"}, 400)
+                # Empty model = clear the --model override; other flags in
+                # CC_DEFAULT_FLAGS (like --max-tokens, --effort) are preserved.
+                # On a non-empty model, the existing --model X is REPLACED but
+                # all other flags are preserved — without this, picking a new
+                # default model in the UI would silently delete the user's
+                # custom flag config.
+                ok, model, err = _validate_model_name(body.get("model", ""))
+                if not ok:
+                    return self._json({"error": err}, 400)
+                # Read existing defaults.env once. The lines list serves both
+                # for extracting the current CC_DEFAULT_FLAGS value AND for
+                # the line-by-line substitution below. Reading the file twice
+                # would create a TOCTOU window where another writer could
+                # modify the file between reads.
+                lines = []
+                if defaults_file.exists():
+                    lines = defaults_file.read_text(encoding="utf-8").splitlines()
+                existing_flags = ""
+                for line in lines:
+                    if line.startswith("CC_DEFAULT_FLAGS="):
+                        value = line[len("CC_DEFAULT_FLAGS="):]
+                        # Strip outer matching quotes (mirrors parse_env_file).
+                        if len(value) >= 2 and value[0] == value[-1] and value[0] in ('"', "'"):
+                            value = value[1:-1]
+                        existing_flags = value
+                        break
+                try:
+                    flags_no_model = _strip_model_from_flags(existing_flags)
+                except ValueError as e:
+                    return self._json({
+                        "error": f"existing CC_DEFAULT_FLAGS in defaults.env is malformed ({e}); fix the file manually before updating the model via API"
+                    }, 400)
+                # Build the new flag value: prepend --model if non-empty, else
+                # leave the (possibly empty) other flags as-is.
+                if model:
+                    new_flag_value = (
+                        f"--model {model} {flags_no_model}".strip()
+                        if flags_no_model
+                        else f"--model {model}"
+                    )
+                else:
+                    new_flag_value = flags_no_model
+                new_line = f'CC_DEFAULT_FLAGS="{new_flag_value}"'
+                # Substitute in the lines we already loaded above (single read).
+                found = False
+                for i, line in enumerate(lines):
+                    if line.startswith("CC_DEFAULT_FLAGS="):
+                        lines[i] = new_line
+                        found = True
+                        break
+                if not found:
+                    lines.append(new_line)
+                content = "\n".join(lines) + "\n"
+                # Atomic write with mode 0o600 (no TOCTOU window). Same
+                # secure-write pattern as the shared _write_env helper.
+                _atomic_write_secure(defaults_file, content)
+                return self._json({"ok": True, "model": model})
 
         # ── Settings env (ANTHROPIC_API_KEY etc.) ─────────────────────────────
         if path == "/api/settings/env":
@@ -30567,10 +32452,10 @@ end tell
                 ).fetchone()
                 org = _get_org()
                 if not row:
-                    html = f"""<!doctype html><html><head><meta charset=utf-8><title>Invalid Invite</title>
-<style>body{{font-family:system-ui;background:#0d0d0d;color:#e8e8e8;display:flex;align-items:center;justify-content:center;min-height:100vh;margin:0}}
-.card{{background:#1a1a1a;border:1px solid #333;border-radius:12px;padding:32px;max-width:400px;text-align:center}}
-h2{{margin:0 0 12px;color:#f87171}}p{{color:#888;margin:0}}</style></head>
+                    html = """<!doctype html><html><head><meta charset=utf-8><title>Invalid Invite</title>
+<style>body{font-family:system-ui;background:#0d0d0d;color:#e8e8e8;display:flex;align-items:center;justify-content:center;min-height:100vh;margin:0}
+.card{background:#1a1a1a;border:1px solid #333;border-radius:12px;padding:32px;max-width:400px;text-align:center}
+h2{margin:0 0 12px;color:#f87171}p{color:#888;margin:0}</style></head>
 <body><div class=card><h2>Invite expired or invalid</h2><p>This invite link is no longer valid.</p></div></body></html>"""
                     return self._html(html, 410)
                 host = self.headers.get("Host", "localhost:8822")
@@ -30949,6 +32834,51 @@ p{{color:#888;margin:12px 0 28px;font-size:0.9rem;line-height:1.5}}
                 return self._json({"ok": True})
 
             return self._json({"error": "journal route not found"}, 404)
+
+        # ── Pairwise session channels ────────────────────────────────────────
+        if path == "/api/channels" or path.startswith("/api/channels/"):
+            # GET /api/channels?session=X — list channels involving X
+            if method == "GET" and path == "/api/channels":
+                sess = qs.get("session", [""])[0].strip()
+                if not sess:
+                    return self._json({"error": "missing 'session'"}, 400)
+                return self._json({"channels": _channel_list_for(sess)})
+            # /api/channels/{a}/{b}/messages
+            parts = path.strip("/").split("/")
+            # ['api','channels',a,b,'messages']
+            if len(parts) == 5 and parts[4] == "messages":
+                a, b = parts[2], parts[3]
+                if not (_VALID_SESSION_NAME_RE.match(a) and _VALID_SESSION_NAME_RE.match(b)):
+                    return self._json({"error": "invalid session name"}, 400)
+                if a == b:
+                    return self._json({"error": "cannot open channel with self"}, 400)
+                if method == "GET":
+                    return self._json({
+                        "channel": _channel_id(a, b),
+                        "a": a, "b": b,
+                        "messages": _channel_history(a, b),
+                    })
+                if method == "POST":
+                    body = self._read_body()
+                    text = (body.get("text") or "").strip()
+                    if not text:
+                        return self._json({"error": "missing 'text'"}, 400)
+                    # path order is {sender}/{recipient}
+                    sender, recipient = a, b
+                    msg = _channel_append(sender, recipient, text)
+                    delivered, deliver_msg = _channel_deliver(sender, recipient, text)
+                    return self._json({
+                        "ok": True,
+                        "message": msg,
+                        "delivered": delivered,
+                        "delivery_status": deliver_msg,
+                    })
+                if method == "DELETE":
+                    # End the channel: notify peer (no reply hint) + delete history
+                    closer, other = a, b
+                    ok, msg = _channel_end(closer, other)
+                    return self._json({"ok": ok, "message": msg}, 200 if ok else 500)
+            return self._json({"error": "channel route not found"}, 404)
 
         # ── CRM / People ─────────────────────────────────────────────────────
         if path == "/api/crm/contacts" or path.startswith("/api/crm/"):
@@ -31342,6 +33272,44 @@ p{{color:#888;margin:12px 0 28px;font-size:0.9rem;line-height:1.5}}
         if path.startswith("/api/torrents"):
             return self._handle_torrents(method, path, qs)
 
+        # ── Log search across all session log files ──
+        # GET /api/log-search?q=<query>&max=<per-session>
+        # Greps the on-disk session log files (not just the in-memory PTY buffer)
+        # and returns hits per session: { matches: { name: [{line, text}, ...] } }
+        if method == "GET" and path == "/api/log-search":
+            q = qs.get("q", [""])[0].strip()
+            if not q:
+                return self._json({"matches": {}})
+            try:
+                max_per = int(qs.get("max", ["50"])[0])
+            except ValueError:
+                max_per = 50
+            max_per = max(1, min(500, max_per))
+            ql = q.lower()
+            ansi_re = re.compile(r"\x1b\[[0-9;?]*[a-zA-Z]")
+            matches: dict[str, list[dict]] = {}
+            try:
+                files = sorted(CC_LOGS.glob("*.log"))
+            except Exception:
+                files = []
+            for lp in files:
+                sess_name = lp.stem
+                try:
+                    text = lp.read_text(errors="replace")
+                except Exception:
+                    continue
+                hits: list[dict] = []
+                for i, raw in enumerate(text.splitlines(), start=1):
+                    if ql in raw.lower():
+                        clean = ansi_re.sub("", raw).strip()
+                        if clean:
+                            hits.append({"line": i, "text": clean[:500]})
+                            if len(hits) >= max_per:
+                                break
+                if hits:
+                    matches[sess_name] = hits
+            return self._json({"matches": matches, "q": q})
+
         # Session-specific routes: /api/sessions/<name>/<action>[/<subid>]
         m = re.match(r"^/api/sessions/([^/]+)(/([^/]+)(/([^/]+))?)?$", path)
         if not m:
@@ -31365,8 +33333,8 @@ p{{color:#888;margin:12px 0 28px;font-size:0.9rem;line-height:1.5}}
                     # Also save snapshot while we have it
                     threading.Thread(target=save_session_log, args=(name, output), daemon=True).start()
                     return self._json({"name": name, "output": output})
-                # Not running or empty — serve saved log
-                saved = load_session_log(name)
+                # Not running or empty — serve saved log (tail only to limit memory)
+                saved = load_session_log(name, tail_bytes=65_536)
                 if saved:
                     return self._json({"name": name, "output": saved, "saved": True})
                 return self._json({"name": name, "output": "(no output)"})
@@ -31393,8 +33361,15 @@ p{{color:#888;margin:12px 0 28px;font-size:0.9rem;line-height:1.5}}
                     "mem_path": str(_session_mem_file(name)),
                 })
             if action == "log":
-                # Download raw terminal log file
                 lp = _log_path(name)
+                if action_subid == "info":
+                    # Lightweight metadata — used by the dashboard before asking
+                    # the session to load its log into context.
+                    if not lp.exists():
+                        return self._json({"exists": False, "size": 0, "path": str(lp)})
+                    st = lp.stat()
+                    return self._json({"exists": True, "size": st.st_size, "mtime": int(st.st_mtime), "path": str(lp)})
+                # Download raw terminal log file
                 if not lp.exists():
                     return self._json({"error": "no log"}, 404)
                 data = lp.read_bytes()
@@ -31786,12 +33761,15 @@ p{{color:#888;margin:12px 0 28px;font-size:0.9rem;line-height:1.5}}
                 (CC_MEMORY / f"{name}.md").unlink(missing_ok=True)
                 _meta_path(name).unlink(missing_ok=True)
                 _log_path(name).unlink(missing_ok=True)
+                _cleanup_session_state(name)
                 return self._json({"ok": True, "message": "deleted"})
             return self._json({"error": "not found"}, 404)
 
         if method == "PATCH":
             if action == "config":
                 body = self._read_body()
+                if not isinstance(body, dict):
+                    return self._json({"error": "payload must be a JSON object"}, 400)
                 cfg = parse_env_file(env_file)
 
                 # Rename
@@ -31837,38 +33815,71 @@ p{{color:#888;margin:12px 0 28px;font-size:0.9rem;line-height:1.5}}
                         old_log.rename(new_log)
                     # Update board items referencing old session name
                     try:
-                        board_items = _load_board()
-                        changed = False
-                        for item in board_items:
-                            if item.get("session") == name:
-                                item["session"] = new_name
-                                changed = True
-                        if changed:
-                            _save_board(board_items)
+                        db = get_db()
+                        db.execute(
+                            "UPDATE issues SET session=? WHERE session=? AND deleted IS NULL",
+                            (new_name, name),
+                        )
+                        db.commit()
                     except Exception:
                         pass
                     return self._json({"ok": True, "message": f"renamed to {new_name}"})
 
                 # Change model
                 if "model" in body:
-                    model_val = body["model"].strip()
-                    flags = cfg.get("CC_FLAGS", "")
-                    # Remove existing --model flag
-                    flags = re.sub(r'--model\s+\S+\s*', '', flags).strip()
+                    ok, model_val, err = _validate_model_name(body["model"])
+                    if not ok:
+                        return self._json({"error": err}, 400)
+                    # Strip any existing --model X / --model=X via the shared
+                    # shlex-based helper so quoted multi-word values and the
+                    # equals-form aren't corrupted. On parse failure (malformed
+                    # CC_FLAGS in the session env file), surface a 400 rather
+                    # than silently wiping out the user's other flags.
+                    try:
+                        flags_no_model = _strip_model_from_flags(cfg.get("CC_FLAGS", ""))
+                    except ValueError as e:
+                        return self._json({
+                            "error": f"existing CC_FLAGS for session '{name}' is malformed ({e}); fix the .env file manually before updating the model"
+                        }, 400)
                     if model_val:
-                        flags = f"--model {model_val} {flags}".strip()
+                        flags = (
+                            f"--model {model_val} {flags_no_model}".strip()
+                            if flags_no_model
+                            else f"--model {model_val}"
+                        )
+                    else:
+                        flags = flags_no_model
                     cfg["CC_FLAGS"] = flags
                     _write_env(env_file, cfg)
-                    # Also send /model to running session so it takes effect immediately
-                    if is_running(name) and model_val:
+                    # Auto-restart the session so the new --model takes effect.
+                    # In-place /model switching via tmux send-keys is unreliable
+                    # (input gets eaten when the session is showing a prompt or
+                    # busy). Restart kills in-flight work but preserves the
+                    # conversation — next start uses --resume <conv-id>.
+                    restarted = False
+                    if is_running(name):
                         try:
-                            subprocess.run(
-                                ["tmux", "send-keys", "-t", tmux_target(name), f"/model {model_val}", "Enter"],
-                                capture_output=True, timeout=5,
-                            )
+                            # Capture the LIVE conversation id BEFORE killing
+                            # the tmux session. The stored meta value can be
+                            # stale (e.g. when a session is removed and re-
+                            # registered with the same name) — the running
+                            # process's argv/open-fds + the work_dir's most-
+                            # recent jsonl are authoritative for what
+                            # conversation is actually being used.
+                            work_dir_pre = str(Path(cfg.get("CC_DIR", str(Path.home()))).expanduser().resolve())
+                            conv_id = _live_conv_id(name, work_dir_pre)
+                            if conv_id:
+                                meta_pre = _load_meta(name)
+                                if meta_pre.get("cc_conversation_id") != conv_id:
+                                    meta_pre["cc_conversation_id"] = conv_id
+                                    _save_meta(name, meta_pre)
+                            stop_session(name)
+                            ok_r, _ = start_session(name)
+                            restarted = bool(ok_r)
                         except Exception:
                             pass
-                    return self._json({"ok": True, "message": f"model set to {model_val}"})
+                    suffix = " (session restarted)" if restarted else ""
+                    return self._json({"ok": True, "message": f"model set to {model_val}{suffix}"})
 
                 # Toggle YOLO
                 if body.get("toggle_yolo"):
@@ -32383,7 +34394,7 @@ def _validate_api_key() -> tuple[bool, str]:
                 "content-type": "application/json",
             },
         )
-        resp = urllib.request.urlopen(req, timeout=10)
+        urllib.request.urlopen(req, timeout=10).close()
         return True, ""
     except urllib.error.HTTPError as e:
         if e.code == 401:
@@ -32428,7 +34439,7 @@ def _watch_self(server):
                     settled_mtime = script.stat().st_mtime
                     if settled_mtime == new_mtime:
                         break
-                    slog(f"[restart] file changed again during debounce, resetting...")
+                    slog("[restart] file changed again during debounce, resetting...")
                     new_mtime = settled_mtime
                 uptime = int(time.time() - _server_start_time)
                 slog(f"[restart] {script.name} settled — restarting (uptime={uptime}s, requests={_server_request_count}, threads={threading.active_count()})")
@@ -32509,7 +34520,7 @@ def _ensure_self_signed(lan_ip: str, extra_ips: list = None):
         if entry not in san_parts:
             san_parts.append(entry)
     san = ",".join(san_parts)
-    print(f"\033[2m  Generating self-signed TLS cert...\033[0m")
+    print("\033[2m  Generating self-signed TLS cert...\033[0m")
     subprocess.run(
         ["openssl", "req", "-x509", "-newkey", "rsa:2048", "-nodes",
          "-keyout", str(key_file), "-out", str(cert_file),
@@ -32563,7 +34574,7 @@ def _ensure_tls(lan_ip: str) -> tuple:
         return str(cert_file), str(key_file), "", None
 
     if subprocess.run(["which", "mkcert"], capture_output=True).returncode == 0:
-        print(f"\033[2m  Generating trusted TLS cert with mkcert...\033[0m")
+        print("\033[2m  Generating trusted TLS cert with mkcert...\033[0m")
         subprocess.run(
             ["mkcert", "-cert-file", str(cert_file), "-key-file", str(key_file),
              "localhost", "127.0.0.1", lan_ip],
@@ -32654,8 +34665,10 @@ def main():
         except Exception as e:
             print(f"\033[33m  TLS setup failed ({e}), falling back to HTTP\033[0m")
 
+    _install_signal_handlers()
     slog(f"[startup] server starting — pid={os.getpid()}, port={port}, scheme={scheme}, python={sys.version.split()[0]}")
-    print(f"\033[1m\033[34mamux\033[0m web dashboard running")
+    _log_resource_snapshot("startup")
+    print("\033[1m\033[34mamux\033[0m web dashboard running")
     print(f"  Local:   {scheme}://localhost:{port}")
     if ts_hostname:
         print(f"  Tailscale: {scheme}://{ts_hostname}:{port}")
@@ -32666,17 +34679,17 @@ def main():
         print(f"\n  Open on your phone → {scheme}://{lan_ip}:{port}")
     if scheme == "https":
         if ts_hostname:
-            print(f"\033[32m  ✓ Tailscale HTTPS — trusted cert, no setup needed on phone\033[0m")
+            print("\033[32m  ✓ Tailscale HTTPS — trusted cert, no setup needed on phone\033[0m")
         else:
-            print(f"\033[32m  ✓ HTTPS enabled — service worker & offline mode will work\033[0m")
+            print("\033[32m  ✓ HTTPS enabled — service worker & offline mode will work\033[0m")
     else:
-        print(f"\033[33m  ⚠ HTTP only — offline mode requires HTTPS on non-localhost\033[0m")
+        print("\033[33m  ⚠ HTTP only — offline mode requires HTTPS on non-localhost\033[0m")
     if AUTH_TOKEN:
         print(f"\033[32m  ✓ Auth enabled — token in {_AUTH_TOKEN_FILE}\033[0m")
     else:
-        print(f"\033[33m  ⚠ Auth DISABLED — all endpoints are public\033[0m")
-    print(f"\033[2m  Auto-reload active — editing amux-server.py will restart\033[0m")
-    print(f"\n\033[2mPress Ctrl-C to stop\033[0m")
+        print("\033[33m  ⚠ Auth DISABLED — all endpoints are public\033[0m")
+    print("\033[2m  Auto-reload active — editing amux-server.py will restart\033[0m")
+    print("\n\033[2mPress Ctrl-C to stop\033[0m")
 
     # Plain HTTP cert server (so phones can fetch cert before trusting it)
     if scheme == "https":
@@ -32735,6 +34748,7 @@ def main():
     schedule_job(_email_sync_job,        interval=_EMAIL_SYNC_INTERVAL, name="email_sync",  initial_delay=20)
     schedule_job(_board_watcher,         interval=30,                   name="board_watcher", initial_delay=30)
     schedule_job(_board_watcher_clear_nudged, interval=60,             name="board_watcher_gc", initial_delay=60)
+    schedule_job(_evict_stale_caches,    interval=300,                  name="cache_evict", initial_delay=60)
     schedule_job(_cleanup_tmp,           interval=1800,                 name="tmp_cleanup", initial_delay=60)
     schedule_job(_auto_archive_idle,     interval=3600,                 name="auto_archive", initial_delay=300)
     schedule_job(_enforce_archived_stopped, interval=600,                name="archive_enforce", initial_delay=30)
@@ -32743,6 +34757,7 @@ def main():
     schedule_job(_cleanup_recordings,       interval=86400,              name="recording_cleanup",  initial_delay=180)
     schedule_job(_db_maintenance,           interval=86400,              name="db_maintenance",     initial_delay=240)
     schedule_job(_validate_api_key_job,     interval=300,                name="key_validate",       initial_delay=10)
+    schedule_job(lambda: _log_resource_snapshot("heartbeat"), interval=300, name="resource_log", initial_delay=60)
     if _AUTO_UPDATE_REPO:
         slog(f"[auto-update] watching {_AUTO_UPDATE_REPO}@{_AUTO_UPDATE_BRANCH} every {_AUTO_UPDATE_INTERVAL}s")
         schedule_job(_auto_update_check, interval=_AUTO_UPDATE_INTERVAL, name="auto_update", initial_delay=_AUTO_UPDATE_INTERVAL)
