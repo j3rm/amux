@@ -827,6 +827,8 @@ def _classify_request(method: str, path: str) -> tuple:
         if method == "POST"  and sub == "start":   return ("session", "started",      sname, sname)
         if method == "POST"  and sub == "stop":    return ("session", "stopped",      sname, sname)
         if method == "POST"  and sub == "send":    return ("session", "message-sent", sname, sname)
+        if method == "POST"  and sub == "steer":   return ("session", "steered",      sname, sname)
+        if method == "DELETE"and sub == "steer":   return ("session", "steer-cleared",sname, sname)
         if method == "POST"  and sub == "archive": return ("session", "archived",     sname, sname)
         if method == "POST"  and sub == "wake":    return ("session", "woken",        sname, sname)
         if method == "PATCH" and sub == "config":  return ("session", "configured",   sname, sname)
@@ -866,6 +868,8 @@ _sse_alert_lock = threading.Lock()
 _send_locks: dict = {}          # per-session locks for serializing send_text/send_keys
 _send_locks_lock = threading.Lock()  # protects _send_locks dict itself
 _session_auto_actions: dict = {} # {name: {"last_compact": ts, "last_restart": ts}}
+_steering_queue: dict = {}      # {session_name: [{"text": str, "queued_at": float, "id": str}]}
+_steering_lock = threading.Lock()
 
 # Per-session token cache — refreshed every 30s, keyed by resolved dir
 _token_cache = {"data": {}, "timestamps": {}, "time": 0}
@@ -1699,6 +1703,21 @@ def _snapshot_all_sessions():
             else:
                 # Session no longer waiting — reset tracking
                 actions.pop("ac_waiting_since", None)
+
+            # ── 5. Steering: deliver queued messages at turn boundary ────────
+            if status == "waiting":
+                with _steering_lock:
+                    queue = _steering_queue.get(name, [])
+                if queue:
+                    msg = queue[0]
+                    ok, err = send_text(name, msg["text"])
+                    if ok:
+                        with _steering_lock:
+                            q = _steering_queue.get(name, [])
+                            _steering_queue[name] = [m for m in q if m["id"] != msg["id"]]
+                        _push_alert("steering_delivered", name,
+                                    f"Steering message delivered to '{name}'")
+
         except Exception:
             pass
 
@@ -4397,6 +4416,7 @@ def list_sessions() -> list:
             "pinned": cfg.get("CC_PINNED", "") == "1",
             "archived": cfg.get("CC_ARCHIVED", "") == "1",
             "auto_continue": cfg.get("CC_AUTO_CONTINUE") in ("1", "true", "yes"),
+            "steering": len(_steering_queue.get(name, [])),
             "tags": [t.strip() for t in cfg.get("CC_TAGS", "").split(",") if t.strip()],
             "flags": cfg.get("CC_FLAGS", ""),
             "creator": cfg.get("CC_CREATOR", ""),
@@ -10963,6 +10983,11 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
     <div id="peek-status" class="overlay-status"></div>
     <div class="peek-cmd-bar">
       <button class="peek-cmd-toggle" id="peek-cmd-toggle" onclick="togglePeekCmd()">&#x25BC; Send command</button>
+      <div id="peek-steer-bar" style="display:none;padding:6px 12px;background:rgba(210,153,34,0.1);border-bottom:1px solid var(--border);font-size:0.78rem;gap:8px;align-items:center;">
+        <span style="color:var(--yellow);font-weight:600;">&#x1F4E8; Steering queued:</span>
+        <span id="peek-steer-text" style="flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;"></span>
+        <button class="btn" style="font-size:0.65rem;padding:2px 6px;" onclick="clearSteering()">Cancel</button>
+      </div>
       <div class="peek-cmd-row open" id="peek-cmd-row" style="flex-wrap:wrap;">
         <div class="voice-status" id="voice-status"><span id="voice-status-text"></span></div>
         <div class="chips" style="width:100%;margin:0;" id="peek-chips"></div>
@@ -12342,6 +12367,7 @@ const _ALERT_LABELS = {
   auto_restart:   (a) => ({ title: '🔄 Agent restarted', body: a.session + ' — ' + a.message }),
   thinking_reset: (a) => ({ title: '🔄 Thinking reset', body: a.session }),
   auto_continue:  (a) => ({ title: '▶ Agent continued', body: a.session }),
+  steering_delivered: (a) => ({ title: '📨 Steering delivered', body: a.session }),
 };
 
 function _fireAmuxAlert(a) {
@@ -12418,6 +12444,13 @@ function updatePeekStatus() {
   else if (s.status === 'idle')    badge = '<span class="status-badge idle">idle</span>';
   else if (!s.running)             badge = '<span class="status-badge" style="background:rgba(255,255,255,0.06);color:var(--dim);border:1px solid var(--border);">stopped</span>';
   el.innerHTML = badge;
+  // Update input placeholder based on session state
+  const cmdInp = document.getElementById('peek-cmd-input');
+  if (cmdInp) {
+    cmdInp.placeholder = s.status === 'active'
+      ? 'Steer at next turn boundary...'
+      : 'Type a message or drop a file...';
+  }
   // Model badge
   const mb = document.getElementById('peek-model-badge');
   if (mb) {
@@ -12546,6 +12579,7 @@ function render() {
           ${s.status === 'active' ? '<span class="status-badge active">working</span>' : ''}
           ${s.status === 'waiting' ? '<span class="status-badge waiting">needs input</span>' : ''}
           ${s.status === 'idle' ? '<span class="status-badge idle">idle</span>' : ''}
+          ${s.steering ? '<span class="status-badge" style="background:rgba(210,153,34,0.2);color:var(--yellow);">&#x1F4E8; steering queued</span>' : ''}
           ${s.tokens ? `<span class="token-count">${fmtTokens(s.tokens)}</span>` : ''}
           ${s.last_activity ? `<span class="last-active">${timeAgo(s.last_activity)}</span>` : ''}
           ${!online ? '<span class="cached-badge">cached</span>' : ''}
@@ -14824,6 +14858,7 @@ function openPeek(name, opts) {
   if (_gtp) _gtp.classList.remove('collapsed');
   if (_peekTab !== 'terminal') setPeekTab('terminal');
   document.getElementById('peek-terminal-panel').style.display = '';
+  document.getElementById('peek-split-wrap').style.display = '';
   document.getElementById('peek-memory-panel').classList.remove('active');
   document.getElementById('peek-git-panel').classList.remove('active');
   document.getElementById('peek-commits-panel').classList.remove('active');
@@ -14850,6 +14885,7 @@ function openPeek(name, opts) {
   if (draft) setTimeout(() => document.getElementById('peek-cmd-input').focus({ preventScroll: true }), 50);
   document.getElementById('peek-title').textContent = name;
   updatePeekStatus();
+  updateSteerBar(name);
   document.getElementById('peek-body').innerHTML = '<span style="color:var(--dim)">Loading...</span>';
   // Reset tab badges; will be repopulated by _peekUpdateTabCounts
   ['peek-tab-schedules-count','peek-tab-notes-count'].forEach(id => {
@@ -15495,6 +15531,16 @@ async function sendPeekCmd() {
   const text = inp.value.trim();
   const files = peekFiles.filter(f => f.path); // only successfully uploaded
   if (!text && files.length === 0) return;
+  // If session is actively working, queue as steering instead of interrupting
+  const sess = (sessions || []).find(s => s.name === peekSession);
+  if (sess && sess.status === 'active' && files.length === 0 && !text.startsWith('/')) {
+    cmdHistoryAdd(text);
+    inp.value = '';
+    inp.style.height = 'auto';
+    delete _peekDrafts[peekSession];
+    await steerSession(peekSession, text);
+    return;
+  }
   cmdHistoryAdd(text);
 
   // Build message: inline @path references (no newlines — tmux treats \n as Enter,
@@ -15538,6 +15584,36 @@ async function peekQuickKeys(keys) {
   setTimeout(refreshPeek, 500);
 }
 
+async function steerSession(name, text) {
+  if (!text) return;
+  const r = await apiCall(API + '/api/sessions/' + encodeURIComponent(name) + '/steer', {
+    method: 'POST', headers: {'Content-Type':'application/json'},
+    body: JSON.stringify({ text })
+  });
+  if (r) {
+    showToast('Steering queued — will deliver at next turn boundary');
+    updateSteerBar(name);
+  }
+}
+async function clearSteering() {
+  if (!peekSession) return;
+  await apiCall(API + '/api/sessions/' + encodeURIComponent(peekSession) + '/steer', { method: 'DELETE' });
+  updateSteerBar(peekSession);
+}
+async function updateSteerBar(name) {
+  const bar = document.getElementById('peek-steer-bar');
+  if (!bar || name !== peekSession) return;
+  try {
+    const r = await fetch(API + '/api/sessions/' + encodeURIComponent(name) + '/steer');
+    const queue = await r.json();
+    if (queue.length > 0) {
+      bar.style.display = 'flex';
+      document.getElementById('peek-steer-text').textContent = queue.map(m => m.text).join(' → ');
+    } else {
+      bar.style.display = 'none';
+    }
+  } catch(e) { bar.style.display = 'none'; }
+}
 function peekDownloadLog() {
   if (!peekSession) return;
   const a = document.createElement('a');
@@ -22766,6 +22842,7 @@ function connectSSE() {
       } else if (msg.type === 'alerts') {
         for (const a of (msg.payload || [])) {
           _fireAmuxAlert(a);
+          if (a.type === 'steering_delivered' && a.session === peekSession) updateSteerBar(peekSession);
         }
       } else if (msg.type === 'invalidate') {
         for (const key of (msg.keys || [])) {
@@ -33463,6 +33540,25 @@ p{{color:#888;margin:12px 0 28px;font-size:0.9rem;line-height:1.5}}
                     _update_meta(name, last_send=int(time.time()))
                 code = 200 if ok else (409 if msg == "not running" else 500)
                 return self._json({"ok": ok, "message": msg}, code)
+            if action == "steer":
+                if method == "GET":
+                    with _steering_lock:
+                        queue = list(_steering_queue.get(name, []))
+                    return self._json(queue)
+                if method == "DELETE":
+                    with _steering_lock:
+                        removed = len(_steering_queue.get(name, []))
+                        _steering_queue[name] = []
+                    return self._json({"ok": True, "cleared": removed})
+                body = self._read_body()
+                text = body.get("text", "")
+                if not text:
+                    return self._json({"error": "missing 'text'"}, 400)
+                msg_id = f"steer-{int(time.time()*1000)}"
+                entry = {"id": msg_id, "text": text, "queued_at": time.time()}
+                with _steering_lock:
+                    _steering_queue.setdefault(name, []).append(entry)
+                return self._json({"ok": True, "id": msg_id, "message": "queued for next turn boundary"})
             if action == "memory":
                 body = self._read_body()
                 content = body.get("content", "")
