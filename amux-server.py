@@ -2540,6 +2540,93 @@ def _sync_skills_to_commands():
         pass
 
 
+_BUILTIN_SLASH_COMMANDS = [
+    ("/add-dir", "Add a working directory"),
+    ("/agents", "Manage agent configurations"),
+    ("/batch", "Orchestrate large-scale changes in parallel"),
+    ("/clear", "Clear conversation history"),
+    ("/color", "Set prompt bar color"),
+    ("/compact", "Compact conversation history"),
+    ("/config", "Open config panel"),
+    ("/context", "Visualize context usage"),
+    ("/copy", "Copy last response to clipboard"),
+    ("/cost", "Show token usage and cost"),
+    ("/debug", "Enable debug logging"),
+    ("/diff", "Interactive diff viewer"),
+    ("/doctor", "Check installation health"),
+    ("/effort", "Set model effort level"),
+    ("/export", "Export conversation as text"),
+    ("/extra-usage", "Configure extra usage for rate limits"),
+    ("/fast", "Toggle fast mode"),
+    ("/feedback", "Submit feedback or report a bug"),
+    ("/focus", "Toggle focus view"),
+    ("/help", "Show available commands"),
+    ("/hooks", "View hook configurations"),
+    ("/ide", "Manage IDE integrations"),
+    ("/init", "Initialize project CLAUDE.md"),
+    ("/login", "Switch account or log in"),
+    ("/logout", "Log out of current account"),
+    ("/loop", "Run a prompt repeatedly"),
+    ("/mcp", "Manage MCP servers"),
+    ("/memory", "Edit CLAUDE.md memory"),
+    ("/model", "Switch model"),
+    ("/permissions", "View/manage permissions"),
+    ("/plan", "Enter plan mode"),
+    ("/plugin", "Manage plugins"),
+    ("/recap", "Summarize current session"),
+    ("/release-notes", "View changelog"),
+    ("/remote-control", "Enable remote control from claude.ai"),
+    ("/rename", "Rename current session"),
+    ("/resume", "Resume a conversation"),
+    ("/review", "Review a pull request"),
+    ("/rewind", "Rewind conversation to a checkpoint"),
+    ("/sandbox", "Toggle sandbox mode"),
+    ("/schedule", "Create or manage routines"),
+    ("/security-review", "Analyze changes for security issues"),
+    ("/simplify", "Review code for reuse and quality"),
+    ("/skills", "List available skills"),
+    ("/stats", "Visualize usage and session history"),
+    ("/status", "Show session status"),
+    ("/statusline", "Configure status line"),
+    ("/tasks", "List and manage background tasks"),
+    ("/terminal-setup", "Set up terminal integration"),
+    ("/theme", "Change color theme"),
+    ("/ultraplan", "Draft a plan with cloud review"),
+    ("/ultrareview", "Deep multi-agent code review"),
+    ("/usage", "Show plan usage and rate limits"),
+    ("/vim", "Edit prompt in Vim"),
+    ("/voice", "Toggle voice dictation"),
+]
+
+
+def _get_slash_commands():
+    import pathlib as _p
+    cmds = [{"cmd": c, "desc": d} for c, d in _BUILTIN_SLASH_COMMANDS]
+    seen = {c for c, _ in _BUILTIN_SLASH_COMMANDS}
+    for d in [_p.Path.home() / ".claude" / "commands", _p.Path(".")  / ".claude" / "commands"]:
+        if not d.is_dir():
+            continue
+        for f in sorted(d.glob("*.md")):
+            name = "/" + f.stem
+            if name in seen:
+                continue
+            seen.add(name)
+            desc = ""
+            try:
+                text = f.read_text()
+                if text.startswith("---"):
+                    fm_end = text.find("---", 3)
+                    if fm_end > 0:
+                        for line in text[3:fm_end].splitlines():
+                            if line.startswith("description:"):
+                                desc = line.split(":", 1)[1].strip()
+                                break
+            except Exception:
+                pass
+            cmds.append({"cmd": name, "desc": desc})
+    return cmds
+
+
 def _init_db():
     """Create SQLite tables if they don't exist."""
     db = get_db()
@@ -6900,11 +6987,15 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
   .chip.chip-edit-toggle { background: none; border: 1px solid transparent; color: var(--dim); padding: 6px 8px; font-size: 0.85rem; }
   .chip.chip-edit-toggle:hover { color: var(--accent); }
   .chip.chip-edit-toggle.active { color: var(--accent); }
-  .chips.editing .chip { cursor: grab; }
-  .chips.editing .chip.dragging { opacity: 0.4; }
-  .chips.editing .chip-remove-btn { display: inline-flex; margin-left: 4px; font-size: 0.7rem; opacity: 0.6; cursor: pointer; }
-  .chips.editing .chip-remove-btn:hover { opacity: 1; color: var(--red); }
+  .chips.editing { flex-wrap: wrap; overflow-x: visible; touch-action: none; gap: 8px; }
+  .chips.editing .chip { cursor: grab; padding: 8px 12px; min-height: 40px; }
+  .chips.editing .chip.dragging { opacity: 0.3; }
+  .chips.editing .chip.drag-over { box-shadow: -3px 0 0 var(--accent); }
+  .chips.editing .chip-drag-handle { margin-right: 4px; opacity: 0.4; font-size: 0.7rem; }
+  .chips.editing .chip-remove-btn { display: inline-flex; margin-left: 6px; font-size: 0.8rem; opacity: 0.6; cursor: pointer; width: 22px; height: 22px; align-items: center; justify-content: center; border-radius: 50%; background: rgba(248,81,73,0.1); }
+  .chips.editing .chip-remove-btn:hover { opacity: 1; color: var(--red); background: rgba(248,81,73,0.2); }
   .chip-remove-btn { display: none; }
+  .chip-drag-handle { display: none; }
   .chip-picker-overlay { position: fixed; inset: 0; background: rgba(0,0,0,0.6); z-index: 2000; display: flex; align-items: center; justify-content: center; }
   .chip-picker { background: var(--card); border: 1px solid var(--border); border-radius: 12px; width: 340px; max-height: 70vh; display: flex; flex-direction: column; overflow: hidden; }
   .chip-picker-header { padding: 12px 16px; border-bottom: 1px solid var(--border); display: flex; align-items: center; gap: 8px; }
@@ -13870,7 +13961,9 @@ function _steeringUpdateBadge() {
   const sess = sessions.find(s => s.name === peekSession);
   const queue = (sess && sess.steering) || [];
   const badge = document.getElementById('peek-tab-steering-count');
-  if (badge) badge.textContent = queue.length ? ' (' + queue.length + ')' : '';
+  if (!badge) return;
+  if (queue.length > 0) { badge.textContent = queue.length; badge.classList.add('has-count'); }
+  else { badge.textContent = ''; badge.classList.remove('has-count'); }
 }
 
 async function _steeringSendNow(msgId) {
@@ -16021,32 +16114,13 @@ function _atInsert(inp, el) {
 }
 
 // ── Slash command autocomplete ──
-const SLASH_COMMANDS = [
-  { cmd: '/compact', desc: 'Compact conversation history' },
-  { cmd: '/status', desc: 'Show session status' },
-  { cmd: '/cost', desc: 'Show token usage and cost' },
-  { cmd: '/clear', desc: 'Clear conversation history' },
-  { cmd: '/help', desc: 'Show available commands' },
-  { cmd: '/init', desc: 'Initialize project CLAUDE.md' },
-  { cmd: '/memory', desc: 'Edit CLAUDE.md memory' },
-  { cmd: '/model', desc: 'Switch model' },
-  { cmd: '/permissions', desc: 'View/manage permissions' },
-  { cmd: '/review', desc: 'Review a pull request' },
-  { cmd: '/terminal-setup', desc: 'Set up terminal integration' },
-  { cmd: '/vim', desc: 'Edit prompt in Vim' },
-  { cmd: '/bug', desc: 'Report a bug' },
-  { cmd: '/login', desc: 'Switch account or log in' },
-  { cmd: '/logout', desc: 'Log out of current account' },
-  { cmd: '/doctor', desc: 'Check installation health' },
-  { cmd: '/config', desc: 'Open config panel' },
-  { cmd: '/amux', desc: 'Interact with amux — board, memory, sessions' },
-  { cmd: '/amux-board', desc: 'Add a task or note to the board' },
-  { cmd: '/chrome-cdp', desc: 'Control live Chrome — screenshots, click, type, eval' },
-  { cmd: '/playwright-auth', desc: 'Capture and sync browser auth profiles' },
-  { cmd: '/pw-test', desc: 'Run Playwright UI tests or investigate issues' },
-  { cmd: '/record', desc: 'Record MP4 video of a browser task' },
-  { cmd: '/review-session-log', desc: 'Review a session terminal log' },
-];
+let SLASH_COMMANDS = [];
+(async function _loadSlashCommands() {
+  try {
+    const r = await fetch(API + '/api/slash-commands');
+    if (r.ok) SLASH_COMMANDS = await r.json();
+  } catch(e) {}
+})();
 
 // ── Customizable chip bar ──
 // Each chip: { id, label, action, value, danger? }
@@ -16068,9 +16142,7 @@ const DEFAULT_CHIPS = [
 ];
 
 // All possible chips the user can add
-const ALL_CHIPS = [
-  // Built-in actions
-  { section: 'Actions', items: [
+const _ACTION_CHIPS = [
     { id: 'continue', label: 'continue', action: 'send', value: 'continue', desc: 'Send "continue"' },
     { id: 'enter', label: 'Enter', action: 'keys', value: 'Enter', desc: 'Press Enter' },
     { id: 'up', label: '\u2191', action: 'keys', value: 'Up', desc: 'Arrow Up' },
@@ -16085,15 +16157,15 @@ const ALL_CHIPS = [
     { id: 'log', label: '\uD83D\uDCC4 Log', action: 'special', value: 'downloadLog', desc: 'Download terminal log' },
     { id: 'sendlog', label: '\uD83D\uDCE5 Load log', action: 'special', value: 'sendLog', desc: 'Tell the session to read its full ~/.amux/logs file as context' },
     { id: 'transcripts', label: '\uD83D\uDCBE Transcripts', action: 'special', value: 'showTranscripts', desc: 'Conversation transcripts' },
-  ]},
 ];
-// Add slash commands section from SLASH_COMMANDS
-ALL_CHIPS.push({
-  section: 'Slash Commands',
-  items: SLASH_COMMANDS.map(c => ({
-    id: c.cmd.slice(1), label: c.cmd, action: 'slash', value: c.cmd, desc: c.desc
-  }))
-});
+function _getAllChips() {
+  return [
+    { section: 'Actions', items: _ACTION_CHIPS },
+    { section: 'Slash Commands', items: SLASH_COMMANDS.map(c => ({
+      id: c.cmd.slice(1), label: c.cmd, action: 'slash', value: c.cmd, desc: c.desc
+    })) },
+  ];
+}
 
 let _chipEditing = false;
 let _chipDragIdx = -1;
@@ -16147,6 +16219,7 @@ function renderChips(container, sessionName, isPeek) {
     const drag = _chipEditing ? 'draggable="true"' : '';
     html += '<div class="' + cls + '" ' + drag + ' data-chip-idx="' + i + '"'
       + ' onclick="_chipAction(_getChips()[' + i + '],\'' + esc(sessionName || '') + '\',' + !!isPeek + ')">'
+      + (_chipEditing ? '<span class="chip-drag-handle">\u2630</span>' : '')
       + esc(chip.label)
       + (_chipEditing ? '<span class="chip-remove-btn" onclick="event.stopPropagation();removeChip(' + i + ')">\u00D7</span>' : '')
       + '</div>';
@@ -16191,6 +16264,51 @@ function _setupChipDrag(container) {
       _saveChips(chips);
       refreshAllChipBars();
     });
+    let _touchClone = null;
+    el.addEventListener('touchstart', e => {
+      _chipDragIdx = parseInt(el.dataset.chipIdx);
+      el.classList.add('dragging');
+      _touchClone = el.cloneNode(true);
+      _touchClone.style.cssText = 'position:fixed;pointer-events:none;z-index:9999;opacity:0.85;transform:scale(1.05);';
+      _touchClone.style.width = el.offsetWidth + 'px';
+      _touchClone.style.left = e.touches[0].clientX - el.offsetWidth / 2 + 'px';
+      _touchClone.style.top = e.touches[0].clientY - el.offsetHeight / 2 + 'px';
+      document.body.appendChild(_touchClone);
+      e.preventDefault();
+    }, {passive: false});
+    el.addEventListener('touchmove', e => {
+      if (_chipDragIdx < 0) return;
+      const t = e.touches[0];
+      if (_touchClone) {
+        _touchClone.style.left = t.clientX - el.offsetWidth / 2 + 'px';
+        _touchClone.style.top = t.clientY - el.offsetHeight / 2 + 'px';
+      }
+      container.querySelectorAll('.chip[data-chip-idx]').forEach(c => c.classList.remove('drag-over'));
+      const target = document.elementFromPoint(t.clientX, t.clientY);
+      const chipTarget = target && target.closest('.chip[data-chip-idx]');
+      if (chipTarget && chipTarget !== el) chipTarget.classList.add('drag-over');
+      e.preventDefault();
+    }, {passive: false});
+    el.addEventListener('touchend', e => {
+      if (_touchClone) { _touchClone.remove(); _touchClone = null; }
+      el.classList.remove('dragging');
+      container.querySelectorAll('.chip[data-chip-idx]').forEach(c => c.classList.remove('drag-over'));
+      if (_chipDragIdx < 0) return;
+      const ct = e.changedTouches[0];
+      const target = document.elementFromPoint(ct.clientX, ct.clientY);
+      const chipTarget = target && target.closest('.chip[data-chip-idx]');
+      if (chipTarget) {
+        const toIdx = parseInt(chipTarget.dataset.chipIdx);
+        if (toIdx !== _chipDragIdx) {
+          const chips = _getChips();
+          const [moved] = chips.splice(_chipDragIdx, 1);
+          chips.splice(toIdx, 0, moved);
+          _saveChips(chips);
+          refreshAllChipBars();
+        }
+      }
+      _chipDragIdx = -1;
+    });
   });
 }
 
@@ -16231,7 +16349,7 @@ function openChipPicker() {
       + '<span>' + esc(c.label) + '</span><span class="cpd">' + esc(c.value.length > 40 ? c.value.slice(0,40) + '...' : c.value) + '</span>'
       + '<span style="color:var(--dim);font-size:0.75rem;">\u2713</span></div>';
   });
-  ALL_CHIPS.forEach(sec => {
+  _getAllChips().forEach(sec => {
     html += '<div class="chip-picker-section">' + esc(sec.section) + '</div>';
     sec.items.forEach(item => {
       const added = existingIds.has(item.id);
@@ -29861,6 +29979,10 @@ class CCHandler(BaseHTTPRequestHandler):
                                 hint = line.split(":", 1)[1].strip()
                 skills.append({"name": row["name"], "description": desc, "hint": hint})
             return self._json(skills)
+
+        if method == "GET" and path == "/api/slash-commands":
+            cmds = _get_slash_commands()
+            return self._json(cmds)
 
         # GET /api/skills/<name> — get full skill content
         if method == "GET" and path.startswith("/api/skills/"):
