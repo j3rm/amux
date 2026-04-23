@@ -29997,6 +29997,35 @@ class CCHandler(BaseHTTPRequestHandler):
             except Exception as e:
                 return self._json({"ok": False, "output": str(e)}, 500)
 
+        # POST /api/webhooks/sms/<session> — SMS Eagle inbound webhook
+        # SMS Eagle sends application/x-www-form-urlencoded with fields:
+        #   from, message_text, date, time, msgid, modem_no
+        if method == "POST" and path.startswith("/api/webhooks/sms/"):
+            session_name = path[len("/api/webhooks/sms/"):]
+            if not session_name:
+                return self._json({"error": "missing session name"}, 400)
+            length = int(self.headers.get("Content-Length", 0))
+            raw = self.rfile.read(length) if length > 0 else b""
+            ct = self.headers.get("Content-Type", "")
+            if "application/json" in ct:
+                try:
+                    payload = json.loads(raw)
+                except Exception:
+                    return self._json({"error": "invalid JSON"}, 400)
+                sender = payload.get("from", payload.get("sender", "unknown"))
+                message = payload.get("message_text", payload.get("text", payload.get("body", "")))
+            else:
+                fields = {k: v[0] for k, v in parse_qs(raw.decode("utf-8", errors="replace")).items()}
+                sender = fields.get("from", "unknown")
+                message = fields.get("message_text", "")
+            if not message:
+                return self._json({"error": "no message body"}, 400)
+            text = f"SMS from {sender}: {message}"
+            ok, msg = send_text(session_name, text)
+            slog(f"[sms-webhook] session={session_name} from={sender} ok={ok}")
+            code = 200 if ok else (409 if msg == "not running" else 500)
+            return self._json({"ok": ok, "message": msg}, code)
+
         # GET /api/metrics — system + per-session resource metrics
         if method == "GET" and path == "/api/metrics":
             return self._json(get_system_metrics())
