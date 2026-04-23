@@ -166,7 +166,7 @@ def _posthog_emit(event: str, props: dict = None, distinct_id: str = ""):
 _PUBLIC_PATHS = frozenset({"/", "/manifest.json", "/sw.js", "/icon.svg", "/icon.png",
                            "/icon-192.png", "/icon-512.png", "/ca", "/release-notes",
                            "/api/release-notes", "/api/calendar.ics"})
-_PUBLIC_PREFIXES = ("/s/", "/api/share/", "/invite/", "/proxy/", "/api/branding/")
+_PUBLIC_PREFIXES = ("/s/", "/api/share/", "/invite/", "/proxy/", "/api/branding/", "/api/webhooks/")
 
 CC_LOGS.mkdir(parents=True, exist_ok=True)
 CC_MEMORY.mkdir(parents=True, exist_ok=True)
