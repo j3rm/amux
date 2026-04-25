@@ -64,39 +64,51 @@
   .mono { font-family: 'JetBrains Mono', ui-monospace, SFMono-Regular, Menlo, monospace; }
   .container { max-width: var(--container); margin: 0 auto; padding: 0 28px; }
 
-  /* ---------- nav ---------- */
-  .nav {
-    position: sticky; top: 0; z-index: 50;
-    backdrop-filter: blur(10px);
-    background: oklch(0.17 0.008 70 / 0.7);
+  /* ---------- nav (matches site-wide .site-header) ---------- */
+  .site-header {
+    position: sticky; top: 0; z-index: 100;
+    display: flex; align-items: center; justify-content: space-between;
+    padding: 0 28px; height: 56px;
+    background: oklch(0.17 0.008 70 / 0.85);
+    backdrop-filter: blur(12px);
     border-bottom: 1px solid var(--line);
   }
-  .nav-inner {
-    display: flex; align-items: center; gap: 32px;
-    height: 60px;
+  .site-header a.logo {
+    display: flex; align-items: center; gap: 10px;
+    font-family: 'JetBrains Mono', ui-monospace, monospace;
+    font-weight: 700; font-size: 16px;
+    color: var(--fg); text-decoration: none; letter-spacing: -0.02em;
   }
-  .brand {
-    display: inline-flex; align-items: center; gap: 10px;
-    font-family: 'JetBrains Mono', monospace;
-    font-weight: 600; letter-spacing: -0.01em;
-    color: var(--fg); text-decoration: none;
+  .site-header a.logo::before {
+    content: "▌";
+    display: grid; place-items: center;
+    width: 22px; height: 22px;
+    border: 1px solid var(--line-2); border-radius: 4px;
+    background: var(--bg-2); color: var(--accent);
+    font-size: 12px; font-weight: 700;
+    animation: blink 1.1s steps(2) infinite;
   }
-  .brand-mark {
-    width: 22px; height: 22px; border-radius: 5px;
-    background: var(--accent);
-    color: var(--bg);
-    display: inline-grid; place-items: center;
-    font-size: 13px; font-weight: 700;
-    box-shadow: 0 0 0 1px oklch(0.80 0.16 65 / 0.4), 0 0 20px oklch(0.80 0.16 65 / 0.35);
+  @keyframes blink { 50% { opacity: 0; } }
+  .site-header nav {
+    display: flex; align-items: center; gap: 22px;
   }
-  .nav-links { display: flex; gap: 26px; margin-left: 8px; }
-  .nav-links a {
-    font-size: 13.5px; color: var(--fg-2); text-decoration: none;
-    font-weight: 500;
+  .site-header nav a {
+    font-family: 'JetBrains Mono', ui-monospace, monospace;
+    font-size: 13px; color: var(--fg-2); text-decoration: none;
   }
-  .nav-links a:hover { color: var(--fg); }
-  .nav-spacer { flex: 1; }
-  .nav-cta { display: flex; gap: 10px; align-items: center; }
+  .site-header nav a:hover { color: var(--fg); }
+  .site-header nav a.nav-cta {
+    font-family: 'JetBrains Mono', ui-monospace, monospace;
+    font-size: 13px; padding: 7px 12px;
+    border: 1px solid var(--line-2); border-radius: 4px;
+    color: var(--fg); background: var(--bg-2);
+  }
+  .site-header nav a.nav-cta:hover { border-color: var(--accent); color: var(--accent); }
+  .site-header nav a.nav-cta-primary {
+    background: var(--accent); color: var(--bg);
+    border-color: var(--accent); font-weight: 600;
+  }
+  .site-header nav a.nav-cta-primary:hover { opacity: 0.85; color: var(--bg); }
 
   /* ---------- buttons ---------- */
   .btn {
@@ -200,11 +212,10 @@
   .hero-cta { display: flex; gap: 12px; flex-wrap: wrap; align-items: center; }
   .hero-cta .btn { padding: 13px 20px; font-size: 14.5px; }
   .gh-stars {
-    margin-left: 6px;
-    font: 500 13px/1 'JetBrains Mono', monospace;
-    color: var(--fg-3);
+    margin-left: 4px;
+    font: 500 12px/1 'JetBrains Mono', monospace;
+    color: var(--fg-2);
   }
-  .gh-stars b { color: var(--fg); font-weight: 600; }
 
   /* ---------- terminal install card ---------- */
   .install {
@@ -284,6 +295,21 @@
   @media (max-width: 960px) {
     .showcase { grid-template-columns: 1fr; }
   }
+  @media (max-width: 600px) {
+    .desktop-body { grid-template-columns: 1fr; }
+    .sidebar { border-right: 0; border-bottom: 1px solid var(--line); padding: 10px 12px; display: flex; flex-wrap: wrap; gap: 4px; }
+    .sidebar .sidebar-section { width: 100%; padding: 6px 8px 4px; }
+    .sidebar .nav-item { padding: 5px 8px; font-size: 12px; }
+    .stat-row { grid-template-columns: repeat(2, 1fr); }
+    .session-grid { grid-template-columns: 1fr; }
+    .section-head h2 { font-size: clamp(24px, 5vw, 36px); }
+    .cta-card { padding: 36px 24px; }
+    .cta-card h2 { font-size: clamp(24px, 5vw, 36px); }
+    .tab-panel[data-panel="board"] > div:last-child { grid-template-columns: 1fr !important; }
+    .tab-panel[data-panel="notes"] > div:last-child { grid-template-columns: 1fr !important; }
+    .tab-panel[data-panel="crm"] div[style*="grid-template-columns:2fr"] { grid-template-columns: 1fr 1fr !important; font-size: 11px; }
+    .tab-panel[data-panel="scheduler"] div[style*="grid-template-columns:2fr"] { grid-template-columns: 1fr 1fr !important; font-size: 11px; }
+  }
 
   /* ---- desktop frame ---- */
   .desktop {
@@ -351,7 +377,9 @@
     padding: 3px 6px; border-radius: 3px;
   }
 
-  .main { padding: 18px 20px; overflow: hidden; }
+  .main { padding: 18px 20px; overflow: hidden; min-height: 480px; }
+  .tab-panel { animation: fadeIn .2s ease; }
+  @keyframes fadeIn { from { opacity: 0; } to { opacity: 1; } }
   .crumbs {
     display: flex; align-items: center; gap: 10px;
     font: 500 12.5px/1 'JetBrains Mono', monospace;
@@ -716,6 +744,12 @@
   .center { text-align: center; }
   .hide-sm { display: inline; }
   @media (max-width: 720px) { .hide-sm { display: none; } }
+  .hide-mobile { display: inline; }
+  @media (max-width: 640px) {
+    .site-header { padding: 0 16px; }
+    .site-header nav { gap: 12px; }
+    .site-header nav a.hide-mobile { display: none; }
+  }
 
   svg.ic { stroke: currentColor; stroke-width: 1.6; fill: none; stroke-linecap: round; stroke-linejoin: round; }
 </style>
@@ -723,31 +757,18 @@
 <body>
 
 <!-- =================== NAV =================== -->
-<nav class="nav">
-  <div class="container nav-inner">
-    <a class="brand" href="/">
-      <span class="brand-mark">a</span>
-      <span>amux</span>
-    </a>
-    <div class="nav-links">
-      <a href="/docs/">Docs</a>
-      <a href="/guides/">Guides</a>
-      <a href="/compare/">Compare</a>
-      <a href="/demos/" class="hide-sm">Demos</a>
-      <a href="/blog/" class="hide-sm">Blog</a>
-    </div>
-    <div class="nav-spacer"></div>
-    <div class="nav-cta">
-      <a class="btn btn-ghost btn-sm hide-sm" href="https://github.com/mixpeek/amux" target="_blank" rel="noopener">
-        <svg class="ic" width="14" height="14" viewBox="0 0 24 24"><path d="M12 .5C5.7.5.5 5.7.5 12c0 5 3.3 9.3 7.9 10.8.6.1.8-.2.8-.6v-2.2c-3.2.7-3.9-1.5-3.9-1.5-.5-1.4-1.3-1.7-1.3-1.7-1-.7.1-.7.1-.7 1.1.1 1.7 1.2 1.7 1.2 1 1.7 2.7 1.2 3.4.9.1-.7.4-1.2.7-1.5-2.6-.3-5.3-1.3-5.3-5.7 0-1.3.4-2.3 1.2-3.1-.1-.3-.5-1.5.1-3.1 0 0 1-.3 3.2 1.2.9-.3 1.9-.4 2.9-.4s2 .1 2.9.4c2.2-1.5 3.2-1.2 3.2-1.2.6 1.6.2 2.8.1 3.1.7.8 1.2 1.8 1.2 3.1 0 4.4-2.7 5.4-5.3 5.7.4.4.8 1.1.8 2.2v3.3c0 .3.2.7.8.6 4.6-1.5 7.9-5.8 7.9-10.8C23.5 5.7 18.3.5 12 .5z" fill="currentColor" stroke="none"/></svg>
-        GitHub
-      </a>
-      <a class="btn btn-primary btn-sm" href="/pricing/">
-        Try Cloud Free <span class="arr">&rarr;</span>
-      </a>
-    </div>
-  </div>
-</nav>
+<header class="site-header">
+  <a class="logo" href="/">amux</a>
+  <nav>
+    <a href="/docs/" class="hide-mobile">docs</a>
+    <a href="/guides/" class="hide-mobile">guides</a>
+    <a href="/compare/" class="hide-mobile">compare</a>
+    <a href="/demos/" class="hide-mobile">demos</a>
+    <a href="/blog/" class="hide-mobile">blog</a>
+    <a href="https://apps.apple.com/us/app/amux-agent-multiplexer/id6760410435" target="_blank" rel="noopener" class="nav-cta-primary nav-cta">iOS app</a>
+    <a href="https://github.com/mixpeek/amux" target="_blank" rel="noopener" class="nav-cta">GitHub <span class="gh-stars" id="gh-stars"></span></a>
+  </nav>
+</header>
 
 <!-- =================== HERO =================== -->
 <header class="hero">
@@ -859,27 +880,27 @@
         <div class="desktop-body">
           <aside class="sidebar">
             <div class="sidebar-section">Workspace</div>
-            <div class="nav-item active">
+            <div class="nav-item active" data-tab="sessions" style="cursor:pointer;">
               <span class="ic"><svg class="ic" width="14" height="14" viewBox="0 0 24 24"><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/></svg></span>
               Sessions <span class="badge">12</span>
             </div>
-            <div class="nav-item">
+            <div class="nav-item" data-tab="board" style="cursor:pointer;">
               <span class="ic"><svg class="ic" width="14" height="14" viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="M3 9h18M8 4v16"/></svg></span>
               Board <span class="badge">7</span>
             </div>
-            <div class="nav-item">
+            <div class="nav-item" data-tab="notes" style="cursor:pointer;">
               <span class="ic"><svg class="ic" width="14" height="14" viewBox="0 0 24 24"><path d="M9 4h6l4 4v12a2 2 0 0 1-2 2H9a4 4 0 0 1-4-4V6a2 2 0 0 1 2-2z"/><path d="M14 4v4h4"/></svg></span>
               Notes
             </div>
-            <div class="nav-item">
+            <div class="nav-item" data-tab="crm" style="cursor:pointer;">
               <span class="ic"><svg class="ic" width="14" height="14" viewBox="0 0 24 24"><circle cx="12" cy="8" r="4"/><path d="M4 21a8 8 0 0 1 16 0"/></svg></span>
               CRM
             </div>
-            <div class="nav-item">
+            <div class="nav-item" data-tab="scheduler" style="cursor:pointer;">
               <span class="ic"><svg class="ic" width="14" height="14" viewBox="0 0 24 24"><path d="M21 11.5a8.4 8.4 0 0 1-8.5 8.5A8.4 8.4 0 0 1 4 11.5 8.4 8.4 0 0 1 12.5 3a8.5 8.5 0 0 1 6.5 3"/><path d="M21 5v5h-5"/></svg></span>
               Scheduler
             </div>
-            <div class="nav-item">
+            <div class="nav-item" data-tab="channels" style="cursor:pointer;">
               <span class="ic"><svg class="ic" width="14" height="14" viewBox="0 0 24 24"><path d="M21 15a4 4 0 0 1-4 4H7l-4 4V7a4 4 0 0 1 4-4h10a4 4 0 0 1 4 4z"/></svg></span>
               Channels <span class="badge">3</span>
             </div>
@@ -890,87 +911,166 @@
           </aside>
 
           <main class="main">
-            <div class="crumbs">
-              <span>workspace</span>
-              <span>&rsaquo;</span>
-              <b>sessions</b>
-              <span>&rsaquo;</span>
-              <span style="color: var(--accent);">all</span>
-              <span style="margin-left:auto; color: var(--fg-3);">&lceil; K</span>
+            <!-- Sessions panel -->
+            <div class="tab-panel" data-panel="sessions">
+              <div class="crumbs">
+                <span>workspace</span><span>&rsaquo;</span><b>sessions</b><span>&rsaquo;</span>
+                <span style="color: var(--accent);">all</span>
+                <span style="margin-left:auto; color: var(--fg-3);">&lceil; K</span>
+              </div>
+              <div class="stat-row">
+                <div class="stat"><div class="stat-l">Active</div><div class="stat-v">8 <small>/ 12</small></div></div>
+                <div class="stat"><div class="stat-l">Tokens today</div><div class="stat-v">4.7M <small>+612k cache</small></div></div>
+                <div class="stat"><div class="stat-l">Spend (24h)</div><div class="stat-v">$18.40</div></div>
+                <div class="stat"><div class="stat-l">Tasks shipped</div><div class="stat-v">23 <small>this week</small></div></div>
+              </div>
+              <div class="session-grid">
+                <div class="session">
+                  <div class="session-head"><span class="status-pill working"><span class="d"></span>working</span><span class="session-name">api-refactor</span></div>
+                  <div class="session-task">Splitting auth middleware into per-route guards. Touching 14 files.</div>
+                  <div class="session-meta"><span>tmux:0</span><span class="sp">&bull;</span><span>421k tok</span><span>2m ago</span></div>
+                </div>
+                <div class="session">
+                  <div class="session-head"><span class="status-pill input"><span class="d"></span>needs input</span><span class="session-name">migrations</span></div>
+                  <div class="session-task">Drop legacy `users.role_id` column? Will require backfill from `permissions`.</div>
+                  <div class="session-meta"><span>tmux:1</span><span class="sp">&bull;</span><span>198k tok</span><span>now</span></div>
+                </div>
+                <div class="session">
+                  <div class="session-head"><span class="status-pill working"><span class="d"></span>working</span><span class="session-name">test-gen-frontend</span></div>
+                  <div class="session-task">Generating Playwright e2e suite for checkout flow. 12 / 34 specs done.</div>
+                  <div class="session-meta"><span>tmux:2</span><span class="sp">&bull;</span><span>1.1M tok</span><span>4m ago</span></div>
+                </div>
+                <div class="session">
+                  <div class="session-head"><span class="status-pill idle"><span class="d"></span>idle</span><span class="session-name">docs-sweep</span></div>
+                  <div class="session-task">Updated 8 README sections. Waiting for review on PR #482.</div>
+                  <div class="session-meta"><span>tmux:3</span><span class="sp">&bull;</span><span>76k tok</span><span>22m ago</span></div>
+                </div>
+                <div class="session">
+                  <div class="session-head"><span class="status-pill working"><span class="d"></span>working</span><span class="session-name">scheduler-cron</span></div>
+                  <div class="session-task">Implementing `--every` flag with timezone-aware parsing.</div>
+                  <div class="session-meta"><span>tmux:4</span><span class="sp">&bull;</span><span>312k tok</span><span>just now</span></div>
+                </div>
+                <div class="session">
+                  <div class="session-head"><span class="status-pill idle"><span class="d"></span>idle</span><span class="session-name">bug-PROJ-219</span></div>
+                  <div class="session-task">Race condition in board claim &mdash; repro pending. /compact ran 3m ago.</div>
+                  <div class="session-meta"><span>tmux:5</span><span class="sp">&bull;</span><span>540k tok</span><span>3m ago</span></div>
+                </div>
+              </div>
             </div>
 
-            <div class="stat-row">
-              <div class="stat">
-                <div class="stat-l">Active</div>
-                <div class="stat-v">8 <small>/ 12</small></div>
+            <!-- Board panel -->
+            <div class="tab-panel" data-panel="board" style="display:none;">
+              <div class="crumbs">
+                <span>workspace</span><span>&rsaquo;</span><b>board</b><span>&rsaquo;</span>
+                <span style="color: var(--accent);">all</span>
               </div>
-              <div class="stat">
-                <div class="stat-l">Tokens today</div>
-                <div class="stat-v">4.7M <small>+612k cache</small></div>
-              </div>
-              <div class="stat">
-                <div class="stat-l">Spend (24h)</div>
-                <div class="stat-v">$18.40</div>
-              </div>
-              <div class="stat">
-                <div class="stat-l">Tasks shipped</div>
-                <div class="stat-v">23 <small>this week</small></div>
+              <div style="display:grid; grid-template-columns: repeat(3, 1fr); gap:10px; margin-top:12px;">
+                <div>
+                  <div style="font:500 11px/1 'JetBrains Mono',monospace; color:var(--fg-3); text-transform:uppercase; letter-spacing:0.08em; padding:8px 0; border-bottom:2px solid var(--fg-3);">Todo <span style="opacity:.6">3</span></div>
+                  <div class="session" style="margin-top:8px;"><div style="font:500 12.5px/1.4 'JetBrains Mono',monospace; color:var(--fg);">PROJ-31</div><div class="session-task">Add rate limiting to /api/sessions endpoint</div><div class="session-meta"><span>api-refactor</span></div></div>
+                  <div class="session" style="margin-top:8px;"><div style="font:500 12.5px/1.4 'JetBrains Mono',monospace; color:var(--fg);">PROJ-34</div><div class="session-task">Write migration rollback script for users table</div><div class="session-meta"><span>migrations</span></div></div>
+                  <div class="session" style="margin-top:8px;"><div style="font:500 12.5px/1.4 'JetBrains Mono',monospace; color:var(--fg);">PROJ-37</div><div class="session-task">Add OpenTelemetry spans to board endpoints</div><div class="session-meta"><span>unassigned</span></div></div>
+                </div>
+                <div>
+                  <div style="font:500 11px/1 'JetBrains Mono',monospace; color:oklch(0.86 0.14 145); text-transform:uppercase; letter-spacing:0.08em; padding:8px 0; border-bottom:2px solid oklch(0.86 0.14 145);">Doing <span style="opacity:.6">2</span></div>
+                  <div class="session" style="margin-top:8px; border-color:oklch(0.55 0.10 145);"><div style="font:500 12.5px/1.4 'JetBrains Mono',monospace; color:var(--fg);">PROJ-28</div><div class="session-task">Refactor auth middleware into per-route guards</div><div class="session-meta"><span style="color:oklch(0.86 0.14 145);">api-refactor</span></div></div>
+                  <div class="session" style="margin-top:8px; border-color:oklch(0.55 0.10 145);"><div style="font:500 12.5px/1.4 'JetBrains Mono',monospace; color:var(--fg);">PROJ-30</div><div class="session-task">Playwright e2e for checkout flow</div><div class="session-meta"><span style="color:oklch(0.86 0.14 145);">test-gen-frontend</span></div></div>
+                </div>
+                <div>
+                  <div style="font:500 11px/1 'JetBrains Mono',monospace; color:var(--accent); text-transform:uppercase; letter-spacing:0.08em; padding:8px 0; border-bottom:2px solid var(--accent);">Done <span style="opacity:.6">2</span></div>
+                  <div class="session" style="margin-top:8px; opacity:.7;"><div style="font:500 12.5px/1.4 'JetBrains Mono',monospace; color:var(--fg);">PROJ-26</div><div class="session-task">Fix SSE reconnect on iOS PWA resume</div><div class="session-meta"><span>docs-sweep</span></div></div>
+                  <div class="session" style="margin-top:8px; opacity:.7;"><div style="font:500 12.5px/1.4 'JetBrains Mono',monospace; color:var(--fg);">PROJ-27</div><div class="session-task">Update README install instructions</div><div class="session-meta"><span>docs-sweep</span></div></div>
+                </div>
               </div>
             </div>
 
-            <div class="session-grid">
-              <div class="session">
-                <div class="session-head">
-                  <span class="status-pill working"><span class="d"></span>working</span>
-                  <span class="session-name">api-refactor</span>
-                </div>
-                <div class="session-task">Splitting auth middleware into per-route guards. Touching 14 files.</div>
-                <div class="session-meta"><span>tmux:0</span><span class="sp">&bull;</span><span>421k tok</span><span>2m ago</span></div>
+            <!-- Notes panel -->
+            <div class="tab-panel" data-panel="notes" style="display:none;">
+              <div class="crumbs">
+                <span>workspace</span><span>&rsaquo;</span><b>notes</b>
               </div>
-
-              <div class="session">
-                <div class="session-head">
-                  <span class="status-pill input"><span class="d"></span>needs input</span>
-                  <span class="session-name">migrations</span>
+              <div style="display:grid; grid-template-columns:200px 1fr; gap:0; margin-top:12px; border:1px solid var(--line); border-radius:6px; overflow:hidden; min-height:320px;">
+                <div style="border-right:1px solid var(--line); padding:10px; background:oklch(0.16 0.008 70);">
+                  <div style="font:500 10.5px/1 'JetBrains Mono',monospace; color:var(--fg-3); text-transform:uppercase; letter-spacing:0.08em; padding:6px 4px;">Documents</div>
+                  <div style="padding:6px 8px; border-radius:4px; background:oklch(0.80 0.16 65 / 0.13); font:500 12.5px/1.4 'JetBrains Mono',monospace; color:var(--fg); margin-top:4px;">architecture.md</div>
+                  <div style="padding:6px 8px; font:500 12.5px/1.4 'JetBrains Mono',monospace; color:var(--fg-2); margin-top:2px;">api-decisions.md</div>
+                  <div style="padding:6px 8px; font:500 12.5px/1.4 'JetBrains Mono',monospace; color:var(--fg-2); margin-top:2px;">standup-apr-24.md</div>
+                  <div style="padding:6px 8px; font:500 12.5px/1.4 'JetBrains Mono',monospace; color:var(--fg-2); margin-top:2px;">release-checklist.md</div>
                 </div>
-                <div class="session-task">Drop legacy `users.role_id` column? Will require backfill from `permissions`.</div>
-                <div class="session-meta"><span>tmux:1</span><span class="sp">&bull;</span><span>198k tok</span><span>now</span></div>
+                <div style="padding:16px 20px; font-size:13.5px; line-height:1.6; color:var(--fg-2);">
+                  <div style="font:600 16px/1 'Geist',sans-serif; color:var(--fg); margin-bottom:14px;">Architecture Overview</div>
+                  <p style="margin:0 0 10px;">amux uses a single-file architecture. <span style="color:var(--accent);">amux-server.py</span> contains the Python HTTP server, SQLite database layer, and the full HTML/CSS/JS dashboard.</p>
+                  <p style="margin:0 0 10px;">Sessions are managed via tmux. Each agent gets an isolated pane with a permanent conversation ID. The watchdog monitors all panes and auto-heals on context overflow or corruption.</p>
+                  <p style="margin:0;">Inter-agent communication uses 1:1 channels with @mentions. The board provides atomic task claiming via SQLite CAS.</p>
+                </div>
               </div>
+            </div>
 
-              <div class="session">
-                <div class="session-head">
-                  <span class="status-pill working"><span class="d"></span>working</span>
-                  <span class="session-name">test-gen-frontend</span>
-                </div>
-                <div class="session-task">Generating Playwright e2e suite for checkout flow. 12 / 34 specs done.</div>
-                <div class="session-meta"><span>tmux:2</span><span class="sp">&bull;</span><span>1.1M tok</span><span>4m ago</span></div>
+            <!-- CRM panel -->
+            <div class="tab-panel" data-panel="crm" style="display:none;">
+              <div class="crumbs">
+                <span>workspace</span><span>&rsaquo;</span><b>crm</b><span>&rsaquo;</span>
+                <span style="color: var(--accent);">contacts</span>
               </div>
-
-              <div class="session">
-                <div class="session-head">
-                  <span class="status-pill idle"><span class="d"></span>idle</span>
-                  <span class="session-name">docs-sweep</span>
+              <div style="margin-top:12px; border:1px solid var(--line); border-radius:6px; overflow:hidden;">
+                <div style="display:grid; grid-template-columns:2fr 1.5fr 1fr 1fr; padding:8px 12px; background:oklch(0.16 0.008 70); font:500 10.5px/1 'JetBrains Mono',monospace; color:var(--fg-3); text-transform:uppercase; letter-spacing:0.08em; border-bottom:1px solid var(--line);">
+                  <span>Name</span><span>Company</span><span>Role</span><span>Last contact</span>
                 </div>
-                <div class="session-task">Updated 8 README sections. Waiting for review on PR #482.</div>
-                <div class="session-meta"><span>tmux:3</span><span class="sp">&bull;</span><span>76k tok</span><span>22m ago</span></div>
+                <div style="display:grid; grid-template-columns:2fr 1.5fr 1fr 1fr; padding:10px 12px; font-size:13px; color:var(--fg-2); border-bottom:1px solid var(--line);"><span style="color:var(--fg); font-weight:500;">Sarah Chen</span><span>Stripe</span><span>Staff Eng</span><span>2d ago</span></div>
+                <div style="display:grid; grid-template-columns:2fr 1.5fr 1fr 1fr; padding:10px 12px; font-size:13px; color:var(--fg-2); border-bottom:1px solid var(--line);"><span style="color:var(--fg); font-weight:500;">Marcus Johnson</span><span>Vercel</span><span>DevRel</span><span>1w ago</span></div>
+                <div style="display:grid; grid-template-columns:2fr 1.5fr 1fr 1fr; padding:10px 12px; font-size:13px; color:var(--fg-2); border-bottom:1px solid var(--line);"><span style="color:var(--fg); font-weight:500;">Priya Sharma</span><span>Anthropic</span><span>PM</span><span>3d ago</span></div>
+                <div style="display:grid; grid-template-columns:2fr 1.5fr 1fr 1fr; padding:10px 12px; font-size:13px; color:var(--fg-2);"><span style="color:var(--fg); font-weight:500;">Alex Rivera</span><span>Linear</span><span>Eng Lead</span><span>5d ago</span></div>
               </div>
+            </div>
 
-              <div class="session">
-                <div class="session-head">
-                  <span class="status-pill working"><span class="d"></span>working</span>
-                  <span class="session-name">scheduler-cron</span>
-                </div>
-                <div class="session-task">Implementing `--every` flag with timezone-aware parsing.</div>
-                <div class="session-meta"><span>tmux:4</span><span class="sp">&bull;</span><span>312k tok</span><span>just now</span></div>
+            <!-- Scheduler panel -->
+            <div class="tab-panel" data-panel="scheduler" style="display:none;">
+              <div class="crumbs">
+                <span>workspace</span><span>&rsaquo;</span><b>scheduler</b>
               </div>
-
-              <div class="session">
-                <div class="session-head">
-                  <span class="status-pill idle"><span class="d"></span>idle</span>
-                  <span class="session-name">bug-PROJ-219</span>
+              <div style="margin-top:12px; border:1px solid var(--line); border-radius:6px; overflow:hidden;">
+                <div style="display:grid; grid-template-columns:2fr 1.5fr 1fr 1fr; padding:8px 12px; background:oklch(0.16 0.008 70); font:500 10.5px/1 'JetBrains Mono',monospace; color:var(--fg-3); text-transform:uppercase; letter-spacing:0.08em; border-bottom:1px solid var(--line);">
+                  <span>Job</span><span>Schedule</span><span>Last run</span><span>Status</span>
                 </div>
-                <div class="session-task">Race condition in board claim &mdash; repro pending. /compact ran 3m ago.</div>
-                <div class="session-meta"><span>tmux:5</span><span class="sp">&bull;</span><span>540k tok</span><span>3m ago</span></div>
+                <div style="display:grid; grid-template-columns:2fr 1.5fr 1fr 1fr; padding:10px 12px; font-size:13px; color:var(--fg-2); border-bottom:1px solid var(--line);"><span style="color:var(--fg); font-weight:500;">nightly-audit</span><span style="font-family:'JetBrains Mono',monospace; font-size:12px;">0 2 * * *</span><span>4h ago</span><span style="color:oklch(0.86 0.14 145);">&#x2713; ok</span></div>
+                <div style="display:grid; grid-template-columns:2fr 1.5fr 1fr 1fr; padding:10px 12px; font-size:13px; color:var(--fg-2); border-bottom:1px solid var(--line);"><span style="color:var(--fg); font-weight:500;">dep-update</span><span style="font-family:'JetBrains Mono',monospace; font-size:12px;">0 9 * * 1</span><span>3d ago</span><span style="color:oklch(0.86 0.14 145);">&#x2713; ok</span></div>
+                <div style="display:grid; grid-template-columns:2fr 1.5fr 1fr 1fr; padding:10px 12px; font-size:13px; color:var(--fg-2);"><span style="color:var(--fg); font-weight:500;">test-sweep</span><span style="font-family:'JetBrains Mono',monospace; font-size:12px;">0 */6 * * *</span><span>2h ago</span><span style="color:var(--accent);">running</span></div>
+              </div>
+            </div>
+
+            <!-- Channels panel -->
+            <div class="tab-panel" data-panel="channels" style="display:none;">
+              <div class="crumbs">
+                <span>workspace</span><span>&rsaquo;</span><b>channels</b>
+              </div>
+              <div style="margin-top:12px; display:flex; flex-direction:column; gap:8px;">
+                <div class="session">
+                  <div style="display:flex; align-items:center; gap:8px;">
+                    <span style="font:500 13px/1 'JetBrains Mono',monospace; color:oklch(0.86 0.14 145);">api-refactor</span>
+                    <span style="font:500 11px/1 'JetBrains Mono',monospace; color:var(--fg-3);">&rarr;</span>
+                    <span style="font:500 13px/1 'JetBrains Mono',monospace; color:var(--accent);">migrations</span>
+                    <span style="margin-left:auto; font:500 11px/1 'JetBrains Mono',monospace; color:var(--fg-3);">2m ago</span>
+                  </div>
+                  <div class="session-task" style="margin-top:6px;">@migrations I need the users table schema before I can split the auth guards. Can you share the current DDL?</div>
+                </div>
+                <div class="session">
+                  <div style="display:flex; align-items:center; gap:8px;">
+                    <span style="font:500 13px/1 'JetBrains Mono',monospace; color:var(--accent);">migrations</span>
+                    <span style="font:500 11px/1 'JetBrains Mono',monospace; color:var(--fg-3);">&rarr;</span>
+                    <span style="font:500 13px/1 'JetBrains Mono',monospace; color:oklch(0.86 0.14 145);">api-refactor</span>
+                    <span style="margin-left:auto; font:500 11px/1 'JetBrains Mono',monospace; color:var(--fg-3);">1m ago</span>
+                  </div>
+                  <div class="session-task" style="margin-top:6px;">@api-refactor Here's the DDL. Note: role_id is being dropped in my migration, use permissions table instead.</div>
+                </div>
+                <div class="session">
+                  <div style="display:flex; align-items:center; gap:8px;">
+                    <span style="font:500 13px/1 'JetBrains Mono',monospace; color:oklch(0.74 0.13 250);">test-gen-frontend</span>
+                    <span style="font:500 11px/1 'JetBrains Mono',monospace; color:var(--fg-3);">&rarr;</span>
+                    <span style="font:500 13px/1 'JetBrains Mono',monospace; color:oklch(0.86 0.14 145);">api-refactor</span>
+                    <span style="margin-left:auto; font:500 11px/1 'JetBrains Mono',monospace; color:var(--fg-3);">5m ago</span>
+                  </div>
+                  <div class="session-task" style="margin-top:6px;">@api-refactor Heads up: 3 of my checkout e2e specs hit /api/auth/session — will those routes change?</div>
+                </div>
               </div>
             </div>
           </main>
@@ -1407,6 +1507,23 @@
   </div>
 </footer>
 
-<script>fetch('https://api.github.com/repos/mixpeek/amux').then(function(r){return r.json()}).then(function(d){var el=document.getElementById('gh-stars');if(el&&d.stargazers_count) el.innerHTML='<b>★ '+d.stargazers_count.toLocaleString()+'</b>'}).catch(function(){})</script>
+<script>
+fetch('https://api.github.com/repos/mixpeek/amux').then(function(r){return r.json()}).then(function(d){if(d.stargazers_count){var els=document.querySelectorAll('.gh-stars');els.forEach(function(el){el.textContent='★ '+d.stargazers_count.toLocaleString()})}}).catch(function(){});
+(function(){
+  var tabs=document.querySelectorAll('.sidebar .nav-item[data-tab]');
+  var panels=document.querySelectorAll('.tab-panel');
+  var urlBar=document.querySelector('.win-url');
+  var routes={sessions:'/sessions',board:'/board',notes:'/notes',crm:'/crm',scheduler:'/scheduler',channels:'/channels'};
+  tabs.forEach(function(tab){
+    tab.addEventListener('click',function(){
+      var t=this.getAttribute('data-tab');
+      tabs.forEach(function(n){n.classList.remove('active')});
+      this.classList.add('active');
+      panels.forEach(function(p){p.style.display=p.getAttribute('data-panel')===t?'':'none'});
+      if(urlBar) urlBar.innerHTML='<span class="lock">•</span> https://localhost:8822'+routes[t];
+    });
+  });
+})();
+</script>
 </body>
 </html>
