@@ -8436,6 +8436,7 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
   .status-badge.active { background: rgba(63,185,80,0.2); color: var(--green); }
   .status-badge.waiting { background: rgba(210,153,34,0.2); color: var(--yellow); }
   .status-badge.idle { background: rgba(139,148,158,0.15); color: var(--dim); }
+  .status-badge.steering { background: rgba(137,87,229,0.2); color: var(--purple,#8957e5); }
   .last-active { font-size: 0.7rem; color: var(--dim); flex-shrink: 0; }
   .token-count { font-size: 0.65rem; color: var(--dim); flex-shrink: 0; font-family: "SF Mono","Fira Code",monospace; opacity: 0.7; }
 
@@ -13029,6 +13030,7 @@ function render() {
           ${s.status === 'active' ? '<span class="status-badge active">working</span>' : ''}
           ${s.status === 'waiting' ? '<span class="status-badge waiting">needs input</span>' : ''}
           ${s.status === 'idle' ? '<span class="status-badge idle">idle</span>' : ''}
+          ${s.steering && s.steering.length ? `<span class="status-badge steering" title="${s.steering.length} steering message${s.steering.length>1?'s':''} queued">${s.steering.length} queued</span>` : ''}
           ${s.tokens ? `<span class="token-count">${fmtTokens(s.tokens)}</span>` : ''}
           ${s.last_activity ? `<span class="last-active">${timeAgo(s.last_activity)}</span>` : ''}
           ${!online ? '<span class="cached-badge">cached</span>' : ''}
@@ -18633,7 +18635,10 @@ async function setFilesSessionDir() {
   } catch(e) { console.error('setFilesSessionDir:', e); }
 }
 function closeExplore() {
+  const sess = _exploreSession;
+  _exploreSession = null;
   document.getElementById('explore-overlay').classList.remove('active');
+  if (sess) { switchView('sessions'); openPeek(sess); }
 }
 function triggerExploreUpload() {
   const inp = document.getElementById('explore-upload-input');
