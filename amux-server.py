@@ -30028,11 +30028,13 @@ class CCHandler(BaseHTTPRequestHandler):
             code = 200 if ok else (409 if msg == "not running" else 500)
             return self._json({"ok": ok, "message": msg}, code)
 
-        # POST /api/webhooks/smartertrack/<session> — SmarterTrack new-chat webhook
-        if method == "POST" and path.startswith("/api/webhooks/smartertrack/"):
+        # GET|POST /api/webhooks/smartertrack/<session> — SmarterTrack new-chat webhook
+        if method in ("GET", "POST") and path.startswith("/api/webhooks/smartertrack/"):
             session_name = path[len("/api/webhooks/smartertrack/"):]
             if not session_name:
                 return self._json({"error": "missing session name"}, 400)
+            if method == "GET":
+                return self._json({"ok": True})
             length = int(self.headers.get("Content-Length", 0))
             raw = self.rfile.read(length) if length > 0 else b""
             ct = self.headers.get("Content-Type", "")
