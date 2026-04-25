@@ -1755,7 +1755,7 @@ def _snapshot_all_sessions():
                 actions.pop("ac_waiting_since", None)
 
             # ── 5. Steering: deliver queued messages at turn boundary ────────
-            if status == "waiting":
+            if status in ("waiting", "idle"):
                 with _steering_lock:
                     queue = _steering_queue.get(name, [])
                 if queue:
