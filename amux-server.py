@@ -8520,6 +8520,68 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
   }
   .toast.visible { opacity: 1; transform: translateY(0); pointer-events: auto; }
 
+  /* In-app notification banners */
+  .notif-banners {
+    position: fixed; top: env(safe-area-inset-top, 0px); right: 12px; z-index: 510;
+    display: flex; flex-direction: column; gap: 6px; pointer-events: none;
+    max-width: 360px; width: calc(100% - 24px);
+  }
+  .notif-banner {
+    pointer-events: auto; display: flex; align-items: flex-start; gap: 8px;
+    background: var(--card); border: 1px solid var(--border); border-radius: 10px;
+    padding: 10px 12px; font-size: 0.82rem; color: var(--text);
+    box-shadow: 0 4px 20px rgba(0,0,0,0.35); cursor: pointer;
+    opacity: 0; transform: translateY(-20px);
+    transition: opacity 0.25s, transform 0.25s;
+  }
+  .notif-banner.visible { opacity: 1; transform: translateY(0); }
+  .notif-banner.removing { opacity: 0; transform: translateX(40px); }
+  .notif-banner-icon { font-size: 1.1rem; flex-shrink: 0; line-height: 1.2; }
+  .notif-banner-body { flex: 1; min-width: 0; }
+  .notif-banner-title { font-weight: 600; font-size: 0.8rem; margin-bottom: 1px; }
+  .notif-banner-text { color: var(--dim); font-size: 0.75rem; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .notif-banner-close { background: none; border: none; color: var(--dim); cursor: pointer; padding: 0 2px; font-size: 0.9rem; line-height: 1; flex-shrink: 0; }
+  .notif-banner-close:hover { color: var(--text); }
+
+  /* Notification panel */
+  .notif-panel {
+    position: absolute; top: 100%; left: 0; z-index: 510;
+    width: 340px; max-height: 420px; overflow-y: auto;
+    background: var(--card); border: 1px solid var(--border); border-radius: 10px;
+    box-shadow: 0 8px 32px rgba(0,0,0,0.4);
+    display: none; flex-direction: column;
+  }
+  .notif-panel.active { display: flex; }
+  .notif-panel-header {
+    display: flex; align-items: center; justify-content: space-between;
+    padding: 10px 12px; border-bottom: 1px solid var(--border); font-size: 0.82rem; font-weight: 600;
+  }
+  .notif-panel-empty { color: var(--dim); font-size: 0.8rem; text-align: center; padding: 32px 12px; }
+  .notif-panel-item {
+    display: flex; align-items: flex-start; gap: 8px; padding: 10px 12px;
+    border-bottom: 1px solid var(--border); cursor: pointer;
+    transition: background 0.12s;
+  }
+  .notif-panel-item:last-child { border-bottom: none; }
+  .notif-panel-item:hover { background: rgba(128,128,128,0.08); }
+  .notif-panel-item.unread { background: rgba(88,166,255,0.06); }
+  .notif-panel-item .npi-icon { font-size: 1rem; flex-shrink: 0; line-height: 1.3; }
+  .notif-panel-item .npi-body { flex: 1; min-width: 0; }
+  .notif-panel-item .npi-title { font-weight: 600; font-size: 0.78rem; }
+  .notif-panel-item .npi-text { color: var(--dim); font-size: 0.72rem; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .notif-panel-item .npi-time { color: var(--dim); font-size: 0.65rem; white-space: nowrap; flex-shrink: 0; }
+  .notif-badge {
+    position: absolute; top: -4px; right: -4px;
+    background: var(--red, #f85149); color: #fff; font-size: 0.55rem; font-weight: 700;
+    min-width: 14px; height: 14px; border-radius: 7px;
+    display: flex; align-items: center; justify-content: center; padding: 0 3px;
+    line-height: 1;
+  }
+  @media (max-width: 600px) {
+    .notif-banners { right: 8px; max-width: calc(100% - 16px); }
+    .notif-panel { width: calc(100vw - 24px); left: -120px; }
+  }
+
   /* Confirm / alert modal — replaces native confirm()/alert() which PWA blocks */
   .modal-backdrop {
     display: none; position: fixed; inset: 0; z-index: 600;
@@ -10234,7 +10296,19 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
   <div style="display:flex;gap:8px;align-items:center;">
     <h1 id="brand-header" style="margin:0;cursor:pointer;display:flex;align-items:center;gap:6px;" onclick="openAbout()"><span id="brand-icon-header"></span><span id="brand-name-header">amux</span></h1>
     <span id="conn-status" class="conn-status online" onclick="showQueueModal()"></span>
-    <button id="notif-btn" onclick="toggleNotifications()" title="Session notifications" style="background:none;border:none;cursor:pointer;padding:2px 4px;font-size:1rem;opacity:0.5;line-height:1;" aria-label="Toggle notifications">&#x1F514;</button>
+    <div style="position:relative;">
+      <button id="notif-btn" onclick="toggleNotifPanel()" title="Notifications" style="background:none;border:none;cursor:pointer;padding:2px 4px;font-size:1rem;opacity:0.7;line-height:1;position:relative;" aria-label="Notifications">&#x1F514;<span id="notif-badge" class="notif-badge" style="display:none;">0</span></button>
+      <div id="notif-panel" class="notif-panel">
+        <div class="notif-panel-header">
+          <span>Notifications</span>
+          <div style="display:flex;gap:8px;align-items:center;">
+            <button onclick="_notifClearAll()" style="background:none;border:none;color:var(--dim);cursor:pointer;font-size:0.7rem;">Clear</button>
+            <button onclick="_notifToggleNative()" id="notif-native-btn" style="background:none;border:none;cursor:pointer;font-size:0.75rem;" title="Toggle native notifications">&#x1F50A;</button>
+          </div>
+        </div>
+        <div id="notif-panel-list"></div>
+      </div>
+    </div>
   </div>
   <div style="display:flex;gap:8px;align-items:center;">
     <div id="org-switcher-wrap" style="display:none;"></div>
@@ -11747,6 +11821,9 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
 <!-- Toast -->
 <div id="toast" class="toast"></div>
 
+<!-- In-app notification banners -->
+<div id="notif-banners" class="notif-banners"></div>
+
 <!-- Cmd history modal -->
 <div id="cmd-history-modal" class="overlay" style="z-index:210;" onclick="if(event.target===this)closeCmdHistoryModal()">
   <div style="display:flex;flex-direction:column;height:100%;max-width:680px;margin:0 auto;width:100%;">
@@ -12768,72 +12845,170 @@ function reconcileQueue(queue) {
 // ═══════ API & CONNECTION ═══════
 let lastSessionsJSON = '';
 
-// ── Session notifications ──
+// ── In-app notification system ──
 const _prevSessionState = {};  // name → {status, running}
-let _notifsEnabled = localStorage.getItem('amux_notifs') === '1';
+let _notifsNative = localStorage.getItem('amux_notifs') === '1';
 let _notesDirty = false;  // set by SSE invalidate when not on notes tab
+let _notifItems = JSON.parse(localStorage.getItem('amux_notif_items') || '[]').slice(0, 100);
+let _notifUnread = _notifItems.filter(n => !n.read).length;
+let _notifPanelOpen = false;
 
-function _updateNotifBtn() {
-  const btn = document.getElementById('notif-btn');
-  if (!btn) return;
-  const granted = Notification.permission === 'granted';
-  btn.textContent = _notifsEnabled && granted ? '\uD83D\uDD14' : '\uD83D\uDD15';
-  btn.style.opacity = _notifsEnabled && granted ? '1' : '0.4';
-  btn.title = _notifsEnabled ? 'Notifications on — click to disable' : 'Notifications off — click to enable';
+function _notifSave() {
+  if (_notifItems.length > 100) _notifItems = _notifItems.slice(0, 100);
+  localStorage.setItem('amux_notif_items', JSON.stringify(_notifItems));
 }
 
-async function toggleNotifications() {
-  if (!_notifsEnabled) {
-    if (Notification.permission === 'denied') {
-      showToast('Blocked — go to browser Site Settings and allow Notifications for this site');
-      return;
-    }
-    const perm = Notification.permission === 'granted'
-      ? 'granted'
-      : await Notification.requestPermission();
-    if (perm !== 'granted') { showToast('Notification permission not granted'); return; }
-    _notifsEnabled = true;
-    localStorage.setItem('amux_notifs', '1');
-    showToast('Session notifications enabled');
-  } else {
-    _notifsEnabled = false;
+function _notifUpdateBadge() {
+  const badge = document.getElementById('notif-badge');
+  if (!badge) return;
+  _notifUnread = _notifItems.filter(n => !n.read).length;
+  badge.textContent = _notifUnread > 99 ? '99+' : String(_notifUnread);
+  badge.style.display = _notifUnread > 0 ? 'flex' : 'none';
+}
+
+function _notifShowBanner(icon, title, body, session) {
+  const container = document.getElementById('notif-banners');
+  if (!container) return;
+  const el = document.createElement('div');
+  el.className = 'notif-banner';
+  el.innerHTML = '<span class="notif-banner-icon">' + icon + '</span>'
+    + '<div class="notif-banner-body"><div class="notif-banner-title">' + esc(title) + '</div>'
+    + '<div class="notif-banner-text">' + esc(body) + '</div></div>'
+    + '<button class="notif-banner-close" onclick="event.stopPropagation();this.parentElement.classList.add(\'removing\');setTimeout(()=>this.parentElement.remove(),250)">&times;</button>';
+  el.onclick = () => { el.classList.add('removing'); setTimeout(() => el.remove(), 250); if (session) openPeek(session); };
+  container.appendChild(el);
+  requestAnimationFrame(() => requestAnimationFrame(() => el.classList.add('visible')));
+  setTimeout(() => { if (el.parentElement) { el.classList.add('removing'); setTimeout(() => el.remove(), 250); } }, 5000);
+  if (container.children.length > 4) container.firstElementChild.remove();
+}
+
+function _notifPush(icon, title, body, session) {
+  _notifItems.unshift({ icon, title, body, session: session || '', ts: Date.now(), read: false });
+  _notifSave();
+  _notifUpdateBadge();
+  _notifShowBanner(icon, title, body, session);
+  if (_notifPanelOpen) _notifRenderPanel();
+  _notifFireNative(title, body, session);
+}
+
+function _notifFireNative(title, body, session) {
+  if (!_notifsNative) return;
+  try {
+    if (typeof Notification === 'undefined' || Notification.permission !== 'granted') return;
+    const n = new Notification(title, { body, icon: '/icon.png', tag: 'amux-' + (session || Date.now()), renotify: true, silent: false });
+    n.onclick = () => { window.focus(); if (session) openPeek(session); n.close(); };
+  } catch(e) {}
+}
+
+async function _notifToggleNative() {
+  if (_notifsNative) {
+    _notifsNative = false;
     localStorage.setItem('amux_notifs', '0');
-    showToast('Session notifications disabled');
+    showToast('Native notifications disabled');
+  } else {
+    try {
+      if (typeof Notification !== 'undefined') {
+        if (Notification.permission === 'denied') { showToast('Blocked — enable in browser Site Settings'); return; }
+        if (Notification.permission !== 'granted') {
+          const perm = await Notification.requestPermission();
+          if (perm !== 'granted') { showToast('Permission not granted'); return; }
+        }
+      }
+    } catch(e) {}
+    _notifsNative = true;
+    localStorage.setItem('amux_notifs', '1');
+    showToast('Native notifications enabled');
   }
-  _updateNotifBtn();
+  _notifUpdateNativeBtn();
 }
+
+function _notifUpdateNativeBtn() {
+  const btn = document.getElementById('notif-native-btn');
+  if (btn) btn.style.opacity = _notifsNative ? '1' : '0.4';
+}
+
+function toggleNotifPanel() {
+  _notifPanelOpen = !_notifPanelOpen;
+  const panel = document.getElementById('notif-panel');
+  if (!panel) return;
+  panel.classList.toggle('active', _notifPanelOpen);
+  if (_notifPanelOpen) {
+    _notifRenderPanel();
+    _notifUpdateNativeBtn();
+    _notifItems.forEach(n => n.read = true);
+    _notifSave();
+    setTimeout(() => _notifUpdateBadge(), 300);
+  }
+}
+
+function _notifRenderPanel() {
+  const list = document.getElementById('notif-panel-list');
+  if (!list) return;
+  if (!_notifItems.length) {
+    list.innerHTML = '<div class="notif-panel-empty">No notifications yet</div>';
+    return;
+  }
+  list.innerHTML = _notifItems.slice(0, 50).map(n => {
+    const ago = _notifTimeAgo(n.ts);
+    return '<div class="notif-panel-item' + (n.read ? '' : ' unread') + '"'
+      + (n.session ? ' onclick="toggleNotifPanel();openPeek(\'' + n.session.replace(/'/g, "\\'") + '\')"' : '')
+      + '><span class="npi-icon">' + n.icon + '</span>'
+      + '<div class="npi-body"><div class="npi-title">' + esc(n.title) + '</div>'
+      + '<div class="npi-text">' + esc(n.body) + '</div></div>'
+      + '<span class="npi-time">' + ago + '</span></div>';
+  }).join('');
+}
+
+function _notifTimeAgo(ts) {
+  const s = Math.floor((Date.now() - ts) / 1000);
+  if (s < 60) return 'now';
+  if (s < 3600) return Math.floor(s / 60) + 'm';
+  if (s < 86400) return Math.floor(s / 3600) + 'h';
+  return Math.floor(s / 86400) + 'd';
+}
+
+function _notifClearAll() {
+  _notifItems = [];
+  _notifSave();
+  _notifUpdateBadge();
+  _notifRenderPanel();
+}
+
+document.addEventListener('click', (e) => {
+  if (_notifPanelOpen && !e.target.closest('#notif-panel') && !e.target.closest('#notif-btn')) {
+    _notifPanelOpen = false;
+    const panel = document.getElementById('notif-panel');
+    if (panel) panel.classList.remove('active');
+  }
+});
 
 function _fireSessionNotif(name, title, body) {
-  if (!_notifsEnabled || Notification.permission !== 'granted') return;
-  const n = new Notification(title, { body, tag: 'amux-' + name, renotify: true, silent: false });
-  n.onclick = () => { window.focus(); openPeek(name); n.close(); };
+  let icon = '\U0001f535';
+  if (title.includes('needs input')) icon = '⚠️';
+  else if (title.includes('stopped')) icon = '⏹';
+  else if (title.includes('started')) icon = '▶️';
+  else if (title.includes('finished')) icon = '✅';
+  _notifPush(icon, title, body || '', name);
 }
 
-// Alert type → human-readable title/body for native notifications
 const _ALERT_LABELS = {
-  scheduler:      (a) => ({ title: '⏰ Scheduler ran', body: a.message.replace(/^Ran schedule: /, '') + (a.session ? ' · ' + a.session : '') }),
-  auto_compact:   (a) => ({ title: '📦 Context compacted', body: a.session }),
-  auto_restart:   (a) => ({ title: '🔄 Agent restarted', body: a.session + ' — ' + a.message }),
-  thinking_reset: (a) => ({ title: '🔄 Thinking reset', body: a.session }),
-  auto_continue:  (a) => ({ title: '▶ Agent continued', body: a.session }),
-  steering_delivered: (a) => ({ title: '📨 Steering delivered', body: a.session }),
+  scheduler:      (a) => ({ icon: '⏰', title: 'Scheduler ran', body: a.message.replace(/^Ran schedule: /, '') + (a.session ? ' \xb7 ' + a.session : '') }),
+  auto_compact:   (a) => ({ icon: '\U0001f4e6', title: 'Context compacted', body: a.session }),
+  auto_restart:   (a) => ({ icon: '\U0001f504', title: 'Agent restarted', body: a.session + ' — ' + a.message }),
+  thinking_reset: (a) => ({ icon: '\U0001f504', title: 'Thinking reset', body: a.session }),
+  auto_continue:  (a) => ({ icon: '▶️', title: 'Agent continued', body: a.session }),
+  steering_delivered: (a) => ({ icon: '\U0001f4e8', title: 'Steering delivered', body: a.session }),
 };
 
 function _fireAmuxAlert(a) {
-  if (!_notifsEnabled || Notification.permission !== 'granted') return;
   const fn = _ALERT_LABELS[a.type];
   if (!fn) return;
-  const { title, body } = fn(a);
-  const n = new Notification(title, {
-    body, icon: '/icon.png',
-    tag: 'amux-alert-' + a.type + '-' + (a.session || ''),
-    renotify: true, silent: false,
-  });
-  n.onclick = () => { window.focus(); if (a.session) openPeek(a.session); n.close(); };
+  const { icon, title, body } = fn(a);
+  _notifPush(icon, title, body, a.session || '');
 }
 
 function _checkSessionTransitions(newData) {
-  if (_initialLoad) return;  // skip initial load to avoid flood
+  if (_initialLoad) return;
   for (const s of newData) {
     const prev = _prevSessionState[s.name];
     if (!prev) { _prevSessionState[s.name] = { status: s.status, running: s.running }; continue; }
@@ -12845,6 +13020,8 @@ function _checkSessionTransitions(newData) {
         amuxTrack('session_waiting', { session: s.name, task: s.task_name || '', auto_continue: !!s.auto_continue });
       } else if (s.status === 'active' && prev.status !== 'active') {
         _fireSessionNotif(s.name, s.name + ' started working', s.task_name || '');
+      } else if (s.status === 'idle' && prev.status === 'active') {
+        _fireSessionNotif(s.name, s.name + ' finished', s.task_name || 'Task completed');
       }
     }
     if (stoppedNow && prev.status !== '') {
@@ -23558,7 +23735,7 @@ setInterval(() => {
 
 // Start SSE (falls back to polling on failure)
 connectSSE();
-_updateNotifBtn();
+_notifUpdateBadge();
 loadBranding();
 
 // Register service worker for offline asset caching
