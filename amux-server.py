@@ -57,6 +57,7 @@ CC_NOTES = CC_HOME / "notes"
 CC_NOTES_PINS = CC_HOME / "notes" / ".pins.json"
 CC_MAP = CC_HOME / "map.json"
 CC_NOTIFICATIONS = CC_HOME / "notifications.json"
+CC_HABITS = CC_HOME / "habits.json"
 CC_TRANSCRIPTS = CC_HOME / "transcripts"  # per-session JSONL backups
 CC_GMAIL = CC_HOME / "gmail-tokens"        # per-account Gmail OAuth tokens
 CC_BRANDING = CC_HOME / "branding"         # white-label assets (icon, logo)
@@ -8508,6 +8509,63 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
   }
   @keyframes send-pulse { 0%,100% { opacity: 1; } 50% { opacity: 0.5; } }
 
+  /* Habits */
+  .habit-card {
+    background: var(--card); border: 1px solid var(--border); border-radius: 12px;
+    padding: 14px 16px; margin-bottom: 10px; transition: transform 0.12s, box-shadow 0.12s;
+    -webkit-tap-highlight-color: transparent;
+  }
+  .habit-card:active { transform: scale(0.98); }
+  .habit-header { display: flex; align-items: center; gap: 10px; margin-bottom: 10px; }
+  .habit-check {
+    width: 36px; height: 36px; border-radius: 50%;
+    border: 2.5px solid var(--border); background: none; cursor: pointer;
+    display: flex; align-items: center; justify-content: center;
+    transition: all 0.2s cubic-bezier(0.175, 0.885, 0.32, 1.275);
+    flex-shrink: 0; font-size: 1.1rem; color: transparent;
+    -webkit-tap-highlight-color: transparent;
+  }
+  .habit-check.done {
+    background: var(--green, #3fb950); border-color: var(--green, #3fb950);
+    color: #fff; transform: scale(1.1);
+  }
+  .habit-check.done.pop { animation: habit-pop 0.35s cubic-bezier(0.175, 0.885, 0.32, 1.275); }
+  @keyframes habit-pop {
+    0% { transform: scale(0.6); } 50% { transform: scale(1.25); } 100% { transform: scale(1.1); }
+  }
+  .habit-name { font-weight: 600; font-size: 0.95rem; flex: 1; min-width: 0; }
+  .habit-streak {
+    font-size: 0.75rem; color: var(--dim); white-space: nowrap;
+    display: flex; align-items: center; gap: 3px;
+  }
+  .habit-streak.fire { color: var(--orange, #d29922); font-weight: 600; }
+  .habit-dots { display: flex; gap: 3px; }
+  .habit-dot {
+    width: 28px; height: 28px; border-radius: 5px;
+    background: rgba(128,128,128,0.1); transition: background 0.15s;
+    display: flex; align-items: center; justify-content: center;
+    font-size: 0.55rem; color: var(--dim);
+  }
+  .habit-dot.filled { background: var(--green, #3fb950); color: transparent; }
+  .habit-dot.today { border: 1.5px solid var(--accent); }
+  .habit-actions {
+    display: flex; align-items: center; justify-content: space-between;
+    margin-top: 8px; gap: 8px;
+  }
+  .habit-edit-btn {
+    background: none; border: none; color: var(--dim); cursor: pointer;
+    font-size: 0.72rem; padding: 4px 8px; border-radius: 4px;
+    transition: color 0.12s;
+  }
+  .habit-edit-btn:hover { color: var(--text); }
+  .habit-empty {
+    text-align: center; color: var(--dim); padding: 60px 20px; font-size: 0.9rem;
+  }
+  @media (max-width: 600px) {
+    .habit-dot { width: 24px; height: 24px; border-radius: 4px; }
+    .habit-check { width: 40px; height: 40px; }
+  }
+
   /* Toast notifications */
   .toast {
     position: fixed; bottom: 20px; right: 20px; z-index: 500;
@@ -10479,6 +10537,7 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
   <button id="tab-torrents" onclick="switchView('torrents')">Torrents</button>
   <button id="tab-terminal" onclick="switchView('terminal')">Terminal</button>
   <button id="tab-browser" onclick="switchView('browser')">Browser</button>
+  <button id="tab-habits" onclick="switchView('habits')">Habits</button>
 </div>
 <div class="tab-customize-wrap">
   <button class="tab-customize-btn" onclick="event.stopPropagation();toggleTabCustomizer()" title="Show/hide tabs">&#x229E;</button>
@@ -11165,6 +11224,12 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
     <button id="tp-mirror-btn" onclick="_tpToggleMirror()" title="Mirror (M)" style="background:none;border:1px solid #555;color:#fff;padding:6px 10px;border-radius:5px;cursor:pointer;">Mirror</button>
     <button onclick="_tpFullscreen()" title="Fullscreen (F)" style="background:none;border:1px solid #555;color:#fff;padding:6px 10px;border-radius:5px;cursor:pointer;">&#x26F6;</button>
   </div>
+</div>
+
+<!-- Habits -->
+<div id="habits-view" style="display:none;flex-direction:column;align-items:center;padding:12px;overflow-y:auto;-webkit-overflow-scrolling:touch;">
+  <div id="habits-container" style="width:100%;max-width:480px;"></div>
+  <button onclick="_habitsAdd()" style="margin-top:12px;background:var(--accent);color:#000;border:none;border-radius:50%;width:48px;height:48px;font-size:1.5rem;cursor:pointer;box-shadow:0 2px 8px rgba(0,0,0,0.3);transition:transform 0.15s;" onmousedown="this.style.transform='scale(0.9)'" onmouseup="this.style.transform=''" ontouchstart="this.style.transform='scale(0.9)'" ontouchend="this.style.transform=''">+</button>
 </div>
 
 <!-- Schedule modal -->
@@ -20431,9 +20496,9 @@ let _crmSidebarOpen = localStorage.getItem('amux_crm_sidebar') !== 'closed';
 function switchView(view) {
   if (document.getElementById('grid-view').classList.contains('active')) exitGridMode();
   activeView = view;
-  const _svIds = ['session','board','calendar','scheduler','files','logs','notes','crm','map','metrics','torrents','terminal','browser','graph','journal'];
-  const _svNames = ['sessions','board','calendar','scheduler','files','logs','notes','crm','map','metrics','torrents','terminal','browser','graph','journal'];
-  const _svDisplay = ['','','flex','','flex','flex','flex','flex','flex','flex','flex','flex','','flex','flex'];
+  const _svIds = ['session','board','calendar','scheduler','files','logs','notes','crm','map','metrics','torrents','terminal','browser','graph','journal','habits'];
+  const _svNames = ['sessions','board','calendar','scheduler','files','logs','notes','crm','map','metrics','torrents','terminal','browser','graph','journal','habits'];
+  const _svDisplay = ['','','flex','','flex','flex','flex','flex','flex','flex','flex','flex','','flex','flex','flex'];
   for (let i = 0; i < _svIds.length; i++) {
     const ve = document.getElementById(_svIds[i] + '-view');
     if (ve) ve.style.display = view === _svNames[i] ? (_svDisplay[i] || '') : 'none';
@@ -20449,6 +20514,7 @@ function switchView(view) {
   if (view === 'metrics') { _metricsLoad(); _metricsApplySidebarState(); } // always refresh on tab switch
   if (view === 'browser') _bwInit();
   if (view === 'journal') _journalInit();
+  if (view === 'habits') _habitsLoad();
   if (view === 'files') loadFiles(_filesPath);
   else {
     try { if (location.hash.startsWith('#path=')) history.replaceState({}, '', location.pathname); } catch(e) {}
@@ -20470,6 +20536,127 @@ function switchView(view) {
   } else {
     if (boardTimer) { clearInterval(boardTimer); boardTimer = null; }
   }
+}
+
+// ── Habits tab ───────────────────────────────────────────────────────────────
+let _habits = [];
+const _HABIT_DAYS = ['S','M','T','W','T','F','S'];
+
+function _habitsDateKey(d) {
+  return d.getFullYear() + '-' + String(d.getMonth()+1).padStart(2,'0') + '-' + String(d.getDate()).padStart(2,'0');
+}
+function _habitsTodayKey() { return _habitsDateKey(new Date()); }
+
+async function _habitsLoad() {
+  try {
+    const r = await fetch(API + '/api/habits');
+    if (r.ok) _habits = await r.json();
+  } catch(e) {}
+  _habitsRender();
+}
+
+async function _habitsSave() {
+  await fetch(API + '/api/habits', {
+    method: 'PUT',
+    headers: _authHeaders({'Content-Type':'application/json'}),
+    body: JSON.stringify(_habits)
+  });
+}
+
+function _habitsRender() {
+  const c = document.getElementById('habits-container');
+  if (!c) return;
+  if (!_habits.length) {
+    c.innerHTML = '<div class="habit-empty">No habits yet.<br>Tap + to add your first one.</div>';
+    return;
+  }
+  const today = _habitsTodayKey();
+  const days = [];
+  for (let i = 6; i >= 0; i--) {
+    const d = new Date(); d.setDate(d.getDate() - i);
+    days.push({ key: _habitsDateKey(d), label: _HABIT_DAYS[d.getDay()], isToday: i === 0 });
+  }
+  c.innerHTML = _habits.map((h, idx) => {
+    const done = (h.log || []).includes(today);
+    const streak = _habitsStreak(h);
+    const streakClass = streak >= 7 ? ' fire' : '';
+    const streakIcon = streak >= 30 ? '🔥🔥' : streak >= 7 ? '🔥' : streak >= 3 ? '⚡' : '';
+    return '<div class="habit-card" data-idx="' + idx + '">'
+      + '<div class="habit-header">'
+      + '<button class="habit-check' + (done ? ' done' : '') + '" onclick="_habitsToggle(' + idx + ',this)" aria-label="Toggle">' + (done ? '✓' : '') + '</button>'
+      + '<span class="habit-name">' + esc(h.name) + '</span>'
+      + '<span class="habit-streak' + streakClass + '">' + streakIcon + ' ' + streak + 'd</span>'
+      + '</div>'
+      + '<div class="habit-actions">'
+      + '<div class="habit-dots">' + days.map(d => {
+          const filled = (h.log || []).includes(d.key);
+          return '<div class="habit-dot' + (filled ? ' filled' : '') + (d.isToday ? ' today' : '') + '">' + d.label + '</div>';
+        }).join('') + '</div>'
+      + '<div style="display:flex;gap:2px;">'
+      + '<button class="habit-edit-btn" onclick="_habitsEdit(' + idx + ')">edit</button>'
+      + '<button class="habit-edit-btn" onclick="_habitsDelete(' + idx + ')" style="color:var(--red,#f85149);">delete</button>'
+      + '</div>'
+      + '</div></div>';
+  }).join('');
+}
+
+function _habitsStreak(h) {
+  const log = new Set(h.log || []);
+  let streak = 0;
+  const d = new Date();
+  const todayKey = _habitsDateKey(d);
+  if (!log.has(todayKey)) d.setDate(d.getDate() - 1);
+  while (true) {
+    if (!log.has(_habitsDateKey(d))) break;
+    streak++;
+    d.setDate(d.getDate() - 1);
+  }
+  return streak;
+}
+
+async function _habitsToggle(idx, btn) {
+  const h = _habits[idx];
+  if (!h) return;
+  const today = _habitsTodayKey();
+  if (!h.log) h.log = [];
+  const i = h.log.indexOf(today);
+  if (i >= 0) {
+    h.log.splice(i, 1);
+  } else {
+    h.log.push(today);
+    if (btn) { btn.classList.add('pop'); setTimeout(() => btn.classList.remove('pop'), 400); }
+    try { navigator.vibrate && navigator.vibrate(15); } catch(e) {}
+  }
+  _habitsRender();
+  await _habitsSave();
+}
+
+async function _habitsAdd() {
+  const name = prompt('Habit name:');
+  if (!name || !name.trim()) return;
+  _habits.push({ name: name.trim(), log: [], created: _habitsTodayKey() });
+  _habitsRender();
+  await _habitsSave();
+}
+
+async function _habitsEdit(idx) {
+  const h = _habits[idx];
+  if (!h) return;
+  const name = prompt('Edit habit name:', h.name);
+  if (name === null) return;
+  if (!name.trim()) return;
+  h.name = name.trim();
+  _habitsRender();
+  await _habitsSave();
+}
+
+async function _habitsDelete(idx) {
+  const h = _habits[idx];
+  if (!h) return;
+  if (!confirm('Delete "' + h.name + '"?')) return;
+  _habits.splice(idx, 1);
+  _habitsRender();
+  await _habitsSave();
 }
 
 // ── Map tab ───────────────────────────────────────────────────────────────────
@@ -30259,6 +30446,21 @@ class CCHandler(BaseHTTPRequestHandler):
                         if wd:
                             _write_claude_memory(sname, wd)
                 return self._json({"ok": True})
+
+        # Habits API (/api/habits)
+        if path == "/api/habits":
+            if method == "GET":
+                data = []
+                if CC_HABITS.exists():
+                    try: data = json.loads(CC_HABITS.read_text())
+                    except Exception: pass
+                return self._json(data)
+            if method == "PUT":
+                body = self._read_body()
+                if isinstance(body, list):
+                    CC_HABITS.write_text(json.dumps(body))
+                    return self._json({"ok": True})
+                return self._error(400, "expected array")
 
         # Notifications API (/api/notifications)
         if path == "/api/notifications":
