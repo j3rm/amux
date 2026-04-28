@@ -932,6 +932,27 @@ def _validate_cc_session_name(name: str) -> bool:
     return bool(name and len(name) <= 64 and _VALID_CC_SESSION_NAME.match(name))
 
 
+def _cc_session_exists_in_project(session_name: str, work_dir: str) -> bool:
+    """Check if a Claude Code session with this name exists in the project directory."""
+    proj_dir = CLAUDE_HOME / "projects" / _project_name(work_dir)
+    if not proj_dir.is_dir():
+        return False
+    try:
+        for jf in proj_dir.glob("*.jsonl"):
+            try:
+                first_line = jf.open().readline()
+                if not first_line:
+                    continue
+                rec = json.loads(first_line)
+                if rec.get("customTitle") == session_name or rec.get("sessionName") == session_name:
+                    return True
+            except Exception:
+                continue
+    except Exception:
+        pass
+    return False
+
+
 # Per-session token cache — refreshed every 30s, keyed by resolved dir
 _token_cache = {"data": {}, "timestamps": {}, "time": 0}
 _TOKEN_CACHE_TTL = 120
@@ -5364,8 +5385,15 @@ def start_session(name: str, extra_flags: str = "", _skip_conv_id: bool = False)
             cc_session_name = meta.get("cc_session_name", "")
             conv_id = meta.get("cc_conversation_id", "")
             if cc_session_name and _validate_cc_session_name(cc_session_name):
-                session_flag = f'--resume {shlex.quote(cc_session_name)}'
-                print(f"[start] {name}: resume={cc_session_name}")
+                if _cc_session_exists_in_project(cc_session_name, work_dir):
+                    session_flag = f'--resume {shlex.quote(cc_session_name)}'
+                    print(f"[start] {name}: resume={cc_session_name}")
+                else:
+                    meta.pop("cc_session_name", None)
+                    meta.pop("cc_conversation_id", None)
+                    _save_meta(name, meta)
+                    session_flag = f'--name {shlex.quote(name)}'
+                    print(f"[start] {name}: fresh start (session '{cc_session_name}' not found in project)")
             elif conv_id and _uuid_re.match(conv_id):
                 # Migration path: old UUID-based session
                 conv_file = (
