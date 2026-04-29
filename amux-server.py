@@ -3266,6 +3266,38 @@ def _complete_session_board_issue(session_name: str):
         pass
 
 
+def _pickup_next_board_task(session_name: str):
+    """Pick up the next queued (todo) board task for this session.
+    Called after a session completes its current task and goes idle.
+    Moves the task to 'doing' and sends the title+desc to the session."""
+    try:
+        time.sleep(3)
+        db = get_db()
+        row = db.execute(
+            "SELECT id, title, desc FROM issues "
+            "WHERE session=? AND status='todo' AND deleted IS NULL "
+            "ORDER BY created ASC LIMIT 1",
+            (session_name,)
+        ).fetchone()
+        if not row:
+            return
+        item_id, title, desc = row["id"], row["title"], row["desc"] or ""
+        now = int(time.time())
+        db.execute("UPDATE issues SET status='doing', updated=? WHERE id=?", (now, item_id))
+        db.commit()
+        _sse_cache["board"]["time"] = 0
+        _append_board_log(item_id, "Auto-picked up from queue")
+        prompt = title
+        if desc:
+            prompt += f"\n\n{desc[:500]}"
+        ok, _ = send_text(session_name, prompt)
+        if ok:
+            _push_alert("task_pickup", session_name,
+                        f"'{session_name}' picked up queued task: {title[:80]}")
+    except Exception as e:
+        print(f"[board] pickup failed for {session_name}: {e}", flush=True)
+
+
 def _notify_session_of_task(session_name: str, item_id: str, title: str):
     """Push a one-line task pickup notice into the target session's tmux pane.
     Idempotent per (session, item_id): we mark `notified=1` on the issue row so
@@ -4553,12 +4585,14 @@ def list_sessions() -> list:
             preview = strip_ansi(lines[-1][:120]) if lines else ""
             if running:
                 status = _detect_claude_status(raw)
-            # Detect session becoming idle → auto-complete board issue
+            # Detect session becoming idle → auto-complete board issue, then pick up next queued task
             prev = _session_prev_status.get(name)
             if status == "idle" and prev in ("active", "waiting"):
-                threading.Thread(target=_complete_session_board_issue, args=(name,), daemon=True).start()
+                def _complete_then_pickup(sname=name):
+                    _complete_session_board_issue(sname)
+                    _pickup_next_board_task(sname)
+                threading.Thread(target=_complete_then_pickup, daemon=True).start()
             elif status == "idle" and prev == "idle" and not running:
-                # Session stopped while idle — ensure board issue is completed
                 threading.Thread(target=_complete_session_board_issue, args=(name,), daemon=True).start()
             elif status == "" and prev in ("active", "waiting", "idle"):
                 # Session went from running to not running
