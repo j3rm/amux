@@ -1513,18 +1513,27 @@ _STRIP_ANSI = re.compile(
 
 
 def _claude_ui_visible(clean_output: str) -> bool:
-    """Return True if Claude's status bar or spinner is present in the terminal output."""
+    """Return True if Claude's or Codex's status bar/spinner is present in the terminal output."""
     lines = [l for l in clean_output.splitlines() if l.strip()]
     # Check last 3 lines for Claude status bar markers
     for l in lines[-3:]:
         ls = l.strip().lower()
         if "\u23f5\u23f5" in l or "bypass permissions" in ls or "plan mode" in ls:
             return True
+        if "codex" in ls and ("full-auto" in ls or "suggest" in ls or "workspace" in ls):
+            return True
     # Check last 12 lines for an active spinner (dingbat + ellipsis)
     for l in lines[-12:]:
         s = l.strip()
         if s and "\u2700" <= s[0] <= "\u27bf":
             return True
+    # Codex prompt: line starting with > (only if "codex" banner seen in output)
+    has_codex = any("codex" in l.lower() for l in lines[:15])
+    if has_codex:
+        for l in lines[-5:]:
+            ls = l.strip()
+            if ls == ">" or ls.startswith("> "):
+                return True
     return False
 
 
@@ -4597,6 +4606,7 @@ def list_sessions() -> list:
             "tags": [t.strip() for t in cfg.get("CC_TAGS", "").split(",") if t.strip()],
             "flags": cfg.get("CC_FLAGS", ""),
             "creator": cfg.get("CC_CREATOR", ""),
+            "provider": cfg.get("CC_PROVIDER", "claude"),
             "running": running,
             "status": status,
             "preview": preview,
@@ -4630,6 +4640,7 @@ def get_session_info(name: str) -> dict | None:
         "pinned": cfg.get("CC_PINNED", "") == "1",
         "tags": [t.strip() for t in cfg.get("CC_TAGS", "").split(",") if t.strip()],
         "flags": cfg.get("CC_FLAGS", ""),
+        "provider": cfg.get("CC_PROVIDER", "claude"),
         "running": is_running(name),
         "raw": f.read_text(),
     }
@@ -5380,8 +5391,9 @@ def start_session(name: str, extra_flags: str = "", _skip_conv_id: bool = False)
 
         # Determine session resume strategy: name-based (new) > UUID (migration) > fresh
         meta = _load_meta(name)
+        provider = cfg.get("CC_PROVIDER", "claude").strip().lower()
         _uuid_re = re.compile(r'^[0-9a-fA-F-]{36}$')
-        if not _skip_conv_id:
+        if not _skip_conv_id and provider == "claude":
             cc_session_name = meta.get("cc_session_name", "")
             conv_id = meta.get("cc_conversation_id", "")
             if cc_session_name and _validate_cc_session_name(cc_session_name):
@@ -5418,26 +5430,37 @@ def start_session(name: str, extra_flags: str = "", _skip_conv_id: bool = False)
         if defaults_file.exists():
             dcfg = parse_env_file(defaults_file)
             default_flags = dcfg.get("CC_DEFAULT_FLAGS", "")
-    
-        cmd = "claude"
-        if default_flags:
-            cmd += f" {_shell_quote_flags(default_flags)}"
-        if flags:
-            cmd += f" {_shell_quote_flags(flags)}"
-        if session_flag:
-            cmd += f" {session_flag}"
-        if extra_flags:
-            cmd += f" {_shell_quote_flags(extra_flags)}"
-        # Inject --mcp-config based on CC_MCP setting (chrome or empty)
-        mcp_val = cfg.get("CC_MCP", "").strip().lower()
-        mcp_dir = CC_HOME  # ~/.amux
-        if mcp_val == "chrome":
-            mcp_chrome = mcp_dir / "mcp-chrome.json"
-            if mcp_chrome.exists():
-                cmd += f" --mcp-config {shlex.quote(str(mcp_chrome))}"
-        # Default to sonnet if no --model specified anywhere
-        if "--model" not in cmd:
-            cmd += " --model sonnet"
+
+        if provider == "codex":
+            cmd = "codex"
+            if flags:
+                cmd += f" {_shell_quote_flags(flags)}"
+            if extra_flags:
+                cmd += f" {_shell_quote_flags(extra_flags)}"
+            if "--model" not in cmd and "-m " not in cmd:
+                cmd += " --model o3"
+            if "--full-auto" not in cmd and "--dangerously-bypass" not in cmd and "-a " not in cmd:
+                cmd += " --full-auto"
+        else:
+            cmd = "claude"
+            if default_flags:
+                cmd += f" {_shell_quote_flags(default_flags)}"
+            if flags:
+                cmd += f" {_shell_quote_flags(flags)}"
+            if session_flag:
+                cmd += f" {session_flag}"
+            if extra_flags:
+                cmd += f" {_shell_quote_flags(extra_flags)}"
+            # Inject --mcp-config based on CC_MCP setting (chrome or empty)
+            mcp_val = cfg.get("CC_MCP", "").strip().lower()
+            mcp_dir = CC_HOME  # ~/.amux
+            if mcp_val == "chrome":
+                mcp_chrome = mcp_dir / "mcp-chrome.json"
+                if mcp_chrome.exists():
+                    cmd += f" --mcp-config {shlex.quote(str(mcp_chrome))}"
+            # Default to sonnet if no --model specified anywhere
+            if "--model" not in cmd:
+                cmd += " --model sonnet"
         try:
             tmux_sess = tmux_name(name)
             # Build shell setup string
@@ -5597,7 +5620,7 @@ def start_session(name: str, extra_flags: str = "", _skip_conv_id: bool = False)
                 if _i >= 10 and _out and _at_shell_prompt(_out):
                     break
     
-            if not _claude_launched and not _skip_conv_id:
+            if not _claude_launched and not _skip_conv_id and provider == "claude":
                 # Check if Claude exited immediately (--resume failure)
                 _out_check = tmux_capture(name, 10)
                 if _at_shell_prompt(_out_check):
@@ -5701,7 +5724,7 @@ def _send_after_ready(name: str, text: str, timeout: int = 30):
         if not output:
             continue
         # Claude shows ❯ (U+276F) or > when ready for input
-        if "\u276f" in output or "\u2771" in output:
+        if "\u276f" in output or "\u2771" in output or _claude_ui_visible(output):
             time.sleep(0.5)  # small extra delay for readline
             send_text(name, text)
             return
@@ -7336,6 +7359,7 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
   .badge.yolo { background: rgba(210,153,34,0.2); color: var(--yellow); }
   .badge.auto-continue { background: rgba(98,160,234,0.2); color: #62a0ea; }
   .badge.model { background: rgba(57,210,192,0.2); color: var(--cyan); }
+  .badge.codex { background: rgba(16,185,129,0.2); color: #10b981; }
 
   /* Expanded panel */
   .panel { display: none; margin-top: 12px; }
@@ -7350,6 +7374,8 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
   .btn:active { background: var(--border); }
   .btn.primary { background: var(--accent); color: #fff; border-color: var(--accent); }
   .btn.danger { border-color: var(--red); color: var(--red); }
+  .provider-btn { flex:1; font-size:0.82rem; padding:7px 10px; transition: all 0.15s; }
+  .provider-btn.selected { background:var(--accent); color:#fff; border-color:var(--accent); font-weight:600; }
   .chips { display: flex; gap: 6px; flex-wrap: nowrap; margin-bottom: 10px; overflow-x: auto; -webkit-overflow-scrolling: touch; scrollbar-width: none; touch-action: pan-x; overscroll-behavior-x: contain; }
   .chips::-webkit-scrollbar { display: none; }
   .chip {
@@ -11471,6 +11497,13 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
         onkeydown="if(event.key==='Enter'){event.preventDefault();document.getElementById('create-dir').focus({preventScroll:true});}">
     </div>
     <div class="field-group">
+      <label class="field-label">Provider</label>
+      <div style="display:flex;gap:6px;">
+        <button type="button" id="create-provider-claude" class="btn provider-btn selected" onclick="_selectProvider('claude')">Claude Code</button>
+        <button type="button" id="create-provider-codex" class="btn provider-btn" onclick="_selectProvider('codex')">Codex</button>
+      </div>
+    </div>
+    <div class="field-group">
       <label class="field-label">Working directory</label>
       <div class="ac-wrap">
         <input id="create-dir" type="text" placeholder="/path/to/project" autocomplete="off" autocorrect="off"
@@ -13324,7 +13357,8 @@ function render() {
           `<div class="card-log-hit" onclick="event.stopPropagation();openPeek('${s.name}',{query:'${sq}',hitIdx:${hi}})"><span class="log-hit-loc">${esc(s.name)}:${h.line}</span> <span class="log-hit-text">${esc(h.text.slice(0, 80))}</span></div>`
         ).join('') + (hits.length > 2 ? `<div class="card-log-hit" style="color:var(--dim);font-style:italic;" onclick="event.stopPropagation();openPeek('${s.name}',{query:'${sq}'})">+${hits.length - 2} more matches</div>` : '');
       })() : ''}
-      ${(isYolo || isAutoContinue || model || s.tags.length) ? `<div class="badges">
+      ${(isYolo || isAutoContinue || model || s.tags.length || s.provider === 'codex') ? `<div class="badges">
+        ${s.provider === 'codex' ? '<span class="badge codex">Codex</span>' : ''}
         ${isYolo ? '<span class="badge yolo">YOLO</span>' : ''}
         ${isAutoContinue ? '<span class="badge auto-continue" title="Auto-continue enabled">AUTO</span>' : ''}
         ${model ? `<span class="badge model">${esc(model)}</span>` : ''}
@@ -19291,7 +19325,23 @@ async function doConnect(tmuxName) {
 let _createBranchEdited = false;  // track if user manually changed branch name
 let _createDirIsGit = false;     // track if current dir is a git repo
 
+let _createProvider = 'claude';
+function _selectProvider(p) {
+  _createProvider = p;
+  document.getElementById('create-provider-claude').classList.toggle('selected', p === 'claude');
+  document.getElementById('create-provider-codex').classList.toggle('selected', p === 'codex');
+  // Hide branch/template/session-name options for codex since it uses different mechanics
+  const isClaude = p === 'claude';
+  document.getElementById('create-branch-enabled').closest('.field-group').style.display = isClaude ? '' : 'none';
+  document.getElementById('create-worktree-field').style.display = isClaude && _createDirIsGit ? '' : 'none';
+  document.getElementById('create-template-field').style.display = isClaude ? '' : 'none';
+}
 function openCreate() {
+  _createProvider = 'claude';
+  document.getElementById('create-provider-claude').classList.add('selected');
+  document.getElementById('create-provider-codex').classList.remove('selected');
+  document.getElementById('create-branch-enabled').closest('.field-group').style.display = '';
+  document.getElementById('create-template-field').style.display = '';
   document.getElementById('create-name').value = '';
   document.getElementById('create-dir').value = (_filesCwd && _filesCwd !== '/') ? _filesCwd : (window._cloudEmail ? '/root' : '');
   document.getElementById('create-prompt').value = '';
@@ -19537,6 +19587,7 @@ async function submitCreate() {
 
   // Online: create immediately, optionally queue prompt
   const createBody = { name, dir, creator: _getDeviceName() };
+  if (_createProvider !== 'claude') createBody.provider = _createProvider;
   if (worktreeEnabled) createBody.worktree = true;
   const r = await apiCall(API + '/api/sessions', {
     method: 'POST', headers: {'Content-Type':'application/json'},
@@ -32444,6 +32495,9 @@ class CCHandler(BaseHTTPRequestHandler):
             if creator:
                 cfg["CC_CREATOR"] = creator
             cfg["CC_FLAGS"] = ""
+            provider = body.get("provider", "").strip().lower()
+            if provider and provider in ("claude", "codex"):
+                cfg["CC_PROVIDER"] = provider
             mcp = body.get("mcp", "").strip().lower()
             if mcp and mcp == "chrome":
                 cfg["CC_MCP"] = mcp
