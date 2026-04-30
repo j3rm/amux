@@ -167,7 +167,7 @@ def _posthog_emit(event: str, props: dict = None, distinct_id: str = ""):
 _PUBLIC_PATHS = frozenset({"/", "/manifest.json", "/sw.js", "/icon.svg", "/icon.png",
                            "/icon-192.png", "/icon-512.png", "/ca", "/release-notes",
                            "/api/release-notes", "/api/calendar.ics"})
-_PUBLIC_PREFIXES = ("/s/", "/api/share/", "/invite/", "/proxy/", "/api/branding/")
+_PUBLIC_PREFIXES = ("/s/", "/api/share/", "/invite/", "/proxy/", "/api/branding/", "/api/webhooks/")
 
 CC_LOGS.mkdir(parents=True, exist_ok=True)
 CC_MEMORY.mkdir(parents=True, exist_ok=True)
@@ -31398,6 +31398,79 @@ class CCHandler(BaseHTTPRequestHandler):
                 return self._json({"ok": False, "output": output}, 500)
             except Exception as e:
                 return self._json({"ok": False, "output": str(e)}, 500)
+
+        # POST /api/webhooks/sms/<session> — SMS Eagle inbound webhook
+        if method == "POST" and path.startswith("/api/webhooks/sms/"):
+            session_name = path[len("/api/webhooks/sms/"):]
+            if not session_name:
+                return self._json({"error": "missing session name"}, 400)
+            length = int(self.headers.get("Content-Length", 0))
+            raw = self.rfile.read(length) if length > 0 else b""
+            ct = self.headers.get("Content-Type", "")
+            slog(f"[sms-webhook] ct={ct!r} raw={raw!r}")
+            if "application/json" in ct:
+                try:
+                    payload = json.loads(raw)
+                except Exception:
+                    return self._json({"error": "invalid JSON"}, 400)
+                sender = payload.get("from", payload.get("sender", "unknown"))
+                message = (payload.get("message_text") or payload.get("text") or
+                           payload.get("body") or payload.get("msg") or "")
+            else:
+                fields = {k: v[0] for k, v in parse_qs(raw.decode("utf-8", errors="replace")).items()}
+                slog(f"[sms-webhook] fields={fields}")
+                sender = fields.get("from", fields.get("modem_no", "unknown"))
+                message = (fields.get("message_text") or fields.get("text") or
+                           fields.get("body") or fields.get("msg") or "")
+            if not message:
+                return self._json({"error": "no message body", "fields": list(fields.keys()) if "application/json" not in ct else list(payload.keys())}, 400)
+            text = f"SMS from {sender}: {message}"
+            ok, msg = send_text(session_name, text)
+            slog(f"[sms-webhook] session={session_name} from={sender} ok={ok}")
+            code = 200 if ok else (409 if msg == "not running" else 500)
+            return self._json({"ok": ok, "message": msg}, code)
+
+        # GET|POST /api/webhooks/smartertrack/<session> — SmarterTrack new-chat webhook
+        if method in ("GET", "POST") and path.startswith("/api/webhooks/smartertrack/"):
+            session_name = path[len("/api/webhooks/smartertrack/"):]
+            if not session_name:
+                return self._json({"error": "missing session name"}, 400)
+            if method == "GET":
+                return self._json({"ok": True})
+            length = int(self.headers.get("Content-Length", 0))
+            raw = self.rfile.read(length) if length > 0 else b""
+            ct = self.headers.get("Content-Type", "")
+            slog(f"[smartertrack-webhook] ct={ct!r} raw={raw!r}")
+            try:
+                if "application/json" in ct:
+                    payload = json.loads(raw) if raw else {}
+                else:
+                    fields = {k: v[0] for k, v in parse_qs(raw.decode("utf-8", errors="replace")).items()}
+                    payload = fields
+                slog(f"[smartertrack-webhook] payload={payload}")
+            except Exception as e:
+                return self._json({"error": f"parse error: {e}"}, 400)
+            customer = (payload.get("customerName") or payload.get("customer_name") or
+                        payload.get("name") or payload.get("displayName") or "unknown")
+            email = payload.get("email") or payload.get("customerEmail") or ""
+            chat_id = payload.get("chatId") or payload.get("chat_id") or payload.get("id") or ""
+            dept = payload.get("department") or payload.get("departmentName") or ""
+            initial_msg = (payload.get("message") or payload.get("initialMessage") or
+                           payload.get("body") or payload.get("text") or "")
+            parts = [f"New SmarterTrack chat from {customer}"]
+            if email:
+                parts.append(f"Email: {email}")
+            if dept:
+                parts.append(f"Department: {dept}")
+            if chat_id:
+                parts.append(f"Chat ID: {chat_id}")
+            if initial_msg:
+                parts.append(f"Message: {initial_msg}")
+            text = "\n".join(parts)
+            ok, msg = send_text(session_name, text)
+            slog(f"[smartertrack-webhook] session={session_name} customer={customer} ok={ok}")
+            code = 200 if ok else (409 if msg == "not running" else 500)
+            return self._json({"ok": ok, "message": msg}, code)
 
         # GET /api/metrics — system + per-session resource metrics
         if method == "GET" and path == "/api/metrics":
