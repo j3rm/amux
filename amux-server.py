@@ -1612,6 +1612,9 @@ def _snapshot_all_sessions():
 
             # Strip ANSI codes for pattern matching
             clean = _STRIP_ANSI.sub("", output)
+            # Recent output only — prevents stale errors in deep scrollback
+            # from re-triggering reactive handlers after a restart
+            clean_recent = "\n".join(clean.splitlines()[-200:])
             now = time.time()
             actions = _session_auto_actions.setdefault(name, {})
 
@@ -1638,7 +1641,7 @@ def _snapshot_all_sessions():
             # Sessions using browser screenshots fill context with large images
             # until Claude errors with "image exceeds the dimension limit".
             # The session gets stuck at the prompt unable to proceed.
-            if ("image" in clean and "exceeds the dimension limit" in clean and
+            if ("image" in clean_recent and "exceeds the dimension limit" in clean_recent and
                     now - actions.get("last_compact", 0) > 120):
                 actions["last_compact"] = now
                 actions["post_compact_continue"] = True
@@ -1648,10 +1651,13 @@ def _snapshot_all_sessions():
                             f"Auto-compacted '{name}' — image dimension limit hit")
 
             # ── 2. Reactive: thinking-block corruption → restart + replay ───
-            if ("redacted_thinking" in clean and
-                    "cannot be modified" in clean and
+            if ("redacted_thinking" in clean_recent and
+                    "cannot be modified" in clean_recent and
                     now - actions.get("last_restart", 0) > 120):
                 actions["last_restart"] = now
+                # Clear scrollback so stale error strings don't re-trigger
+                subprocess.run(["tmux", "clear-history", "-t", tmux_target(name)],
+                               capture_output=True, timeout=5)
                 wd = _session_work_dir(name)
                 last_msg = _last_meaningful_user_message(wd)
                 _hard_kill_claude(name)
@@ -1668,9 +1674,11 @@ def _snapshot_all_sessions():
             # ── 2b. Reactive: session ID already in use → hard-kill + restart ─
             # Claude Code exits with "Session ID ... is already in use" when a
             # stale process holds the lock.
-            if ("is already in use" in clean and "Session ID" in clean and
+            if ("is already in use" in clean_recent and "Session ID" in clean_recent and
                     now - actions.get("last_restart", 0) > 120):
                 actions["last_restart"] = now
+                subprocess.run(["tmux", "clear-history", "-t", tmux_target(name)],
+                               capture_output=True, timeout=5)
                 wd = _session_work_dir(name)
                 last_msg = _last_meaningful_user_message(wd)
                 _hard_kill_claude(name)
