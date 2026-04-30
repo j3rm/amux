@@ -167,7 +167,7 @@ def _posthog_emit(event: str, props: dict = None, distinct_id: str = ""):
 _PUBLIC_PATHS = frozenset({"/", "/manifest.json", "/sw.js", "/icon.svg", "/icon.png",
                            "/icon-192.png", "/icon-512.png", "/ca", "/release-notes",
                            "/api/release-notes", "/api/calendar.ics"})
-_PUBLIC_PREFIXES = ("/s/", "/api/share/", "/invite/", "/proxy/", "/api/branding/")
+_PUBLIC_PREFIXES = ("/s/", "/api/share/", "/invite/", "/proxy/", "/api/branding/", "/api/webhooks/")
 
 CC_LOGS.mkdir(parents=True, exist_ok=True)
 CC_MEMORY.mkdir(parents=True, exist_ok=True)
@@ -1419,6 +1419,31 @@ def _push_alert(alert_type: str, session: str, message: str):
         _sse_alerts.append({"type": alert_type, "session": session, "message": message, "ts": int(time.time())})
         if len(_sse_alerts) > 50:
             _sse_alerts = _sse_alerts[-50:]
+    _send_pushover(f"amux — {alert_type}", message)
+
+
+def _send_pushover(title: str, message: str, priority: int = 0) -> None:
+    """Fire-and-forget Pushover notification in a background thread."""
+    token = os.environ.get("AMUX_PUSHOVER_TOKEN", "")
+    user  = os.environ.get("AMUX_PUSHOVER_USER", "")
+    if not token or not user:
+        return
+    def _send():
+        try:
+            import urllib.request, urllib.parse
+            data = urllib.parse.urlencode({
+                "token":    token,
+                "user":     user,
+                "title":    title,
+                "message":  message,
+                "priority": priority,
+            }).encode()
+            urllib.request.urlopen(
+                "https://api.pushover.net/1/messages.json", data, timeout=10
+            )
+        except Exception as e:
+            slog(f"[pushover] send failed: {e}")
+    threading.Thread(target=_send, daemon=True).start()
 
 
 def _read_jsonl_tail(filepath: Path, max_bytes: int = 5_000_000) -> list:
@@ -4605,6 +4630,15 @@ def list_sessions() -> list:
             elif status == "" and prev in ("active", "waiting", "idle"):
                 # Session went from running to not running
                 threading.Thread(target=_complete_session_board_issue, args=(name,), daemon=True).start()
+            # Pushover notification when session needs input
+            if status == "waiting" and prev in ("active", ""):
+                _cfg_notif = parse_env_file(CC_SESSIONS / f"{name}.env")
+                _auto_cont = _cfg_notif.get("CC_AUTO_CONTINUE", "") in ("1", "true", "yes")
+                if not _auto_cont:
+                    threading.Thread(target=_send_pushover, args=(
+                        f"amux — {name} needs input",
+                        "Session is waiting for your response.",
+                    ), daemon=True).start()
             _session_prev_status[name] = status if running else ""
             # Filter for intelligible content lines
             intelligible = []
@@ -10575,6 +10609,30 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
               onclick="saveApiKey()">Save</button>
           </div>
           <div id="settings-apikey-status" style="font-size:0.7rem;color:var(--dim);margin-top:4px;"></div>
+        </div>
+        <div class="settings-sep"></div>
+        <div class="settings-section" id="settings-pushover-section">
+          <div class="settings-section-label">Pushover Notifications</div>
+          <div style="font-size:0.72rem;color:var(--dim);margin-bottom:6px;">Receive push notifications on iOS/Android when sessions need attention.</div>
+          <div style="font-size:0.72rem;color:var(--dim);margin-bottom:4px;">App Token</div>
+          <div style="display:flex;gap:6px;align-items:center;margin-bottom:6px;">
+            <input id="settings-pushover-token" type="password" autocomplete="off"
+              class="search-input" placeholder="a…"
+              style="flex:1;font-size:0.78rem;padding:5px 8px;box-sizing:border-box;min-width:0;">
+          </div>
+          <div style="font-size:0.72rem;color:var(--dim);margin-bottom:4px;">User Key</div>
+          <div style="display:flex;gap:6px;align-items:center;margin-bottom:6px;">
+            <input id="settings-pushover-user" type="password" autocomplete="off"
+              class="search-input" placeholder="u…"
+              style="flex:1;font-size:0.78rem;padding:5px 8px;box-sizing:border-box;min-width:0;">
+          </div>
+          <div style="display:flex;gap:6px;">
+            <button class="btn" style="font-size:0.7rem;padding:3px 10px;white-space:nowrap;"
+              onclick="savePushoverKeys()">Save</button>
+            <button class="btn" style="font-size:0.7rem;padding:3px 10px;white-space:nowrap;"
+              onclick="sendPushoverTest()">Send test</button>
+          </div>
+          <div id="settings-pushover-status" style="font-size:0.7rem;color:var(--dim);margin-top:4px;"></div>
         </div>
         <div class="settings-sep"></div>
         <div class="settings-section" id="settings-billing-section" style="display:none;">
@@ -16933,6 +16991,7 @@ const _ACTION_CHIPS = [
     { id: 'ctrlo', label: 'Ctrl+O', action: 'keys', value: 'C-o', desc: 'Accept & continue' },
     { id: 'esc', label: 'Esc', action: 'keys', value: 'Escape', desc: 'Escape' },
     { id: 'tab', label: 'Tab', action: 'keys', value: 'Tab', desc: 'Tab key' },
+    { id: 'shifttab', label: 'Shift+Tab', action: 'keys', value: 'BTab', desc: 'Shift+Tab (accept suggestion)' },
     { id: 'yes', label: 'Yes', action: 'send', value: 'yes', desc: 'Send "yes"' },
     { id: 'no', label: 'No', action: 'send', value: 'no', desc: 'Send "no"' },
     { id: 'log', label: '\uD83D\uDCC4 Log', action: 'special', value: 'downloadLog', desc: 'Download terminal log' },
@@ -24895,6 +24954,59 @@ async function saveApiKey() {
   } catch(e) { if (st) st.textContent = 'Error: ' + e.message; }
 }
 
+// ── Pushover ───────────────────────────────────────────────────────────────────
+async function loadPushoverKeys() {
+  try {
+    const r = await fetch('/api/settings/env');
+    const data = await r.json();
+    const tInp = document.getElementById('settings-pushover-token');
+    const uInp = document.getElementById('settings-pushover-user');
+    const st = document.getElementById('settings-pushover-status');
+    if (tInp) tInp.placeholder = data.AMUX_PUSHOVER_TOKEN || 'a…';
+    if (uInp) uInp.placeholder = data.AMUX_PUSHOVER_USER || 'u…';
+    if (st) st.textContent = (data.AMUX_PUSHOVER_TOKEN && data.AMUX_PUSHOVER_USER) ? 'Keys saved ✓' : 'No keys set';
+  } catch(e) {}
+}
+
+async function savePushoverKeys() {
+  const tInp = document.getElementById('settings-pushover-token');
+  const uInp = document.getElementById('settings-pushover-user');
+  const st = document.getElementById('settings-pushover-status');
+  const token = tInp ? tInp.value.trim() : '';
+  const user  = uInp ? uInp.value.trim() : '';
+  if (!token && !user) return;
+  st && (st.textContent = 'Saving…');
+  const body = {};
+  if (token) body.AMUX_PUSHOVER_TOKEN = token;
+  if (user)  body.AMUX_PUSHOVER_USER  = user;
+  try {
+    const r = await fetch('/api/settings/env', {method:'PATCH', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify(body)});
+    if (r.ok) {
+      if (tInp) tInp.value = '';
+      if (uInp) uInp.value = '';
+      if (st) st.textContent = 'Saved ✓';
+      await loadPushoverKeys();
+    } else {
+      if (st) st.textContent = 'Save failed';
+    }
+  } catch(e) { if (st) st.textContent = 'Error: ' + e.message; }
+}
+
+async function sendPushoverTest() {
+  const st = document.getElementById('settings-pushover-status');
+  st && (st.textContent = 'Sending…');
+  try {
+    const r = await fetch('/api/pushover/test', {method:'POST'});
+    if (r.ok) {
+      if (st) st.textContent = 'Test sent ✓';
+    } else {
+      const d = await r.json().catch(()=>({}));
+      if (st) st.textContent = d.error || 'Send failed';
+    }
+  } catch(e) { if (st) st.textContent = 'Error: ' + e.message; }
+}
+
 // ── Team / Org / Invites ──────────────────────────────────────────────────────
 async function loadTeamSection() {
   try {
@@ -25070,6 +25182,7 @@ toggleSettings = function() {
     loadTeamSection();
     loadApiKeys();
     loadBillingSection();
+    loadPushoverKeys();
   }
 };
 
@@ -30699,6 +30812,10 @@ class CCHandler(BaseHTTPRequestHandler):
                 body.setdefault("level", "info")
                 items.insert(0, body)
                 _notif_save(items)
+                _send_pushover(
+                    body.get("title", "amux notification"),
+                    body.get("body", body.get("message", "")),
+                )
                 return self._json({"ok": True, "id": body["id"]})
 
         if path.startswith("/api/notifications/"):
@@ -31282,6 +31399,80 @@ class CCHandler(BaseHTTPRequestHandler):
                 return self._json({"ok": False, "output": output}, 500)
             except Exception as e:
                 return self._json({"ok": False, "output": str(e)}, 500)
+
+        # POST /api/webhooks/sms/<session> — SMS Eagle inbound webhook
+        if method == "POST" and path.startswith("/api/webhooks/sms/"):
+            session_name = path[len("/api/webhooks/sms/"):]
+            if not session_name:
+                return self._json({"error": "missing session name"}, 400)
+            length = int(self.headers.get("Content-Length", 0))
+            raw = self.rfile.read(length) if length > 0 else b""
+            ct = self.headers.get("Content-Type", "")
+            slog(f"[sms-webhook] ct={ct!r} raw={raw!r}")
+            if "application/json" in ct:
+                try:
+                    payload = json.loads(raw)
+                except Exception:
+                    return self._json({"error": "invalid JSON"}, 400)
+                sender = payload.get("from", payload.get("sender", "unknown"))
+                message = (payload.get("message_text") or payload.get("text") or
+                           payload.get("body") or payload.get("msg") or "")
+            else:
+                fields = {k: v[0] for k, v in parse_qs(raw.decode("utf-8", errors="replace")).items()}
+                slog(f"[sms-webhook] fields={fields}")
+                sender = fields.get("from", fields.get("modem_no", "unknown"))
+                message = (fields.get("message_text") or fields.get("text") or
+                           fields.get("body") or fields.get("msg") or "")
+            if not message:
+                return self._json({"error": "no message body", "fields": list(fields.keys()) if "application/json" not in ct else list(payload.keys())}, 400)
+            text = f"SMS from {sender}: {message}"
+            ok, msg = send_text(session_name, text)
+            slog(f"[sms-webhook] session={session_name} from={sender} ok={ok}")
+            code = 200 if ok else (409 if msg == "not running" else 500)
+            return self._json({"ok": ok, "message": msg}, code)
+
+        # GET|POST /api/webhooks/smartertrack/<session> — SmarterTrack new-chat webhook
+        if method in ("GET", "POST") and path.startswith("/api/webhooks/smartertrack/"):
+            session_name = path[len("/api/webhooks/smartertrack/"):]
+            if not session_name:
+                return self._json({"error": "missing session name"}, 400)
+            if method == "GET":
+                return self._json({"ok": True})
+            length = int(self.headers.get("Content-Length", 0))
+            raw = self.rfile.read(length) if length > 0 else b""
+            ct = self.headers.get("Content-Type", "")
+            slog(f"[smartertrack-webhook] ct={ct!r} raw={raw!r}")
+            try:
+                if "application/json" in ct:
+                    payload = json.loads(raw) if raw else {}
+                else:
+                    fields = {k: v[0] for k, v in parse_qs(raw.decode("utf-8", errors="replace")).items()}
+                    payload = fields
+                slog(f"[smartertrack-webhook] payload={payload}")
+            except Exception as e:
+                return self._json({"error": f"parse error: {e}"}, 400)
+            # Extract common SmarterTrack fields (adjust after first hit)
+            customer = (payload.get("customerName") or payload.get("customer_name") or
+                        payload.get("name") or payload.get("displayName") or "unknown")
+            email = payload.get("email") or payload.get("customerEmail") or ""
+            chat_id = payload.get("chatId") or payload.get("chat_id") or payload.get("id") or ""
+            dept = payload.get("department") or payload.get("departmentName") or ""
+            initial_msg = (payload.get("message") or payload.get("initialMessage") or
+                           payload.get("body") or payload.get("text") or "")
+            parts = [f"New SmarterTrack chat from {customer}"]
+            if email:
+                parts.append(f"Email: {email}")
+            if dept:
+                parts.append(f"Department: {dept}")
+            if chat_id:
+                parts.append(f"Chat ID: {chat_id}")
+            if initial_msg:
+                parts.append(f"Message: {initial_msg}")
+            text = "\n".join(parts)
+            ok, msg = send_text(session_name, text)
+            slog(f"[smartertrack-webhook] session={session_name} customer={customer} ok={ok}")
+            code = 200 if ok else (409 if msg == "not running" else 500)
+            return self._json({"ok": ok, "message": msg}, code)
 
         # GET /api/metrics — system + per-session resource metrics
         if method == "GET" and path == "/api/metrics":
@@ -33591,7 +33782,7 @@ return "not_found"
 
         # ── Settings env (ANTHROPIC_API_KEY etc.) ─────────────────────────────
         if path == "/api/settings/env":
-            _allowed_env_keys = {"ANTHROPIC_API_KEY", "OPENAI_API_KEY"}
+            _allowed_env_keys = {"ANTHROPIC_API_KEY", "OPENAI_API_KEY", "AMUX_PUSHOVER_TOKEN", "AMUX_PUSHOVER_USER"}
             if method == "GET":
                 result = {}
                 for k in _allowed_env_keys:
@@ -33635,6 +33826,15 @@ return "not_found"
                     except Exception:
                         pass
                 return self._json({"ok": True})
+
+        # ── Pushover test ──────────────────────────────────────────────────────
+        if path == "/api/pushover/test" and method == "POST":
+            token = os.environ.get("AMUX_PUSHOVER_TOKEN", "")
+            user  = os.environ.get("AMUX_PUSHOVER_USER", "")
+            if not token or not user:
+                return self._json({"error": "Pushover keys not configured"}, 400)
+            _send_pushover("amux — test", "Pushover notifications are working!")
+            return self._json({"ok": True})
 
         # ── Org / Team / Invites ──────────────────────────────────────────────
         if path.startswith("/api/org") or path.startswith("/invite/"):
@@ -35304,6 +35504,96 @@ _AUTO_UPDATE_BRANCH = os.environ.get("AMUX_AUTO_UPDATE_BRANCH", "main")
 _AUTO_UPDATE_INTERVAL = int(os.environ.get("AMUX_AUTO_UPDATE_INTERVAL", "60"))  # seconds
 
 
+def _board_watcher():
+    """Nudge idle sessions that have unread todo board items assigned to them.
+
+    Runs every 30s. For each session with todo items:
+      - idle   → send a one-line nudge so it picks up the task
+      - active → skip, retry next cycle
+      - waiting / not running → skip
+    Tracks which (session, item_id) pairs have already been nudged to avoid
+    spamming the same task repeatedly until it is claimed or status changes.
+    """
+    try:
+        db = get_db()
+        rows = db.execute(
+            "SELECT id, title, session FROM issues "
+            "WHERE status='todo' AND session IS NOT NULL AND session != '' AND deleted IS NULL"
+        ).fetchall()
+        if not rows:
+            return
+
+        # Group by session
+        by_session: dict[str, list] = {}
+        for row in rows:
+            s = row["session"]
+            by_session.setdefault(s, []).append(dict(row))
+
+        # Capture current pane output once per session (cheap — tmux capture-pane)
+        for session_name, items in by_session.items():
+            if not is_running(session_name):
+                continue
+            try:
+                r = subprocess.run(
+                    ["tmux", "capture-pane", "-p", "-t", tmux_target(session_name)],
+                    capture_output=True, text=True, timeout=5,
+                )
+                raw = r.stdout if r.returncode == 0 else ""
+            except Exception:
+                continue
+
+            status = _detect_claude_status(raw)
+            if status != "idle":
+                continue  # busy or waiting — retry next cycle
+
+            # Find items not yet nudged
+            already_nudged: set = _board_watcher._nudged  # type: ignore[attr-defined]
+            pending = [i for i in items if (session_name, i["id"]) not in already_nudged]
+            if not pending:
+                continue
+
+            # Send a single nudge listing all pending tasks
+            task_lines = "\n".join(f"- [{i['id']}] {i['title']}" for i in pending)
+            nudge = (
+                f"You have {len(pending)} task(s) waiting on the board assigned to you:\n"
+                f"{task_lines}\n"
+                f"Check the board and claim the next task when you are ready:\n"
+                f"curl -sk $AMUX_URL/api/board | python3 -c \""
+                f"import json,sys,os; s=os.getenv('AMUX_SESSION',''); "
+                f"[print(i['id'],i['title']) for i in json.load(sys.stdin) "
+                f"if i.get('session')==s and i['status']=='todo']\""
+            )
+            ok, _ = send_text(session_name, nudge)
+            if ok:
+                for i in pending:
+                    already_nudged.add((session_name, i["id"]))
+                slog(f"[board_watcher] nudged {session_name} with {len(pending)} task(s)")
+
+    except Exception as e:
+        slog(f"[board_watcher] error: {e}")
+
+
+# Track nudged (session, item_id) pairs — cleared when item leaves todo status
+_board_watcher._nudged = set()  # type: ignore[attr-defined]
+
+
+def _board_watcher_clear_nudged():
+    """Remove completed/claimed items from the nudge-tracking set so re-assignments work."""
+    try:
+        db = get_db()
+        active_ids = {
+            row["id"] for row in db.execute(
+                "SELECT id FROM issues WHERE status='todo' AND deleted IS NULL"
+            ).fetchall()
+        }
+        _board_watcher._nudged = {  # type: ignore[attr-defined]
+            (s, iid) for s, iid in _board_watcher._nudged  # type: ignore[attr-defined]
+            if iid in active_ids
+        }
+    except Exception:
+        pass
+
+
 def _cleanup_tmp():
     """Prune stale Claude Code sandbox files from /private/tmp to prevent disk full."""
     tmp_dir = Path(f"/private/tmp/claude-{os.getuid()}")
@@ -35998,6 +36288,8 @@ def main():
     schedule_job(_kill_stale_ray,        interval=600,                  name="ray_reap",     initial_delay=120)
     schedule_job(_refresh_token_cache,   interval=120,                  name="token_cache", initial_delay=5)
     schedule_job(_email_sync_job,        interval=_EMAIL_SYNC_INTERVAL, name="email_sync",  initial_delay=20)
+    schedule_job(_board_watcher,         interval=30,                   name="board_watcher", initial_delay=30)
+    schedule_job(_board_watcher_clear_nudged, interval=60,             name="board_watcher_gc", initial_delay=60)
     schedule_job(_evict_stale_caches,    interval=300,                  name="cache_evict", initial_delay=60)
     schedule_job(_cleanup_tmp,           interval=1800,                 name="tmp_cleanup", initial_delay=60)
     schedule_job(_auto_archive_idle,     interval=3600,                 name="auto_archive", initial_delay=300)
