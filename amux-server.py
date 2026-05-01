@@ -1515,9 +1515,15 @@ _STRIP_ANSI = re.compile(
 def _claude_ui_visible(clean_output: str) -> bool:
     """Return True if Claude's or Codex's status bar/spinner is present in the terminal output."""
     lines = [l for l in clean_output.splitlines() if l.strip()]
-    # Check last 3 lines for Claude status bar markers
+    # Check last 3 lines for Claude status bar markers.
+    # Guard: when Claude is killed (signal 9), its status bar text can leak
+    # into the bash prompt line as garbled output (e.g. "videos$ ass permissions
+    # on \u00b7 1 shell"). Require that the line does NOT start with a shell prompt.
+    _shell_prompt_re = re.compile(r'^.*[$%]\s')
     for l in lines[-3:]:
         ls = l.strip().lower()
+        if _shell_prompt_re.match(ls):
+            continue
         if "\u23f5\u23f5" in l or "bypass permissions" in ls or "plan mode" in ls:
             return True
         if "codex" in ls and ("full-auto" in ls or "suggest" in ls or "workspace" in ls):
@@ -13357,7 +13363,8 @@ function render() {
   updateActiveCount();
   // Build tag filter bar
   const tagEl = document.getElementById('tag-filters');
-  const allTags = [...new Set(sessions.flatMap(s => s.tags || []))].sort();
+  const allTags = [...new Set(sessions.filter(s => !s.archived).flatMap(s => s.tags || []))].sort();
+  if (activeTag && !allTags.includes(activeTag)) activeTag = null;
   if (allTags.length) {
     tagEl.innerHTML = allTags.map(t =>
       `<span class="tag-filter${activeTag === t ? ' active' : ''}" onclick="toggleTagFilter('${esc(t)}')">${esc(t)}</span>`
