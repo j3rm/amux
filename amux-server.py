@@ -5592,8 +5592,8 @@ def start_session(name: str, extra_flags: str = "", _skip_conv_id: bool = False)
             default_flags = dcfg.get("CC_DEFAULT_FLAGS", "")
 
         if provider == "codex":
-            # Find most recent codex session for this work_dir to resume
-            codex_session_id = _find_latest_codex_session(work_dir)
+            # Resume from stored codex session ID (per amux session), not by cwd
+            codex_session_id = meta.get("codex_session_id", "")
             if codex_session_id:
                 cmd = f"codex resume {codex_session_id}"
                 print(f"[start] {name}: codex resume {codex_session_id}")
@@ -5906,6 +5906,17 @@ def start_session(name: str, extra_flags: str = "", _skip_conv_id: bool = False)
             meta.pop("start_error", None)
             meta["last_started"] = int(time.time())
             meta["start_count"] = meta.get("start_count", 0) + 1
+            # For codex: capture the new session ID after a brief delay
+            if provider == "codex" and not meta.get("codex_session_id"):
+                def _capture_codex_id(sname=name, wd=work_dir):
+                    time.sleep(8)
+                    sid = _find_latest_codex_session(wd)
+                    if sid:
+                        m = _load_meta(sname)
+                        m["codex_session_id"] = sid
+                        _save_meta(sname, m)
+                        print(f"[start] {sname}: captured codex session {sid}")
+                threading.Thread(target=_capture_codex_id, daemon=True).start()
             _save_meta(name, meta)
             return True, "started"
         except subprocess.CalledProcessError as e:
@@ -13532,8 +13543,7 @@ function render() {
   function _renderSessionCard(s) {
     const isExp = expanded.has(s.name);
     const flags = s.flags || '';
-    const isYolo = flags.includes('--dangerously-skip-permissions');
-  const isAutoContinue = !!s.auto_continue;
+    const isYolo = flags.includes('--dangerously-skip-permissions') || !!s.auto_continue;
     const modelMatch = flags.match(/--model\s+(\S+)/);
     const flagModel = modelMatch ? modelMatch[1] : null;
     const model = flagModel || s.active_model || null;
@@ -13553,7 +13563,6 @@ function render() {
           <div class="card-menu-item" onclick="event.stopPropagation();editField('${s.name}','name','${esc(s.name)}')"><span class="mi">&#x270E;</span> Rename</div>
           <div class="card-menu-item" onclick="event.stopPropagation();editField('${s.name}','model','${esc(model||"")}','${esc(s.provider||"claude")}')"><span class="mi">&#x2699;</span> Model${model ? ': '+esc(model) : ''}</div>
           <div class="card-menu-item" onclick="event.stopPropagation();toggleYolo('${s.name}')"><span class="mi">${isYolo?'&#x2611;':'&#x2610;'}</span> YOLO mode</div>
-          <div class="card-menu-item" onclick="event.stopPropagation();toggleAutoContinue('${s.name}')" title="Auto-respond when Claude is waiting for user input (~60s delay)"><span class="mi">${isAutoContinue?'&#x2611;':'&#x2610;'}</span> Auto-continue</div>
           <div class="card-menu-item" onclick="event.stopPropagation();editField('${s.name}','desc','${esc(s.desc||"")}')"><span class="mi">&#x1F4DD;</span> Description</div>
           <div class="card-menu-item" onclick="event.stopPropagation();editField('${s.name}','tags','${esc(s.tags.join(", "))}')"><span class="mi">&#x1F3F7;</span> Tags</div>
           <div class="card-menu-item" onclick="event.stopPropagation();editField('${s.name}','dir','${esc(s.dir)}')"><span class="mi">&#x1F4C1;</span> Directory</div>
@@ -13593,10 +13602,9 @@ function render() {
           `<div class="card-log-hit" onclick="event.stopPropagation();openPeek('${s.name}',{query:'${sq}',hitIdx:${hi}})"><span class="log-hit-loc">${esc(s.name)}:${h.line}</span> <span class="log-hit-text">${esc(h.text.slice(0, 80))}</span></div>`
         ).join('') + (hits.length > 2 ? `<div class="card-log-hit" style="color:var(--dim);font-style:italic;" onclick="event.stopPropagation();openPeek('${s.name}',{query:'${sq}'})">+${hits.length - 2} more matches</div>` : '');
       })() : ''}
-      ${(isYolo || isAutoContinue || model || s.tags.length || s.provider === 'codex') ? `<div class="badges">
+      ${(isYolo || model || s.tags.length || s.provider === 'codex') ? `<div class="badges">
         ${s.provider === 'codex' ? '<span class="badge codex">Codex</span>' : ''}
         ${isYolo ? '<span class="badge yolo">YOLO</span>' : ''}
-        ${isAutoContinue ? '<span class="badge auto-continue" title="Auto-continue enabled">AUTO</span>' : ''}
         ${model ? `<span class="badge model">${esc(model)}</span>` : ''}
         ${s.tags.map(t => `<span class="tag" data-tag="${esc(t)}" onclick="event.stopPropagation();toggleTagFilter('${esc(t)}')">${esc(t)}</span>`).join('')}
       </div>` : ''}
@@ -14490,37 +14498,25 @@ async function toggleYolo(session) {
     body: JSON.stringify({ toggle_yolo: true })
   });
   if (r) {
-    // Optimistic update: flip the flag locally so render() shows the change immediately
     const s = sessions.find(s => s.name === session);
     if (s) {
       const flag = '--dangerously-skip-permissions';
-      s.flags = (s.flags || '').includes(flag)
-        ? s.flags.replace(flag, '').trim()
-        : ((s.flags || '') + ' ' + flag).trim();
-      lastSessionsJSON = '';  // force fetchSessions to re-render
+      const wasYolo = (s.flags || '').includes(flag) || !!s.auto_continue;
+      if (wasYolo) {
+        s.flags = (s.flags || '').replace(flag, '').trim();
+        s.auto_continue = false;
+      } else {
+        if (s.provider !== 'codex') s.flags = ((s.flags || '') + ' ' + flag).trim();
+        s.auto_continue = true;
+      }
+      lastSessionsJSON = '';
       render();
     }
   }
   fetchSessions();
 }
 
-async function toggleAutoContinue(session) {
-  closeAllMenus();
-  const r = await apiCall(API + '/api/sessions/' + session + '/config', {
-    method: 'PATCH', headers: {'Content-Type':'application/json'},
-    body: JSON.stringify({ toggle_auto_continue: true })
-  });
-  if (r) {
-    // Optimistic update
-    const s = sessions.find(s => s.name === session);
-    if (s) {
-      s.auto_continue = !s.auto_continue;
-      lastSessionsJSON = '';  // force fetchSessions to re-render
-      render();
-    }
-  }
-  fetchSessions();
-}
+async function toggleAutoContinue(session) { return toggleYolo(session); }
 
 async function togglePin(session) {
   closeAllMenus();
@@ -35371,23 +35367,24 @@ p{{color:#888;margin:12px 0 28px;font-size:0.9rem;line-height:1.5}}
                     suffix = " (session restarted)" if restarted else ""
                     return self._json({"ok": True, "message": f"model set to {model_val}{suffix}"})
 
-                # Toggle YOLO
-                if body.get("toggle_yolo"):
+                # Toggle YOLO (permissions skip + auto-continue combined)
+                if body.get("toggle_yolo") or body.get("toggle_auto_continue"):
+                    provider = cfg.get("CC_PROVIDER", "claude")
                     flags = cfg.get("CC_FLAGS", "")
-                    if "--dangerously-skip-permissions" in flags:
+                    is_yolo = (
+                        "--dangerously-skip-permissions" in flags
+                        or cfg.get("CC_AUTO_CONTINUE") in ("1", "true", "yes")
+                    )
+                    if is_yolo:
                         flags = flags.replace("--dangerously-skip-permissions", "").strip()
+                        cfg["CC_AUTO_CONTINUE"] = "0"
                     else:
-                        flags = f"{flags} --dangerously-skip-permissions".strip()
+                        if provider != "codex":
+                            flags = f"{flags} --dangerously-skip-permissions".strip()
+                        cfg["CC_AUTO_CONTINUE"] = "1"
                     cfg["CC_FLAGS"] = flags
                     _write_env(env_file, cfg)
                     return self._json({"ok": True, "message": "yolo toggled"})
-
-                # Toggle auto-continue
-                if body.get("toggle_auto_continue"):
-                    cur = cfg.get("CC_AUTO_CONTINUE", "0")
-                    cfg["CC_AUTO_CONTINUE"] = "0" if cur in ("1", "true", "yes") else "1"
-                    _write_env(env_file, cfg)
-                    return self._json({"ok": True, "message": "auto_continue toggled"})
 
                 # Change directory
                 if "dir" in body:

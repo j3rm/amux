@@ -310,19 +310,12 @@ cmd_start() {
   local provider="${CC_PROVIDER:-claude}"
   local cmd
   if [[ "$provider" == "codex" ]]; then
-    # Find most recent codex session for this directory to resume
-    local codex_sid
-    codex_sid=$(find "$HOME/.codex/sessions" -name 'rollout-*.jsonl' -print0 2>/dev/null \
-      | xargs -0 ls -t 2>/dev/null | while read -r f; do
-        local sess_cwd
-        sess_cwd=$(python3 -c "import json; m=json.loads(open('$f').readline()); print(m.get('payload',{}).get('cwd',''))" 2>/dev/null)
-        sess_cwd="${sess_cwd%/}"
-        local check_dir="${dir%/}"
-        if [[ "$sess_cwd" == "$check_dir" ]]; then
-          python3 -c "import json; m=json.loads(open('$f').readline()); print(m.get('payload',{}).get('id',''))" 2>/dev/null
-          break
-        fi
-      done)
+    # Resume from stored codex session ID in meta file
+    local meta_file="$CC_SESSIONS/${name}.meta.json"
+    local codex_sid=""
+    if [[ -f "$meta_file" ]]; then
+      codex_sid=$(python3 -c "import json; print(json.load(open('$meta_file')).get('codex_session_id',''))" 2>/dev/null)
+    fi
     if [[ -n "$codex_sid" ]]; then
       cmd="codex resume $codex_sid"
     else
