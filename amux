@@ -306,14 +306,33 @@ cmd_start() {
   esac
   [[ -d "$dir" ]] || die "directory not found: $dir"
 
-  # Build claude command. Each component is shell-quoted before
-  # concatenation so the nested shell tmux invokes (the user's default
-  # shell) sees one literal token per argument — preventing zsh nomatch
-  # on '[1m]' globbing AND nested-shell command injection via $* token
-  # boundary loss. See quote_flags / quote_argv comments for details.
-  local cmd="claude"
-  # Apply global defaults from defaults.env
-  if [[ -n "${CC_DEFAULT_FLAGS:-}" ]]; then
+  # Build command. Check CC_PROVIDER to pick codex vs claude.
+  local provider="${CC_PROVIDER:-claude}"
+  local cmd
+  if [[ "$provider" == "codex" ]]; then
+    # Find most recent codex session for this directory to resume
+    local codex_sid
+    codex_sid=$(find "$HOME/.codex/sessions" -name 'rollout-*.jsonl' -print0 2>/dev/null \
+      | xargs -0 ls -t 2>/dev/null | while read -r f; do
+        local sess_cwd
+        sess_cwd=$(python3 -c "import json; m=json.loads(open('$f').readline()); print(m.get('payload',{}).get('cwd',''))" 2>/dev/null)
+        sess_cwd="${sess_cwd%/}"
+        local check_dir="${dir%/}"
+        if [[ "$sess_cwd" == "$check_dir" ]]; then
+          python3 -c "import json; m=json.loads(open('$f').readline()); print(m.get('payload',{}).get('id',''))" 2>/dev/null
+          break
+        fi
+      done)
+    if [[ -n "$codex_sid" ]]; then
+      cmd="codex resume $codex_sid"
+    else
+      cmd="codex"
+    fi
+  else
+    cmd="claude"
+  fi
+  # Apply global defaults from defaults.env (skip for codex — Claude flags don't apply)
+  if [[ "$provider" != "codex" && -n "${CC_DEFAULT_FLAGS:-}" ]]; then
     local q
     q=$(quote_flags "$CC_DEFAULT_FLAGS") || die "failed to quote CC_DEFAULT_FLAGS"
     [[ -n "$q" ]] && cmd="$cmd $q"
@@ -332,6 +351,22 @@ cmd_start() {
     local q
     q=$(quote_argv "$@") || die "failed to quote inline arguments"
     [[ -n "$q" ]] && cmd="$cmd $q"
+  fi
+
+  # Codex-specific defaults
+  if [[ "$provider" == "codex" ]]; then
+    [[ "$cmd" == *"--model"* || "$cmd" == *"-m "* ]] || cmd="$cmd --model gpt-5.5"
+    [[ "$cmd" == *"--full-auto"* || "$cmd" == *"--dangerously-bypass"* || "$cmd" == *"-a "* ]] || cmd="$cmd -a never"
+    if [[ "$cmd" != *"--add-dir"* ]]; then
+      local git_root
+      git_root=$(git -C "$dir" rev-parse --show-toplevel 2>/dev/null) || true
+      if [[ -n "$git_root" && "$git_root" != "$dir" ]]; then
+        cmd="$cmd --add-dir $(printf '%q' "$git_root")"
+        [[ -d "$git_root/.git" ]] && cmd="$cmd --add-dir $(printf '%q' "$git_root/.git")"
+      fi
+    fi
+  else
+    [[ "$cmd" == *"--model"* ]] || cmd="$cmd --model sonnet"
   fi
 
   # Create tmux session and attach

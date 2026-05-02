@@ -1526,7 +1526,7 @@ def _claude_ui_visible(clean_output: str) -> bool:
             continue
         if "\u23f5\u23f5" in l or "bypass permissions" in ls or "plan mode" in ls:
             return True
-        if "codex" in ls and ("full-auto" in ls or "suggest" in ls or "workspace" in ls):
+        if "codex" in ls and ("full-auto" in ls or "suggest" in ls or "workspace" in ls or "approval" in ls or "-a never" in ls):
             return True
     # Check last 12 lines for an active spinner (dingbat-prefixed status line
     # like "\u273b Crunched for 1m 38s"). Exclude U+276F \u276f \u2014 that's Claude's input
@@ -1535,12 +1535,17 @@ def _claude_ui_visible(clean_output: str) -> bool:
         s = l.strip()
         if s and "\u2700" <= s[0] <= "\u27bf" and s[0] != "\u276f":
             return True
-    # Codex prompt: line starting with > (only if "codex" banner seen in output)
+    # Codex prompt: line starting with > or › (only if "codex" banner seen in output)
     has_codex = any("codex" in l.lower() for l in lines[:15])
     if has_codex:
         for l in lines[-5:]:
             ls = l.strip()
             if ls == ">" or ls.startswith("> "):
+                return True
+            if ls.startswith("›"):
+                return True
+            # Codex model status line: "gpt-X xhigh · ~/path"
+            if "·" in ls and ("gpt-" in ls or "o3" in ls or "o4" in ls):
                 return True
     return False
 
@@ -1636,6 +1641,19 @@ def _snapshot_all_sessions():
                 _push_alert("auto_compact", name,
                             f"Auto-compacted '{name}' — image dimension limit hit")
 
+            # ── 1c. Reactive: corrupted image in context → auto-compact ────
+            # When a malformed image (truncated PNG, SVG-as-PNG, etc.) gets
+            # loaded via Read, every subsequent API call fails with "Could not
+            # process image". The bad image is stuck in conversation history.
+            if ("Could not process image" in clean and
+                    now - actions.get("last_compact", 0) > 120):
+                actions["last_compact"] = now
+                actions["post_compact_continue"] = True
+                threading.Thread(target=backup_session_jsonl, args=(name, "pre_compact_img"), daemon=True).start()
+                send_text(name, "/compact")
+                _push_alert("auto_compact", name,
+                            f"Auto-compacted '{name}' — corrupted image in context")
+
             # ── 2. Reactive: thinking-block corruption → restart + replay ───
             if ("redacted_thinking" in clean and
                     "cannot be modified" in clean and
@@ -1688,7 +1706,9 @@ def _snapshot_all_sessions():
             # "Killed" appears in scrollback — handles OOM kills across restarts.
             if _at_shell_prompt(clean) and not actions.get("restarting") and not actions.get("hibernated"):
                 cfg_ar = parse_env_file(f)
-                if cfg_ar.get("CC_AUTO_CONTINUE") in ("1", "true", "yes"):
+                if cfg_ar.get("CC_ARCHIVED") == "1":
+                    pass  # don't auto-restart archived sessions
+                elif cfg_ar.get("CC_AUTO_CONTINUE") in ("1", "true", "yes"):
                     last_alive = actions.get("last_claude_alive", 0)
                     last_restart = actions.get("last_auto_restart", 0)
                     _killed_in_output = "Killed" in clean and ("$ " in clean or "%" in clean)
@@ -4509,7 +4529,24 @@ def _detect_claude_status(raw_output: str) -> str:
         # Status bar visible but no active/waiting signal → idle at prompt
         return "idle"
 
-    # ── 4. Fallback: check for shell prompt character ──
+    # ── 4. Codex-specific patterns ──
+    # Codex active: bullet + "esc to interrupt" or working/running
+    for l in reversed(lines[-12:]):
+        s = l.strip()
+        sl = s.lower()
+        if s.startswith("•") and "esc to interrupt" in sl:
+            return "active"
+        if s.startswith("•") and ("working" in sl or "running" in sl):
+            return "active"
+    # Codex idle: › prompt or model status line (gpt-X · ~/path)
+    for l in lines[-5:]:
+        ls = l.strip()
+        if "·" in ls and ("gpt-" in ls or "o3" in ls or "o4" in ls):
+            return "idle"
+        if ls.startswith("›") and ("implement" in ls.lower() or ls == "›"):
+            return "idle"
+
+    # ── 5. Fallback: check for shell prompt character ──
     # Only treat ❯ as a shell prompt when it's at the end of a line (not ❯ 1. Yes selector)
     for l in lines[-5:]:
         ls = l.strip()
@@ -4663,10 +4700,13 @@ def list_sessions() -> list:
             else:
                 # Fallback: show last few non-empty stripped lines (e.g. spinner/tool output during active processing)
                 preview_lines = [strip_ansi(l).strip()[:200] for l in lines[-8:] if strip_ansi(l).strip()][-5:]
-        # Detect active model from JSONL
+        # Detect active model from JSONL (skip for codex — it has no Claude JSONL)
         raw_dir = cfg.get("CC_DIR", "")
         resolved_dir = str(Path(raw_dir).expanduser().resolve()) if raw_dir else ""
-        active_model = detect_active_model(raw_dir, meta.get("cc_conversation_id", ""))
+        if cfg.get("CC_PROVIDER", "claude") == "codex":
+            active_model = _extract_model_from_flags(cfg.get("CC_FLAGS", "")) or "gpt-5.5"
+        else:
+            active_model = detect_active_model(raw_dir, meta.get("cc_conversation_id", ""))
         # Parse task time from spinner line
         task_time = _parse_task_time(raw) if raw else ""
         # Token count from JSONL cache (refreshed once above the loop).
@@ -5472,6 +5512,11 @@ def start_session(name: str, extra_flags: str = "", _skip_conv_id: bool = False)
         if is_running(name):
             return True, "already running"
         cfg = parse_env_file(f)
+        # Un-archive on start — prevents stale archived flag from hiding active sessions
+        if cfg.get("CC_ARCHIVED") == "1":
+            lines = [l for l in f.read_text().splitlines() if "CC_ARCHIVED" not in l]
+            f.write_text("\n".join(lines) + "\n")
+            cfg.pop("CC_ARCHIVED", None)
         work_dir = str(Path(cfg.get("CC_DIR", str(Path.home()))).expanduser().resolve())
         flags = cfg.get("CC_FLAGS", "")
         # Claude Code v2.1.69+ rejects --dangerously-skip-permissions when running as root.
@@ -5517,21 +5562,69 @@ def start_session(name: str, extra_flags: str = "", _skip_conv_id: bool = False)
     
         # Load defaults
         defaults_file = CC_HOME / "defaults.env"
+
+        def _find_latest_codex_session(cwd: str) -> str:
+            """Find the most recent Codex session ID for a given working directory."""
+            codex_sessions = Path.home() / ".codex" / "sessions"
+            if not codex_sessions.exists():
+                return ""
+            best_id, best_mtime = "", 0.0
+            for jsonl in codex_sessions.rglob("rollout-*.jsonl"):
+                try:
+                    mt = jsonl.stat().st_mtime
+                    if mt <= best_mtime:
+                        continue
+                    with jsonl.open() as f:
+                        first = f.readline()
+                    if not first:
+                        continue
+                    meta = json.loads(first)
+                    payload = meta.get("payload", {})
+                    if payload.get("cwd", "").rstrip("/") == cwd.rstrip("/"):
+                        best_id = payload.get("id", "")
+                        best_mtime = mt
+                except Exception:
+                    continue
+            return best_id
         default_flags = ""
         if defaults_file.exists():
             dcfg = parse_env_file(defaults_file)
             default_flags = dcfg.get("CC_DEFAULT_FLAGS", "")
 
         if provider == "codex":
-            cmd = "codex"
+            # Find most recent codex session for this work_dir to resume
+            codex_session_id = _find_latest_codex_session(work_dir)
+            if codex_session_id:
+                cmd = f"codex resume {codex_session_id}"
+                print(f"[start] {name}: codex resume {codex_session_id}")
+            else:
+                cmd = "codex"
+                print(f"[start] {name}: codex fresh start")
             if flags:
                 cmd += f" {_shell_quote_flags(flags)}"
             if extra_flags:
                 cmd += f" {_shell_quote_flags(extra_flags)}"
             if "--model" not in cmd and "-m " not in cmd:
-                cmd += " --model o3"
+                cmd += " --model gpt-5.5"
             if "--full-auto" not in cmd and "--dangerously-bypass" not in cmd and "-a " not in cmd:
-                cmd += " --full-auto"
+                cmd += " -a never"
+            # If work_dir is a subdirectory of a git repo, add the repo root
+            # so codex's sandbox can write to .git (needed for commits)
+            if "--add-dir" not in cmd:
+                try:
+                    _gr = subprocess.run(
+                        ["git", "-C", work_dir, "rev-parse", "--show-toplevel"],
+                        capture_output=True, text=True, timeout=5,
+                    )
+                    if _gr.returncode == 0:
+                        git_root = _gr.stdout.strip()
+                        if git_root != work_dir:
+                            cmd += f" --add-dir {shlex.quote(git_root)}"
+                            git_dir = os.path.join(git_root, ".git")
+                            if os.path.isdir(git_dir):
+                                cmd += f" --add-dir {shlex.quote(git_dir)}"
+                except Exception:
+                    pass
         else:
             cmd = "claude"
             if default_flags:
@@ -10606,6 +10699,7 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
           <div style="font-size:0.72rem;color:var(--dim);margin-bottom:6px;">Applied to new sessions without an explicit model</div>
           <select id="settings-default-model" onchange="saveDefaultModel(this.value)"
             style="width:100%;font-size:0.85rem;padding:5px 8px;border-radius:6px;border:1px solid var(--border);background:var(--card);color:var(--fg);">
+            <optgroup label="Claude">
             <option value="sonnet">sonnet</option>
             <option value="opus">opus</option>
             <option value="haiku">haiku</option>
@@ -10616,6 +10710,15 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
             <option value="claude-sonnet-4-6">claude-sonnet-4-6</option>
             <option value="claude-sonnet-4-6[1m]">claude-sonnet-4-6 [1M]</option>
             <option value="claude-haiku-4-5-20251001">claude-haiku-4-5-20251001</option>
+            </optgroup>
+            <optgroup label="Codex (OpenAI)">
+            <option value="gpt-5.5">gpt-5.5</option>
+            <option value="o3">o3</option>
+            <option value="o4-mini">o4-mini</option>
+            <option value="gpt-4o">gpt-4o</option>
+            <option value="gpt-4.1">gpt-4.1</option>
+            <option value="gpt-4.1-mini">gpt-4.1-mini</option>
+            </optgroup>
           </select>
         </div>
         <div class="settings-sep"></div>
@@ -13340,7 +13443,8 @@ function updatePeekStatus() {
   const mb = document.getElementById('peek-model-badge');
   if (mb) {
     const flagModel = (s.flags || '').match(/--model\s+(\S+)/);
-    const model = s.active_model || (flagModel ? flagModel[1] : '') || 'sonnet';
+    const defaultModel = s.provider === 'codex' ? 'gpt-5.5' : 'sonnet';
+    const model = s.active_model || (flagModel ? flagModel[1] : '') || defaultModel;
     mb.textContent = model;
   }
 }
@@ -13447,7 +13551,7 @@ function render() {
           <div class="card-menu-item" onclick="event.stopPropagation();closeAllMenus();showSessionInfo('${s.name}')"><span class="mi">&#x2139;</span> Info</div>
           <div class="card-menu-item" onclick="event.stopPropagation();togglePin('${s.name}')"><span class="mi">${s.pinned?'&#x1F4CC;':'&#x1F4CC;'}</span> ${s.pinned ? 'Unpin' : 'Pin to top'}</div>
           <div class="card-menu-item" onclick="event.stopPropagation();editField('${s.name}','name','${esc(s.name)}')"><span class="mi">&#x270E;</span> Rename</div>
-          <div class="card-menu-item" onclick="event.stopPropagation();editField('${s.name}','model','${esc(model||"")}')"><span class="mi">&#x2699;</span> Model${model ? ': '+esc(model) : ''}</div>
+          <div class="card-menu-item" onclick="event.stopPropagation();editField('${s.name}','model','${esc(model||"")}','${esc(s.provider||"claude")}')"><span class="mi">&#x2699;</span> Model${model ? ': '+esc(model) : ''}</div>
           <div class="card-menu-item" onclick="event.stopPropagation();toggleYolo('${s.name}')"><span class="mi">${isYolo?'&#x2611;':'&#x2610;'}</span> YOLO mode</div>
           <div class="card-menu-item" onclick="event.stopPropagation();toggleAutoContinue('${s.name}')" title="Auto-respond when Claude is waiting for user input (~60s delay)"><span class="mi">${isAutoContinue?'&#x2611;':'&#x2610;'}</span> Auto-continue</div>
           <div class="card-menu-item" onclick="event.stopPropagation();editField('${s.name}','desc','${esc(s.desc||"")}')"><span class="mi">&#x1F4DD;</span> Description</div>
@@ -14183,7 +14287,7 @@ if (window._AMUX_DEFAULT_MODEL) {
 
 // ── Edit modal ──
 let editState = null;  // {session, field, current}
-function editField(session, field, current) {
+function editField(session, field, current, provider) {
   closeAllMenus();
   const titles = { name: 'Rename session', model: 'Change model', dir: 'Change directory', desc: 'Set description', tags: 'Edit tags', duplicate: 'Duplicate session', clone: 'Clone & continue' };
   const placeholders = { name: 'Session name', model: 'e.g. opus, sonnet, haiku', dir: window._cloudEmail ? '/root' : '/path/to/project', desc: 'Brief description...', tags: 'e.g. work, frontend, urgent', duplicate: 'New session name', clone: 'New session name' };
@@ -14192,11 +14296,24 @@ function editField(session, field, current) {
   const sel = document.getElementById('edit-select');
   const inpWrap = document.getElementById('edit-input-wrap');
   if (field === 'model') {
+    const claudeModels = [
+      {v:'',l:'Default'},{v:'opus',l:'opus'},{v:'sonnet',l:'sonnet'},{v:'haiku',l:'haiku'},
+      {v:'claude-opus-4-7',l:'claude-opus-4-7'},{v:'claude-opus-4-7[1m]',l:'claude-opus-4-7 [1M]'},
+      {v:'claude-opus-4-6',l:'claude-opus-4-6'},{v:'claude-opus-4-6[1m]',l:'claude-opus-4-6 [1M]'},
+      {v:'claude-sonnet-4-6',l:'claude-sonnet-4-6'},{v:'claude-sonnet-4-6[1m]',l:'claude-sonnet-4-6 [1M]'},
+      {v:'claude-haiku-4-5-20251001',l:'claude-haiku-4-5-20251001'}
+    ];
+    const codexModels = [
+      {v:'',l:'Default'},{v:'gpt-5.5',l:'gpt-5.5'},{v:'o3',l:'o3'},{v:'o4-mini',l:'o4-mini'},
+      {v:'gpt-4o',l:'gpt-4o'},{v:'gpt-4.1',l:'gpt-4.1'},{v:'gpt-4.1-mini',l:'gpt-4.1-mini'}
+    ];
+    const models = (provider === 'codex') ? codexModels : claudeModels;
+    sel.innerHTML = '';
+    models.forEach(m => { const o = document.createElement('option'); o.value = m.v; o.textContent = m.l; sel.appendChild(o); });
     inpWrap.style.display = 'none';
     sel.style.display = 'block';
     sel.value = current || '';
     if (current && !Array.from(sel.options).some(o => o.value === current)) {
-      // Add custom model as option if not in list
       const opt = document.createElement('option');
       opt.value = current; opt.textContent = current;
       sel.appendChild(opt);
