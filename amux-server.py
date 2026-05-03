@@ -1564,6 +1564,14 @@ def _claude_ui_visible(clean_output: str) -> bool:
     return False
 
 
+def _at_resume_picker(clean_output: str) -> bool:
+    """Return True if Claude's --resume picker is showing (interactive session selector)."""
+    return bool(clean_output and
+                ("Resume Session" in clean_output or "Type to Search" in clean_output or
+                 "Enter to select" in clean_output or "Esc to cancel" in clean_output) and
+                "⌕" in clean_output)  # ⌕ search icon in the picker
+
+
 def _at_shell_prompt(clean_output: str) -> bool:
     """Return True if the terminal looks like a bare shell prompt (no Claude UI)."""
     if _claude_ui_visible(clean_output):
@@ -1698,13 +1706,14 @@ def _snapshot_all_sessions():
             # Track last time Claude UI was visible (used by auto-restart below)
             if _claude_ui_visible(clean):
                 actions["last_claude_alive"] = now
+                actions.pop("hibernated", None)
 
             # ── 4. Auto-restart: Claude exited to shell prompt ────────────────
             # Triggered when: CC_AUTO_CONTINUE=1 AND terminal shows a bare shell
             # prompt (no Claude UI). Rate-limited to once per 90s.
             # Also fires after server restart (last_claude_alive unknown) if
             # "Killed" appears in scrollback — handles OOM kills across restarts.
-            if _at_shell_prompt(clean) and not actions.get("restarting"):
+            if _at_shell_prompt(clean) and not actions.get("restarting") and not actions.get("hibernated"):
                 cfg_ar = parse_env_file(f)
                 if cfg_ar.get("CC_AUTO_CONTINUE") in ("1", "true", "yes"):
                     last_alive = actions.get("last_claude_alive", 0)
@@ -1767,6 +1776,27 @@ def _snapshot_all_sessions():
                                                         f"{elapsed_secs // 3600}h old")
                     except Exception:
                         pass
+
+            # ── 6. Auto-hibernate: stop idle sessions to reclaim memory ───────
+            # Claude processes hold 400-750 MB each even when idle. With 30+
+            # sessions that causes OOM kills. Stop Claude in sessions idle for
+            # >30 min. The conversation is preserved — next send auto-wakes it.
+            _HIBERNATE_IDLE_SECS = 1800  # 30 minutes
+            if status == "idle" and not actions.get("restarting"):
+                last_activity = actions.get("last_claude_alive", 0)
+                meta_h = _load_meta(name)
+                last_send = meta_h.get("last_send", 0)
+                last_real_activity = max(last_activity, last_send)
+                if last_real_activity and now - last_real_activity > _HIBERNATE_IDLE_SECS:
+                    if not actions.get("hibernated"):
+                        actions["hibernated"] = True
+                        def _do_hibernate(sname=name):
+                            try:
+                                stop_session(sname)
+                                print(f"[hibernate] {sname}: stopped after {int(now - last_real_activity)}s idle")
+                            except Exception:
+                                pass
+                        threading.Thread(target=_do_hibernate, daemon=True).start()
 
             # ── 3a. Post-compact continuation ──────────────────────────────────
             # After we trigger auto-compact, the session goes idle at the ❯ prompt.
@@ -5717,13 +5747,38 @@ def start_session(name: str, extra_flags: str = "", _skip_conv_id: bool = False)
                 if _out and _claude_ui_visible(_out):
                     _claude_launched = True
                     break
-                # If we see a shell prompt within 5s, --resume may have failed
+                # If we see a shell prompt or resume picker, --resume failed
                 if _i >= 10 and _out and _at_shell_prompt(_out):
+                    break
+                if _i >= 6 and _out and _at_resume_picker(_out):
                     break
     
             if not _claude_launched and not _skip_conv_id and provider == "claude":
-                # Check if Claude exited immediately (--resume failure)
+                # Check if stuck in resume picker (--resume showed interactive selector)
                 _out_check = tmux_capture(name, 10)
+                if _at_resume_picker(_out_check):
+                    print(f"[start] {name}: stuck in resume picker, escaping and starting fresh")
+                    # Send Escape to close picker, then Ctrl-C to exit claude
+                    subprocess.run(["tmux", "send-keys", "-t", tmux_target(name), "Escape"],
+                                   capture_output=True, timeout=5)
+                    time.sleep(0.5)
+                    subprocess.run(["tmux", "send-keys", "-t", tmux_target(name), "C-c"],
+                                   capture_output=True, timeout=5)
+                    time.sleep(2)
+                    # Wait for shell prompt
+                    for _w in range(10):
+                        _out_w = tmux_capture(name, 10)
+                        if _out_w and _at_shell_prompt(_out_w):
+                            break
+                        time.sleep(0.5)
+                    # Clear stale session name
+                    meta.pop("cc_session_name", None)
+                    meta.pop("cc_conversation_id", None)
+                    _save_meta(name, meta)
+                    # Mark as at shell prompt so the fallback below fires
+                    _out_check = tmux_capture(name, 10)
+
+                # Check if Claude exited immediately (--resume failure)
                 if _at_shell_prompt(_out_check):
                     print(f"[start] {name}: --resume failed, starting fresh")
                     # Clear stale session name and retry with --name
@@ -6014,8 +6069,23 @@ def _get_send_lock(name: str) -> threading.Lock:
         return _send_locks[name]
 
 
+_auto_waking = set()
+
 def send_text(name: str, text: str) -> tuple[bool, str]:
     if not is_running(name):
+        if name in _auto_waking:
+            return False, "not running"
+        env_file = CC_SESSIONS / f"{name}.env"
+        if env_file.exists():
+            _auto_waking.add(name)
+            try:
+                ok, msg = start_session(name)
+                if not ok:
+                    return False, f"auto-wake failed: {msg}"
+                _send_after_ready(name, text)
+                return True, "sent (auto-woke)"
+            finally:
+                _auto_waking.discard(name)
         return False, "not running"
     lock = _get_send_lock(name)
     with lock:
