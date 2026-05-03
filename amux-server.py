@@ -5600,7 +5600,11 @@ def start_session(name: str, extra_flags: str = "", _skip_conv_id: bool = False)
             tmux_exists = tmux_sess in r_tmux.stdout.splitlines()
     
             if tmux_exists:
-                # Existing tmux session -- reuse it
+                # Existing tmux session -- reuse it, but wipe scrollback first so
+                # stale error strings (thinking corruption, session-ID conflicts)
+                # don't trigger the watchdog on the newly started Claude process.
+                subprocess.run(["tmux", "clear-history", "-t", tmux_target(name)],
+                               capture_output=True, timeout=5)
                 output = tmux_capture(name, 10)
                 if _at_shell_prompt(output):
                     # At shell prompt -- clear and send Claude command
