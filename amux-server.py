@@ -1358,6 +1358,8 @@ _YOLO_PROMPTS = [
     (re.compile(r'do you want to proceed.*esc to cancel', re.IGNORECASE | re.DOTALL), '1'),
     # Leaked permission prompt: "Yes, and don't ask again … Esc to cancel"
     (re.compile(r'yes.*and don.t ask again.*esc to cancel', re.IGNORECASE | re.DOTALL), '1'),
+    # Codex MCP/plugin tool approval: "Allow X to run tool "Y"? 1. Always … 2. Yes, for this session"
+    (re.compile(r'allow\s+\S+\s+to run tool.*\d\.\s*(yes|allow)', re.IGNORECASE | re.DOTALL), '2'),
 ]
 _YOLO_COOLDOWN = 6  # seconds between auto-responses per session
 _yolo_last_responded: dict = {}
@@ -1385,7 +1387,13 @@ def _yolo_auto_respond():
             if now - _yolo_last_responded.get(name, 0) < _YOLO_COOLDOWN:
                 continue
             cfg = parse_env_file(f)
-            if '--dangerously-skip-permissions' not in cfg.get('CC_FLAGS', ''):
+            _flags = cfg.get('CC_FLAGS', '')
+            _is_yolo = (
+                '--dangerously-skip-permissions' in _flags
+                or '--dangerously-bypass-approvals-and-sandbox' in _flags
+                or cfg.get('CC_AUTO_CONTINUE') in ('1', 'true', 'yes')
+            )
+            if not _is_yolo:
                 continue
             raw = tmux_capture(name, 50)
             if not raw:
@@ -1567,6 +1575,10 @@ def _at_shell_prompt(clean_output: str) -> bool:
         ls = l.strip()
         # Bash/zsh prompt: ends with $ or % (not Claude's ❯ prompt)
         if re.search(r'[$%]\s*$', ls) and "\u276f" not in ls:
+            return True
+        # After Killed/signal 9, status bar text leaks after the prompt char:
+        # e.g. "mixpeek$ ss permissions on · 5 shells"
+        if re.match(r'\S+[$%]\s', ls) and "\u276f" not in ls:
             return True
     return False
 
@@ -13546,7 +13558,7 @@ function render() {
   function _renderSessionCard(s) {
     const isExp = expanded.has(s.name);
     const flags = s.flags || '';
-    const isYolo = flags.includes('--dangerously-skip-permissions') || !!s.auto_continue;
+    const isYolo = flags.includes('--dangerously-skip-permissions') || flags.includes('--dangerously-bypass-approvals-and-sandbox') || !!s.auto_continue;
     const modelMatch = flags.match(/--model\s+(\S+)/);
     const flagModel = modelMatch ? modelMatch[1] : null;
     const model = flagModel || s.active_model || null;
@@ -14503,13 +14515,15 @@ async function toggleYolo(session) {
   if (r) {
     const s = sessions.find(s => s.name === session);
     if (s) {
-      const flag = '--dangerously-skip-permissions';
-      const wasYolo = (s.flags || '').includes(flag) || !!s.auto_continue;
+      const claudeFlag = '--dangerously-skip-permissions';
+      const codexFlag = '--dangerously-bypass-approvals-and-sandbox';
+      const wasYolo = (s.flags || '').includes(claudeFlag) || (s.flags || '').includes(codexFlag) || !!s.auto_continue;
       if (wasYolo) {
-        s.flags = (s.flags || '').replace(flag, '').trim();
+        s.flags = (s.flags || '').replace(claudeFlag, '').replace(codexFlag, '').trim();
         s.auto_continue = false;
       } else {
-        if (s.provider !== 'codex') s.flags = ((s.flags || '') + ' ' + flag).trim();
+        const addFlag = s.provider === 'codex' ? codexFlag : claudeFlag;
+        s.flags = ((s.flags || '') + ' ' + addFlag).trim();
         s.auto_continue = true;
       }
       lastSessionsJSON = '';
@@ -35376,13 +35390,17 @@ p{{color:#888;margin:12px 0 28px;font-size:0.9rem;line-height:1.5}}
                     flags = cfg.get("CC_FLAGS", "")
                     is_yolo = (
                         "--dangerously-skip-permissions" in flags
+                        or "--dangerously-bypass-approvals-and-sandbox" in flags
                         or cfg.get("CC_AUTO_CONTINUE") in ("1", "true", "yes")
                     )
                     if is_yolo:
                         flags = flags.replace("--dangerously-skip-permissions", "").strip()
+                        flags = flags.replace("--dangerously-bypass-approvals-and-sandbox", "").strip()
                         cfg["CC_AUTO_CONTINUE"] = "0"
                     else:
-                        if provider != "codex":
+                        if provider == "codex":
+                            flags = f"{flags} --dangerously-bypass-approvals-and-sandbox".strip()
+                        else:
                             flags = f"{flags} --dangerously-skip-permissions".strip()
                         cfg["CC_AUTO_CONTINUE"] = "1"
                     cfg["CC_FLAGS"] = flags
