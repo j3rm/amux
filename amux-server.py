@@ -1358,8 +1358,8 @@ _YOLO_PROMPTS = [
     (re.compile(r'do you want to proceed.*esc to cancel', re.IGNORECASE | re.DOTALL), '1'),
     # Leaked permission prompt: "Yes, and don't ask again … Esc to cancel"
     (re.compile(r'yes.*and don.t ask again.*esc to cancel', re.IGNORECASE | re.DOTALL), '1'),
-    # Codex MCP/plugin tool approval: "Allow X to run tool "Y"? 1. Always … 2. Yes, for this session"
-    (re.compile(r'allow\s+\S+\s+to run tool.*\d\.\s*(yes|allow)', re.IGNORECASE | re.DOTALL), '2'),
+    # Codex MCP/plugin tool approval: "Allow X to <verb> …? 1. Allow 2. Allow for this session"
+    (re.compile(r'allow\s+\S+\s+to\s+\w+.*\d\.\s*allow\b.*esc to cancel', re.IGNORECASE | re.DOTALL), '2'),
 ]
 _YOLO_COOLDOWN = 6  # seconds between auto-responses per session
 _yolo_last_responded: dict = {}
@@ -5623,14 +5623,19 @@ def start_session(name: str, extra_flags: str = "", _skip_conv_id: bool = False)
             else:
                 cmd = "codex"
                 print(f"[start] {name}: codex fresh start")
-            if flags:
-                cmd += f" {_shell_quote_flags(flags)}"
+            _codex_yolo = False
+            _codex_flags = flags or ""
+            if any(f in _codex_flags for f in ('--dangerously-skip-permissions', '--dangerously-bypass-approvals-and-sandbox')):
+                _codex_yolo = True
+                _codex_flags = re.sub(r'--dangerously-(?:skip-permissions|bypass-approvals-and-sandbox)\s*', '', _codex_flags).strip()
+            if _codex_flags:
+                cmd += f" {_shell_quote_flags(_codex_flags)}"
             if extra_flags:
                 cmd += f" {_shell_quote_flags(extra_flags)}"
             if "--model" not in cmd and "-m " not in cmd:
                 cmd += " --model gpt-5.5"
-            if "--full-auto" not in cmd and "--dangerously-bypass" not in cmd and "-a " not in cmd:
-                cmd += " -a never"
+            if "--full-auto" not in cmd and "-a " not in cmd:
+                cmd += " --full-auto" if _codex_yolo else " -a never"
             # If work_dir is a subdirectory of a git repo, add the repo root
             # so codex's sandbox can write to .git (needed for commits)
             if "--add-dir" not in cmd:
