@@ -8126,10 +8126,10 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
   /* Create session */
   .header-row {
     display: flex; align-items: center; justify-content: space-between;
-    position: sticky; top: 0; z-index: 40;
-    background: var(--bg); padding: 16px;
-    padding-top: max(16px, env(safe-area-inset-top));
-    margin: calc(-1 * max(16px, env(safe-area-inset-top))) -16px 0 -16px;
+    position: sticky; top: var(--chrome-tab-h, 0px); z-index: 40;
+    background: var(--bg); padding: 12px 16px;
+    margin: 0 -16px 0 -16px;
+    border-bottom: 1px solid var(--border);
   }
   .header-row h1 { margin-bottom: 0; }
   .btn-create {
@@ -9147,7 +9147,7 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
     display: flex; align-items: stretch;
     margin: 0 -16px 12px -16px;
     border-bottom: 1px solid var(--border);
-    position: sticky; top: 60px; z-index: 39; background: var(--bg);
+    position: sticky; top: var(--sticky-nav-top, 60px); z-index: 39; background: var(--bg);
   }
   .tab-bar {
     display: flex; gap: 0; padding: 0 0 0 16px; flex: 1;
@@ -9185,6 +9185,68 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
   .tab-customizer-item:hover { background: var(--hover); }
   .tab-customizer-item.required { opacity: 0.45; cursor: not-allowed; }
   .tab-customizer-item input[type=checkbox] { accent-color: var(--accent); cursor: pointer; }
+
+  /* Chrome-style browser tabs */
+  .chrome-tabs-bar {
+    display: flex; align-items: flex-end;
+    position: sticky; top: 0; z-index: 41;
+    background: color-mix(in srgb, var(--bg), black 12%);
+    padding: max(6px, env(safe-area-inset-top)) 6px 0 10px;
+    margin: calc(-1 * max(16px, env(safe-area-inset-top))) -16px 0 -16px;
+    gap: 1px;
+    overflow-x: auto; overflow-y: hidden;
+    -webkit-overflow-scrolling: touch;
+  }
+  .chrome-tabs-bar::-webkit-scrollbar { display: none; }
+  .chrome-tab {
+    display: flex; align-items: center; gap: 4px;
+    padding: 7px 6px 7px 12px;
+    background: transparent;
+    border: 1px solid transparent; border-bottom: none;
+    border-radius: 8px 8px 0 0;
+    cursor: pointer;
+    font-size: 0.78rem; font-weight: 500;
+    color: var(--dim);
+    max-width: 190px; min-width: 0;
+    position: relative; user-select: none;
+    white-space: nowrap; flex-shrink: 0;
+    transition: background 0.12s, color 0.12s;
+  }
+  .chrome-tab:hover { background: rgba(255,255,255,0.06); }
+  .chrome-tab.active {
+    background: var(--bg); color: var(--fg);
+    border-color: var(--border);
+    margin-bottom: -1px; padding-bottom: 8px;
+  }
+  .chrome-tab-label { overflow: hidden; text-overflow: ellipsis; flex: 1; min-width: 0; pointer-events: none; }
+  .chrome-tab-close {
+    flex-shrink: 0; width: 18px; height: 18px;
+    border-radius: 50%; display: flex; align-items: center; justify-content: center;
+    font-size: 0.6rem; line-height: 1;
+    color: var(--dim); cursor: pointer;
+    opacity: 0; transition: opacity 0.12s, background 0.12s;
+  }
+  .chrome-tab:hover .chrome-tab-close,
+  .chrome-tab.active .chrome-tab-close { opacity: 1; }
+  .chrome-tab-close:hover { background: rgba(255,255,255,0.15); color: var(--fg); }
+  .chrome-tab-add {
+    flex-shrink: 0; width: 28px; height: 28px;
+    border-radius: 50%; display: flex; align-items: center; justify-content: center;
+    background: none; border: none;
+    color: var(--dim); cursor: pointer;
+    font-size: 1.05rem; line-height: 1;
+    margin: 0 4px 4px 4px;
+    transition: background 0.12s, color 0.12s;
+  }
+  .chrome-tab-add:hover { background: rgba(255,255,255,0.1); color: var(--fg); }
+  body.light .chrome-tabs-bar { background: color-mix(in srgb, var(--bg), black 6%); }
+  body.light .chrome-tab:hover { background: rgba(0,0,0,0.05); }
+  body.light .chrome-tab-close:hover { background: rgba(0,0,0,0.1); }
+  body.light .chrome-tab-add:hover { background: rgba(0,0,0,0.07); }
+  @media (max-width: 600px) {
+    .chrome-tab { padding: 8px 4px 8px 10px; font-size: 0.75rem; max-width: 140px; }
+    .chrome-tab-add { width: 32px; height: 32px; min-height: 44px; }
+  }
 
   /* Logs view */
   .logs-toolbar {
@@ -10671,6 +10733,7 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
   <button onclick="_dismissOrgBanner()" style="background:none;border:none;color:#bbf7d0;cursor:pointer;font-size:1rem;line-height:1;opacity:0.7;padding:0 2px;" title="Dismiss">&#x2715;</button>
 </div>
 
+<div id="chrome-tabs-bar" class="chrome-tabs-bar"></div>
 <div class="header-row">
   <div style="display:flex;gap:8px;align-items:center;">
     <h1 id="brand-header" style="margin:0;cursor:pointer;display:flex;align-items:center;gap:6px;" onclick="openAbout()"><span id="brand-icon-header"></span><span id="brand-name-header">amux</span></h1>
@@ -20912,6 +20975,83 @@ let _crmOpenAbort = null;
 let _crmActiveTags = [];
 let _crmSidebarOpen = localStorage.getItem('amux_crm_sidebar') !== 'closed';
 
+// ═══════ CHROME TABS ═══════
+const _VIEW_LABELS = {sessions:'Sessions',board:'Board',calendar:'Calendar',scheduler:'Scheduler',files:'Files',logs:'Logs',notes:'Notes',crm:'People',map:'Map',metrics:'Metrics',torrents:'Torrents',terminal:'Terminal',browser:'Browser',graph:'Graph',journal:'Journal',habits:'Habits',grid:'Workspace'};
+let _chromeTabs = JSON.parse(localStorage.getItem('amux_chrome_tabs') || 'null') || [{id:1,view:'sessions'}];
+let _chromeActiveId = parseInt(localStorage.getItem('amux_chrome_active')) || _chromeTabs[0]?.id || 1;
+let _chromeNextId = Math.max(..._chromeTabs.map(t => t.id), 0) + 1;
+
+function _chromeRender() {
+  const bar = document.getElementById('chrome-tabs-bar');
+  if (!bar) return;
+  let h = '';
+  for (const t of _chromeTabs) {
+    const cls = t.id === _chromeActiveId ? ' active' : '';
+    const label = _VIEW_LABELS[t.view] || t.view;
+    const close = _chromeTabs.length > 1 ? '<span class="chrome-tab-close" onclick="event.stopPropagation();_chromeCloseTab('+t.id+')">&#x2715;</span>' : '';
+    h += '<div class="chrome-tab'+cls+'" onclick="_chromeSwitchTab('+t.id+')" data-tab-id="'+t.id+'"><span class="chrome-tab-label">'+label+'</span>'+close+'</div>';
+  }
+  h += '<button class="chrome-tab-add" onclick="_chromeAddTab()" title="New tab">+</button>';
+  bar.innerHTML = h;
+  _chromeUpdateOffsets();
+}
+
+function _chromeUpdateOffsets() {
+  requestAnimationFrame(() => {
+    const ctb = document.getElementById('chrome-tabs-bar');
+    const hr = document.querySelector('.header-row');
+    if (ctb) {
+      const h = ctb.offsetHeight;
+      document.documentElement.style.setProperty('--chrome-tab-h', h + 'px');
+      if (hr) document.documentElement.style.setProperty('--sticky-nav-top', (h + hr.offsetHeight) + 'px');
+    }
+  });
+}
+
+function _chromeSwitchTab(id) {
+  if (_chromeActiveId === id) return;
+  _chromeActiveId = id;
+  const tab = _chromeTabs.find(t => t.id === id);
+  if (tab) {
+    if (tab.view === 'grid') enterGridMode();
+    else switchView(tab.view);
+  }
+  _chromeRender();
+  _chromeSave();
+}
+
+function _chromeAddTab(view) {
+  view = view || 'sessions';
+  const tab = {id: _chromeNextId++, view: view};
+  _chromeTabs.push(tab);
+  _chromeActiveId = tab.id;
+  switchView(tab.view);
+  _chromeRender();
+  _chromeSave();
+}
+
+function _chromeCloseTab(id) {
+  if (_chromeTabs.length <= 1) return;
+  const idx = _chromeTabs.findIndex(t => t.id === id);
+  _chromeTabs.splice(idx, 1);
+  if (_chromeActiveId === id) {
+    const ni = Math.min(idx, _chromeTabs.length - 1);
+    _chromeActiveId = _chromeTabs[ni].id;
+    const tab = _chromeTabs[ni];
+    if (tab.view === 'grid') enterGridMode();
+    else switchView(tab.view);
+  }
+  _chromeRender();
+  _chromeSave();
+}
+
+function _chromeSave() {
+  try {
+    localStorage.setItem('amux_chrome_tabs', JSON.stringify(_chromeTabs));
+    localStorage.setItem('amux_chrome_active', String(_chromeActiveId));
+  } catch(e) {}
+}
+
 function switchView(view) {
   if (document.getElementById('grid-view').classList.contains('active')) exitGridMode();
   activeView = view;
@@ -20955,6 +21095,9 @@ function switchView(view) {
   } else {
     if (boardTimer) { clearInterval(boardTimer); boardTimer = null; }
   }
+  // Update chrome tab state
+  const _ct = _chromeTabs.find(t => t.id === _chromeActiveId);
+  if (_ct && _ct.view !== view) { _ct.view = view; _chromeRender(); _chromeSave(); }
 }
 
 // ── Habits tab ───────────────────────────────────────────────────────────────
@@ -24343,6 +24486,14 @@ setInterval(() => {
 connectSSE();
 _notifUpdateBadge();
 loadBranding();
+
+// Initialize chrome tabs
+_chromeRender();
+// Restore the active tab's view on page load
+const _initTab = _chromeTabs.find(t => t.id === _chromeActiveId) || _chromeTabs[0];
+if (_initTab && _initTab.view !== 'sessions') switchView(_initTab.view);
+// Recalculate sticky offsets on resize
+window.addEventListener('resize', _chromeUpdateOffsets);
 
 // Register service worker for offline asset caching
 if ('serviceWorker' in navigator) {
