@@ -1666,19 +1666,15 @@ def _snapshot_all_sessions():
                 _push_alert("auto_compact", name,
                             f"Auto-compacted '{name}' — image dimension limit hit")
 
-            # ── 1c. Reactive: stuck in --resume/--name picker → escape it ────
-            # If start_session missed the picker (⌕ dropped by tmux), the
-            # watchdog catches it here and sends Escape+Ctrl-C to exit.
-            if _at_resume_picker(clean_recent) and now - actions.get("last_picker_escape", 0) > 30:
+            # ── 1c. Reactive: stuck in --resume/--name picker → accept top item ─
+            # Press Enter to select the most-recent session (top of list).
+            # Do NOT Escape+Ctrl-C — that exits Claude, triggering auto-restart
+            # which launches Claude again and shows the picker again (loop).
+            if _at_resume_picker(clean_recent) and now - actions.get("last_picker_escape", 0) > 60:
                 actions["last_picker_escape"] = now
-                subprocess.run(["tmux", "send-keys", "-t", tmux_target(name), "Escape"],
+                subprocess.run(["tmux", "send-keys", "-t", tmux_target(name), "Enter"],
                                capture_output=True, timeout=5)
-                time.sleep(0.3)
-                subprocess.run(["tmux", "send-keys", "-t", tmux_target(name), "C-c"],
-                               capture_output=True, timeout=5)
-                slog(f"[watchdog] {name}: escaped stuck resume picker")
-                _push_alert("picker_escape", name,
-                            f"Session '{name}': escaped stuck resume picker, will restart fresh")
+                slog(f"[watchdog] {name}: accepted resume picker (pressed Enter)")
 
             # ── 2. Reactive: thinking-block corruption → restart + replay ───
             if ("redacted_thinking" in clean_recent and
@@ -5776,28 +5772,21 @@ def start_session(name: str, extra_flags: str = "", _skip_conv_id: bool = False)
                     break
     
             if not _claude_launched and not _skip_conv_id and provider == "claude":
-                # Check if stuck in resume picker (--resume showed interactive selector)
+                # Check if stuck in resume picker (--resume/--name showed interactive selector)
                 _out_check = tmux_capture(name, 10)
                 if _at_resume_picker(_out_check):
-                    print(f"[start] {name}: stuck in resume picker, escaping and starting fresh")
-                    # Send Escape to close picker, then Ctrl-C to exit claude
-                    subprocess.run(["tmux", "send-keys", "-t", tmux_target(name), "Escape"],
+                    print(f"[start] {name}: resume picker showing, pressing Enter to accept top session")
+                    # Press Enter to select the most-recent (top) session — do NOT
+                    # Escape+Ctrl-C, that exits Claude and auto-restart loops back here.
+                    subprocess.run(["tmux", "send-keys", "-t", tmux_target(name), "Enter"],
                                    capture_output=True, timeout=5)
-                    time.sleep(0.5)
-                    subprocess.run(["tmux", "send-keys", "-t", tmux_target(name), "C-c"],
-                                   capture_output=True, timeout=5)
-                    time.sleep(2)
-                    # Wait for shell prompt
-                    for _w in range(10):
-                        _out_w = tmux_capture(name, 10)
-                        if _out_w and _at_shell_prompt(_out_w):
-                            break
+                    # Wait up to 10s for Claude UI to appear after selection
+                    for _w in range(20):
                         time.sleep(0.5)
-                    # Clear stale session name
-                    meta.pop("cc_session_name", None)
-                    meta.pop("cc_conversation_id", None)
-                    _save_meta(name, meta)
-                    # Mark as at shell prompt so the fallback below fires
+                        _out_w = tmux_capture(name, 50)
+                        if _out_w and _claude_ui_visible(_out_w):
+                            _claude_launched = True
+                            break
                     _out_check = tmux_capture(name, 10)
 
                 # Check if Claude exited immediately (--resume failure)
