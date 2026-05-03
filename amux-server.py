@@ -1565,11 +1565,19 @@ def _claude_ui_visible(clean_output: str) -> bool:
 
 
 def _at_resume_picker(clean_output: str) -> bool:
-    """Return True if Claude's --resume picker is showing (interactive session selector)."""
-    return bool(clean_output and
-                ("Resume Session" in clean_output or "Type to Search" in clean_output or
-                 "Enter to select" in clean_output or "Esc to cancel" in clean_output) and
-                "⌕" in clean_output)  # ⌕ search icon in the picker
+    """Return True if Claude's --resume/--name picker is showing (interactive session selector).
+
+    The ⌕ icon is NOT checked — tmux capture-pane drops it inconsistently.
+    Require "Resume Session" (the picker title) plus any one secondary signal.
+    """
+    if not clean_output:
+        return False
+    if "Resume Session" not in clean_output:
+        return False
+    return any(s in clean_output for s in (
+        "Type to Search", "Esc to cancel", "Enter to select",
+        "to select", "to cancel", "1 of ",
+    ))
 
 
 def _at_shell_prompt(clean_output: str) -> bool:
@@ -1657,6 +1665,20 @@ def _snapshot_all_sessions():
                 send_text(name, "/compact")
                 _push_alert("auto_compact", name,
                             f"Auto-compacted '{name}' — image dimension limit hit")
+
+            # ── 1c. Reactive: stuck in --resume/--name picker → escape it ────
+            # If start_session missed the picker (⌕ dropped by tmux), the
+            # watchdog catches it here and sends Escape+Ctrl-C to exit.
+            if _at_resume_picker(clean_recent) and now - actions.get("last_picker_escape", 0) > 30:
+                actions["last_picker_escape"] = now
+                subprocess.run(["tmux", "send-keys", "-t", tmux_target(name), "Escape"],
+                               capture_output=True, timeout=5)
+                time.sleep(0.3)
+                subprocess.run(["tmux", "send-keys", "-t", tmux_target(name), "C-c"],
+                               capture_output=True, timeout=5)
+                slog(f"[watchdog] {name}: escaped stuck resume picker")
+                _push_alert("picker_escape", name,
+                            f"Session '{name}': escaped stuck resume picker, will restart fresh")
 
             # ── 2. Reactive: thinking-block corruption → restart + replay ───
             if ("redacted_thinking" in clean_recent and
