@@ -9229,16 +9229,33 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
   .chrome-tab:hover .chrome-tab-close,
   .chrome-tab.active .chrome-tab-close { opacity: 1; }
   .chrome-tab-close:hover { background: rgba(255,255,255,0.15); color: var(--fg); }
+  .chrome-tab-add-wrap { position: relative; flex-shrink: 0; margin: 0 4px 4px 4px; }
   .chrome-tab-add {
-    flex-shrink: 0; width: 28px; height: 28px;
+    width: 28px; height: 28px;
     border-radius: 50%; display: flex; align-items: center; justify-content: center;
     background: none; border: none;
     color: var(--dim); cursor: pointer;
     font-size: 1.05rem; line-height: 1;
-    margin: 0 4px 4px 4px;
     transition: background 0.12s, color 0.12s;
   }
   .chrome-tab-add:hover { background: rgba(255,255,255,0.1); color: var(--fg); }
+  .chrome-tab-menu {
+    display: none; position: absolute; top: calc(100% + 4px); left: 0;
+    background: var(--card); border: 1px solid var(--border); border-radius: 8px;
+    min-width: 160px; z-index: 200; padding: 4px 0;
+    box-shadow: 0 8px 24px rgba(0,0,0,0.4);
+  }
+  .chrome-tab-menu.open { display: block; }
+  .chrome-tab-menu-item {
+    padding: 7px 14px; font-size: 0.82rem; cursor: pointer;
+    color: var(--fg); white-space: nowrap;
+  }
+  .chrome-tab-menu-item:hover { background: var(--hover); }
+  .chrome-tab-rename {
+    background: transparent; border: none; outline: none;
+    color: inherit; font: inherit; width: 100%;
+    padding: 0; margin: 0; cursor: text;
+  }
   body.light .chrome-tabs-bar { background: color-mix(in srgb, var(--bg), black 6%); }
   body.light .chrome-tab:hover { background: rgba(0,0,0,0.05); }
   body.light .chrome-tab-close:hover { background: rgba(0,0,0,0.1); }
@@ -20980,6 +20997,7 @@ const _VIEW_LABELS = {sessions:'Sessions',board:'Board',calendar:'Calendar',sche
 let _chromeTabs = JSON.parse(localStorage.getItem('amux_chrome_tabs') || 'null') || [{id:1,view:'sessions'}];
 let _chromeActiveId = parseInt(localStorage.getItem('amux_chrome_active')) || _chromeTabs[0]?.id || 1;
 let _chromeNextId = Math.max(..._chromeTabs.map(t => t.id), 0) + 1;
+let _chromeMenuOpen = false;
 
 function _chromeRender() {
   const bar = document.getElementById('chrome-tabs-bar');
@@ -20987,13 +21005,42 @@ function _chromeRender() {
   let h = '';
   for (const t of _chromeTabs) {
     const cls = t.id === _chromeActiveId ? ' active' : '';
-    const label = _VIEW_LABELS[t.view] || t.view;
+    const label = (t.name || _VIEW_LABELS[t.view] || t.view).replace(/</g,'&lt;');
     const close = _chromeTabs.length > 1 ? '<span class="chrome-tab-close" onclick="event.stopPropagation();_chromeCloseTab('+t.id+')">&#x2715;</span>' : '';
-    h += '<div class="chrome-tab'+cls+'" onclick="_chromeSwitchTab('+t.id+')" data-tab-id="'+t.id+'"><span class="chrome-tab-label">'+label+'</span>'+close+'</div>';
+    h += '<div class="chrome-tab'+cls+'" onclick="_chromeSwitchTab('+t.id+')" onmousedown="if(event.button===1){event.preventDefault();_chromeCloseTab('+t.id+')}" ondblclick="event.stopPropagation();_chromeRenameTab('+t.id+')" data-tab-id="'+t.id+'"><span class="chrome-tab-label">'+label+'</span>'+close+'</div>';
   }
-  h += '<button class="chrome-tab-add" onclick="_chromeAddTab()" title="New tab">+</button>';
+  h += '<div class="chrome-tab-add-wrap"><button class="chrome-tab-add" onclick="_chromeToggleMenu(event)" title="New tab">+</button>';
+  h += '<div class="chrome-tab-menu" id="chrome-tab-menu">';
+  const views = ['sessions','board','calendar','scheduler','files','logs','notes','crm','map','metrics','terminal','browser','habits','grid'];
+  for (const v of views) h += '<div class="chrome-tab-menu-item" onclick="_chromeAddTab(\''+v+'\')">'+(_VIEW_LABELS[v]||v)+'</div>';
+  h += '</div></div>';
   bar.innerHTML = h;
   _chromeUpdateOffsets();
+}
+
+function _chromeToggleMenu(e) {
+  e.stopPropagation();
+  _chromeMenuOpen = !_chromeMenuOpen;
+  const menu = document.getElementById('chrome-tab-menu');
+  if (menu) menu.classList.toggle('open', _chromeMenuOpen);
+  if (_chromeMenuOpen) {
+    const close = (ev) => { if (!ev.target.closest('.chrome-tab-add-wrap')) { _chromeMenuOpen = false; const m = document.getElementById('chrome-tab-menu'); if (m) m.classList.remove('open'); document.removeEventListener('click', close); }};
+    setTimeout(() => document.addEventListener('click', close), 0);
+  }
+}
+
+function _chromeRenameTab(id) {
+  const tab = _chromeTabs.find(t => t.id === id);
+  if (!tab) return;
+  const el = document.querySelector('.chrome-tab[data-tab-id="'+id+'"] .chrome-tab-label');
+  if (!el) return;
+  const current = tab.name || _VIEW_LABELS[tab.view] || tab.view;
+  el.innerHTML = '<input class="chrome-tab-rename" value="'+current.replace(/"/g,'&quot;')+'" />';
+  const inp = el.querySelector('input');
+  inp.focus(); inp.select();
+  const commit = () => { const val = inp.value.trim(); tab.name = val && val !== _VIEW_LABELS[tab.view] ? val : ''; _chromeRender(); _chromeSave(); };
+  inp.addEventListener('blur', commit);
+  inp.addEventListener('keydown', (e) => { if (e.key === 'Enter') { e.preventDefault(); inp.blur(); } if (e.key === 'Escape') { tab.name = ''; inp.blur(); }});
 }
 
 function _chromeUpdateOffsets() {
@@ -21021,11 +21068,13 @@ function _chromeSwitchTab(id) {
 }
 
 function _chromeAddTab(view) {
+  _chromeMenuOpen = false;
   view = view || 'sessions';
-  const tab = {id: _chromeNextId++, view: view};
+  const tab = {id: _chromeNextId++, view: view, name: ''};
   _chromeTabs.push(tab);
   _chromeActiveId = tab.id;
-  switchView(tab.view);
+  if (view === 'grid') enterGridMode();
+  else switchView(tab.view);
   _chromeRender();
   _chromeSave();
 }
