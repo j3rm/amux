@@ -1753,9 +1753,13 @@ def _snapshot_all_sessions():
             # Claude processes lose their API connection after ~2 days but stay running.
             # Sends succeed (tmux delivers text) but Claude never processes them.
             # Check once per hour; restart if Claude process uptime > 48h and session is idle.
+            # Guard: skip if Claude was seen alive within 2h — avoids killing active sessions
+            # whose processes happen to cross the 48h mark during a brief idle between steps.
             if status == "idle" and not actions.get("restarting"):
+                _last_alive_stale = actions.get("last_claude_alive", 0)
+                _stale_ok = not _last_alive_stale or (now - _last_alive_stale > 7200)
                 last_stale_check = actions.get("last_stale_check", 0)
-                if now - last_stale_check > 3600:  # check once per hour
+                if _stale_ok and now - last_stale_check > 3600:  # check once per hour
                     actions["last_stale_check"] = now
                     try:
                         tmux_sess = tmux_name(name)
@@ -1798,8 +1802,8 @@ def _snapshot_all_sessions():
             # ── 6. Auto-hibernate: stop idle sessions to reclaim memory ───────
             # Claude processes hold 400-750 MB each even when idle. With 30+
             # sessions that causes OOM kills. Stop Claude in sessions idle for
-            # >30 min. The conversation is preserved — next send auto-wakes it.
-            _HIBERNATE_IDLE_SECS = 1800  # 30 minutes
+            # >2 hours. The conversation is preserved — next send auto-wakes it.
+            _HIBERNATE_IDLE_SECS = 7200  # 2 hours
             if status == "idle" and not actions.get("restarting"):
                 last_activity = actions.get("last_claude_alive", 0)
                 meta_h = _load_meta(name)
