@@ -1714,18 +1714,16 @@ def _snapshot_all_sessions():
             # ── 4. Auto-restart: Claude exited to shell prompt ────────────────
             # Triggered when: CC_AUTO_CONTINUE=1 AND terminal shows a bare shell
             # prompt (no Claude UI). Rate-limited to once per 90s.
-            # Also fires after server restart (last_claude_alive unknown) if
-            # "Killed" appears in scrollback — handles OOM kills across restarts.
+            # Always restarts when CC_AUTO_CONTINUE=1 — the user explicitly opted
+            # in. Previous logic required last_alive < 600s which failed after
+            # macOS hibernate (hours-long SIGKILL gaps).
             if _at_shell_prompt(clean) and not actions.get("restarting") and not actions.get("hibernated"):
                 cfg_ar = parse_env_file(f)
                 if cfg_ar.get("CC_ARCHIVED") == "1":
                     pass  # don't auto-restart archived sessions
                 elif cfg_ar.get("CC_AUTO_CONTINUE") in ("1", "true", "yes"):
-                    last_alive = actions.get("last_claude_alive", 0)
                     last_restart = actions.get("last_auto_restart", 0)
-                    _killed_in_output = "Killed" in clean and ("$ " in clean or "%" in clean)
-                    if ((last_alive and now - last_alive < 600) or
-                            (not last_alive and _killed_in_output)) and now - last_restart > 90:
+                    if now - last_restart > 90:
                         actions["restarting"] = True
                         actions["last_auto_restart"] = now
                         def _do_restart(sname=name, _actions=actions):
