@@ -1644,27 +1644,38 @@ def _snapshot_all_sessions():
             # Sessions using browser screenshots fill context with large images
             # until Claude errors with "image exceeds the dimension limit".
             # The session gets stuck at the prompt unable to proceed.
-            if ("image" in clean and "exceeds the dimension limit" in clean and
+            # Guard: only fire once per error. The error text persists in tmux
+            # scrollback after compaction, so without this flag the handler
+            # re-triggers every 120s and floods /compact commands.
+            _img_dim_error = "image" in clean and "exceeds the dimension limit" in clean
+            if (_img_dim_error and not actions.get("img_dim_compacted") and
                     now - actions.get("last_compact", 0) > 120):
                 actions["last_compact"] = now
+                actions["img_dim_compacted"] = True
                 actions["post_compact_continue"] = True
                 threading.Thread(target=backup_session_jsonl, args=(name, "pre_compact_img"), daemon=True).start()
                 send_text(name, "/compact")
                 _push_alert("auto_compact", name,
                             f"Auto-compacted '{name}' — image dimension limit hit")
+            elif not _img_dim_error:
+                actions.pop("img_dim_compacted", None)
 
             # ── 1c. Reactive: corrupted image in context → auto-compact ────
             # When a malformed image (truncated PNG, SVG-as-PNG, etc.) gets
             # loaded via Read, every subsequent API call fails with "Could not
             # process image". The bad image is stuck in conversation history.
-            if ("Could not process image" in clean and
+            _img_corrupt_error = "Could not process image" in clean
+            if (_img_corrupt_error and not actions.get("img_corrupt_compacted") and
                     now - actions.get("last_compact", 0) > 120):
                 actions["last_compact"] = now
+                actions["img_corrupt_compacted"] = True
                 actions["post_compact_continue"] = True
                 threading.Thread(target=backup_session_jsonl, args=(name, "pre_compact_img"), daemon=True).start()
                 send_text(name, "/compact")
                 _push_alert("auto_compact", name,
                             f"Auto-compacted '{name}' — corrupted image in context")
+            elif not _img_corrupt_error:
+                actions.pop("img_corrupt_compacted", None)
 
             # ── 2. Reactive: thinking-block corruption → restart + replay ───
             if ("redacted_thinking" in clean and
