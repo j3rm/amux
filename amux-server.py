@@ -5626,25 +5626,27 @@ def start_session(name: str, extra_flags: str = "", _skip_conv_id: bool = False)
         if provider == "codex":
             # Resume from stored codex session ID (per amux session), not by cwd
             codex_session_id = meta.get("codex_session_id", "")
-            if codex_session_id:
-                cmd = f"codex resume {codex_session_id}"
-                print(f"[start] {name}: codex resume {codex_session_id}")
-            else:
-                cmd = "codex"
-                print(f"[start] {name}: codex fresh start")
             _codex_yolo = False
             _codex_flags = flags or ""
             if any(f in _codex_flags for f in ('--dangerously-skip-permissions', '--dangerously-bypass-approvals-and-sandbox')):
                 _codex_yolo = True
                 _codex_flags = re.sub(r'--dangerously-(?:skip-permissions|bypass-approvals-and-sandbox)\s*', '', _codex_flags).strip()
+            # Build options list first (before session ID for `codex resume`)
+            _codex_opts = ""
             if _codex_flags:
-                cmd += f" {_shell_quote_flags(_codex_flags)}"
+                _codex_opts += f" {_shell_quote_flags(_codex_flags)}"
             if extra_flags:
-                cmd += f" {_shell_quote_flags(extra_flags)}"
-            if "--model" not in cmd and "-m " not in cmd:
-                cmd += " --model gpt-5.5"
-            if "--full-auto" not in cmd and "-a " not in cmd:
-                cmd += " --full-auto" if _codex_yolo else " -a never"
+                _codex_opts += f" {_shell_quote_flags(extra_flags)}"
+            if "--model" not in _codex_opts and "-m " not in _codex_opts:
+                _codex_opts += " --model gpt-5.5"
+            if "--dangerously-bypass" not in _codex_opts and "-a " not in _codex_opts:
+                _codex_opts += " --dangerously-bypass-approvals-and-sandbox" if _codex_yolo else " -a never"
+            if codex_session_id:
+                cmd = f"codex resume{_codex_opts} {codex_session_id}"
+                print(f"[start] {name}: codex resume {codex_session_id}")
+            else:
+                cmd = f"codex{_codex_opts}"
+                print(f"[start] {name}: codex fresh start")
             # If work_dir is a subdirectory of a git repo, add the repo root
             # so codex's sandbox can write to .git (needed for commits)
             if "--add-dir" not in cmd:
