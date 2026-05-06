@@ -1675,6 +1675,17 @@ def _snapshot_all_sessions():
                 _push_alert("auto_compact", name,
                             f"Auto-compacted '{name}' — corrupted image in context")
 
+            # ── 1d. Reactive: stuck in --resume/--name picker → accept top item ──
+            # If start_session() missed the picker (e.g. it appeared after launch),
+            # press Enter to select the most-recent session at the top of the list.
+            # Do NOT send Escape+Ctrl-C — that exits Claude, auto-restart fires,
+            # Claude is launched again with --resume, picker shows again → kill loop.
+            if _at_resume_picker(clean_recent) and now - actions.get("last_picker_escape", 0) > 60:
+                actions["last_picker_escape"] = now
+                subprocess.run(["tmux", "send-keys", "-t", tmux_target(name), "Enter"],
+                               capture_output=True, timeout=5)
+                slog(f"[watchdog] {name}: accepted resume picker (pressed Enter)")
+
             # ── 2. Reactive: thinking-block corruption → restart + replay ───
             if ("redacted_thinking" in clean and
                     "cannot be modified" in clean and
@@ -5849,26 +5860,18 @@ def start_session(name: str, extra_flags: str = "", _skip_conv_id: bool = False)
                 # Check if stuck in resume picker (--resume showed interactive selector)
                 _out_check = tmux_capture(name, 10)
                 if _at_resume_picker(_out_check):
-                    print(f"[start] {name}: stuck in resume picker, escaping and starting fresh")
-                    # Send Escape to close picker, then Ctrl-C to exit claude
-                    subprocess.run(["tmux", "send-keys", "-t", tmux_target(name), "Escape"],
+                    print(f"[start] {name}: resume picker showing, pressing Enter to accept top session")
+                    # Press Enter to select the most-recent (top) session.
+                    # Do NOT Escape+Ctrl-C — that exits Claude, auto-restart fires,
+                    # --resume is invoked again, picker shows again → infinite loop.
+                    subprocess.run(["tmux", "send-keys", "-t", tmux_target(name), "Enter"],
                                    capture_output=True, timeout=5)
-                    time.sleep(0.5)
-                    subprocess.run(["tmux", "send-keys", "-t", tmux_target(name), "C-c"],
-                                   capture_output=True, timeout=5)
-                    time.sleep(2)
-                    # Wait for shell prompt
-                    for _w in range(10):
-                        _out_w = tmux_capture(name, 10)
-                        if _out_w and _at_shell_prompt(_out_w):
-                            break
+                    # Wait up to 10s for Claude UI to appear after selection
+                    for _w in range(20):
                         time.sleep(0.5)
-                    # Clear stale session name
-                    meta.pop("cc_session_name", None)
-                    meta.pop("cc_conversation_id", None)
-                    _save_meta(name, meta)
-                    # Mark as at shell prompt so the fallback below fires
-                    _out_check = tmux_capture(name, 10)
+                        _out_check = tmux_capture(name, 10)
+                        if _out_check and _claude_ui_visible(_out_check):
+                            break
 
                 # Check if Claude exited immediately (--resume failure)
                 if _at_shell_prompt(_out_check):
