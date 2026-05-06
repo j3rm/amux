@@ -470,7 +470,7 @@ def _bu_screenshot(session: str = "amux", path: str = "", retries: int = 3) -> d
         return result
     return result
 
-def _bu_agent_run(task: str, session: str = "amux-agent", profile: str = "",
+def _bu_agent_run(task: str, session: str = "amux-agent", profile: str = "default",
                   start_url: str = "", max_iterations: int = 25,
                   model: str = "claude-sonnet-4-5") -> dict:
     """Run an Anthropic Computer Use agent loop driving the browser-use Playwright session.
@@ -1358,6 +1358,8 @@ _YOLO_PROMPTS = [
     (re.compile(r'do you want to proceed.*esc to cancel', re.IGNORECASE | re.DOTALL), '1'),
     # Leaked permission prompt: "Yes, and don't ask again … Esc to cancel"
     (re.compile(r'yes.*and don.t ask again.*esc to cancel', re.IGNORECASE | re.DOTALL), '1'),
+    # Codex MCP/plugin tool approval: "Allow X to <verb> …? 1. Allow 2. Allow for this session"
+    (re.compile(r'allow\s+\S+\s+to\s+\w+.*\d\.\s*allow\b.*esc to cancel', re.IGNORECASE | re.DOTALL), '2'),
 ]
 _YOLO_COOLDOWN = 6  # seconds between auto-responses per session
 _yolo_last_responded: dict = {}
@@ -1385,7 +1387,13 @@ def _yolo_auto_respond():
             if now - _yolo_last_responded.get(name, 0) < _YOLO_COOLDOWN:
                 continue
             cfg = parse_env_file(f)
-            if '--dangerously-skip-permissions' not in cfg.get('CC_FLAGS', ''):
+            _flags = cfg.get('CC_FLAGS', '')
+            _is_yolo = (
+                '--dangerously-skip-permissions' in _flags
+                or '--dangerously-bypass-approvals-and-sandbox' in _flags
+                or cfg.get('CC_AUTO_CONTINUE') in ('1', 'true', 'yes')
+            )
+            if not _is_yolo:
                 continue
             raw = tmux_capture(name, 50)
             if not raw:
@@ -1540,12 +1548,18 @@ _STRIP_ANSI = re.compile(
 def _claude_ui_visible(clean_output: str) -> bool:
     """Return True if Claude's or Codex's status bar/spinner is present in the terminal output."""
     lines = [l for l in clean_output.splitlines() if l.strip()]
-    # Check last 3 lines for Claude status bar markers
+    # Check last 3 lines for Claude status bar markers.
+    # Guard: when Claude is killed (signal 9), its status bar text can leak
+    # into the bash prompt line as garbled output (e.g. "videos$ ass permissions
+    # on \u00b7 1 shell"). Require that the line does NOT start with a shell prompt.
+    _shell_prompt_re = re.compile(r'^.*[$%]\s')
     for l in lines[-3:]:
         ls = l.strip().lower()
+        if _shell_prompt_re.match(ls):
+            continue
         if "\u23f5\u23f5" in l or "bypass permissions" in ls or "plan mode" in ls:
             return True
-        if "codex" in ls and ("full-auto" in ls or "suggest" in ls or "workspace" in ls):
+        if "codex" in ls and ("full-auto" in ls or "suggest" in ls or "workspace" in ls or "approval" in ls or "-a never" in ls):
             return True
     # Check last 12 lines for an active spinner (dingbat-prefixed status line
     # like "\u273b Crunched for 1m 38s"). Exclude U+276F \u276f \u2014 that's Claude's input
@@ -1554,12 +1568,17 @@ def _claude_ui_visible(clean_output: str) -> bool:
         s = l.strip()
         if s and "\u2700" <= s[0] <= "\u27bf" and s[0] != "\u276f":
             return True
-    # Codex prompt: line starting with > (only if "codex" banner seen in output)
+    # Codex prompt: line starting with > or › (only if "codex" banner seen in output)
     has_codex = any("codex" in l.lower() for l in lines[:15])
     if has_codex:
         for l in lines[-5:]:
             ls = l.strip()
             if ls == ">" or ls.startswith("> "):
+                return True
+            if ls.startswith("›"):
+                return True
+            # Codex model status line: "gpt-X xhigh · ~/path"
+            if "·" in ls and ("gpt-" in ls or "o3" in ls or "o4" in ls):
                 return True
     return False
 
@@ -1589,6 +1608,10 @@ def _at_shell_prompt(clean_output: str) -> bool:
         ls = l.strip()
         # Bash/zsh prompt: ends with $ or % (not Claude's ❯ prompt)
         if re.search(r'[$%]\s*$', ls) and "\u276f" not in ls:
+            return True
+        # After Killed/signal 9, status bar text leaks after the prompt char:
+        # e.g. "mixpeek$ ss permissions on · 5 shells"
+        if re.match(r'\S+[$%]\s', ls) and "\u276f" not in ls:
             return True
     return False
 
@@ -1676,6 +1699,19 @@ def _snapshot_all_sessions():
                                capture_output=True, timeout=5)
                 slog(f"[watchdog] {name}: accepted resume picker (pressed Enter)")
 
+            # ── 1d. Reactive: corrupted image in context → auto-compact ────
+            # When a malformed image (truncated PNG, SVG-as-PNG, etc.) gets
+            # loaded via Read, every subsequent API call fails with "Could not
+            # process image". The bad image is stuck in conversation history.
+            if ("Could not process image" in clean and
+                    now - actions.get("last_compact", 0) > 120):
+                actions["last_compact"] = now
+                actions["post_compact_continue"] = True
+                threading.Thread(target=backup_session_jsonl, args=(name, "pre_compact_img"), daemon=True).start()
+                send_text(name, "/compact")
+                _push_alert("auto_compact", name,
+                            f"Auto-compacted '{name}' — corrupted image in context")
+
             # ── 2. Reactive: thinking-block corruption → restart + replay ───
             if ("redacted_thinking" in clean_recent and
                     "cannot be modified" in clean_recent and
@@ -1733,7 +1769,9 @@ def _snapshot_all_sessions():
             # "Killed" appears in scrollback — handles OOM kills across restarts.
             if _at_shell_prompt(clean) and not actions.get("restarting") and not actions.get("hibernated"):
                 cfg_ar = parse_env_file(f)
-                if cfg_ar.get("CC_AUTO_CONTINUE") in ("1", "true", "yes"):
+                if cfg_ar.get("CC_ARCHIVED") == "1":
+                    pass  # don't auto-restart archived sessions
+                elif cfg_ar.get("CC_AUTO_CONTINUE") in ("1", "true", "yes"):
                     last_alive = actions.get("last_claude_alive", 0)
                     last_restart = actions.get("last_auto_restart", 0)
                     _killed_in_output = "Killed" in clean and ("$ " in clean or "%" in clean)
@@ -4569,7 +4607,24 @@ def _detect_claude_status(raw_output: str) -> str:
         # Status bar visible but no active/waiting signal → idle at prompt
         return "idle"
 
-    # ── 4. Fallback: check for shell prompt character ──
+    # ── 4. Codex-specific patterns ──
+    # Codex active: bullet + "esc to interrupt" or working/running
+    for l in reversed(lines[-12:]):
+        s = l.strip()
+        sl = s.lower()
+        if s.startswith("•") and "esc to interrupt" in sl:
+            return "active"
+        if s.startswith("•") and ("working" in sl or "running" in sl):
+            return "active"
+    # Codex idle: › prompt or model status line (gpt-X · ~/path)
+    for l in lines[-5:]:
+        ls = l.strip()
+        if "·" in ls and ("gpt-" in ls or "o3" in ls or "o4" in ls):
+            return "idle"
+        if ls.startswith("›") and ("implement" in ls.lower() or ls == "›"):
+            return "idle"
+
+    # ── 5. Fallback: check for shell prompt character ──
     # Only treat ❯ as a shell prompt when it's at the end of a line (not ❯ 1. Yes selector)
     for l in lines[-5:]:
         ls = l.strip()
@@ -4732,10 +4787,13 @@ def list_sessions() -> list:
             else:
                 # Fallback: show last few non-empty stripped lines (e.g. spinner/tool output during active processing)
                 preview_lines = [strip_ansi(l).strip()[:200] for l in lines[-8:] if strip_ansi(l).strip()][-5:]
-        # Detect active model from JSONL
+        # Detect active model from JSONL (skip for codex — it has no Claude JSONL)
         raw_dir = cfg.get("CC_DIR", "")
         resolved_dir = str(Path(raw_dir).expanduser().resolve()) if raw_dir else ""
-        active_model = detect_active_model(raw_dir, meta.get("cc_conversation_id", ""))
+        if cfg.get("CC_PROVIDER", "claude") == "codex":
+            active_model = _extract_model_from_flags(cfg.get("CC_FLAGS", "")) or "gpt-5.5"
+        else:
+            active_model = detect_active_model(raw_dir, meta.get("cc_conversation_id", ""))
         # Parse task time from spinner line
         task_time = _parse_task_time(raw) if raw else ""
         # Token count from JSONL cache (refreshed once above the loop).
@@ -5541,6 +5599,11 @@ def start_session(name: str, extra_flags: str = "", _skip_conv_id: bool = False)
         if is_running(name):
             return True, "already running"
         cfg = parse_env_file(f)
+        # Un-archive on start — prevents stale archived flag from hiding active sessions
+        if cfg.get("CC_ARCHIVED") == "1":
+            lines = [l for l in f.read_text().splitlines() if "CC_ARCHIVED" not in l]
+            f.write_text("\n".join(lines) + "\n")
+            cfg.pop("CC_ARCHIVED", None)
         work_dir = str(Path(cfg.get("CC_DIR", str(Path.home()))).expanduser().resolve())
         flags = cfg.get("CC_FLAGS", "")
         # Claude Code v2.1.69+ rejects --dangerously-skip-permissions when running as root.
@@ -5586,21 +5649,74 @@ def start_session(name: str, extra_flags: str = "", _skip_conv_id: bool = False)
     
         # Load defaults
         defaults_file = CC_HOME / "defaults.env"
+
+        def _find_latest_codex_session(cwd: str) -> str:
+            """Find the most recent Codex session ID for a given working directory."""
+            codex_sessions = Path.home() / ".codex" / "sessions"
+            if not codex_sessions.exists():
+                return ""
+            best_id, best_mtime = "", 0.0
+            for jsonl in codex_sessions.rglob("rollout-*.jsonl"):
+                try:
+                    mt = jsonl.stat().st_mtime
+                    if mt <= best_mtime:
+                        continue
+                    with jsonl.open() as f:
+                        first = f.readline()
+                    if not first:
+                        continue
+                    meta = json.loads(first)
+                    payload = meta.get("payload", {})
+                    if payload.get("cwd", "").rstrip("/") == cwd.rstrip("/"):
+                        best_id = payload.get("id", "")
+                        best_mtime = mt
+                except Exception:
+                    continue
+            return best_id
         default_flags = ""
         if defaults_file.exists():
             dcfg = parse_env_file(defaults_file)
             default_flags = dcfg.get("CC_DEFAULT_FLAGS", "")
 
         if provider == "codex":
-            cmd = "codex"
-            if flags:
-                cmd += f" {_shell_quote_flags(flags)}"
+            # Resume from stored codex session ID (per amux session), not by cwd
+            codex_session_id = meta.get("codex_session_id", "")
+            if codex_session_id:
+                cmd = f"codex resume {codex_session_id}"
+                print(f"[start] {name}: codex resume {codex_session_id}")
+            else:
+                cmd = "codex"
+                print(f"[start] {name}: codex fresh start")
+            _codex_yolo = False
+            _codex_flags = flags or ""
+            if any(f in _codex_flags for f in ('--dangerously-skip-permissions', '--dangerously-bypass-approvals-and-sandbox')):
+                _codex_yolo = True
+                _codex_flags = re.sub(r'--dangerously-(?:skip-permissions|bypass-approvals-and-sandbox)\s*', '', _codex_flags).strip()
+            if _codex_flags:
+                cmd += f" {_shell_quote_flags(_codex_flags)}"
             if extra_flags:
                 cmd += f" {_shell_quote_flags(extra_flags)}"
             if "--model" not in cmd and "-m " not in cmd:
-                cmd += " --model o3"
-            if "--full-auto" not in cmd and "--dangerously-bypass" not in cmd and "-a " not in cmd:
-                cmd += " --full-auto"
+                cmd += " --model gpt-5.5"
+            if "--full-auto" not in cmd and "-a " not in cmd:
+                cmd += " --full-auto" if _codex_yolo else " -a never"
+            # If work_dir is a subdirectory of a git repo, add the repo root
+            # so codex's sandbox can write to .git (needed for commits)
+            if "--add-dir" not in cmd:
+                try:
+                    _gr = subprocess.run(
+                        ["git", "-C", work_dir, "rev-parse", "--show-toplevel"],
+                        capture_output=True, text=True, timeout=5,
+                    )
+                    if _gr.returncode == 0:
+                        git_root = _gr.stdout.strip()
+                        if git_root != work_dir:
+                            cmd += f" --add-dir {shlex.quote(git_root)}"
+                            git_dir = os.path.join(git_root, ".git")
+                            if os.path.isdir(git_dir):
+                                cmd += f" --add-dir {shlex.quote(git_dir)}"
+                except Exception:
+                    pass
         else:
             cmd = "claude"
             if default_flags:
@@ -5623,26 +5739,28 @@ def start_session(name: str, extra_flags: str = "", _skip_conv_id: bool = False)
                 cmd += " --model sonnet"
         try:
             tmux_sess = tmux_name(name)
-            # Build shell setup string
-            shell_rc = "unset CLAUDECODE CLAUDE_CODE_ENTRYPOINT; "
-            # Detect OAuth
+            # Build shell setup string — skip Claude env cleanup for codex
             _has_oauth = False
-            try:
-                import json as _j2
-                _cj = Path.home() / ".claude.json"
-                if _cj.exists():
-                    _has_oauth = bool(_j2.loads(_cj.read_text()).get("oauthAccount"))
-            except Exception:
-                pass
-            if _has_oauth:
-                shell_rc += "unset ANTHROPIC_API_KEY; "
+            if provider == "codex":
+                shell_rc = ""
+            else:
+                shell_rc = "unset CLAUDECODE CLAUDE_CODE_ENTRYPOINT; "
+                try:
+                    import json as _j2
+                    _cj = Path.home() / ".claude.json"
+                    if _cj.exists():
+                        _has_oauth = bool(_j2.loads(_cj.read_text()).get("oauthAccount"))
+                except Exception:
+                    pass
+                if _has_oauth:
+                    shell_rc += "unset ANTHROPIC_API_KEY; "
             for rc in [Path.home() / ".zprofile", Path.home() / ".bash_profile", Path.home() / ".profile"]:
                 if rc.exists():
                     shell_rc += f"source {rc} 2>/dev/null; cd {shlex.quote(work_dir)}; "
                     break
             else:
                 shell_rc += f"cd {shlex.quote(work_dir)}; "
-            if _has_oauth:
+            if provider != "codex" and _has_oauth:
                 shell_rc += "unset ANTHROPIC_API_KEY; "
             # Forward select env vars into the tmux session.
             _env_args = []
@@ -5879,6 +5997,17 @@ def start_session(name: str, extra_flags: str = "", _skip_conv_id: bool = False)
             meta.pop("start_error", None)
             meta["last_started"] = int(time.time())
             meta["start_count"] = meta.get("start_count", 0) + 1
+            # For codex: capture the new session ID after a brief delay
+            if provider == "codex" and not meta.get("codex_session_id"):
+                def _capture_codex_id(sname=name, wd=work_dir):
+                    time.sleep(8)
+                    sid = _find_latest_codex_session(wd)
+                    if sid:
+                        m = _load_meta(sname)
+                        m["codex_session_id"] = sid
+                        _save_meta(sname, m)
+                        print(f"[start] {sname}: captured codex session {sid}")
+                threading.Thread(target=_capture_codex_id, daemon=True).start()
             _save_meta(name, meta)
             return True, "started"
         except subprocess.CalledProcessError as e:
@@ -7650,7 +7779,7 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
 
   /* Peek overlay */
   .overlay {
-    position: fixed; top: 0; left: 0; right: 0; bottom: 0;
+    position: fixed; top: var(--chrome-tab-h, 0px); left: 0; right: 0; bottom: 0;
     background: var(--bg);
     z-index: 100; flex-direction: column;
   }
@@ -7710,7 +7839,7 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
 
   /* File preview overlay */
   .file-overlay {
-    display: none; position: fixed; inset: 0; background: rgba(1,4,9,0.92);
+    display: none; position: fixed; top: var(--chrome-tab-h, 0px); left: 0; right: 0; bottom: 0; background: rgba(1,4,9,0.92);
     z-index: 200; flex-direction: column;
     padding: 12px; padding-top: max(12px, env(safe-area-inset-top));
   }
@@ -8058,10 +8187,10 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
   /* Create session */
   .header-row {
     display: flex; align-items: center; justify-content: space-between;
-    position: sticky; top: 0; z-index: 40;
-    background: var(--bg); padding: 16px;
-    padding-top: max(16px, env(safe-area-inset-top));
-    margin: calc(-1 * max(16px, env(safe-area-inset-top))) -16px 0 -16px;
+    position: sticky; top: var(--chrome-tab-h, 0px); z-index: 40;
+    background: var(--bg); padding: 12px 16px;
+    margin: 0 -16px 0 -16px;
+    border-bottom: 1px solid var(--border);
   }
   .header-row h1 { margin-bottom: 0; }
   .btn-create {
@@ -9079,7 +9208,7 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
     display: flex; align-items: stretch;
     margin: 0 -16px 12px -16px;
     border-bottom: 1px solid var(--border);
-    position: sticky; top: 60px; z-index: 39; background: var(--bg);
+    position: sticky; top: var(--sticky-nav-top, 60px); z-index: 39; background: var(--bg);
   }
   .tab-bar {
     display: flex; gap: 0; padding: 0 0 0 16px; flex: 1;
@@ -9117,6 +9246,100 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
   .tab-customizer-item:hover { background: var(--hover); }
   .tab-customizer-item.required { opacity: 0.45; cursor: not-allowed; }
   .tab-customizer-item input[type=checkbox] { accent-color: var(--accent); cursor: pointer; }
+
+  /* Chrome-style browser tabs */
+  .chrome-tabs-bar {
+    display: flex; align-items: flex-end;
+    position: fixed; top: 0; left: 0; right: 0; z-index: 1000;
+    background: color-mix(in srgb, var(--bg), black 12%);
+    padding: max(6px, env(safe-area-inset-top)) 6px 0 10px;
+    margin: 0;
+    gap: 1px;
+    overflow: visible;
+  }
+  .chrome-tab {
+    display: flex; align-items: center; gap: 4px;
+    padding: 7px 6px 7px 12px;
+    background: transparent;
+    border: 1px solid transparent; border-bottom: none;
+    border-radius: 8px 8px 0 0;
+    cursor: pointer;
+    font-size: 0.78rem; font-weight: 500;
+    color: var(--dim);
+    max-width: 190px; min-width: 0;
+    position: relative; user-select: none;
+    white-space: nowrap; flex-shrink: 0;
+    transition: background 0.12s, color 0.12s;
+  }
+  .chrome-tab:hover { background: rgba(255,255,255,0.06); }
+  .chrome-tab.active {
+    background: var(--bg); color: var(--fg);
+    border-color: var(--border);
+    margin-bottom: -1px; padding-bottom: 8px;
+  }
+  .chrome-tab-label { overflow: hidden; text-overflow: ellipsis; flex: 1; min-width: 0; pointer-events: none; }
+  .chrome-tab-close {
+    flex-shrink: 0; width: 18px; height: 18px;
+    border-radius: 50%; display: flex; align-items: center; justify-content: center;
+    font-size: 0.6rem; line-height: 1;
+    color: var(--dim); cursor: pointer;
+    opacity: 0; transition: opacity 0.12s, background 0.12s;
+  }
+  .chrome-tab:hover .chrome-tab-close,
+  .chrome-tab.active .chrome-tab-close { opacity: 1; }
+  .chrome-tab-close:hover { background: rgba(255,255,255,0.15); color: var(--fg); }
+  .chrome-tab-add-wrap { position: relative; flex-shrink: 0; margin: 0 4px 4px 4px; }
+  .chrome-tab-add {
+    width: 28px; height: 28px;
+    border-radius: 50%; display: flex; align-items: center; justify-content: center;
+    background: none; border: none;
+    color: var(--dim); cursor: pointer;
+    font-size: 1.05rem; line-height: 1;
+    transition: background 0.12s, color 0.12s;
+  }
+  .chrome-tab-add:hover { background: rgba(255,255,255,0.1); color: var(--fg); }
+  .chrome-tab-menu {
+    display: none; position: absolute; top: calc(100% + 4px); left: 0;
+    background: var(--card); border: 1px solid var(--border); border-radius: 8px;
+    min-width: 160px; z-index: 200; padding: 4px 0;
+    box-shadow: 0 8px 24px rgba(0,0,0,0.4);
+  }
+  .chrome-tab-menu.open { display: block; }
+  .chrome-tab-menu-item {
+    padding: 7px 14px; font-size: 0.82rem; cursor: pointer;
+    color: var(--fg); white-space: nowrap;
+  }
+  .chrome-tab-menu-item:hover { background: var(--hover); }
+  .chrome-tab-collapse {
+    flex-shrink: 0; margin-left: auto; padding: 0 10px;
+    background: none; border: none; color: var(--dim); cursor: pointer;
+    font-size: 0.7rem; line-height: 1; display: flex; align-items: center;
+    height: 100%; transition: color 0.12s;
+  }
+  .chrome-tab-collapse:hover { color: var(--fg); }
+  .chrome-tabs-bar.collapsed .chrome-tab,
+  .chrome-tabs-bar.collapsed .chrome-tab-add-wrap { display: none; }
+  .chrome-tabs-bar.collapsed { padding-bottom: 4px; }
+  .chrome-tab-frames { position: fixed; top: var(--chrome-tab-h, 36px); left: 0; right: 0; bottom: 0; z-index: 999; display: none; }
+  .chrome-tab-frames.active { display: block; }
+  .chrome-tab-frames iframe { position: absolute; inset: 0; width: 100%; height: 100%; border: none; background: var(--bg); }
+  .chrome-tab-frames iframe.hidden { display: none; }
+  body.in-tab .chrome-tabs-bar,
+  body.in-tab .chrome-tab-frames { display: none !important; }
+  body.in-tab { padding-top: 0 !important; }
+  .chrome-tab-rename {
+    background: transparent; border: none; outline: none;
+    color: inherit; font: inherit; width: 100%;
+    padding: 0; margin: 0; cursor: text;
+  }
+  body.light .chrome-tabs-bar { background: color-mix(in srgb, var(--bg), black 6%); }
+  body.light .chrome-tab:hover { background: rgba(0,0,0,0.05); }
+  body.light .chrome-tab-close:hover { background: rgba(0,0,0,0.1); }
+  body.light .chrome-tab-add:hover { background: rgba(0,0,0,0.07); }
+  @media (max-width: 600px) {
+    .chrome-tab { padding: 8px 4px 8px 10px; font-size: 0.75rem; max-width: 140px; }
+    .chrome-tab-add { width: 32px; height: 32px; min-height: 44px; }
+  }
 
   /* Logs view */
   .logs-toolbar {
@@ -10603,6 +10826,8 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
   <button onclick="_dismissOrgBanner()" style="background:none;border:none;color:#bbf7d0;cursor:pointer;font-size:1rem;line-height:1;opacity:0.7;padding:0 2px;" title="Dismiss">&#x2715;</button>
 </div>
 
+<div id="chrome-tabs-bar" class="chrome-tabs-bar"></div>
+<div id="chrome-tab-frames" class="chrome-tab-frames"></div>
 <div class="header-row">
   <div style="display:flex;gap:8px;align-items:center;">
     <h1 id="brand-header" style="margin:0;cursor:pointer;display:flex;align-items:center;gap:6px;" onclick="openAbout()"><span id="brand-icon-header"></span><span id="brand-name-header">amux</span></h1>
@@ -10672,6 +10897,7 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
           <div style="font-size:0.72rem;color:var(--dim);margin-bottom:6px;">Applied to new sessions without an explicit model</div>
           <select id="settings-default-model" onchange="saveDefaultModel(this.value)"
             style="width:100%;font-size:0.85rem;padding:5px 8px;border-radius:6px;border:1px solid var(--border);background:var(--card);color:var(--fg);">
+            <optgroup label="Claude">
             <option value="sonnet">sonnet</option>
             <option value="opus">opus</option>
             <option value="haiku">haiku</option>
@@ -10682,6 +10908,15 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
             <option value="claude-sonnet-4-6">claude-sonnet-4-6</option>
             <option value="claude-sonnet-4-6[1m]">claude-sonnet-4-6 [1M]</option>
             <option value="claude-haiku-4-5-20251001">claude-haiku-4-5-20251001</option>
+            </optgroup>
+            <optgroup label="Codex (OpenAI)">
+            <option value="gpt-5.5">gpt-5.5</option>
+            <option value="o3">o3</option>
+            <option value="o4-mini">o4-mini</option>
+            <option value="gpt-4o">gpt-4o</option>
+            <option value="gpt-4.1">gpt-4.1</option>
+            <option value="gpt-4.1-mini">gpt-4.1-mini</option>
+            </optgroup>
           </select>
         </div>
         <div class="settings-sep"></div>
@@ -13430,7 +13665,8 @@ function updatePeekStatus() {
   const mb = document.getElementById('peek-model-badge');
   if (mb) {
     const flagModel = (s.flags || '').match(/--model\s+(\S+)/);
-    const model = s.active_model || (flagModel ? flagModel[1] : '') || 'sonnet';
+    const defaultModel = s.provider === 'codex' ? 'gpt-5.5' : 'sonnet';
+    const model = s.active_model || (flagModel ? flagModel[1] : '') || defaultModel;
     mb.textContent = model;
   }
 }
@@ -13453,7 +13689,8 @@ function render() {
   updateActiveCount();
   // Build tag filter bar
   const tagEl = document.getElementById('tag-filters');
-  const allTags = [...new Set(sessions.flatMap(s => s.tags || []))].sort();
+  const allTags = [...new Set(sessions.filter(s => !s.archived).flatMap(s => s.tags || []))].sort();
+  if (activeTag && !allTags.includes(activeTag)) activeTag = null;
   if (allTags.length) {
     tagEl.innerHTML = allTags.map(t =>
       `<span class="tag-filter${activeTag === t ? ' active' : ''}" onclick="toggleTagFilter('${esc(t)}')">${esc(t)}</span>`
@@ -13517,8 +13754,7 @@ function render() {
   function _renderSessionCard(s) {
     const isExp = expanded.has(s.name);
     const flags = s.flags || '';
-    const isYolo = flags.includes('--dangerously-skip-permissions');
-  const isAutoContinue = !!s.auto_continue;
+    const isYolo = flags.includes('--dangerously-skip-permissions') || flags.includes('--dangerously-bypass-approvals-and-sandbox') || !!s.auto_continue;
     const modelMatch = flags.match(/--model\s+(\S+)/);
     const flagModel = modelMatch ? modelMatch[1] : null;
     const model = flagModel || s.active_model || null;
@@ -13536,9 +13772,8 @@ function render() {
           <div class="card-menu-item" onclick="event.stopPropagation();closeAllMenus();showSessionInfo('${s.name}')"><span class="mi">&#x2139;</span> Info</div>
           <div class="card-menu-item" onclick="event.stopPropagation();togglePin('${s.name}')"><span class="mi">${s.pinned?'&#x1F4CC;':'&#x1F4CC;'}</span> ${s.pinned ? 'Unpin' : 'Pin to top'}</div>
           <div class="card-menu-item" onclick="event.stopPropagation();editField('${s.name}','name','${esc(s.name)}')"><span class="mi">&#x270E;</span> Rename</div>
-          <div class="card-menu-item" onclick="event.stopPropagation();editField('${s.name}','model','${esc(model||"")}')"><span class="mi">&#x2699;</span> Model${model ? ': '+esc(model) : ''}</div>
+          <div class="card-menu-item" onclick="event.stopPropagation();editField('${s.name}','model','${esc(model||"")}','${esc(s.provider||"claude")}')"><span class="mi">&#x2699;</span> Model${model ? ': '+esc(model) : ''}</div>
           <div class="card-menu-item" onclick="event.stopPropagation();toggleYolo('${s.name}')"><span class="mi">${isYolo?'&#x2611;':'&#x2610;'}</span> YOLO mode</div>
-          <div class="card-menu-item" onclick="event.stopPropagation();toggleAutoContinue('${s.name}')" title="Auto-respond when Claude is waiting for user input (~60s delay)"><span class="mi">${isAutoContinue?'&#x2611;':'&#x2610;'}</span> Auto-continue</div>
           <div class="card-menu-item" onclick="event.stopPropagation();editField('${s.name}','desc','${esc(s.desc||"")}')"><span class="mi">&#x1F4DD;</span> Description</div>
           <div class="card-menu-item" onclick="event.stopPropagation();editField('${s.name}','tags','${esc(s.tags.join(", "))}')"><span class="mi">&#x1F3F7;</span> Tags</div>
           <div class="card-menu-item" onclick="event.stopPropagation();editField('${s.name}','dir','${esc(s.dir)}')"><span class="mi">&#x1F4C1;</span> Directory</div>
@@ -13578,10 +13813,9 @@ function render() {
           `<div class="card-log-hit" onclick="event.stopPropagation();openPeek('${s.name}',{query:'${sq}',hitIdx:${hi}})"><span class="log-hit-loc">${esc(s.name)}:${h.line}</span> <span class="log-hit-text">${esc(h.text.slice(0, 80))}</span></div>`
         ).join('') + (hits.length > 2 ? `<div class="card-log-hit" style="color:var(--dim);font-style:italic;" onclick="event.stopPropagation();openPeek('${s.name}',{query:'${sq}'})">+${hits.length - 2} more matches</div>` : '');
       })() : ''}
-      ${(isYolo || isAutoContinue || model || s.tags.length || s.provider === 'codex') ? `<div class="badges">
+      ${(isYolo || model || s.tags.length || s.provider === 'codex') ? `<div class="badges">
         ${s.provider === 'codex' ? '<span class="badge codex">Codex</span>' : ''}
         ${isYolo ? '<span class="badge yolo">YOLO</span>' : ''}
-        ${isAutoContinue ? '<span class="badge auto-continue" title="Auto-continue enabled">AUTO</span>' : ''}
         ${model ? `<span class="badge model">${esc(model)}</span>` : ''}
         ${s.tags.map(t => `<span class="tag" data-tag="${esc(t)}" onclick="event.stopPropagation();toggleTagFilter('${esc(t)}')">${esc(t)}</span>`).join('')}
       </div>` : ''}
@@ -13611,19 +13845,13 @@ function render() {
     </div>`;
   }
 
-  // Grid mode: flat list sorted by saved card order, no grouping (desktop only)
+  // Grid mode: flat list sorted by activity or alpha, no grouping (desktop only)
   if (layoutMode === 'grid' && window.innerWidth >= 900) {
     let sortedFiltered;
     if (sortMode === 'alpha') {
       sortedFiltered = [...filtered].sort(_alphaSortSessions);
     } else {
-      const orderMap = {};
-      cardOrder.forEach((name, i) => { orderMap[name] = i; });
-      sortedFiltered = [...filtered].sort((a, b) => {
-        const ai = orderMap[a.name] !== undefined ? orderMap[a.name] : 9999;
-        const bi = orderMap[b.name] !== undefined ? orderMap[b.name] : 9999;
-        return ai - bi;
-      });
+      sortedFiltered = [...filtered].sort(_naturalSortSessions);
     }
     el.innerHTML = draftCards + sortedFiltered.map(_renderSessionCard).join('');
     for (const [id, d] of Object.entries(savedInputs)) { const inp = document.getElementById(id); if (inp) { inp.value = d.value; autoGrow(inp); } }
@@ -13692,25 +13920,10 @@ function render() {
   } else {
     // list mode (flat) or group mode with active filter: flat list
     let flatList = filtered;
-    if (layoutMode === 'list' && !activeTag && !q) {
-      if (sortMode === 'alpha') {
-        flatList = [...filtered].sort(_alphaSortSessions);
-      } else if (cardOrder.length) {
-        const orderMap = {};
-        cardOrder.forEach((n, i) => { orderMap[n] = i; });
-        flatList = [...filtered].sort((a, b) => {
-          const ai = orderMap[a.name];
-          const bi = orderMap[b.name];
-          if (ai !== undefined && bi !== undefined) return ai - bi;
-          if (ai !== undefined) return -1; // ordered before unordered
-          if (bi !== undefined) return 1;
-          return _naturalSortSessions(a, b); // new sessions: natural order
-        });
-      } else {
-        flatList = [...filtered].sort(_naturalSortSessions);
-      }
-    } else if (sortMode === 'alpha' && !activeTag && !q) {
+    if (sortMode === 'alpha') {
       flatList = [...filtered].sort(_alphaSortSessions);
+    } else {
+      flatList = [...filtered].sort(_naturalSortSessions);
     }
     el.innerHTML = draftCards + flatList.map(_renderSessionCard).join('');
     if (layoutMode === 'list') requestAnimationFrame(initSortable);
@@ -14293,7 +14506,7 @@ if (window._AMUX_DEFAULT_MODEL) {
 
 // ── Edit modal ──
 let editState = null;  // {session, field, current}
-function editField(session, field, current) {
+function editField(session, field, current, provider) {
   closeAllMenus();
   const titles = { name: 'Rename session', model: 'Change model', dir: 'Change directory', desc: 'Set description', tags: 'Edit tags', duplicate: 'Duplicate session', clone: 'Clone & continue' };
   const placeholders = { name: 'Session name', model: 'e.g. opus, sonnet, haiku', dir: window._cloudEmail ? '/root' : '/path/to/project', desc: 'Brief description...', tags: 'e.g. work, frontend, urgent', duplicate: 'New session name', clone: 'New session name' };
@@ -14302,11 +14515,24 @@ function editField(session, field, current) {
   const sel = document.getElementById('edit-select');
   const inpWrap = document.getElementById('edit-input-wrap');
   if (field === 'model') {
+    const claudeModels = [
+      {v:'',l:'Default'},{v:'opus',l:'opus'},{v:'sonnet',l:'sonnet'},{v:'haiku',l:'haiku'},
+      {v:'claude-opus-4-7',l:'claude-opus-4-7'},{v:'claude-opus-4-7[1m]',l:'claude-opus-4-7 [1M]'},
+      {v:'claude-opus-4-6',l:'claude-opus-4-6'},{v:'claude-opus-4-6[1m]',l:'claude-opus-4-6 [1M]'},
+      {v:'claude-sonnet-4-6',l:'claude-sonnet-4-6'},{v:'claude-sonnet-4-6[1m]',l:'claude-sonnet-4-6 [1M]'},
+      {v:'claude-haiku-4-5-20251001',l:'claude-haiku-4-5-20251001'}
+    ];
+    const codexModels = [
+      {v:'',l:'Default'},{v:'gpt-5.5',l:'gpt-5.5'},{v:'o3',l:'o3'},{v:'o4-mini',l:'o4-mini'},
+      {v:'gpt-4o',l:'gpt-4o'},{v:'gpt-4.1',l:'gpt-4.1'},{v:'gpt-4.1-mini',l:'gpt-4.1-mini'}
+    ];
+    const models = (provider === 'codex') ? codexModels : claudeModels;
+    sel.innerHTML = '';
+    models.forEach(m => { const o = document.createElement('option'); o.value = m.v; o.textContent = m.l; sel.appendChild(o); });
     inpWrap.style.display = 'none';
     sel.style.display = 'block';
     sel.value = current || '';
     if (current && !Array.from(sel.options).some(o => o.value === current)) {
-      // Add custom model as option if not in list
       const opt = document.createElement('option');
       opt.value = current; opt.textContent = current;
       sel.appendChild(opt);
@@ -14483,37 +14709,27 @@ async function toggleYolo(session) {
     body: JSON.stringify({ toggle_yolo: true })
   });
   if (r) {
-    // Optimistic update: flip the flag locally so render() shows the change immediately
     const s = sessions.find(s => s.name === session);
     if (s) {
-      const flag = '--dangerously-skip-permissions';
-      s.flags = (s.flags || '').includes(flag)
-        ? s.flags.replace(flag, '').trim()
-        : ((s.flags || '') + ' ' + flag).trim();
-      lastSessionsJSON = '';  // force fetchSessions to re-render
+      const claudeFlag = '--dangerously-skip-permissions';
+      const codexFlag = '--dangerously-bypass-approvals-and-sandbox';
+      const wasYolo = (s.flags || '').includes(claudeFlag) || (s.flags || '').includes(codexFlag) || !!s.auto_continue;
+      if (wasYolo) {
+        s.flags = (s.flags || '').replace(claudeFlag, '').replace(codexFlag, '').trim();
+        s.auto_continue = false;
+      } else {
+        const addFlag = s.provider === 'codex' ? codexFlag : claudeFlag;
+        s.flags = ((s.flags || '') + ' ' + addFlag).trim();
+        s.auto_continue = true;
+      }
+      lastSessionsJSON = '';
       render();
     }
   }
   fetchSessions();
 }
 
-async function toggleAutoContinue(session) {
-  closeAllMenus();
-  const r = await apiCall(API + '/api/sessions/' + session + '/config', {
-    method: 'PATCH', headers: {'Content-Type':'application/json'},
-    body: JSON.stringify({ toggle_auto_continue: true })
-  });
-  if (r) {
-    // Optimistic update
-    const s = sessions.find(s => s.name === session);
-    if (s) {
-      s.auto_continue = !s.auto_continue;
-      lastSessionsJSON = '';  // force fetchSessions to re-render
-      render();
-    }
-  }
-  fetchSessions();
-}
+async function toggleAutoContinue(session) { return toggleYolo(session); }
 
 async function togglePin(session) {
   closeAllMenus();
@@ -16164,11 +16380,12 @@ async function _psfLoad(dirPath) {
       const sizeStr = entry.type === 'dir' ? '' : _fmtSize(entry.size);
       const dateStr = entry.modified ? timeAgo(entry.modified) : '';
       const slash = entry.type === 'dir' ? '<span style="color:var(--dim)">/</span>' : '';
+      const ep = entryPath.replace(/'/g, "\\'");
       row.innerHTML =
         `<div class="fe-cell-name">${icon}<span>${esc(entry.name)}${slash}</span></div>` +
         `<div class="fe-cell-size">${sizeStr}</div>` +
         `<div class="fe-cell-date">${dateStr}</div>` +
-        `<div class="fe-cell-actions"></div>`;
+        `<div class="fe-cell-actions"><button class="fe-menu-btn" title="Options" onclick="event.stopPropagation();_showFilesMenu('${ep}',this,'${entry.type}')">⋯</button></div>`;
       row.onclick = entry.type === 'dir' ? () => _psfLoad(entryPath) : () => _psfViewFile(entryPath);
       body.appendChild(row);
     }
@@ -19319,7 +19536,7 @@ function _showExploreMenu(path, btn, type) {
   const delItem = document.createElement('button');
   delItem.className = 'explore-menu-item';
   delItem.style.color = 'var(--red, #f85149)';
-  delItem.textContent = type === 'directory' ? 'Delete folder' : 'Delete file';
+  delItem.textContent = (type === 'dir' || type === 'directory') ? 'Delete folder' : 'Delete file';
   delItem.onclick = async () => {
     popup.remove();
     const name = path.split('/').pop();
@@ -19365,7 +19582,7 @@ function _showFilesMenu(path, btn, type) {
   linkItem.onclick = () => { popup.remove(); _copyFileDeeplink(path); };
   popup.appendChild(linkItem);
   // Download (files only)
-  if (type !== 'directory') {
+  if (type !== 'dir' && type !== 'directory') {
     const dlItem = document.createElement('button');
     dlItem.className = 'explore-menu-item';
     dlItem.textContent = 'Download';
@@ -19384,7 +19601,7 @@ function _showFilesMenu(path, btn, type) {
   const delItem = document.createElement('button');
   delItem.className = 'explore-menu-item';
   delItem.style.color = 'var(--red, #f85149)';
-  delItem.textContent = type === 'directory' ? 'Delete folder' : 'Delete file';
+  delItem.textContent = (type === 'dir' || type === 'directory') ? 'Delete folder' : 'Delete file';
   delItem.onclick = async () => {
     popup.remove();
     const name = path.split('/').pop();
@@ -20876,6 +21093,126 @@ let _crmQueueOpen = false;
 let _crmOpenAbort = null;
 let _crmActiveTags = [];
 let _crmSidebarOpen = localStorage.getItem('amux_crm_sidebar') !== 'closed';
+
+// ═══════ CHROME TABS ═══════
+const _isInTab = new URLSearchParams(location.search).has('_tab');
+if (_isInTab) document.body.classList.add('in-tab');
+
+let _chromeTabs = JSON.parse(localStorage.getItem('amux_chrome_tabs2') || 'null') || [{id:1, name:'Tab 1'}];
+let _chromeActiveId = parseInt(localStorage.getItem('amux_chrome_active2')) || _chromeTabs[0]?.id || 1;
+let _chromeNextId = Math.max(..._chromeTabs.map(t => t.id), 0) + 1;
+let _chromeCollapsed = localStorage.getItem('amux_chrome_collapsed') === '1';
+
+function _chromeRender() {
+  if (_isInTab) return;
+  const bar = document.getElementById('chrome-tabs-bar');
+  const fc = document.getElementById('chrome-tab-frames');
+  if (!bar) return;
+  bar.classList.toggle('collapsed', _chromeCollapsed);
+  let h = '';
+  for (const t of _chromeTabs) {
+    const cls = t.id === _chromeActiveId ? ' active' : '';
+    const label = (t.name || 'Tab ' + t.id).replace(/</g,'&lt;');
+    const close = _chromeTabs.length > 1 ? '<span class="chrome-tab-close" onclick="event.stopPropagation();_chromeCloseTab('+t.id+')">&#x2715;</span>' : '';
+    h += '<div class="chrome-tab'+cls+'" onclick="_chromeSwitchTab('+t.id+')" onmousedown="if(event.button===1){event.preventDefault();_chromeCloseTab('+t.id+')}" ondblclick="event.stopPropagation();_chromeRenameTab('+t.id+')" data-tab-id="'+t.id+'"><span class="chrome-tab-label">'+label+'</span>'+close+'</div>';
+  }
+  h += '<button class="chrome-tab-add" onclick="_chromeAddTab()" title="New tab" style="margin:0 4px 4px 4px;">+</button>';
+  h += '<button class="chrome-tab-collapse" onclick="_chromeToggleCollapse()" title="'+(_chromeCollapsed?'Show tabs':'Hide tabs')+'">'+(_chromeCollapsed?'&#x25BC;':'&#x25B2;')+'</button>';
+  bar.innerHTML = h;
+  _chromeShowActive();
+  _chromeUpdateOffsets();
+}
+
+function _chromeShowActive() {
+  if (_isInTab) return;
+  const fc = document.getElementById('chrome-tab-frames');
+  if (!fc) return;
+  const tab = _chromeTabs.find(t => t.id === _chromeActiveId);
+  if (!tab) return;
+  const isFirst = _chromeTabs[0] && _chromeTabs[0].id === _chromeActiveId;
+  if (isFirst) {
+    fc.classList.remove('active');
+  } else {
+    fc.classList.add('active');
+    let iframe = fc.querySelector('iframe[data-tab-id="'+_chromeActiveId+'"]');
+    if (!iframe) {
+      iframe = document.createElement('iframe');
+      iframe.dataset.tabId = String(_chromeActiveId);
+      iframe.src = '/?_tab=1';
+      fc.appendChild(iframe);
+    }
+    fc.querySelectorAll('iframe').forEach(f => f.classList.toggle('hidden', f.dataset.tabId !== String(_chromeActiveId)));
+  }
+}
+
+function _chromeToggleCollapse() {
+  _chromeCollapsed = !_chromeCollapsed;
+  localStorage.setItem('amux_chrome_collapsed', _chromeCollapsed ? '1' : '0');
+  _chromeRender();
+}
+
+function _chromeRenameTab(id) {
+  const tab = _chromeTabs.find(t => t.id === id);
+  if (!tab) return;
+  const el = document.querySelector('.chrome-tab[data-tab-id="'+id+'"] .chrome-tab-label');
+  if (!el) return;
+  const current = tab.name || 'Tab ' + tab.id;
+  el.innerHTML = '<input class="chrome-tab-rename" value="'+current.replace(/"/g,'&quot;')+'" />';
+  const inp = el.querySelector('input');
+  inp.focus(); inp.select();
+  const commit = () => { const val = inp.value.trim(); tab.name = val || ''; _chromeRender(); _chromeSave(); };
+  inp.addEventListener('blur', commit);
+  inp.addEventListener('keydown', (e) => { if (e.key === 'Enter') { e.preventDefault(); inp.blur(); } if (e.key === 'Escape') { tab.name = ''; inp.blur(); }});
+}
+
+function _chromeUpdateOffsets() {
+  requestAnimationFrame(() => {
+    const ctb = document.getElementById('chrome-tabs-bar');
+    const hr = document.querySelector('.header-row');
+    if (ctb) {
+      const h = ctb.offsetHeight;
+      document.documentElement.style.setProperty('--chrome-tab-h', h + 'px');
+      if (!_isInTab) document.body.style.paddingTop = h + 'px';
+      if (hr) document.documentElement.style.setProperty('--sticky-nav-top', (h + hr.offsetHeight) + 'px');
+    }
+  });
+}
+
+function _chromeSwitchTab(id) {
+  if (_chromeActiveId === id) return;
+  _chromeActiveId = id;
+  _chromeRender();
+  _chromeSave();
+}
+
+function _chromeAddTab() {
+  const tab = {id: _chromeNextId++, name: ''};
+  _chromeTabs.push(tab);
+  _chromeActiveId = tab.id;
+  _chromeRender();
+  _chromeSave();
+}
+
+function _chromeCloseTab(id) {
+  if (_chromeTabs.length <= 1) return;
+  const idx = _chromeTabs.findIndex(t => t.id === id);
+  const fc = document.getElementById('chrome-tab-frames');
+  if (fc) { const iframe = fc.querySelector('iframe[data-tab-id="'+id+'"]'); if (iframe) iframe.remove(); }
+  _chromeTabs.splice(idx, 1);
+  if (_chromeActiveId === id) {
+    const ni = Math.min(idx, _chromeTabs.length - 1);
+    _chromeActiveId = _chromeTabs[ni].id;
+  }
+  _chromeRender();
+  _chromeSave();
+}
+
+function _chromeSave() {
+  try {
+    localStorage.setItem('amux_chrome_tabs2', JSON.stringify(_chromeTabs));
+    localStorage.setItem('amux_chrome_active2', String(_chromeActiveId));
+  } catch(e) {}
+}
 
 function switchView(view) {
   if (document.getElementById('grid-view').classList.contains('active')) exitGridMode();
@@ -24308,6 +24645,10 @@ setInterval(() => {
 connectSSE();
 _notifUpdateBadge();
 loadBranding();
+
+// Initialize chrome tabs
+_chromeRender();
+window.addEventListener('resize', _chromeUpdateOffsets);
 
 // Register service worker for offline asset caching
 if ('serviceWorker' in navigator) {
@@ -34685,7 +35026,7 @@ p{{color:#888;margin:12px 0 28px;font-size:0.9rem;line-height:1.5}}
                 body = self._read_body()
                 url = body.get("url", "about:blank")
                 session = body.get("session", "amux")
-                profile = body.get("profile")
+                profile = body.get("profile", "default")
                 args = []
                 if profile:
                     args += ["-b", "real", "--profile", profile]
@@ -35506,23 +35847,28 @@ p{{color:#888;margin:12px 0 28px;font-size:0.9rem;line-height:1.5}}
                     suffix = " (session restarted)" if restarted else ""
                     return self._json({"ok": True, "message": f"model set to {model_val}{suffix}"})
 
-                # Toggle YOLO
-                if body.get("toggle_yolo"):
+                # Toggle YOLO (permissions skip + auto-continue combined)
+                if body.get("toggle_yolo") or body.get("toggle_auto_continue"):
+                    provider = cfg.get("CC_PROVIDER", "claude")
                     flags = cfg.get("CC_FLAGS", "")
-                    if "--dangerously-skip-permissions" in flags:
+                    is_yolo = (
+                        "--dangerously-skip-permissions" in flags
+                        or "--dangerously-bypass-approvals-and-sandbox" in flags
+                        or cfg.get("CC_AUTO_CONTINUE") in ("1", "true", "yes")
+                    )
+                    if is_yolo:
                         flags = flags.replace("--dangerously-skip-permissions", "").strip()
+                        flags = flags.replace("--dangerously-bypass-approvals-and-sandbox", "").strip()
+                        cfg["CC_AUTO_CONTINUE"] = "0"
                     else:
-                        flags = f"{flags} --dangerously-skip-permissions".strip()
+                        if provider == "codex":
+                            flags = f"{flags} --dangerously-bypass-approvals-and-sandbox".strip()
+                        else:
+                            flags = f"{flags} --dangerously-skip-permissions".strip()
+                        cfg["CC_AUTO_CONTINUE"] = "1"
                     cfg["CC_FLAGS"] = flags
                     _write_env(env_file, cfg)
                     return self._json({"ok": True, "message": "yolo toggled"})
-
-                # Toggle auto-continue
-                if body.get("toggle_auto_continue"):
-                    cur = cfg.get("CC_AUTO_CONTINUE", "0")
-                    cfg["CC_AUTO_CONTINUE"] = "0" if cur in ("1", "true", "yes") else "1"
-                    _write_env(env_file, cfg)
-                    return self._json({"ok": True, "message": "auto_continue toggled"})
 
                 # Change directory
                 if "dir" in body:
