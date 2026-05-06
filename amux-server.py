@@ -1618,13 +1618,17 @@ def _snapshot_all_sessions():
 
             # Strip ANSI codes for pattern matching
             clean = _STRIP_ANSI.sub("", output)
+            # Use only the last 200 lines for reactive triggers — stale scrollback
+            # from previous compactions/errors persists in tmux history and re-fires
+            # the same trigger repeatedly after every server restart.
+            clean_recent = "\n".join(clean.splitlines()[-200:])
             now = time.time()
             actions = _session_auto_actions.setdefault(name, {})
 
             # ── 1. Proactive: auto-compact when context is low ──────────────
             # Skip if the context % appears in /status output (user was just checking)
-            ctx_match = re.search(r'context left until auto-compact[:\s]+(\d+)%', clean, re.IGNORECASE)
-            _from_status_cmd = bool(ctx_match and re.search(r'❯\s*/status', clean))
+            ctx_match = re.search(r'context left until auto-compact[:\s]+(\d+)%', clean_recent, re.IGNORECASE)
+            _from_status_cmd = bool(ctx_match and re.search(r'❯\s*/status', clean_recent))
             if ctx_match and not _from_status_cmd:
                 pct = int(ctx_match.group(1))
                 _ac_row = get_db().execute("SELECT value FROM prefs WHERE key='auto_compact_enabled'").fetchone()
@@ -1657,7 +1661,7 @@ def _snapshot_all_sessions():
             # When a malformed image (truncated PNG, SVG-as-PNG, etc.) gets
             # loaded via Read, every subsequent API call fails with "Could not
             # process image". The bad image is stuck in conversation history.
-            if ("Could not process image" in clean and
+            if ("Could not process image" in clean_recent and
                     now - actions.get("last_compact", 0) > 120):
                 actions["last_compact"] = now
                 actions["post_compact_continue"] = True
