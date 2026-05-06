@@ -1601,9 +1601,9 @@ def _at_resume_picker(clean_output: str) -> bool:
 
 def _at_shell_prompt(clean_output: str) -> bool:
     """Return True if the terminal looks like a bare shell prompt (no Claude UI)."""
-    if _claude_ui_visible(clean_output):
-        return False
     lines = [l for l in clean_output.splitlines() if l.strip()]
+    # Check last lines FIRST — a shell prompt wins over any older spinner signals
+    # in scrollback (completed spinners persist in history after Claude exits).
     for l in lines[-5:]:
         ls = l.strip()
         # Bash/zsh prompt: ends with $ or % (not Claude's ❯ prompt)
@@ -1613,8 +1613,9 @@ def _at_shell_prompt(clean_output: str) -> bool:
         # e.g. "mixpeek$ ss permissions on · 5 shells"
         if re.match(r'\S+[$%]\s', ls) and "\u276f" not in ls:
             return True
+    if _claude_ui_visible(clean_output):
+        return False
     return False
-
 
 def _snapshot_all_sessions():
     """Capture scrollback for health checks on all running sessions.
