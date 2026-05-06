@@ -1680,10 +1680,12 @@ def _snapshot_all_sessions():
                 if pct < 30 and now - actions.get("last_backup", 0) > 120:
                     actions["last_backup"] = now
                     threading.Thread(target=backup_session_jsonl, args=(name, "pre_compact"), daemon=True).start()
-                if _ac_enabled and pct < 50 and now - actions.get("last_compact", 0) > 300:
+                if (_ac_enabled and pct < 20 and now - actions.get("last_compact", 0) > 300
+                        and _detect_claude_status(clean) == "idle"):
                     actions["last_compact"] = now
                     _update_meta(name, last_compact=now)
                     actions["post_compact_continue"] = True  # send continuation when compact finishes
+                    slog(f"[watchdog] {name}: auto-compacting (context at {pct}%)")
                     send_text(name, "/compact")
                     _push_alert("auto_compact", name,
                                 f"Auto-compacted '{name}' — context was at {pct}%")
@@ -1733,6 +1735,7 @@ def _snapshot_all_sessions():
                     "cannot be modified" in clean_recent and
                     now - actions.get("last_restart", 0) > 120):
                 actions["last_restart"] = now
+                slog(f"[watchdog] {name}: hard-killing — thinking block corruption")
                 # Clear scrollback so stale error strings don't re-trigger
                 subprocess.run(["tmux", "clear-history", "-t", tmux_target(name)],
                                capture_output=True, timeout=5)
@@ -1755,6 +1758,7 @@ def _snapshot_all_sessions():
             if ("is already in use" in clean_recent and "Session ID" in clean_recent and
                     now - actions.get("last_restart", 0) > 120):
                 actions["last_restart"] = now
+                slog(f"[watchdog] {name}: hard-killing — session ID conflict")
                 subprocess.run(["tmux", "clear-history", "-t", tmux_target(name)],
                                capture_output=True, timeout=5)
                 wd = _session_work_dir(name)
@@ -1809,9 +1813,11 @@ def _snapshot_all_sessions():
             # Check once per hour; restart if Claude process uptime > 48h and session is idle.
             # Guard: skip if Claude was seen alive within 2h — avoids killing active sessions
             # whose processes happen to cross the 48h mark during a brief idle between steps.
+            # Guard: only fire after we've seen the session alive in this server run — prevents
+            # false-positives immediately after server restart when last_claude_alive=0 for all.
             if status == "idle" and not actions.get("restarting"):
                 _last_alive_stale = actions.get("last_claude_alive", 0)
-                _stale_ok = not _last_alive_stale or (now - _last_alive_stale > 7200)
+                _stale_ok = _last_alive_stale > 0 and (now - _last_alive_stale > 7200)
                 last_stale_check = actions.get("last_stale_check", 0)
                 if _stale_ok and now - last_stale_check > 3600:  # check once per hour
                     actions["last_stale_check"] = now
@@ -1841,6 +1847,7 @@ def _snapshot_all_sessions():
                                         if now - last_restart > 300:
                                             actions["restarting"] = True
                                             actions["last_auto_restart"] = now
+                                            slog(f"[watchdog] {name}: recycling stale Claude process ({elapsed_secs//3600}h old)")
                                             def _do_stale_restart(sname=name, _actions=actions, _age=elapsed_secs):
                                                 _hard_kill_claude(sname)
                                                 time.sleep(3)
@@ -1877,6 +1884,7 @@ def _snapshot_all_sessions():
                     if last_real_activity and now - last_real_activity > _HIBERNATE_IDLE_SECS:
                         if not actions.get("hibernated"):
                             actions["hibernated"] = True
+                            slog(f"[watchdog] {name}: hibernating (idle {int(now - last_real_activity)//60}min)")
                             def _do_hibernate(sname=name):
                                 try:
                                     stop_session(sname)
