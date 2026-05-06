@@ -1714,7 +1714,21 @@ def _snapshot_all_sessions():
                 actions["last_picker_escape"] = now
                 subprocess.run(["tmux", "send-keys", "-t", tmux_target(name), "Enter"],
                                capture_output=True, timeout=5)
-                slog(f"[watchdog] {name}: accepted resume picker (pressed Enter)")
+                # Count duplicate JSONL files to diagnose root cause
+                try:
+                    wd = _session_work_dir(name)
+                    if wd:
+                        proj_dir = CLAUDE_HOME / "projects" / _project_name(wd)
+                        dupes = [jf for jf in proj_dir.glob("*.jsonl")
+                                 if json.loads(jf.open().readline()).get("customTitle") == name]
+                        if len(dupes) > 1:
+                            dupes.sort(key=lambda p: p.stat().st_mtime, reverse=True)
+                            dupe_names = ", ".join(f"{jf.name[:8]}({jf.stat().st_size//1024}KB)" for jf in dupes)
+                            slog(f"[watchdog] {name}: accepted resume picker — {len(dupes)} duplicate sessions: {dupe_names}")
+                        else:
+                            slog(f"[watchdog] {name}: accepted resume picker (pressed Enter)")
+                except Exception:
+                    slog(f"[watchdog] {name}: accepted resume picker (pressed Enter)")
 
             # ── 1d. Reactive: corrupted image in context → auto-compact ────
             # When a malformed image (truncated PNG, SVG-as-PNG, etc.) gets
@@ -36689,6 +36703,31 @@ def main():
     _install_signal_handlers()
     slog(f"[startup] server starting — pid={os.getpid()}, port={port}, scheme={scheme}, python={sys.version.split()[0]}")
     _log_resource_snapshot("startup")
+    # Scan for duplicate Claude session JSONL files that cause the resume picker loop
+    try:
+        for env_f in CC_SESSIONS.glob("*.env"):
+            sname = env_f.stem
+            wd = _session_work_dir(sname)
+            if not wd:
+                continue
+            proj_dir = CLAUDE_HOME / "projects" / _project_name(wd)
+            if not proj_dir.is_dir():
+                continue
+            matches = []
+            for jf in proj_dir.glob("*.jsonl"):
+                try:
+                    first = jf.open().readline()
+                    if first and json.loads(first).get("customTitle") == sname:
+                        matches.append(jf)
+                except Exception:
+                    pass
+            if len(matches) > 1:
+                matches.sort(key=lambda p: p.stat().st_mtime, reverse=True)
+                info = ", ".join(f"{jf.name[:8]}({jf.stat().st_size//1024}KB)" for jf in matches)
+                slog(f"[startup] WARNING: {sname} has {len(matches)} duplicate sessions — will cause picker loop: {info}"
+                     f" — delete older: {matches[-1].name}")
+    except Exception:
+        pass
     print("\033[1m\033[34mamux\033[0m web dashboard running")
     print(f"  Local:   {scheme}://localhost:{port}")
     if ts_hostname:
