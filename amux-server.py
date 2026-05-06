@@ -1660,10 +1660,11 @@ def _snapshot_all_sessions():
 
             # Seed last_compact from meta on first snapshot after server restart
             # so the cooldown survives restarts and stale scrollback can't re-fire.
+            # If meta has no record (first ever run), use server start time so we
+            # don't fire on stale scrollback before the user has a chance to interact.
             if "last_compact" not in actions:
                 _meta_lc = _load_meta(name)
-                if _meta_lc.get("last_compact"):
-                    actions["last_compact"] = _meta_lc["last_compact"]
+                actions["last_compact"] = _meta_lc.get("last_compact") or _server_start_time
 
             # Master switch — read once, applied to all compact-triggering sections.
             _ac_row = get_db().execute("SELECT value FROM prefs WHERE key='auto_compact_enabled'").fetchone()
