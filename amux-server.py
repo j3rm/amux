@@ -1559,11 +1559,20 @@ def _claude_ui_visible(clean_output: str) -> bool:
 
 
 def _at_resume_picker(clean_output: str) -> bool:
-    """Return True if Claude's --resume picker is showing (interactive session selector)."""
-    return bool(clean_output and
-                ("Resume Session" in clean_output or "Type to Search" in clean_output or
-                 "Enter to select" in clean_output or "Esc to cancel" in clean_output) and
-                "⌕" in clean_output)  # ⌕ search icon in the picker
+    """Return True if Claude's --resume/--name picker is showing (interactive session selector).
+
+    The ⌕ icon is NOT checked — tmux capture-pane drops it inconsistently on many
+    terminal emulators and tmux versions, causing silent false-negatives.
+    Require "Resume Session" (the picker title) plus any one secondary signal.
+    """
+    if not clean_output:
+        return False
+    if "Resume Session" not in clean_output:
+        return False
+    return any(s in clean_output for s in (
+        "Type to Search", "Esc to cancel", "Enter to select",
+        "to select", "to cancel", "1 of ",
+    ))
 
 
 def _at_shell_prompt(clean_output: str) -> bool:
