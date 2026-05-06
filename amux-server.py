@@ -1625,20 +1625,30 @@ def _snapshot_all_sessions():
             now = time.time()
             actions = _session_auto_actions.setdefault(name, {})
 
+            # Seed last_compact from meta on first snapshot after server restart
+            # so the cooldown survives restarts and stale scrollback can't re-fire.
+            if "last_compact" not in actions:
+                _meta_lc = _load_meta(name)
+                if _meta_lc.get("last_compact"):
+                    actions["last_compact"] = _meta_lc["last_compact"]
+
+            # Master switch — read once, applied to all compact-triggering sections.
+            _ac_row = get_db().execute("SELECT value FROM prefs WHERE key='auto_compact_enabled'").fetchone()
+            _ac_enabled = (_ac_row is None) or (_ac_row[0] != "0")  # default ON
+
             # ── 1. Proactive: auto-compact when context is low ──────────────
             # Skip if the context % appears in /status output (user was just checking)
             ctx_match = re.search(r'context left until auto-compact[:\s]+(\d+)%', clean_recent, re.IGNORECASE)
             _from_status_cmd = bool(ctx_match and re.search(r'❯\s*/status', clean_recent))
             if ctx_match and not _from_status_cmd:
                 pct = int(ctx_match.group(1))
-                _ac_row = get_db().execute("SELECT value FROM prefs WHERE key='auto_compact_enabled'").fetchone()
-                _ac_enabled = (_ac_row is None) or (_ac_row[0] != "0")  # default ON
                 # Backup JSONL before compaction (regardless of whether auto-compact fires)
                 if pct < 30 and now - actions.get("last_backup", 0) > 120:
                     actions["last_backup"] = now
                     threading.Thread(target=backup_session_jsonl, args=(name, "pre_compact"), daemon=True).start()
                 if _ac_enabled and pct < 50 and now - actions.get("last_compact", 0) > 300:
                     actions["last_compact"] = now
+                    _update_meta(name, last_compact=now)
                     actions["post_compact_continue"] = True  # send continuation when compact finishes
                     send_text(name, "/compact")
                     _push_alert("auto_compact", name,
@@ -1648,9 +1658,11 @@ def _snapshot_all_sessions():
             # Sessions using browser screenshots fill context with large images
             # until Claude errors with "image exceeds the dimension limit".
             # The session gets stuck at the prompt unable to proceed.
-            if ("image" in clean and "exceeds the dimension limit" in clean and
+            if (_ac_enabled and
+                    "image" in clean_recent and "exceeds the dimension limit" in clean_recent and
                     now - actions.get("last_compact", 0) > 120):
                 actions["last_compact"] = now
+                _update_meta(name, last_compact=now)
                 actions["post_compact_continue"] = True
                 threading.Thread(target=backup_session_jsonl, args=(name, "pre_compact_img"), daemon=True).start()
                 send_text(name, "/compact")
@@ -1661,9 +1673,11 @@ def _snapshot_all_sessions():
             # When a malformed image (truncated PNG, SVG-as-PNG, etc.) gets
             # loaded via Read, every subsequent API call fails with "Could not
             # process image". The bad image is stuck in conversation history.
-            if ("Could not process image" in clean_recent and
+            if (_ac_enabled and
+                    "Could not process image" in clean_recent and
                     now - actions.get("last_compact", 0) > 120):
                 actions["last_compact"] = now
+                _update_meta(name, last_compact=now)
                 actions["post_compact_continue"] = True
                 threading.Thread(target=backup_session_jsonl, args=(name, "pre_compact_img"), daemon=True).start()
                 send_text(name, "/compact")
