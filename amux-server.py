@@ -1795,17 +1795,17 @@ def _snapshot_all_sessions():
             # Claude processes hold 400-750 MB each even when idle. With 30+
             # sessions that causes OOM kills. Stop Claude in sessions idle for
             # >30 min. The conversation is preserved — next send auto-wakes it.
+            # Auto-continue sessions are hibernated too — auto-restart already
+            # checks `not actions.get("hibernated")` so they won't bounce back.
+            # They wake on next send_text (which calls start_session).
             _HIBERNATE_IDLE_SECS = 1800  # 30 minutes
             _HIBERNATE_STARTUP_GRACE = 600  # 10 min grace after server restart
             if status == "idle" and not actions.get("restarting"):
                 cfg_hib = parse_env_file(f)
                 _skip_hibernate = (
-                    # Don't hibernate auto-continue sessions — auto-restart
-                    # would just bring them back, creating a pointless cycle
-                    cfg_hib.get("CC_AUTO_CONTINUE") in ("1", "true", "yes")
                     # Grace period after server restart: actions dict is wiped
                     # so we can't tell if a session was recently active
-                    or now - _server_start_time < _HIBERNATE_STARTUP_GRACE
+                    now - _server_start_time < _HIBERNATE_STARTUP_GRACE
                 )
                 if not _skip_hibernate:
                     last_activity = actions.get("last_claude_alive", 0)
