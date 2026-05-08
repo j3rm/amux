@@ -7806,9 +7806,7 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
   .tts-btn-secondary { background: var(--surface); color: var(--text); border: 1px solid var(--border); }
   .tts-audio-wrap { display: flex; align-items: center; gap: 10px; }
   .tts-audio-wrap audio { flex: 1; height: 36px; }
-  .send-row { display: flex; flex-wrap: wrap; gap: 8px; min-width: 0; overflow: visible; position: relative; }
-  .send-row.multiline .send-input { flex: 1 1 100%; }
-  .send-row.multiline .btn.primary { margin-left: auto; }
+  .send-row { display: flex; gap: 8px; min-width: 0; overflow: visible; position: relative; }
   .send-input {
     flex: 1; min-width: 0; font-size: 1rem; padding: 10px 14px; border-radius: 8px;
     border: 1px solid var(--border); background: var(--bg); color: var(--text);
@@ -8639,9 +8637,7 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
   .peek-cmd-row {
     display: none; gap: 8px; padding-top: 6px;
   }
-  .peek-cmd-row.open { display: flex; flex-wrap: wrap; min-width: 0; overflow: visible; position: relative; }
-  .peek-cmd-row.open.multiline .ac-wrap { flex: 1 1 100%; }
-  .peek-cmd-row.open.multiline .btn.primary { margin-left: auto; }
+  .peek-cmd-row.open { display: flex; min-width: 0; overflow: visible; position: relative; }
   .peek-cmd-row .send-input { font-size: 0.85rem; padding: 8px 12px; min-height: 36px; min-width: 0; }
   .peek-cmd-row .btn { min-height: 36px; padding: 6px 12px; font-size: 0.82rem; }
   /* File attachment bar */
@@ -15036,15 +15032,7 @@ async function doKeys(name, keys) {
 
 function autoGrow(el) {
   el.style.height = 'auto';
-  const sh = el.scrollHeight;
-  el.style.height = Math.min(sh, parseFloat(getComputedStyle(el).maxHeight) || 999) + 'px';
-  const row = el.closest('.peek-cmd-row, .send-row');
-  if (row) {
-    const cs = getComputedStyle(el);
-    const lh = parseFloat(cs.lineHeight);
-    const singleH = (isNaN(lh) ? parseFloat(cs.fontSize) * 1.4 : lh) + parseFloat(cs.paddingTop) + parseFloat(cs.paddingBottom);
-    row.classList.toggle('multiline', sh > singleH + 6);
-  }
+  el.style.height = Math.min(el.scrollHeight, parseFloat(getComputedStyle(el).maxHeight) || 999) + 'px';
 }
 async function gitPush(name, e) {
   if (!name) return;
