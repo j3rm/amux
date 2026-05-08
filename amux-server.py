@@ -7462,12 +7462,12 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
   .report-last-refresh { font-size:0.72rem; color:var(--dim); }
   .report-total { font-weight:600; }
   @keyframes spin { to { transform: rotate(360deg); } }
-  html { font-size: 16px; }
+  html { font-size: 16px; overflow-x: clip; }
   body {
     font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif;
     background: var(--bg); color: var(--text);
     min-height: 100vh; min-height: 100dvh;
-    max-width: 100vw; overflow-x: hidden;
+    width: 100%; overflow-x: clip;
     padding: 16px; padding-top: max(16px, var(--chrome-tab-h, 0px), env(safe-area-inset-top));
     padding-bottom: max(16px, env(safe-area-inset-bottom));
     -webkit-text-size-adjust: 100%;
@@ -16415,17 +16415,15 @@ function _syncPeekOverlayToVisualViewport() {
   const constrained = vv.height < window.innerHeight - 1 || vv.offsetTop > 1;
   if (constrained) {
     ov.style.top = vv.offsetTop + 'px';
-    ov.style.bottom = '0px';
-    ov.style.height = '';
-    const kbHeight = window.innerHeight - vv.offsetTop - vv.height;
-    ov.style.paddingBottom = Math.max(0, kbHeight) + 'px';
+    ov.style.height = vv.height + 'px';
+    ov.style.bottom = 'auto';
+    ov.style.paddingBottom = '0px';
   } else {
     ov.style.top = '';
-    ov.style.bottom = '';
     ov.style.height = '';
+    ov.style.bottom = '';
     ov.style.paddingBottom = '';
   }
-  // Compact mode: hide chips, shrink padding when viewport is tight
   ov.classList.toggle('vv-compact', constrained && vv.height < window.innerHeight * 0.7);
 }
 (function() {
@@ -16439,6 +16437,11 @@ function _syncPeekOverlayToVisualViewport() {
     if (document.getElementById('peek-overlay')?.classList.contains('active')) {
       _syncPeekOverlayToVisualViewport();
     }
+  });
+  // iOS keyboard: re-sync after animation settles so input stays visible
+  document.getElementById('peek-cmd-input')?.addEventListener('focus', () => {
+    setTimeout(_syncPeekOverlayToVisualViewport, 100);
+    setTimeout(_syncPeekOverlayToVisualViewport, 400);
   });
 })();
 
