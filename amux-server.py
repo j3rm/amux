@@ -35699,8 +35699,17 @@ p{{color:#888;margin:12px 0 28px;font-size:0.9rem;line-height:1.5}}
 
                 # Change directory
                 if "dir" in body:
-                    cfg["CC_DIR"] = body["dir"].strip()
+                    new_dir = body["dir"].strip()
+                    old_dir = cfg.get("CC_DIR", "")
+                    cfg["CC_DIR"] = new_dir
                     _write_env(env_file, cfg)
+                    if new_dir != old_dir and is_running(name):
+                        def _restart_in_new_dir(sname=name):
+                            _hard_kill_claude(sname)
+                            time.sleep(2)
+                            start_session(sname)
+                        threading.Thread(target=_restart_in_new_dir, daemon=True).start()
+                        return self._json({"ok": True, "message": "directory updated — restarting session"})
                     return self._json({"ok": True, "message": "directory updated"})
 
                 # Change description
