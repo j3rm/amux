@@ -8586,6 +8586,11 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
   .peek-cmd-row.open { display: flex; min-width: 0; overflow: visible; position: relative; }
   .peek-cmd-row .send-input { font-size: 0.85rem; padding: 8px 12px; min-height: 36px; min-width: 0; }
   .peek-cmd-row .btn { min-height: 36px; padding: 6px 12px; font-size: 0.82rem; }
+  .send-split { display: flex; flex-shrink: 0; }
+  .send-split-main { border-radius: 8px 0 0 8px; padding-right: 8px; }
+  .send-split-arrow { border-radius: 0 8px 8px 0; padding: 6px 6px; border-left: 1px solid rgba(255,255,255,0.2); font-size: 0.55rem; min-width: 28px; min-height: 44px; }
+  .send-split.mode-queue .send-split-main { background: var(--purple, #a371f7); border-color: var(--purple, #a371f7); }
+  .send-split.mode-queue .send-split-arrow { background: var(--purple, #a371f7); border-color: var(--purple, #a371f7); }
   /* File attachment bar */
   .peek-attach-bar { display: none; gap: 6px; padding: 4px 0 2px; flex-wrap: wrap; width: 100%; }
   .peek-attach-bar.has-files { display: flex; }
@@ -12071,7 +12076,7 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
           style="position:absolute;width:0;height:0;opacity:0;overflow:hidden;pointer-events:none;" onchange="handlePeekFileInput(event)">
         <button class="peek-attach-btn" title="Attach file" onclick="document.getElementById('peek-file-input').click()">&#128206;</button>
         <button class="peek-attach-btn" id="peek-hist-btn" onclick="openCmdHistoryModal()" title="Message history">&#x1F551;</button>
-        <button class="btn primary" onclick="sendPeekCmd()">Send</button>
+        <div class="send-split"><button class="btn primary send-split-main" onclick="sendPeekCmd()">Send</button><button class="btn primary send-split-arrow" onclick="_toggleSendMode(event)" title="Switch send mode">&#x25BC;</button></div>
       </div>
       <!-- Drag-over hint (shown by CSS when drag-over class is on peek-overlay) -->
       <div class="peek-drag-hint" style="display:none;">&#128206; Drop to attach</div>
@@ -16852,15 +16857,39 @@ function handlePeekPaste(e) {
   });
 })();
 
+let _sendMode = localStorage.getItem('amux_send_mode') || 'send'; // 'send' or 'queue'
+function _toggleSendMode(e) {
+  e?.stopPropagation();
+  _sendMode = _sendMode === 'send' ? 'queue' : 'send';
+  localStorage.setItem('amux_send_mode', _sendMode);
+  _updateSendSplit();
+}
+function _updateSendSplit() {
+  const split = document.querySelector('.send-split');
+  if (!split) return;
+  split.classList.toggle('mode-queue', _sendMode === 'queue');
+  split.querySelector('.send-split-main').textContent = _sendMode === 'queue' ? 'Queue' : 'Send';
+}
+setTimeout(_updateSendSplit, 0);
+
 async function sendPeekCmd() {
   if (!peekSession) return;
   const inp = document.getElementById('peek-cmd-input');
   const text = inp.value.trim();
-  const files = peekFiles.filter(f => f.path); // only successfully uploaded
+  const files = peekFiles.filter(f => f.path);
   if (!text && files.length === 0) return;
-  // If session is actively working, ask whether to queue or send now
   const sess = (sessions || []).find(s => s.name === peekSession);
-  if (sess && sess.status === 'active' && files.length === 0 && !text.startsWith('/')) {
+  // Queue mode: bypass dialog, always queue at next turn boundary
+  if (_sendMode === 'queue' && sess && sess.status === 'active' && files.length === 0 && !text.startsWith('/')) {
+    cmdHistoryAdd(text, {type:'steering'});
+    inp.value = '';
+    inp.style.height = 'auto';
+    delete _peekDrafts[peekSession];
+    await steerSession(peekSession, text);
+    return;
+  }
+  // Send mode with active session: show dialog
+  if (_sendMode === 'send' && sess && sess.status === 'active' && files.length === 0 && !text.startsWith('/')) {
     const choice = await _showSteerPrompt(text);
     if (choice === 'queue') {
       cmdHistoryAdd(text, {type:'steering'});
