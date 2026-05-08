@@ -7468,7 +7468,7 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
     background: var(--bg); color: var(--text);
     min-height: 100vh; min-height: 100dvh;
     max-width: 100vw; overflow-x: hidden;
-    padding: 16px; padding-top: max(16px, env(safe-area-inset-top));
+    padding: 16px; padding-top: max(16px, var(--chrome-tab-h, 0px), env(safe-area-inset-top));
     padding-bottom: max(16px, env(safe-area-inset-bottom));
     -webkit-text-size-adjust: 100%;
   }
@@ -7764,7 +7764,7 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
 
   /* Peek overlay */
   .overlay {
-    position: fixed; top: var(--chrome-tab-h, 0px); left: 0; right: 0; bottom: 0;
+    position: fixed; top: max(var(--chrome-tab-h, 0px), env(safe-area-inset-top, 0px)); left: 0; right: 0; bottom: 0;
     background: var(--bg);
     z-index: 100; flex-direction: column;
   }
@@ -7824,7 +7824,7 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
 
   /* File preview overlay */
   .file-overlay {
-    display: none; position: fixed; top: var(--chrome-tab-h, 0px); left: 0; right: 0; bottom: 0; background: rgba(1,4,9,0.92);
+    display: none; position: fixed; top: max(var(--chrome-tab-h, 0px), env(safe-area-inset-top, 0px)); left: 0; right: 0; bottom: 0; background: rgba(1,4,9,0.92);
     z-index: 200; flex-direction: column;
     padding: 12px; padding-top: max(12px, env(safe-area-inset-top));
   }
@@ -8172,7 +8172,7 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
   /* Create session */
   .header-row {
     display: flex; align-items: center; justify-content: space-between;
-    position: sticky; top: var(--chrome-tab-h, 0px); z-index: 40;
+    position: sticky; top: max(var(--chrome-tab-h, 0px), env(safe-area-inset-top, 0px)); z-index: 40;
     background: var(--bg); padding: 12px 16px;
     margin: 0 -16px 0 -16px;
     border-bottom: 1px solid var(--border);
@@ -8947,7 +8947,7 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
 
   /* In-app notification banners */
   .notif-banners {
-    position: fixed; top: calc(var(--chrome-tab-h, 0px) + 8px); right: 12px; z-index: 1002;
+    position: fixed; top: calc(max(var(--chrome-tab-h, 0px), env(safe-area-inset-top, 0px)) + 8px); right: 12px; z-index: 1002;
     display: flex; flex-direction: column; gap: 6px; pointer-events: none;
     max-width: 360px; width: calc(100% - 24px);
   }
@@ -21137,8 +21137,11 @@ function _chromeUpdateOffsets() {
     if (ctb) {
       const h = _chromeCollapsed ? 0 : ctb.offsetHeight;
       document.documentElement.style.setProperty('--chrome-tab-h', h + 'px');
-      if (!_isInTab) document.body.style.paddingTop = h + 'px';
-      if (hr) document.documentElement.style.setProperty('--sticky-nav-top', (h + hr.offsetHeight) + 'px');
+      // Body padding-top is handled by CSS: max(16px, --chrome-tab-h, safe-area-inset-top)
+      if (hr) {
+        const bodyPadTop = parseInt(getComputedStyle(document.body).paddingTop) || 0;
+        document.documentElement.style.setProperty('--sticky-nav-top', (bodyPadTop + hr.offsetHeight) + 'px');
+      }
     }
   });
 }
