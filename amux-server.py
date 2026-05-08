@@ -1745,6 +1745,41 @@ def _snapshot_all_sessions():
                         _push_alert("auto_restart", name,
                                     f"Claude exited in '{name}' — auto-restarting")
 
+            # ── 4b. Process-level auto-restart: Claude killed (OOM / signal 9) ──
+            # _at_shell_prompt can miss exits when Claude's status bar text leaks
+            # into scrollback after a kill (causes _claude_ui_visible to
+            # false-positive). This check doesn't parse terminal output — it
+            # directly checks if the shell's child process is gone.
+            if not actions.get("restarting") and not actions.get("hibernated"):
+                cfg_pl = parse_env_file(f)
+                if (cfg_pl.get("CC_AUTO_CONTINUE") in ("1", "true", "yes")
+                        and cfg_pl.get("CC_ARCHIVED") != "1"):
+                    last_restart = actions.get("last_auto_restart", 0)
+                    if now - last_restart > 90:
+                        try:
+                            tmux_sess = tmux_name(name)
+                            r_pp = subprocess.run(
+                                ["tmux", "list-panes", "-t", tmux_sess, "-F", "#{pane_pid}"],
+                                capture_output=True, text=True, timeout=5)
+                            if r_pp.returncode == 0 and r_pp.stdout.strip():
+                                shell_pid = r_pp.stdout.strip().split("\n")[0]
+                                r_ch = subprocess.run(
+                                    ["pgrep", "-P", shell_pid],
+                                    capture_output=True, text=True, timeout=5)
+                                if not r_ch.stdout.strip():
+                                    # Shell has no children — Claude is gone
+                                    actions["restarting"] = True
+                                    actions["last_auto_restart"] = now
+                                    def _do_oom_restart(sname=name, _actions=actions):
+                                        time.sleep(3)
+                                        start_session(sname)
+                                        _actions.pop("restarting", None)
+                                    threading.Thread(target=_do_oom_restart, daemon=True).start()
+                                    _push_alert("auto_restart", name,
+                                                f"Claude process died in '{name}' (OOM/signal) — auto-restarting")
+                        except Exception:
+                            pass
+
             # ── 5. Stale process reaper: restart idle sessions with old Claude processes
             # Claude processes lose their API connection after ~2 days but stay running.
             # Sends succeed (tmux delivers text) but Claude never processes them.
