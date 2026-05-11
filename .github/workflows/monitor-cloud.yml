@@ -2,15 +2,13 @@ name: Monitor cloud.amux.io
 
 on:
   schedule:
-    - cron: '*/10 * * * *'  # every 10 minutes
+    - cron: '0 * * * *'  # every hour (was every 10 min — $223/month in Actions)
   workflow_dispatch:
 
 jobs:
   monitor:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-
       - name: Health check — HTTPS endpoint
         id: health
         run: |
