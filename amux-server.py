@@ -1181,7 +1181,8 @@ def is_running(session: str) -> bool:
             ["tmux", "list-sessions", "-F", "#{session_name}"],
             capture_output=True, text=True,
         )
-        if tmux_name(session) not in r.stdout.splitlines():
+        tmux_sess = tmux_name(session)
+        if tmux_sess not in r.stdout.splitlines():
             return False
         # Tmux exists -- check if Claude is actually running (not at shell prompt)
         output = tmux_capture(session, 10)
@@ -1189,6 +1190,22 @@ def is_running(session: str) -> bool:
             return True  # empty output but tmux exists -- assume running (startup)
         if _at_shell_prompt(output):
             return False
+        # Terminal-based check can false-positive when Claude's status bar text
+        # leaks into scrollback after a SIGKILL. Cross-check by verifying the
+        # shell actually has a child process (Claude).
+        try:
+            r_pp = subprocess.run(
+                ["tmux", "list-panes", "-t", tmux_sess, "-F", "#{pane_pid}"],
+                capture_output=True, text=True, timeout=5)
+            if r_pp.returncode == 0 and r_pp.stdout.strip():
+                shell_pid = r_pp.stdout.strip().split("\n")[0]
+                r_ch = subprocess.run(
+                    ["pgrep", "-P", shell_pid],
+                    capture_output=True, text=True, timeout=5)
+                if not r_ch.stdout.strip():
+                    return False
+        except Exception:
+            pass
         return True
     except FileNotFoundError:
         return False
@@ -2094,6 +2111,8 @@ def _snapshot_all_sessions():
             running_sessions = set(r.stdout.splitlines())
     except Exception:
         return
+    _HIBERNATE_IDLE_SECS = 1800  # 30 minutes
+    _HIBERNATE_STARTUP_GRACE = 600  # 10 min grace after server restart
     for f in CC_SESSIONS.glob("*.env"):
         name = f.stem
         if tmux_name(name) not in running_sessions:
@@ -2227,6 +2246,14 @@ def _snapshot_all_sessions():
                         def _do_restart(sname=name, _actions=actions):
                             time.sleep(3)
                             start_session(sname)
+                            # Wait for Claude UI to appear before clearing
+                            # restarting flag — prevents auto-continue from
+                            # sending text into the resume picker.
+                            for _w in range(30):
+                                time.sleep(1)
+                                _o = tmux_capture(sname, 10)
+                                if _o and _claude_ui_visible(_o):
+                                    break
                             _actions.pop("restarting", None)
                         threading.Thread(target=_do_restart, daemon=True).start()
                         _push_alert("auto_restart", name,
@@ -2237,7 +2264,12 @@ def _snapshot_all_sessions():
             # into scrollback after a kill (causes _claude_ui_visible to
             # false-positive). This check doesn't parse terminal output — it
             # directly checks if the shell's child process is gone.
-            if not actions.get("restarting") and not actions.get("hibernated"):
+            # During startup grace, only fire if stale Claude UI is visible
+            # (killed mid-operation) — skip bare shell prompts (legitimately hibernated).
+            _in_grace = now - _server_start_time < _HIBERNATE_STARTUP_GRACE
+            _ui_stale = _claude_ui_visible(clean) and not _at_resume_picker(clean)
+            if (not actions.get("restarting") and not actions.get("hibernated")
+                    and (not _in_grace or _ui_stale)):
                 cfg_pl = parse_env_file(f)
                 if (cfg_pl.get("CC_AUTO_CONTINUE") in ("1", "true", "yes")
                         and cfg_pl.get("CC_ARCHIVED") != "1"):
@@ -2255,17 +2287,29 @@ def _snapshot_all_sessions():
                                     capture_output=True, text=True, timeout=5)
                                 if not r_ch.stdout.strip():
                                     # Shell has no children — Claude is gone
+                                    slog(f"[4b] {name}: no child process under shell PID {shell_pid} — triggering OOM restart")
                                     actions["restarting"] = True
                                     actions["last_auto_restart"] = now
                                     def _do_oom_restart(sname=name, _actions=actions):
                                         time.sleep(3)
                                         start_session(sname)
+                                        for _w in range(30):
+                                            time.sleep(1)
+                                            _o = tmux_capture(sname, 10)
+                                            if _o and _claude_ui_visible(_o):
+                                                break
                                         _actions.pop("restarting", None)
                                     threading.Thread(target=_do_oom_restart, daemon=True).start()
                                     _push_alert("auto_restart", name,
                                                 f"Claude process died in '{name}' (OOM/signal) — auto-restarting")
-                        except Exception:
-                            pass
+                                else:
+                                    pass  # Claude child exists — healthy
+                            else:
+                                slog(f"[4b] {name}: list-panes failed rc={r_pp.returncode}")
+                        except Exception as e:
+                            slog(f"[4b] {name}: exception: {e}")
+                    else:
+                        pass  # rate-limited (restart < 90s ago)
 
             # ── 5. Stale process reaper: restart idle sessions with old Claude processes
             # Claude processes lose their API connection after ~2 days but stay running.
@@ -2305,6 +2349,11 @@ def _snapshot_all_sessions():
                                                 _hard_kill_claude(sname)
                                                 time.sleep(3)
                                                 start_session(sname)
+                                                for _w in range(30):
+                                                    time.sleep(1)
+                                                    _o = tmux_capture(sname, 10)
+                                                    if _o and _claude_ui_visible(_o):
+                                                        break
                                                 _actions.pop("restarting", None)
                                             threading.Thread(target=_do_stale_restart, daemon=True).start()
                                             _push_alert("auto_restart", name,
@@ -2320,8 +2369,6 @@ def _snapshot_all_sessions():
             # Auto-continue sessions are hibernated too — auto-restart already
             # checks `not actions.get("hibernated")` so they won't bounce back.
             # They wake on next send_text (which calls start_session).
-            _HIBERNATE_IDLE_SECS = 1800  # 30 minutes
-            _HIBERNATE_STARTUP_GRACE = 600  # 10 min grace after server restart
             if status == "idle" and not actions.get("restarting"):
                 cfg_hib = parse_env_file(f)
                 _skip_hibernate = (
@@ -2349,7 +2396,8 @@ def _snapshot_all_sessions():
             # After we trigger auto-compact, the session goes idle at the ❯ prompt.
             # status == 'idle' doesn't trigger normal auto-continue, so we handle
             # it explicitly: wait ≥30s for compact to finish, then send a continue msg.
-            if actions.get("post_compact_continue") and status in ("idle", "waiting"):
+            # Skip if mid-restart — text would land in resume picker search box.
+            if actions.get("post_compact_continue") and status in ("idle", "waiting") and not actions.get("restarting"):
                 elapsed_since_compact = now - actions.get("last_compact", 0)
                 if elapsed_since_compact > 30 and now - actions.get("last_auto_continue", 0) > 60:
                     cfg_ac = parse_env_file(f)
@@ -2360,7 +2408,7 @@ def _snapshot_all_sessions():
                     _push_alert("auto_continue", name,
                                 f"Post-compact auto-continue sent to '{name}'")
 
-            if status == "waiting":
+            if status == "waiting" and not actions.get("restarting"):
                 if "ac_waiting_since" not in actions:
                     # First snapshot seeing this session waiting — remember it
                     actions["ac_waiting_since"] = now
@@ -6700,6 +6748,17 @@ def _get_send_lock(name: str) -> threading.Lock:
 _auto_waking = set()
 
 def send_text(name: str, text: str) -> tuple[bool, str]:
+    # Don't send into a resume picker — text lands in the search box and
+    # corrupts session selection. Wait for Claude to finish loading.
+    _actions_st = _session_auto_actions.get(name, {})
+    if _actions_st.get("restarting"):
+        return False, "session is restarting"
+    try:
+        _out_st = tmux_capture(name, 10)
+        if _out_st and _at_resume_picker(_out_st):
+            return False, "session is in resume picker"
+    except Exception:
+        pass
     if not is_running(name):
         if name in _auto_waking:
             return False, "not running"
