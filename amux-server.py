@@ -192,6 +192,21 @@ _S3_CAL_URL = (
     f"https://{_S3_BUCKET}.s3.{_S3_REGION}.amazonaws.com/{_S3_KEY}"
     if _S3_BUCKET else ""
 )
+# Rate-limit watchdog (fleet-level). Mode controls auto-resume behavior:
+#   off       — detect the prompt and press 1, but do NOT auto-resume.
+#   capped    — auto-resume up to AMUX_RATE_LIMIT_BUDGET times per session
+#               per UTC day; after the budget is exhausted, fall back to
+#               manual (user must steer resume themselves).
+#   unlimited — auto-resume every time, no cap.
+_RATE_LIMIT_MODE = (os.environ.get("AMUX_RATE_LIMIT_MODE", "capped") or "capped").lower()
+if _RATE_LIMIT_MODE not in ("off", "capped", "unlimited"):
+    _RATE_LIMIT_MODE = "capped"
+try:
+    _RATE_LIMIT_BUDGET = int(os.environ.get("AMUX_RATE_LIMIT_BUDGET", "3"))
+except ValueError:
+    _RATE_LIMIT_BUDGET = 3
+if _RATE_LIMIT_BUDGET < 0:
+    _RATE_LIMIT_BUDGET = 0
 MAX_LOG_BYTES = 10 * 1024 * 1024  # 10MB per session
 SERVER_LOG = CC_LOGS / "server.log"
 _server_log_lock = threading.Lock()
@@ -1416,6 +1431,478 @@ def _yolo_auto_respond():
 def _yolo_loop():
     try:
         _yolo_auto_respond()
+    except Exception:
+        pass
+
+
+# ── Rate-limit watchdog ──────────────────────────────────────────────────────
+# Claude Code's /rate-limit-options prompt appears when a subscription usage
+# cap is hit. The three-option menu lets the user either wait, add funds, or
+# upgrade. amux auto-selects option 1 ("Stop and wait for limit to reset")
+# fleet-wide — when one Max account hits its cap, every active session blocks
+# at once, and pressing 1 by hand on each is impractical at scale.
+#
+# Unlike _YOLO_PROMPTS, this runs regardless of --dangerously-skip-permissions:
+# the rate-limit prompt blocks every session equally, YOLO or not.
+_RATE_LIMIT_PROMPTS = [
+    # Anchor on the option-1 menu line. The "1." prefix confirms it's a menu
+    # render and not the phrase appearing in arbitrary scrollback noise; the
+    # full phrase ("Stop and wait for limit to reset") is distinctive enough
+    # that we don't need to also match options 2/3, which keeps the pattern
+    # robust if Anthropic relabels the other choices.
+    (re.compile(r'1\.\s*stop and wait for limit to reset', re.IGNORECASE), '1'),
+]
+
+
+# Reset-time formats Claude Code is known to render in scrollback when a
+# session hits the cap. We scan the surrounding tmux capture for any of them
+# and convert to a unix timestamp so the watchdog can schedule an auto-resume.
+_RATE_LIMIT_RESET_PATTERNS = [
+    # "resets HH:MM" — wall-clock; today if still ahead, otherwise tomorrow.
+    re.compile(r'resets?\s+(?:at\s+)?(\d{1,2}):(\d{2})\s*(am|pm)?\b', re.IGNORECASE),
+    # "Resets in: 4 hours 23 minutes" — relative duration (hours and/or minutes).
+    re.compile(r'resets?\s+in[:\s]+(?:(\d+)\s*h(?:ours?)?)?\s*(?:(\d+)\s*m(?:in(?:ute)?s?)?)?', re.IGNORECASE),
+    # "reset on April 15, 2026 at 10:49 PM" — absolute date + 12h time.
+    re.compile(
+        r'reset(?:s|\s+on)?\s+(?:on\s+)?'
+        r'(jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|jul(?:y)?|'
+        r'aug(?:ust)?|sep(?:tember)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)'
+        r'\s+(\d{1,2}),?\s+(\d{4})\s+at\s+(\d{1,2}):(\d{2})\s*(am|pm)',
+        re.IGNORECASE,
+    ),
+]
+
+_MONTHS = {
+    'jan': 1, 'feb': 2, 'mar': 3, 'apr': 4, 'may': 5, 'jun': 6,
+    'jul': 7, 'aug': 8, 'sep': 9, 'oct': 10, 'nov': 11, 'dec': 12,
+}
+
+# Permissive fallback: any bare HH:MM (optionally with AM/PM) in the
+# scrollback when none of the labeled patterns above match. Real-world
+# Claude Code rendering wraps lines and may push the "resets" label off
+# the same line as the time, so a bare-time scan within the menu's
+# scrollback window is more robust than requiring the strict label.
+# A >=5min-in-the-future filter blocks pickup of the current-time status
+# bar (e.g. "✦ 14:23 thinking…").
+_RATE_LIMIT_BARE_TIME_RE = re.compile(r'\b(\d{1,2}):(\d{2})\s*(am|pm)?\b', re.IGNORECASE)
+
+
+def _parse_rate_limit_reset(text: str, now: float | None = None) -> int | None:
+    """Scan text for a Claude Code rate-limit reset time and return a unix ts.
+
+    Recognizes three TUI formats:
+      - "resets HH:MM" or "resets at H:MM PM" (today, or tomorrow if past)
+      - "Resets in: <N> hours <M> minutes" (relative duration)
+      - "reset on <Month> <D>, <YYYY> at <H:MM AM/PM>" (absolute)
+
+    Returns None if no recognizable format is present. The wall-clock formats
+    are interpreted in the server's local time zone — Claude Code renders
+    them in the user's local zone, and amux runs on the same machine.
+    """
+    import datetime as _dt
+    if not text:
+        return None
+    now_ts = now if now is not None else time.time()
+    base = _dt.datetime.fromtimestamp(now_ts)
+    # Defensive ANSI strip — the handler already cleans the capture before
+    # calling this, but selftests and any future direct caller may pass
+    # raw tmux output.
+    text = _STRIP_ANSI.sub("", text)
+
+    # 1. "Resets in: N hours M minutes" — check first so it doesn't get
+    #    swallowed by the bare "resets HH:MM" pattern (no colon → no match
+    #    anyway, but ordering keeps intent obvious).
+    m = _RATE_LIMIT_RESET_PATTERNS[1].search(text)
+    if m and (m.group(1) or m.group(2)):
+        hours = int(m.group(1) or 0)
+        minutes = int(m.group(2) or 0)
+        if hours or minutes:
+            return int(now_ts + hours * 3600 + minutes * 60)
+
+    # 2. Absolute "reset on April 15, 2026 at 10:49 PM"
+    m = _RATE_LIMIT_RESET_PATTERNS[2].search(text)
+    if m:
+        month_key = m.group(1).lower()[:3]
+        month = _MONTHS.get(month_key)
+        day = int(m.group(2))
+        year = int(m.group(3))
+        hour = int(m.group(4))
+        minute = int(m.group(5))
+        meridiem = m.group(6).lower()
+        if meridiem == 'pm' and hour != 12:
+            hour += 12
+        elif meridiem == 'am' and hour == 12:
+            hour = 0
+        if month and 0 <= hour < 24 and 0 <= minute < 60:
+            try:
+                dt = _dt.datetime(year, month, day, hour, minute)
+                return int(dt.timestamp())
+            except ValueError:
+                pass
+
+    # 3. "resets HH:MM" — today if still ahead, otherwise tomorrow.
+    m = _RATE_LIMIT_RESET_PATTERNS[0].search(text)
+    if m:
+        hour = int(m.group(1))
+        minute = int(m.group(2))
+        meridiem = (m.group(3) or '').lower()
+        if meridiem == 'pm' and hour != 12:
+            hour += 12
+        elif meridiem == 'am' and hour == 12:
+            hour = 0
+        if 0 <= hour < 24 and 0 <= minute < 60:
+            candidate = base.replace(hour=hour, minute=minute, second=0, microsecond=0)
+            if candidate.timestamp() <= now_ts:
+                candidate += _dt.timedelta(days=1)
+            return int(candidate.timestamp())
+
+    # 4. Bare-time fallback. Take the earliest HH:MM at least 5 minutes
+    # in the future — that filters out current-time status-bar renders
+    # like "✦ 14:23 thinking…" while still catching a "resets 14:30"
+    # that landed on its own wrapped line away from the "resets" word.
+    candidates = []
+    for mm in _RATE_LIMIT_BARE_TIME_RE.finditer(text):
+        hour = int(mm.group(1))
+        minute = int(mm.group(2))
+        meridiem = (mm.group(3) or '').lower()
+        if meridiem == 'pm' and hour != 12:
+            hour += 12
+        elif meridiem == 'am' and hour == 12:
+            hour = 0
+        if not (0 <= hour < 24 and 0 <= minute < 60):
+            continue
+        cand = base.replace(hour=hour, minute=minute, second=0, microsecond=0)
+        if cand.timestamp() <= now_ts:
+            cand += _dt.timedelta(days=1)
+        if cand.timestamp() - now_ts < 300:
+            continue  # too close to now — likely the current-time bar
+        candidates.append(int(cand.timestamp()))
+    if candidates:
+        return min(candidates)
+
+    return None
+
+
+_RATE_LIMIT_DEFAULT_RESUME_TEXT = "continue"
+
+
+def _should_skip_rate_limit_resume(scrollback_clean: str) -> tuple[bool, str]:
+    """Decide whether auto-resume should be skipped at reset time.
+
+    The watchdog parks a session by pressing 1 on the /rate-limit-options
+    menu, which leaves Claude Code displaying a "waiting for limit to reset"
+    confirmation. If at reset time the scrollback still shows that wait
+    state, auto-resume is safe — we're just unblocking what we parked.
+
+    If the user intervened (picked option 2 or 3 from the menu, typed
+    something new, or otherwise moved past the wait state), the session
+    is no longer parked where we left it, and steering "continue" would
+    fight the user. Skip in that case.
+
+    Returns (skip, reason). Reason is a short human-readable string for
+    the log line; empty string when skip is False.
+    """
+    if not scrollback_clean:
+        # Empty scrollback usually means the session is stopped/archived
+        # and we can't see anything; safest to skip rather than risk
+        # poking a session in an unknown state.
+        return True, "no scrollback to inspect"
+    tail = "\n".join(scrollback_clean.splitlines()[-30:]).lower()
+    # Positive markers: Claude is still parked at the wait-for-reset state.
+    if "waiting for" in tail and "reset" in tail:
+        return False, ""
+    if "stop and wait for limit to reset" in tail:
+        # User hasn't pressed anything yet — pattern was matched but
+        # the menu is still showing. Resume is premature; the auto-respond
+        # cycle will press 1 first.
+        return True, "rate-limit menu still showing"
+    if "rate-limit-options" in tail or "rate limit" in tail:
+        # Some related rate-limit UI is still on screen; user may be
+        # interacting with it.
+        return False, ""
+    # No rate-limit-related markers anywhere in the tail → the session
+    # has moved on. Don't fight the user.
+    return True, "session moved past wait-state"
+
+
+def _session_rate_limit_resume_text(cfg: dict) -> str:
+    """Return the per-session text to steer at rate-limit reset.
+
+    Read from CC_RATE_LIMIT_RESUME_TEXT in ~/.amux/sessions/<name>.env
+    (defaults to "continue"). Lets supervisors/orchestrators use a
+    richer resume prompt than a bare "continue".
+    """
+    val = cfg.get("CC_RATE_LIMIT_RESUME_TEXT", "").strip()
+    return val or _RATE_LIMIT_DEFAULT_RESUME_TEXT
+
+
+# Seconds between consecutive auto-responses for the same session. The
+# scheduler tick is 3s, so with a 10s cooldown the watchdog fires no more
+# than once every ~12s on a persistently-matching prompt (matches the
+# behavior observed during manual verification). Real Claude clears the
+# menu immediately after pressing 1, so this loop only matters when the
+# menu text persists in scrollback — typically a simulation artifact
+# where the prompt was injected via tmux send-keys without Enter and
+# stayed pinned in the input area.
+_RATE_LIMIT_COOLDOWN = 10
+_RATE_LIMIT_DRIFT_TOLERANCE = 30  # seconds; reset times closer than this are "in sync"
+_RATE_LIMIT_DRIFT_LOG_COOLDOWN = 600  # don't repeat the drift warning more than every 10 min
+_rate_limit_last_responded: dict = {}
+_rate_limit_last_drift_log: float = 0.0
+
+
+def _rate_limit_budget_state(actions: dict, today_utc: str, budget: int) -> tuple[bool, int]:
+    """Return (exhausted, used) for a session's auto-resume budget.
+
+    Resets the per-session counter when the stored UTC day differs from
+    today_utc (mutating `actions`). Isolated here so the selftest can verify
+    midnight-rollover behavior without spinning up tmux.
+    """
+    if actions.get("rate_limit_budget_day") != today_utc:
+        actions["rate_limit_budget_day"] = today_utc
+        actions["rate_limit_resumes_today"] = 0
+    used = int(actions.get("rate_limit_resumes_today", 0))
+    return (used >= budget, used)
+
+
+def _check_rate_limit_drift():
+    """Warn if reset times parsed across the fleet disagree by >30s.
+
+    The subscription cap is account-wide, so every blocked session should
+    have the same reset time (within ~seconds). Larger drift usually means
+    our parser misread one session's scrollback. Log-only — no behavior
+    change.
+    """
+    global _rate_limit_last_drift_log
+    now = time.time()
+    if now - _rate_limit_last_drift_log < _RATE_LIMIT_DRIFT_LOG_COOLDOWN:
+        return
+    future_resets = []
+    for name, actions in _session_auto_actions.items():
+        r = actions.get("rate_limit_reset_at")
+        if r and r > now:
+            future_resets.append((name, r))
+    if len(future_resets) < 2:
+        return
+    spread = max(r for _, r in future_resets) - min(r for _, r in future_resets)
+    if spread > _RATE_LIMIT_DRIFT_TOLERANCE:
+        _rate_limit_last_drift_log = now
+        sample = ", ".join(f"{n}={r}" for n, r in sorted(future_resets)[:6])
+        slog(f"[rate-limit] reset-time drift across fleet: spread={int(spread)}s "
+             f"across {len(future_resets)} sessions ({sample}). "
+             f"Likely a parser mis-read — verify by peeking each session.")
+
+
+def _rate_limit_auto_respond():
+    """Detect /rate-limit-options across the fleet and press 1 on each match.
+
+    Mirrors _yolo_auto_respond's shape but runs on every running session
+    regardless of YOLO mode — the rate-limit prompt blocks YOLO and
+    non-YOLO sessions equally. On match, presses 1 to park the session
+    at "waiting for limit to reset", parses the reset time from the
+    surrounding scrollback, and stores it in _session_auto_actions[name]
+    for the auto-resume scheduler to pick up later.
+    """
+    now = time.time()
+    running_sessions = set()
+    try:
+        r = subprocess.run(
+            ["tmux", "list-sessions", "-F", "#{session_name}"],
+            capture_output=True, text=True, timeout=5,
+        )
+        if r.returncode == 0:
+            running_sessions = set(r.stdout.splitlines())
+    except Exception:
+        return  # tmux not available
+    for f in CC_SESSIONS.glob("*.env"):
+        name = f.stem
+        try:
+            if tmux_name(name) not in running_sessions:
+                continue
+            if now - _rate_limit_last_responded.get(name, 0) < _RATE_LIMIT_COOLDOWN:
+                continue
+            # 300 lines is enough to catch the reset-time line, which can
+            # appear ~10-20 lines above the menu in Claude Code's UI.
+            raw = tmux_capture(name, 300)
+            if not raw:
+                continue
+            clean = _STRIP_ANSI.sub("", raw)
+            matched_idx = -1
+            for i, (pattern, response) in enumerate(_RATE_LIMIT_PROMPTS):
+                if pattern.search(clean):
+                    send_text(name, response)
+                    _rate_limit_last_responded[name] = now
+                    matched_idx = i
+                    break
+            if matched_idx < 0:
+                continue
+            actions = _session_auto_actions.setdefault(name, {})
+            parsed_reset = _parse_rate_limit_reset(clean, now=now)
+            actions["rate_limit_last_event_ts"] = int(now)
+            if parsed_reset:
+                reset_at = parsed_reset
+                actions["rate_limit_reset_at"] = reset_at
+                actions.pop("rate_limit_reset_at_fallback", None)
+                slog(f"[rate-limit] session={name} auto-selected option 1, "
+                     f"reset_at={reset_at}")
+            else:
+                # Couldn't parse a reset time. Apply a 5-minute safety
+                # fallback so auto-resume still has a target — Claude
+                # Code's actual rate-limit windows are always much
+                # longer (1h+, usually 5h), so 5 min cannot trigger a
+                # premature resume. If the prompt is still showing
+                # when the fallback fires, the auto-respond loop will
+                # press 1 again and the auto-resume's state-aware skip
+                # predicate prevents fighting.
+                reset_at = int(now + 300)
+                actions["rate_limit_reset_at"] = reset_at
+                actions["rate_limit_reset_at_fallback"] = True
+                # Log a sanitized snippet so future debugging can see
+                # what the parser actually saw. Single-line, capped
+                # length so the server log stays readable.
+                snippet = " | ".join(
+                    l.strip() for l in clean.splitlines()[-12:] if l.strip()
+                )[:240]
+                slog(f"[rate-limit] session={name} auto-selected option 1, "
+                     f"reset_at={reset_at} (5min safety fallback — no "
+                     f"parseable reset time in scrollback); "
+                     f"tail-snippet={snippet!r}")
+            _posthog_emit("rate_limit_auto_handled", {
+                "session": name,
+                "pattern_idx": matched_idx,
+                "reset_at": reset_at,
+                "fallback": not parsed_reset,
+            }, distinct_id=name)
+        except Exception:
+            pass
+
+
+def _rate_limit_auto_resume():
+    """Steer the configured resume text to sessions whose reset time passed.
+
+    Respects fleet mode (off/capped/unlimited) and per-session budget.
+    Calls the state-aware skip predicate to avoid fighting a user who
+    moved past the wait-for-reset state.
+    """
+    import datetime as _dt
+    now = time.time()
+    today_utc = _dt.datetime.utcnow().strftime("%Y-%m-%d")
+
+    # Collect candidates first so we can bail out cheaply when nothing's due.
+    candidates = [name for name, actions in list(_session_auto_actions.items())
+                  if actions.get("rate_limit_reset_at")
+                  and actions["rate_limit_reset_at"] <= now]
+    if not candidates:
+        return
+
+    if _RATE_LIMIT_MODE == "off":
+        # Clear stale reset-at so the badge doesn't linger past reset time.
+        # The user has to steer the resume themselves in this mode.
+        for name in candidates:
+            actions = _session_auto_actions.get(name) or {}
+            actions.pop("rate_limit_reset_at", None)
+            slog(f"[rate-limit] session={name} reset time reached; "
+                 f"auto-resume disabled (mode=off)")
+        return
+
+    running_sessions = set()
+    try:
+        r = subprocess.run(
+            ["tmux", "list-sessions", "-F", "#{session_name}"],
+            capture_output=True, text=True, timeout=5,
+        )
+        if r.returncode == 0:
+            running_sessions = set(r.stdout.splitlines())
+    except Exception:
+        return
+
+    resumed = 0
+    skipped = 0
+    budget_exhausted = 0
+    for name in candidates:
+        actions = _session_auto_actions.get(name) or {}
+        env_file = CC_SESSIONS / f"{name}.env"
+        if not env_file.exists():
+            actions.pop("rate_limit_reset_at", None)
+            continue
+        try:
+            cfg = parse_env_file(env_file)
+
+            # Always run the rollover so the per-day counter doesn't grow
+            # forever in unlimited mode; second return is ignored unless
+            # we're enforcing a cap.
+            exhausted, used = _rate_limit_budget_state(
+                actions, today_utc, _RATE_LIMIT_BUDGET)
+            if _RATE_LIMIT_MODE == "capped":
+                if exhausted:
+                    actions.pop("rate_limit_reset_at", None)
+                    budget_exhausted += 1
+                    slog(f"[rate-limit] session={name} auto-resume budget "
+                         f"exhausted ({used}/{_RATE_LIMIT_BUDGET}), "
+                         f"falling back to manual")
+                    _push_alert("rate_limit_manual", name,
+                                f"Rate-limit auto-resume budget exhausted for "
+                                f"'{name}' — manual resume required")
+                    continue
+
+            scrollback = ""
+            if tmux_name(name) in running_sessions:
+                raw = tmux_capture(name, 100)
+                if raw:
+                    scrollback = _STRIP_ANSI.sub("", raw)
+            skip, reason = _should_skip_rate_limit_resume(scrollback)
+            if skip:
+                actions.pop("rate_limit_reset_at", None)
+                skipped += 1
+                slog(f"[rate-limit] session={name} auto-resume skipped at "
+                     f"reset, {reason}")
+                continue
+
+            resume_text = _session_rate_limit_resume_text(cfg)
+            ok, err = send_text(name, resume_text)
+            if ok:
+                actions.pop("rate_limit_reset_at", None)
+                actions["rate_limit_resumes_today"] = \
+                    actions.get("rate_limit_resumes_today", 0) + 1
+                resumed += 1
+                slog(f"[rate-limit] session={name} resumed at reset, "
+                     f"resume_text={resume_text!r}")
+                _posthog_emit("rate_limit_auto_resumed", {
+                    "session": name,
+                    "resume_text": resume_text,
+                }, distinct_id=name)
+            else:
+                # Don't clear reset_at — next tick will retry. Send can fail
+                # transiently if tmux is briefly unavailable.
+                slog(f"[rate-limit] session={name} resume send failed: {err}")
+        except Exception as e:
+            slog(f"[rate-limit] session={name} resume error: {e}")
+
+    total = resumed + skipped + budget_exhausted
+    if total > 1:
+        slog(f"[rate-limit] fleet resume: {resumed} sessions steered, "
+             f"{skipped} skipped (user intervened), "
+             f"{budget_exhausted} budget-exhausted")
+        _posthog_emit("rate_limit_fleet_event", {
+            "kind": "resume",
+            "resumed": resumed,
+            "skipped": skipped,
+            "budget_exhausted": budget_exhausted,
+        })
+
+
+def _rate_limit_loop():
+    """Single rate-limit watchdog tick: detect prompts, handle reset."""
+    try:
+        _rate_limit_auto_respond()
+    except Exception:
+        pass
+    try:
+        _check_rate_limit_drift()
+    except Exception:
+        pass
+    try:
+        _rate_limit_auto_resume()
     except Exception:
         pass
 
@@ -4793,6 +5280,7 @@ def list_sessions() -> list:
             "archived": cfg.get("CC_ARCHIVED", "") == "1",
             "auto_continue": cfg.get("CC_AUTO_CONTINUE") in ("1", "true", "yes"),
             "steering": _steering_queue.get(name, []),
+            "rate_limited_until": _session_auto_actions.get(name, {}).get("rate_limit_reset_at", 0),
             "tags": [t.strip() for t in cfg.get("CC_TAGS", "").split(",") if t.strip()],
             "flags": cfg.get("CC_FLAGS", ""),
             "creator": cfg.get("CC_CREATOR", ""),
@@ -8201,6 +8689,17 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
   .btn-active .active-count {
     font-variant-numeric: tabular-nums;
   }
+  /* Fleet-wide rate-limit indicator */
+  .btn-rate-limit {
+    display: none; font-size: 0.78rem; padding: 6px 10px; border-radius: 8px;
+    border: 1px solid rgba(248,81,73,0.45);
+    background: rgba(248,81,73,0.12); color: #f85149;
+    cursor: pointer; font-weight: 500; min-height: 40px;
+    align-items: center; gap: 6px; font-variant-numeric: tabular-nums;
+    -webkit-tap-highlight-color: transparent;
+  }
+  .btn-rate-limit.show { display: flex; }
+  .btn-rate-limit:active { background: rgba(248,81,73,0.22); }
   .active-dropdown {
     display: none; position: fixed; top: auto; right: 16px;
     background: var(--card); border: 1px solid var(--border);
@@ -8810,6 +9309,7 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
   .status-badge.waiting { background: rgba(210,153,34,0.2); color: var(--yellow); }
   .status-badge.idle { background: rgba(139,148,158,0.15); color: var(--dim); }
   .status-badge.steering { background: rgba(137,87,229,0.2); color: var(--purple,#8957e5); }
+  .status-badge.rate-limited { background: rgba(248,81,73,0.18); color: #f85149; }
   .last-active { font-size: 0.7rem; color: var(--dim); flex-shrink: 0; }
   .token-count { font-size: 0.65rem; color: var(--dim); flex-shrink: 0; font-family: "SF Mono","Fira Code",monospace; opacity: 0.7; }
 
@@ -10843,6 +11343,9 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
   </div>
   <div style="display:flex;gap:8px;align-items:center;">
     <div id="org-switcher-wrap" style="display:none;"></div>
+    <button class="btn-rate-limit" id="rate-limit-pill" title="" onclick="event.stopPropagation();_scrollToFirstRateLimited()">
+      <span id="rate-limit-pill-text">0 rate-limited</span>
+    </button>
     <div class="active-wrap">
       <button class="btn-active" id="active-btn" onclick="event.stopPropagation();toggleActiveDropdown()">
         <span class="active-dot"></span>
@@ -13624,6 +14127,9 @@ function updatePeekStatus() {
   else if (s.status === 'waiting') badge = '<span class="status-badge waiting">needs input</span>';
   else if (s.status === 'idle')    badge = '<span class="status-badge idle">idle</span>';
   else if (!s.running)             badge = '<span class="status-badge" style="background:rgba(255,255,255,0.06);color:var(--dim);border:1px solid var(--border);">stopped</span>';
+  if (s.rate_limited_until) {
+    badge += `<span class="status-badge rate-limited" style="margin-left:6px;">Rate-limited until ${_fmtClockTime(s.rate_limited_until)}</span>`;
+  }
   el.innerHTML = badge;
   // Update input placeholder based on session state
   const cmdInp = document.getElementById('peek-cmd-input');
@@ -13658,6 +14164,7 @@ function render() {
   // Save focused element before ANY DOM changes — captures search-input, send-input, or anything else
   const focusedId = _active && _active.id ? _active.id : null;
   updateActiveCount();
+  updateRateLimitPill();
   // Build tag filter bar
   const tagEl = document.getElementById('tag-filters');
   const allTags = [...new Set(sessions.filter(s => !s.archived).flatMap(s => s.tags || []))].sort();
@@ -13761,10 +14268,11 @@ function render() {
           <div class="card-menu-item danger" onclick="event.stopPropagation();deleteSession('${s.name}')"><span class="mi">&#x2716;</span> Delete</div>
         </div>
         </div>
-        ${(s.status || s.tokens || s.last_activity || !online) ? `<div class="card-header-meta">
+        ${(s.status || s.tokens || s.last_activity || s.rate_limited_until || !online) ? `<div class="card-header-meta">
           ${s.status === 'active' ? '<span class="status-badge active">working</span>' : ''}
           ${s.status === 'waiting' ? '<span class="status-badge waiting">needs input</span>' : ''}
           ${s.status === 'idle' ? '<span class="status-badge idle">idle</span>' : ''}
+          ${s.rate_limited_until ? `<span class="status-badge rate-limited" title="Rate-limited — auto-resume at ${_fmtClockTime(s.rate_limited_until)}">Rate-limited until ${_fmtClockTime(s.rate_limited_until)}</span>` : ''}
           ${s.steering && s.steering.length ? `<span class="status-badge steering" title="${s.steering.length} steering message${s.steering.length>1?'s':''} queued">${s.steering.length} queued</span>` : ''}
           ${s.tokens ? `<span class="token-count">${fmtTokens(s.tokens)}</span>` : ''}
           ${s.last_activity ? `<span class="last-active">${timeAgo(s.last_activity)}</span>` : ''}
@@ -13948,6 +14456,13 @@ function fmtDuration(sec) {
   if (h > 0) return h + 'h ' + m + 'm';
   if (m > 0) return m + 'm';
   return sec + 's';
+}
+function _fmtClockTime(epoch) {
+  if (!epoch) return '';
+  const d = new Date(epoch * 1000);
+  const hh = String(d.getHours()).padStart(2, '0');
+  const mm = String(d.getMinutes()).padStart(2, '0');
+  return hh + ':' + mm;
 }
 
 // ═══════ GIT BRANCH AWARENESS ═══════
@@ -14393,7 +14908,7 @@ function _renderArchivedSection() {
     (q ? archived : allArchived).forEach(s => {
       const ago = s.last_activity ? timeAgo(s.last_activity) : '';
       const preview = esc(s.preview || s.desc || '');
-      html += `<div class="archived-card">
+      html += `<div class="archived-card" data-session="${esc(s.name)}">
         <div class="archived-card-name">${esc(s.name)}</div>
         ${ago ? `<div class="archived-card-meta">${ago}</div>` : ''}
         ${preview ? `<div class="archived-card-preview">${preview}</div>` : ''}
@@ -14454,6 +14969,31 @@ function updateActiveCount() {
   const btn = document.getElementById('active-btn');
   if (el) el.textContent = count;
   if (btn) btn.style.display = count > 0 ? 'flex' : 'none';
+}
+function updateRateLimitPill() {
+  const pill = document.getElementById('rate-limit-pill');
+  const txt = document.getElementById('rate-limit-pill-text');
+  if (!pill || !txt) return;
+  const blocked = sessions.filter(s => s.rate_limited_until);
+  if (!blocked.length) {
+    pill.classList.remove('show');
+    return;
+  }
+  // All sessions on one account share a reset time; show the earliest if
+  // they drift, and indicate "N of M" so the user sees the fleet picture.
+  const earliest = Math.min(...blocked.map(s => s.rate_limited_until));
+  const total = sessions.filter(s => !s.archived).length || blocked.length;
+  txt.textContent = blocked.length + ' of ' + total +
+    ' rate-limited, reset ' + _fmtClockTime(earliest);
+  pill.title = blocked.map(s => s.name).join(', ');
+  pill.classList.add('show');
+}
+function _scrollToFirstRateLimited() {
+  const target = sessions.find(s => s.rate_limited_until);
+  if (!target) return;
+  const sel = '[data-session="' + target.name.replace(/"/g, '\\"') + '"]';
+  const card = document.querySelector(sel);
+  if (card && card.scrollIntoView) card.scrollIntoView({ behavior: 'smooth', block: 'center' });
 }
 
 // ── Header + dropdown ──
@@ -36562,6 +37102,7 @@ def main():
 
     # Register all recurring jobs with the unified scheduler
     schedule_job(_yolo_loop,             interval=3,                    name="yolo",        initial_delay=3)
+    schedule_job(_rate_limit_loop,       interval=3,                    name="rate_limit",  initial_delay=4)
     schedule_job(_snapshot_loop,         interval=60,                   name="snapshot",    initial_delay=0)
     schedule_job(_reap_stale_browsers,  interval=120,                  name="browser_reap", initial_delay=60)
     schedule_job(_kill_stale_ray,        interval=600,                  name="ray_reap",     initial_delay=120)
@@ -36607,5 +37148,227 @@ def main():
                 pass
 
 
+def _run_selftests() -> int:
+    """Inline unit tests for the rate-limit watchdog.
+
+    Triggered by `AMUX_SELFTEST=1 python3 amux-server.py`. Touches no DB,
+    no network, no filesystem — covers the pure helpers added for this
+    feature. Returns process exit code (0 = all pass).
+    """
+    import datetime as _dt
+    failures: list[str] = []
+
+    def check(label: str, ok: bool, *, detail: str = ""):
+        status = "PASS" if ok else "FAIL"
+        line = f"  [{status}] {label}"
+        if detail and not ok:
+            line += f"  — {detail}"
+        print(line)
+        if not ok:
+            failures.append(label)
+
+    # ── 1. _RATE_LIMIT_PROMPTS pattern match ─────────────────────────────
+    print("rate-limit prompt pattern:")
+    positive = (
+        "What do you want to do?\n"
+        "❯ 1. Stop and wait for limit to reset\n"
+        "  2. Add funds to continue with extra usage\n"
+        "  3. Upgrade your plan\n"
+    )
+    pat = _RATE_LIMIT_PROMPTS[0][0]
+    check("matches real /rate-limit-options menu", bool(pat.search(positive)))
+    check("matches case-insensitively",
+          bool(pat.search(positive.upper())))
+    check("does not match empty string", not pat.search(""))
+    check("does not match a YOLO 'Do you want to proceed?' prompt",
+          not pat.search("Do you want to proceed?\n❯ 1. Yes\n  2. No\nEsc to cancel"))
+    check("does not match the /usage slash-command palette entry",
+          not pat.search("/usage    Show plan usage and rate limits"))
+    check("does not match the bare phrase without a '1.' menu prefix",
+          not pat.search("the system will stop and wait for limit to reset later"))
+
+    # ── 2. _parse_rate_limit_reset across all three formats ──────────────
+    print("reset-time parser:")
+    # Use a fixed reference time so wall-clock tests are deterministic.
+    ref_dt = _dt.datetime(2026, 5, 11, 9, 0, 0)  # 09:00 local
+    ref_ts = ref_dt.timestamp()
+
+    # Format 1: "resets HH:MM" later today
+    out = _parse_rate_limit_reset(
+        "You've used 95% of your session limit · resets 14:30",
+        now=ref_ts,
+    )
+    expected = _dt.datetime(2026, 5, 11, 14, 30).timestamp()
+    check("format1 'resets HH:MM' later today", out == int(expected),
+          detail=f"got {out}, want {int(expected)}")
+
+    # Format 1b: "resets HH:MM" already past → tomorrow
+    out = _parse_rate_limit_reset("resets 03:00", now=ref_ts)
+    expected = _dt.datetime(2026, 5, 12, 3, 0).timestamp()
+    check("format1 'resets HH:MM' past today rolls to tomorrow",
+          out == int(expected),
+          detail=f"got {out}, want {int(expected)}")
+
+    # Format 2: "Resets in: 4 hours 23 minutes"
+    out = _parse_rate_limit_reset("Resets in: 4 hours 23 minutes", now=ref_ts)
+    expected = int(ref_ts + 4 * 3600 + 23 * 60)
+    check("format2 'Resets in: N hours M minutes'", out == expected,
+          detail=f"got {out}, want {expected}")
+
+    # Format 2b: minutes-only relative
+    out = _parse_rate_limit_reset("resets in 45 minutes", now=ref_ts)
+    expected = int(ref_ts + 45 * 60)
+    check("format2 minutes-only relative", out == expected,
+          detail=f"got {out}, want {expected}")
+
+    # Format 3: absolute date+time
+    out = _parse_rate_limit_reset(
+        "Please upgrade your plan or wait for your limit to reset on "
+        "April 15, 2026 at 10:49 PM",
+        now=ref_ts,
+    )
+    expected = int(_dt.datetime(2026, 4, 15, 22, 49).timestamp())
+    check("format3 absolute 'Month D, YYYY at H:MM PM'",
+          out == expected, detail=f"got {out}, want {expected}")
+
+    # Malformed input
+    check("malformed input returns None",
+          _parse_rate_limit_reset("resets at bananas o'clock", now=ref_ts) is None)
+    check("empty input returns None",
+          _parse_rate_limit_reset("", now=ref_ts) is None)
+
+    # Realistic boxed UI sample — Claude renders rate-limit context inside
+    # a bordered panel; the strict "resets HH:MM" pattern catches the
+    # in-panel time even with the box-drawing characters around it.
+    boxed = (
+        "  ╭──────────────────────────────────────────╮\n"
+        "  │ You've used 95% of your session limit ·   │\n"
+        "  │ resets 14:30                              │\n"
+        "  ╰──────────────────────────────────────────╯\n"
+        "\n"
+        "What do you want to do?\n"
+        "❯ 1. Stop and wait for limit to reset\n"
+        "  2. Add funds to continue with extra usage\n"
+        "  3. Upgrade your plan\n"
+    )
+    out = _parse_rate_limit_reset(boxed, now=ref_ts)
+    expected = int(_dt.datetime(2026, 5, 11, 14, 30).timestamp())
+    check("realistic boxed UI scrollback parses to 14:30",
+          out == expected, detail=f"got {out}, want {expected}")
+
+    # Bare-time fallback — strict label not present, but a usable HH:MM
+    # sits in the menu area. Should still parse.
+    bare_only = (
+        "What do you want to do?\n"
+        "❯ 1. Stop and wait for limit to reset\n"
+        "  2. Add funds\n  3. Upgrade\n"
+        "\n"
+        "Try again at 19:00.\n"
+    )
+    out = _parse_rate_limit_reset(bare_only, now=ref_ts)
+    expected = int(_dt.datetime(2026, 5, 11, 19, 0).timestamp())
+    check("bare-time fallback catches '19:00' without 'resets' label",
+          out == expected, detail=f"got {out}, want {expected}")
+
+    # Status-bar current time should NOT be picked up — it's within 5 min
+    # of now, which the filter rejects. Without a reset time anywhere
+    # else in the scrollback, the parser returns None.
+    status_bar = (
+        "✦ 09:02 Crunched for 2m 14s — Sonnet 4.6\n"
+        "What do you want to do?\n"
+        "❯ 1. Stop and wait for limit to reset\n"
+    )
+    check("status-bar current time is filtered out (<5min in future)",
+          _parse_rate_limit_reset(status_bar, now=ref_ts) is None,
+          detail=f"got {_parse_rate_limit_reset(status_bar, now=ref_ts)}")
+
+    # ANSI-laden input — parser strips defensively, so the same bytes the
+    # handler would feed it still resolve.
+    ansi_text = "\x1b[31mYou've used 95% of your limit · resets 14:30\x1b[0m\n"
+    out = _parse_rate_limit_reset(ansi_text, now=ref_ts)
+    expected = int(_dt.datetime(2026, 5, 11, 14, 30).timestamp())
+    check("ANSI-laden input is stripped and parsed",
+          out == expected, detail=f"got {out}, want {expected}")
+
+    # ── 3. Budget accounting via _rate_limit_budget_state ────────────────
+    print("budget accounting:")
+    today = "2026-05-11"
+    a = {"rate_limit_budget_day": today, "rate_limit_resumes_today": 1}
+    exhausted, used = _rate_limit_budget_state(a, today, 3)
+    check("under cap (1/3) not exhausted", (not exhausted) and used == 1)
+
+    a = {"rate_limit_budget_day": today, "rate_limit_resumes_today": 3}
+    exhausted, used = _rate_limit_budget_state(a, today, 3)
+    check("at cap (3/3) is exhausted", exhausted and used == 3)
+
+    a = {"rate_limit_budget_day": today, "rate_limit_resumes_today": 5}
+    exhausted, used = _rate_limit_budget_state(a, today, 3)
+    check("over cap (5/3) is exhausted", exhausted and used == 5)
+
+    # Midnight UTC rollover — different day key triggers reset.
+    a = {"rate_limit_budget_day": "2026-05-10", "rate_limit_resumes_today": 99}
+    exhausted, used = _rate_limit_budget_state(a, today, 3)
+    check("midnight UTC rollover resets counter to 0",
+          (not exhausted) and used == 0 and a["rate_limit_budget_day"] == today)
+
+    # No prior day recorded — first observation of the day.
+    a = {}
+    exhausted, used = _rate_limit_budget_state(a, today, 3)
+    check("first observation of the day initializes counter",
+          (not exhausted) and used == 0 and a["rate_limit_budget_day"] == today)
+
+    # ── 4. _should_skip_rate_limit_resume predicate ──────────────────────
+    print("state-aware skip predicate:")
+    in_wait_state = (
+        "Session limit reached. Waiting for the limit to reset at 14:30...\n"
+        "❯"
+    )
+    skip, reason = _should_skip_rate_limit_resume(in_wait_state)
+    check("in wait state → resume", not skip,
+          detail=f"reason={reason!r}")
+
+    past_wait_state = (
+        "user: do something else\n"
+        "assistant: sure, here is the result\n"
+        "❯ "
+    )
+    skip, reason = _should_skip_rate_limit_resume(past_wait_state)
+    check("past wait state → skip", skip and "moved past" in reason,
+          detail=f"reason={reason!r}")
+
+    archived_or_empty = ""
+    skip, reason = _should_skip_rate_limit_resume(archived_or_empty)
+    check("empty scrollback (archived/stopped) → skip",
+          skip and "no scrollback" in reason, detail=f"reason={reason!r}")
+
+    menu_still_showing = (
+        "❯ 1. Stop and wait for limit to reset\n"
+        "  2. Add funds\n  3. Upgrade\n"
+    )
+    skip, reason = _should_skip_rate_limit_resume(menu_still_showing)
+    check("rate-limit menu still showing → skip (premature)",
+          skip and "menu still showing" in reason,
+          detail=f"reason={reason!r}")
+
+    # ── 5. _session_rate_limit_resume_text default + override ────────────
+    print("resume-text helper:")
+    check("default is 'continue'",
+          _session_rate_limit_resume_text({}) == "continue")
+    check("blank value falls back to 'continue'",
+          _session_rate_limit_resume_text({"CC_RATE_LIMIT_RESUME_TEXT": "  "}) == "continue")
+    check("override is returned as-is",
+          _session_rate_limit_resume_text(
+              {"CC_RATE_LIMIT_RESUME_TEXT": "resume polling"}) == "resume polling")
+
+    print()
+    if failures:
+        print(f"FAILED: {len(failures)} test(s): {', '.join(failures)}")
+        return 1
+    print("All rate-limit watchdog selftests passed.")
+    return 0
+
+
 if __name__ == "__main__":
+    if os.environ.get("AMUX_SELFTEST") == "1":
+        sys.exit(_run_selftests())
     main()

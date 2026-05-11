@@ -77,6 +77,83 @@ Parses ANSI-stripped tmux output — no hooks, no patches, no modifications to C
 | `redacted_thinking … cannot be modified` | Restarts + replays last message |
 | Stuck waiting + `CC_AUTO_CONTINUE=1` | Auto-responds based on prompt type |
 | YOLO session + safety prompt | Auto-answers (never fires on model questions) |
+| `/rate-limit-options` (any session, fleet-wide) | Auto-presses 1, records reset time, auto-resumes at reset |
+
+#### Fleet-aware rate-limit handling
+
+When a single Max/Pro account's usage cap is hit, every active Claude Code
+session on that account blocks at the same `/rate-limit-options` prompt
+within seconds. amux's watchdog detects this fleet-wide, presses option 1
+("Stop and wait for limit to reset") on each blocked session, parses the
+reset time from the surrounding scrollback, and steers a resume message
+to every still-parked session once the reset time passes.
+
+The dashboard shows a per-session "Rate-limited until HH:MM" badge plus a
+header pill summarizing the fleet ("N of M rate-limited, reset HH:MM").
+
+**Per-session resume text** — set `CC_RATE_LIMIT_RESUME_TEXT` in
+`~/.amux/sessions/<name>.env` to override the default `continue`. Useful
+for orchestrators or supervisors that need a richer resume prompt:
+
+```bash
+echo 'CC_RATE_LIMIT_RESUME_TEXT="peek workers, surface phase STOPs, resume monitoring"' \
+  >> ~/.amux/sessions/orchestrator.env
+```
+
+**Fleet auto-resume mode** — set `AMUX_RATE_LIMIT_MODE` in
+`~/.amux/server.env`:
+
+| Mode | Behavior |
+|------|----------|
+| `off` | Detect prompt and press 1, but do NOT auto-resume — user must steer manually |
+| `capped` *(default)* | Auto-resume up to `AMUX_RATE_LIMIT_BUDGET` times per session per UTC day (default 3); fall back to manual after the cap |
+| `unlimited` | Auto-resume every time, no cap |
+
+A user who manually intervenes on a rate-limited session (picks option 2/3,
+types something new, archives it) is detected at reset time via a
+state-aware scrollback check, and auto-resume is skipped for that session.
+
+**Manual verification:** install the feature on a development server, then
+inject a fake prompt into a test session's tmux scrollback:
+
+```bash
+tmux send-keys -t amux-rl-test \
+  $'What do you want to do?\n❯ 1. Stop and wait for limit to reset\n  2. Add funds\n  3. Upgrade your plan\nresets 23:59\n' \
+  Enter
+```
+
+Within ~3-15 seconds the dashboard card should show the badge and
+`~/.amux/logs/server.log` should contain `[rate-limit] session=... auto-selected option 1, reset_at=...`.
+
+**Simulation caveats:** `tmux send-keys` lands text at Claude's input
+prompt, not as raw terminal output, and Claude may render or re-render
+it differently than a real rate-limit event. Two pitfalls to be aware of:
+
+- The strict reset-time parser may not match Claude's actual rendering;
+  when that happens the watchdog applies a 5-minute safety fallback so
+  the auto-resume path still exercises end-to-end. Real rate-limit
+  windows are always >1h, so the fallback never causes premature resume.
+- If the menu text persists in Claude's input area without being
+  submitted, the detector will re-fire every ~12 seconds (10s cooldown +
+  3s tick). Send `C-c` to the session after the initial detection if you
+  want to stop the loop while observing badge/pill behavior:
+
+  ```bash
+  tmux send-keys -t amux-rl-test C-c
+  ```
+
+The simulation is a sanity check; the integration test for the real
+rendering can only be done against an actual rate-limit event. If you
+hit one on a development account, capture `tmux capture-pane -p -t
+amux-<session> -S -300` to a file and feed it through the parser:
+
+```bash
+python3 -c "import sys; sys.path.insert(0,'.'); \
+  import importlib.util as iu; \
+  spec = iu.spec_from_file_location('a','amux-server.py'); \
+  m = iu.module_from_spec(spec); spec.loader.exec_module(m); \
+  print(m._parse_rate_limit_reset(open('capture.txt').read()))"
+```
 
 ### Agent-to-Agent Orchestration
 
