@@ -18721,7 +18721,7 @@ function slashAcKeydown(e) {
     e.preventDefault();
     if (getSel() >= 0) slashAcPick(getSel());
     else if (atMode) slashAcPick(0);
-    else el.classList.remove('open');
+    else { el.classList.remove('open'); sendPeekCmd(); }
   } else if (e.key === 'Tab') {
     e.preventDefault();
     slashAcPick(getSel() >= 0 ? getSel() : 0);
