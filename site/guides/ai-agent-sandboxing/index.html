@@ -1,0 +1,756 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="dark">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="theme-color" content="#1e2330">
+  <title>AI Agent Sandboxing in 2026: Docker, E2B, Firecracker, gVisor, Modal &amp; Daytona Compared &mdash; amux</title>
+  <link rel="icon" href="/icon.svg" type="image/svg+xml">
+  <meta name="description" content="How to sandbox AI coding agents in 2026. 8 isolation technologies compared: Docker, E2B, Firecracker microVMs, gVisor, Modal, Daytona, Fly.io, and Podman. Plus built-in sandboxes in Claude Code, Codex CLI, and Cursor.">
+  <meta name="keywords" content="AI agent sandbox, sandbox AI coding agent, AI code execution sandbox, E2B sandbox, Firecracker microVM AI, Docker AI agent, gVisor AI agent, AI agent security, AI agent isolation, sandboxing coding agents, Claude Code sandbox, Codex CLI sandbox, AI agent RCE, secure AI code execution, Modal sandbox, Daytona AI agent">
+  <link rel="canonical" href="https://amux.io/guides/ai-agent-sandboxing/">
+  <meta property="og:title" content="AI Agent Sandboxing in 2026: 8 Isolation Technologies Compared">
+  <meta property="og:description" content="Docker, E2B, Firecracker, gVisor, Modal, Daytona, Fly.io, and Podman — compared on isolation strength, startup speed, and AI agent compatibility.">
+  <meta property="og:url" content="https://amux.io/guides/ai-agent-sandboxing/">
+  <meta property="og:image" content="https://amux.io/og-image.png">
+  <meta property="og:type" content="article">
+  <meta name="twitter:card" content="summary_large_image">
+  <link rel="alternate" type="application/rss+xml" title="amux Blog" href="https://amux.io/blog/rss.xml">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600;700&family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="/style.css">
+
+  <script type="application/ld+json">{
+    "@context":"https://schema.org",
+    "@type":"BreadcrumbList",
+    "itemListElement":[
+      {"@type":"ListItem","position":1,"name":"amux","item":"https://amux.io/"},
+      {"@type":"ListItem","position":2,"name":"Guides","item":"https://amux.io/guides/"},
+      {"@type":"ListItem","position":3,"name":"AI Agent Sandboxing","item":"https://amux.io/guides/ai-agent-sandboxing/"}
+    ]
+  }</script>
+  <script type="application/ld+json">{
+    "@context":"https://schema.org",
+    "@type":"TechArticle",
+    "headline":"AI Agent Sandboxing in 2026: Docker, E2B, Firecracker, gVisor, Modal & Daytona Compared",
+    "description":"How to sandbox AI coding agents in 2026. 8 isolation technologies compared on security strength, startup speed, network control, and agent compatibility.",
+    "author":{"@type":"Organization","name":"amux","url":"https://amux.io"},
+    "publisher":{"@type":"Organization","name":"amux","url":"https://amux.io","logo":{"@type":"ImageObject","url":"https://amux.io/icon.png"}},
+    "datePublished":"2026-05-13",
+    "dateModified":"2026-05-13",
+    "mainEntityOfPage":"https://amux.io/guides/ai-agent-sandboxing/"
+  }</script>
+  <script type="application/ld+json">{
+    "@context":"https://schema.org",
+    "@type":"ItemList",
+    "name":"AI Agent Sandboxing Technologies 2026",
+    "numberOfItems":8,
+    "itemListElement":[
+      {"@type":"ListItem","position":1,"name":"Docker","url":"https://www.docker.com/"},
+      {"@type":"ListItem","position":2,"name":"E2B","url":"https://e2b.dev/"},
+      {"@type":"ListItem","position":3,"name":"Firecracker","url":"https://github.com/firecracker-microvm/firecracker"},
+      {"@type":"ListItem","position":4,"name":"gVisor","url":"https://gvisor.dev/"},
+      {"@type":"ListItem","position":5,"name":"Modal","url":"https://modal.com/"},
+      {"@type":"ListItem","position":6,"name":"Daytona","url":"https://www.daytona.io/"},
+      {"@type":"ListItem","position":7,"name":"Fly.io Machines","url":"https://fly.io/"},
+      {"@type":"ListItem","position":8,"name":"Podman","url":"https://podman.io/"}
+    ]
+  }</script>
+  <script type="application/ld+json">{
+    "@context":"https://schema.org",
+    "@type":"FAQPage",
+    "mainEntity":[
+      {"@type":"Question","name":"Why do AI coding agents need sandboxing?","acceptedAnswer":{"@type":"Answer","text":"AI coding agents execute arbitrary code on your machine — they run terminal commands, install packages, modify files, and make network requests. Without sandboxing, a prompt injection, hallucinated command, or malicious dependency can escalate to full system compromise. Microsoft disclosed CVE-2026-25592 in May 2026 showing how prompt injection in agent frameworks achieved host-level remote code execution. Sandboxing limits the blast radius: even if the agent runs dangerous code, the damage is confined to an isolated environment."}},
+      {"@type":"Question","name":"What is the difference between a container and a microVM for AI agent sandboxing?","acceptedAnswer":{"@type":"Answer","text":"Containers (Docker, Podman) share the host kernel and use namespace isolation — they're fast to start (~1s) but have a larger attack surface because a kernel exploit can escape the container. MicroVMs (Firecracker, E2B) run a separate lightweight kernel inside a hardware-virtualized environment — they take slightly longer to start (~150ms for Firecracker, sub-100ms for E2B) but provide near-VM-level isolation. For most AI agent workloads, containers with gVisor (which intercepts syscalls in userspace) offer a strong middle ground: container-speed startup with VM-like isolation."}},
+      {"@type":"Question","name":"Which sandboxing approach is best for running Claude Code or Codex CLI?","acceptedAnswer":{"@type":"Answer","text":"For Claude Code, the simplest approach is using its built-in permission modes (plan mode restricts file writes, auto mode requires approval for dangerous commands). For stronger isolation, run Claude Code inside a Docker container or E2B sandbox — Claude Code works in any Linux environment. Codex CLI has the strongest built-in sandboxing of any coding agent: OS-level isolation with filesystem restrictions and network disabled by default. For maximum security, run either agent inside a Firecracker microVM via E2B or a gVisor-sandboxed Docker container."}},
+      {"@type":"Question","name":"Can I sandbox AI agents without losing performance?","acceptedAnswer":{"@type":"Answer","text":"Yes. Modern sandboxing technologies have minimal performance overhead. Docker containers add less than 2% CPU overhead. gVisor adds 5-15% overhead on syscall-heavy workloads but near-zero on most coding tasks. Firecracker microVMs boot in under 150ms with less than 5MB memory overhead. E2B sandboxes start in under 100ms. The main performance consideration is not CPU overhead but startup latency — if you're creating a new sandbox for every agent task, sub-second startup matters. E2B, Firecracker, and Docker all achieve this."}},
+      {"@type":"Question","name":"How do I sandbox AI agents running in parallel with amux?","acceptedAnswer":{"@type":"Answer","text":"amux manages parallel AI agent sessions in tmux. For sandboxing, you have several options: (1) Run each agent in its own Docker container with mounted project directories. (2) Use git worktree isolation (amux's built-in conflict detection) to give each agent its own branch and working directory. (3) For maximum isolation, run agents in E2B sandboxes and connect them to amux via the REST API. (4) Combine approaches: worktree isolation for git conflicts plus Docker for filesystem/network isolation. amux's self-healing watchdog works with all these configurations."}},
+      {"@type":"Question","name":"Is Docker secure enough for AI agent sandboxing?","acceptedAnswer":{"@type":"Answer","text":"Docker with default settings provides reasonable isolation for most use cases but is not bulletproof. Container escapes via kernel exploits (CVE-2024-21626, CVE-2019-5736) have been demonstrated. To harden Docker for AI agents: (1) Use --security-opt=no-new-privileges, (2) Drop all capabilities with --cap-drop=ALL, (3) Use --network=none to disable networking, (4) Mount project directories read-only where possible, (5) Run as non-root user, (6) Enable seccomp and AppArmor profiles. For higher-security requirements, add gVisor as the container runtime or switch to Firecracker microVMs."}},
+      {"@type":"Question","name":"What is E2B and why is it popular for AI agent sandboxing?","acceptedAnswer":{"@type":"Answer","text":"E2B (pronounced 'e-to-b') is an open-source platform that provides cloud sandboxes built on Firecracker microVMs specifically designed for AI agent code execution. Each sandbox boots in under 100ms, runs a full Linux environment, and is completely isolated from the host and other sandboxes. E2B is popular because it was purpose-built for AI agents — the API is designed for programmatic sandbox creation, file upload, command execution, and cleanup. It's used by AI coding tools, chatbots, and data analysis agents that need to execute untrusted code safely."}},
+      {"@type":"Question","name":"What are the best free and open-source sandboxing options?","acceptedAnswer":{"@type":"Answer","text":"The best free and open-source options are: Docker (Apache 2.0) — the most widely available, runs everywhere. Podman (Apache 2.0) — rootless containers without a daemon. Firecracker (Apache 2.0) — microVMs with near-VM isolation, requires KVM (Linux only). gVisor (Apache 2.0) — userspace kernel that intercepts syscalls, runs as a Docker/containerd runtime. nsjail (Apache 2.0) — lightweight Linux process isolation. Bubblewrap (LGPL) — unprivileged sandboxing used by Flatpak. E2B Code Interpreter is open-source, though the managed platform is a paid service."}}
+    ]
+  }</script>
+
+  <style>
+    .compare-grid{display:grid;gap:1.5rem;margin:2rem 0}
+    .tool-card{background:var(--surface);border:1px solid var(--border);border-radius:8px;padding:1.6rem}
+    .tool-card h3{margin:0 0 0.3rem;font-size:1.1rem}
+    .tool-card h3 a{color:inherit}
+    .tool-meta{font-size:0.8rem;color:var(--muted);margin-bottom:1rem;display:flex;gap:1rem;flex-wrap:wrap}
+    .tool-meta span{display:inline-flex;align-items:center;gap:0.3rem}
+    .tool-meta a{color:var(--dim);text-decoration:underline;text-decoration-color:var(--border)}
+    .tool-meta a:hover{color:var(--text)}
+    .tool-card p{font-size:0.88rem;color:var(--dim);margin-bottom:1rem;line-height:1.7}
+    .tool-card p a{color:var(--dim);text-decoration:underline;text-decoration-color:var(--border)}
+    .tool-card p a:hover{color:var(--text)}
+    .tool-card ul{font-size:0.88rem;line-height:1.7;padding-left:1.2rem;color:var(--dim)}
+    .tool-card ul li strong{color:var(--text)}
+    .tool-verdict{margin-top:1rem;padding-top:0.8rem;border-top:1px solid var(--border);font-size:0.85rem;color:var(--dim)}
+    .tool-verdict strong{color:var(--amber)}
+    .compare-table-wrap{overflow-x:auto;margin:2rem 0;-webkit-overflow-scrolling:touch}
+    .compare-table{width:100%;border-collapse:collapse;font-size:0.82rem;min-width:1000px}
+    .compare-table th,.compare-table td{padding:0.7rem 0.8rem;text-align:left;border-bottom:1px solid var(--border);white-space:nowrap}
+    .compare-table th{background:var(--surface);color:var(--muted);font-weight:600;text-transform:uppercase;letter-spacing:0.04em;font-size:0.72rem;position:sticky;top:0}
+    .compare-table td:first-child{font-weight:600;color:var(--text)}
+    .compare-table tr:hover td{background:var(--surface)}
+    .y{color:var(--green)}
+    .n{color:var(--red)}
+    .p{color:var(--amber)}
+    .tl{color:var(--text);text-decoration:underline;text-decoration-color:var(--border)}
+    .tl:hover{color:var(--green)}
+    .verdict-box{background:var(--surface);border:1px solid var(--border);border-radius:8px;padding:1.4rem 1.6rem;margin:1.2rem 0}
+    .verdict-box h3{margin:0 0 0.8rem;font-size:1rem}
+    .verdict-box ul{font-size:0.88rem;line-height:1.8;padding-left:1.2rem;color:var(--dim)}
+    .verdict-box ul li strong{color:var(--text)}
+    .axis-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:1rem;margin:1.5rem 0}
+    .axis-card{background:var(--surface);border:1px solid var(--border);border-radius:8px;padding:1.2rem 1.4rem}
+    .axis-card h4{margin:0 0 0.4rem;font-size:0.9rem;color:var(--amber)}
+    .axis-card h4 a{color:inherit;text-decoration:none}
+    .axis-card h4 a:hover{text-decoration:underline}
+    .axis-card p{font-size:0.85rem;color:var(--dim);margin:0;line-height:1.6}
+    .tldr{background:oklch(0.82 0.17 85 / .08);border:1px solid oklch(0.82 0.17 85 / .25);border-radius:8px;padding:1.4rem 1.6rem;margin:2rem 0}
+    .tldr h3{margin:0 0 0.6rem;font-size:0.95rem;color:var(--amber)}
+    .tldr p{font-size:0.88rem;color:var(--dim);margin:0 0 0.3rem;line-height:1.7}
+    .tldr p:last-child{margin:0}
+    .winner-badge{display:inline-block;font-family:var(--font-mono);font-size:10px;font-weight:700;letter-spacing:0.04em;text-transform:uppercase;padding:2px 6px;border-radius:3px;background:oklch(0.80 0.18 145 / .15);color:var(--green);margin-left:0.4rem;vertical-align:middle}
+    .threat-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(250px,1fr));gap:1rem;margin:1.5rem 0}
+    .threat-card{background:var(--surface);border:1px solid oklch(0.65 0.20 25 / .3);border-radius:8px;padding:1.2rem 1.4rem}
+    .threat-card h4{margin:0 0 0.4rem;font-size:0.9rem;color:oklch(0.75 0.17 25)}
+    .threat-card p{font-size:0.85rem;color:var(--dim);margin:0;line-height:1.6}
+    .layer-label{display:inline-block;font-family:var(--font-mono);font-size:0.7rem;font-weight:600;letter-spacing:0.05em;text-transform:uppercase;padding:3px 8px;border-radius:4px;margin-bottom:0.8rem}
+    .layer-container{background:oklch(0.65 0.15 250 / .15);color:oklch(0.75 0.15 250)}
+    .layer-microvm{background:oklch(0.65 0.18 145 / .15);color:oklch(0.75 0.18 145)}
+    .layer-kernel{background:oklch(0.65 0.16 310 / .15);color:oklch(0.75 0.16 310)}
+    .layer-cloud{background:oklch(0.65 0.15 55 / .15);color:oklch(0.75 0.15 55)}
+    .layer-builtin{background:oklch(0.65 0.17 25 / .15);color:oklch(0.75 0.17 25)}
+    .cve-callout{background:oklch(0.65 0.20 25 / .08);border:1px solid oklch(0.65 0.20 25 / .25);border-radius:8px;padding:1.2rem 1.4rem;margin:1.5rem 0}
+    .cve-callout p{font-size:0.88rem;color:var(--dim);margin:0;line-height:1.7}
+    .cve-callout a{color:var(--dim);text-decoration:underline;text-decoration-color:var(--border)}
+    .cve-callout a:hover{color:var(--text)}
+    .cve-callout strong{color:oklch(0.75 0.17 25)}
+    @media(max-width:700px){
+      .axis-grid{grid-template-columns:1fr}
+      .threat-grid{grid-template-columns:1fr}
+    }
+  </style>
+</head>
+<body>
+  <header class="site-header">
+    <a class="logo" href="/">amux</a>
+    <nav>
+      <a href="/docs/" class="hide-mobile">docs</a>
+      <a href="/guides/" class="hide-mobile">guides</a>
+      <a href="/compare/" class="hide-mobile">compare</a>
+      <a href="/demos/" class="hide-mobile">demos</a>
+      <a href="/blog/" class="hide-mobile">blog</a>
+      <a href="https://apps.apple.com/us/app/amux-agent-multiplexer/id6760410435" target="_blank" rel="noopener" class="nav-cta-primary nav-cta">iOS app</a>
+      <a href="https://github.com/mixpeek/amux" target="_blank" rel="noopener" class="nav-cta">GitHub <span class="gh-stars" id="gh-stars"></span></a>
+    </nav>
+  </header>
+  <main>
+    <div class="breadcrumb"><a href="/">amux</a> <span class="sep">&rsaquo;</span> <a href="/guides/">Guides</a> <span class="sep">&rsaquo;</span> <span>AI Agent Sandboxing</span></div>
+
+    <h1>AI Agent Sandboxing in 2026: How to Run Coding Agents Without Risking Your System</h1>
+    <p class="subtitle">AI coding agents execute arbitrary code on your machine &mdash; shell commands, package installs, file modifications, network requests. Without isolation, a prompt injection or hallucinated <code>rm -rf</code> can compromise your entire system. This guide compares 8 sandboxing technologies and the built-in safety models of <a href="https://code.claude.com/" target="_blank" rel="noopener">Claude Code</a>, <a href="https://github.com/openai/codex" target="_blank" rel="noopener">Codex CLI</a>, and <a href="https://cursor.com" target="_blank" rel="noopener">Cursor</a> &mdash; so you can run agents autonomously without staying up all night watching them.</p>
+
+    <!-- ───────── TL;DR ───────── -->
+    <div class="tldr">
+      <h3>Quick picks</h3>
+      <p><strong>Easiest to set up:</strong> <a href="https://www.docker.com/" target="_blank" rel="noopener">Docker</a> &mdash; works everywhere, mount your project read-only, disable networking</p>
+      <p><strong>Purpose-built for AI:</strong> <a href="https://e2b.dev/" target="_blank" rel="noopener">E2B</a> &mdash; Firecracker microVMs with sub-100ms boot, built for agent code execution</p>
+      <p><strong>Strongest isolation:</strong> <a href="https://github.com/firecracker-microvm/firecracker" target="_blank" rel="noopener">Firecracker</a> &mdash; hardware-virtualized microVMs, &lt;5MB overhead, powers AWS Lambda</p>
+      <p><strong>Best for cloud workloads:</strong> <a href="https://modal.com/" target="_blank" rel="noopener">Modal</a> &mdash; serverless sandboxes with gVisor isolation, sub-second cold starts</p>
+      <p><strong>Best built-in sandbox:</strong> <a href="https://github.com/openai/codex" target="_blank" rel="noopener">Codex CLI</a> &mdash; OS-level isolation with network disabled by default</p>
+      <p><strong>Best for agent fleets:</strong> <a href="https://github.com/mixpeek/amux" target="_blank" rel="noopener">amux</a> + <a href="https://www.docker.com/" target="_blank" rel="noopener">Docker</a> &mdash; per-session containers with git worktree isolation and self-healing</p>
+    </div>
+
+    <nav class="toc" style="background:var(--surface);border:1px solid var(--border);border-radius:8px;padding:1.2rem 1.6rem;margin:2rem 0;">
+      <strong style="font-size:0.82rem;text-transform:uppercase;letter-spacing:0.05em;color:var(--muted);">Contents</strong>
+      <ol style="margin:0.6rem 0 0;padding-left:1.2rem;font-size:0.88rem;line-height:2;">
+        <li><a href="#why" style="color:var(--dim);text-decoration:none;">Why AI Agents Need Sandboxing</a></li>
+        <li><a href="#threats" style="color:var(--dim);text-decoration:none;">The Threat Model</a></li>
+        <li><a href="#table" style="color:var(--dim);text-decoration:none;">Master Comparison Table</a></li>
+        <li><a href="#containers" style="color:var(--dim);text-decoration:none;">Container-Based Isolation</a></li>
+        <li><a href="#microvms" style="color:var(--dim);text-decoration:none;">MicroVM-Based Isolation</a></li>
+        <li><a href="#kernel" style="color:var(--dim);text-decoration:none;">Kernel-Level Sandboxing</a></li>
+        <li><a href="#cloud" style="color:var(--dim);text-decoration:none;">Cloud Sandbox Platforms</a></li>
+        <li><a href="#builtin" style="color:var(--dim);text-decoration:none;">Built-In Tool Sandboxes</a></li>
+        <li><a href="#choose" style="color:var(--dim);text-decoration:none;">How to Choose</a></li>
+        <li><a href="#fleet" style="color:var(--dim);text-decoration:none;">Sandboxing Agent Fleets</a></li>
+        <li><a href="#faq" style="color:var(--dim);text-decoration:none;">FAQ</a></li>
+      </ol>
+    </nav>
+
+    <!-- ═══════════════════════════════════════════════════════════════
+         WHY
+         ═══════════════════════════════════════════════════════════════ -->
+    <h2 id="why">Why AI Agents Need Sandboxing</h2>
+    <p>An AI coding agent is not an autocomplete widget. It is an autonomous process that reads files, writes code, runs shell commands, installs packages, and makes HTTP requests. When you run <a href="https://code.claude.com/" target="_blank" rel="noopener">Claude Code</a> in YOLO mode or <a href="https://cursor.com" target="_blank" rel="noopener">Cursor</a>&rsquo;s agent mode, you are giving an LLM access to your terminal with your user-level permissions.</p>
+    <p>Most of the time, this works. But AI agents fail in ways that human developers don&rsquo;t:</p>
+    <ul>
+      <li><strong>Hallucinated commands</strong> &mdash; LLMs occasionally generate destructive commands they &ldquo;think&rdquo; are correct</li>
+      <li><strong>Prompt injection</strong> &mdash; malicious content in files, READMEs, or dependency metadata can hijack an agent&rsquo;s behavior</li>
+      <li><strong>Supply chain attacks</strong> &mdash; agents install packages from <a href="https://www.npmjs.com/" target="_blank" rel="noopener">npm</a>, <a href="https://pypi.org/" target="_blank" rel="noopener">PyPI</a>, and other registries without verifying integrity</li>
+      <li><strong>Data exfiltration</strong> &mdash; an agent with network access can send code, secrets, or credentials to external servers</li>
+    </ul>
+
+    <div class="cve-callout">
+      <p><strong>CVE-2026-25592 &amp; CVE-2026-26030:</strong> On May 7, 2026, <a href="https://www.microsoft.com/en-us/security/blog/2026/05/07/prompts-become-shells-rce-vulnerabilities-ai-agent-frameworks/" target="_blank" rel="noopener">Microsoft disclosed</a> remote code execution vulnerabilities in <a href="https://github.com/microsoft/semantic-kernel" target="_blank" rel="noopener">Semantic Kernel</a>&rsquo;s AI agent framework. Prompt injection escalated to host-level RCE &mdash; the agent&rsquo;s tool-calling mechanism became a shell. This is the threat model that sandboxing addresses: even if the agent is compromised, the damage stays inside the sandbox.</p>
+    </div>
+
+    <!-- ═══════════════════════════════════════════════════════════════
+         THREAT MODEL
+         ═══════════════════════════════════════════════════════════════ -->
+    <h2 id="threats">The Threat Model</h2>
+    <p>What can go wrong when an AI agent runs unsandboxed? Four categories of risk, from most to least common:</p>
+
+    <div class="threat-grid">
+      <div class="threat-card">
+        <h4>Filesystem damage</h4>
+        <p>Agent deletes, overwrites, or corrupts files outside the project. Most common failure mode. Mitigated by mounting project directories read-only or restricting filesystem access to a dedicated working directory.</p>
+      </div>
+      <div class="threat-card">
+        <h4>Network exfiltration</h4>
+        <p>Agent sends source code, <code>.env</code> files, or secrets to an external server via <code>curl</code>, package install scripts, or reverse shells. Mitigated by disabling outbound networking or restricting to an allowlist.</p>
+      </div>
+      <div class="threat-card">
+        <h4>Privilege escalation</h4>
+        <p>Agent exploits host kernel vulnerabilities or misconfigured permissions to escape isolation. Container escapes (<a href="https://nvd.nist.gov/vuln/detail/CVE-2024-21626" target="_blank" rel="noopener">CVE-2024-21626</a>) have been demonstrated. Mitigated by microVMs or userspace kernels like <a href="https://gvisor.dev/" target="_blank" rel="noopener">gVisor</a>.</p>
+      </div>
+      <div class="threat-card">
+        <h4>Resource exhaustion</h4>
+        <p>Agent spawns infinite loops, fills disk, or consumes all memory. Mitigated by cgroup resource limits, timeout enforcement, and <a href="https://github.com/mixpeek/amux" target="_blank" rel="noopener">amux</a>&rsquo;s watchdog which detects and kills stuck sessions.</p>
+      </div>
+    </div>
+
+    <!-- ═══════════════════════════════════════════════════════════════
+         MASTER TABLE
+         ═══════════════════════════════════════════════════════════════ -->
+    <h2 id="table">Master Comparison Table</h2>
+    <p>Eight sandboxing technologies compared on the dimensions that matter for AI coding agents.</p>
+
+    <div class="compare-table-wrap">
+      <table class="compare-table">
+        <thead>
+          <tr>
+            <th>Technology</th>
+            <th>Isolation Level</th>
+            <th>Startup Time</th>
+            <th>Overhead</th>
+            <th>Network Control</th>
+            <th>GPU Support</th>
+            <th>Open Source</th>
+            <th>Runs On</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td><a href="https://www.docker.com/" target="_blank" rel="noopener" class="tl">Docker</a></td>
+            <td class="p">Namespace + cgroup</td>
+            <td class="y">&lt;1s</td>
+            <td class="y">&lt;2% CPU</td>
+            <td class="y">--network=none</td>
+            <td class="y">--gpus flag</td>
+            <td class="y">Apache 2.0</td>
+            <td>Linux, macOS, Win</td>
+          </tr>
+          <tr>
+            <td><a href="https://podman.io/" target="_blank" rel="noopener" class="tl">Podman</a></td>
+            <td class="p">Namespace + rootless</td>
+            <td class="y">&lt;1s</td>
+            <td class="y">&lt;2% CPU</td>
+            <td class="y">--network=none</td>
+            <td class="y">CDI support</td>
+            <td class="y">Apache 2.0</td>
+            <td>Linux, macOS, Win</td>
+          </tr>
+          <tr>
+            <td><a href="https://e2b.dev/" target="_blank" rel="noopener" class="tl">E2B</a> <span class="winner-badge">AI-native</span></td>
+            <td class="y">Firecracker microVM</td>
+            <td class="y">&lt;100ms</td>
+            <td class="y">&lt;5MB RAM</td>
+            <td class="y">Fully isolated</td>
+            <td class="n">Not yet</td>
+            <td class="p">Core OSS</td>
+            <td>Cloud (managed)</td>
+          </tr>
+          <tr>
+            <td><a href="https://github.com/firecracker-microvm/firecracker" target="_blank" rel="noopener" class="tl">Firecracker</a></td>
+            <td class="y">Hardware VM (KVM)</td>
+            <td class="y">&lt;150ms</td>
+            <td class="y">&lt;5MB RAM</td>
+            <td class="y">TAP/tun</td>
+            <td class="n">No</td>
+            <td class="y">Apache 2.0</td>
+            <td>Linux (KVM)</td>
+          </tr>
+          <tr>
+            <td><a href="https://gvisor.dev/" target="_blank" rel="noopener" class="tl">gVisor</a></td>
+            <td class="y">Userspace kernel</td>
+            <td class="y">&lt;1s</td>
+            <td class="p">5&ndash;15% syscalls</td>
+            <td class="y">Netstack</td>
+            <td class="p">Platform-specific</td>
+            <td class="y">Apache 2.0</td>
+            <td>Linux</td>
+          </tr>
+          <tr>
+            <td><a href="https://modal.com/" target="_blank" rel="noopener" class="tl">Modal</a></td>
+            <td class="y">gVisor + containers</td>
+            <td class="y">&lt;1s</td>
+            <td class="y">Managed</td>
+            <td class="y">Configurable</td>
+            <td class="y">Full GPU</td>
+            <td class="n">Proprietary</td>
+            <td>Cloud (managed)</td>
+          </tr>
+          <tr>
+            <td><a href="https://www.daytona.io/" target="_blank" rel="noopener" class="tl">Daytona</a></td>
+            <td class="p">Container-based</td>
+            <td class="p">~5&ndash;15s</td>
+            <td class="y">Low</td>
+            <td class="y">Network policies</td>
+            <td class="y">GPU pass-through</td>
+            <td class="y">Apache 2.0</td>
+            <td>Any cloud / self-hosted</td>
+          </tr>
+          <tr>
+            <td><a href="https://fly.io/" target="_blank" rel="noopener" class="tl">Fly.io Machines</a></td>
+            <td class="y">Firecracker microVM</td>
+            <td class="y">&lt;300ms</td>
+            <td class="y">Low</td>
+            <td class="y">Private networking</td>
+            <td class="y">L40S GPUs</td>
+            <td class="n">Proprietary</td>
+            <td>Cloud (managed)</td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+
+    <!-- ═══════════════════════════════════════════════════════════════
+         CONTAINERS
+         ═══════════════════════════════════════════════════════════════ -->
+    <h2 id="containers">Container-Based Isolation</h2>
+    <p>Containers use Linux namespaces and cgroups to isolate processes. They share the host kernel &mdash; which makes them fast but means a kernel exploit can escape. For most AI agent workloads, a hardened container is sufficient. For untrusted code or red-team scenarios, pair containers with <a href="https://gvisor.dev/" target="_blank" rel="noopener">gVisor</a> or switch to <a href="https://github.com/firecracker-microvm/firecracker" target="_blank" rel="noopener">Firecracker</a>.</p>
+
+    <div class="compare-grid">
+
+      <!-- Docker -->
+      <div class="tool-card">
+        <span class="layer-label layer-container">Container</span>
+        <h3><a href="https://www.docker.com/" target="_blank" rel="noopener">Docker</a></h3>
+        <div class="tool-meta">
+          <span>By <a href="https://www.docker.com/" target="_blank" rel="noopener">Docker Inc.</a></span>
+          <span>Apache 2.0</span>
+          <span>Linux, macOS, Windows</span>
+        </div>
+        <p>The default containerization platform. <a href="https://www.docker.com/" target="_blank" rel="noopener">Docker</a> runs everywhere, integrates with every CI/CD system, and most developers already have it installed. For AI agent sandboxing, the key flags are <code>--network=none</code> (disable networking), <code>--cap-drop=ALL</code> (drop all Linux capabilities), and <code>--read-only</code> (immutable root filesystem).</p>
+        <ul>
+          <li><strong>Hardened agent command:</strong> <code>docker run --rm --network=none --cap-drop=ALL --security-opt=no-new-privileges -v ./project:/work:ro agent-image</code></li>
+          <li><strong>GPU support</strong> &mdash; <code>--gpus</code> flag for NVIDIA GPU pass-through</li>
+          <li><strong>Composable</strong> &mdash; use Docker Compose to define multi-container agent environments</li>
+          <li><strong>Ecosystem</strong> &mdash; integrates with <a href="https://gvisor.dev/" target="_blank" rel="noopener">gVisor</a> as runtime for stronger isolation (<code>--runtime=runsc</code>)</li>
+        </ul>
+        <div class="tool-verdict"><strong>Best for:</strong> teams that want proven, widely-understood isolation without changing their workflow. The default choice for 90% of agent sandboxing needs.</div>
+      </div>
+
+      <!-- Podman -->
+      <div class="tool-card">
+        <span class="layer-label layer-container">Container</span>
+        <h3><a href="https://podman.io/" target="_blank" rel="noopener">Podman</a></h3>
+        <div class="tool-meta">
+          <span>By <a href="https://www.redhat.com/" target="_blank" rel="noopener">Red Hat</a></span>
+          <span>Apache 2.0</span>
+          <span>Linux, macOS, Windows</span>
+        </div>
+        <p>Drop-in <a href="https://www.docker.com/" target="_blank" rel="noopener">Docker</a> replacement with one critical advantage: rootless by default. <a href="https://podman.io/" target="_blank" rel="noopener">Podman</a> runs containers without a daemon and without root privileges, reducing the attack surface. A container escape in rootless <a href="https://podman.io/" target="_blank" rel="noopener">Podman</a> lands in an unprivileged user namespace, not root.</p>
+        <ul>
+          <li><strong>Rootless by default</strong> &mdash; no daemon, no root, smaller attack surface than <a href="https://www.docker.com/" target="_blank" rel="noopener">Docker</a></li>
+          <li><strong>Docker-compatible CLI</strong> &mdash; <code>alias docker=podman</code> works for most commands</li>
+          <li><strong>Pod support</strong> &mdash; group multiple containers (agent + sidecar tools) into a pod</li>
+          <li><strong>Systemd integration</strong> &mdash; generate systemd unit files for long-running agent containers</li>
+        </ul>
+        <div class="tool-verdict"><strong>Best for:</strong> security-conscious teams who want rootless containers without changing their container workflow.</div>
+      </div>
+
+    </div>
+
+    <!-- ═══════════════════════════════════════════════════════════════
+         MICROVMS
+         ═══════════════════════════════════════════════════════════════ -->
+    <h2 id="microvms">MicroVM-Based Isolation</h2>
+    <p>MicroVMs run a separate kernel inside hardware-virtualized environments. Unlike containers, an exploit inside a microVM cannot reach the host kernel &mdash; it only compromises the guest kernel. This is the strongest isolation model available, and it&rsquo;s what <a href="https://aws.amazon.com/lambda/" target="_blank" rel="noopener">AWS Lambda</a> and <a href="https://aws.amazon.com/fargate/" target="_blank" rel="noopener">Fargate</a> use under the hood.</p>
+
+    <div class="compare-grid">
+
+      <!-- E2B -->
+      <div class="tool-card">
+        <span class="layer-label layer-microvm">MicroVM</span>
+        <h3><a href="https://e2b.dev/" target="_blank" rel="noopener">E2B</a> <span class="winner-badge">AI-native</span></h3>
+        <div class="tool-meta">
+          <span>By <a href="https://e2b.dev/" target="_blank" rel="noopener">E2B</a></span>
+          <span>Core: Apache 2.0</span>
+          <span>Cloud-managed</span>
+        </div>
+        <p>Purpose-built for AI agent code execution. <a href="https://e2b.dev/" target="_blank" rel="noopener">E2B</a> provides cloud sandboxes powered by <a href="https://github.com/firecracker-microvm/firecracker" target="_blank" rel="noopener">Firecracker</a> microVMs with an API designed specifically for AI agents: create a sandbox, upload files, execute commands, read output, and tear down &mdash; all in milliseconds. Each sandbox is fully isolated from the host and other sandboxes.</p>
+        <ul>
+          <li><strong>Sub-100ms cold start</strong> &mdash; faster than most container startups</li>
+          <li><strong>Agent-first API</strong> &mdash; Python and TypeScript SDKs designed for agent integration (<code>sandbox.run_code()</code>)</li>
+          <li><strong>Custom templates</strong> &mdash; define base environments with pre-installed languages, frameworks, and tools</li>
+          <li><strong>File system persistence</strong> &mdash; upload project files, execute code, download results</li>
+          <li><strong>Integrations</strong> &mdash; works with <a href="https://code.claude.com/" target="_blank" rel="noopener">Claude Code</a>, <a href="https://github.com/openai/codex" target="_blank" rel="noopener">Codex</a>, <a href="https://langchain.com/" target="_blank" rel="noopener">LangChain</a>, <a href="https://www.crewai.com/" target="_blank" rel="noopener">CrewAI</a>, and any agent framework</li>
+        </ul>
+        <div class="tool-verdict"><strong>Best for:</strong> AI platforms and agents that need to execute untrusted code in the cloud with maximum isolation and minimum setup.</div>
+      </div>
+
+      <!-- Firecracker -->
+      <div class="tool-card">
+        <span class="layer-label layer-microvm">MicroVM</span>
+        <h3><a href="https://github.com/firecracker-microvm/firecracker" target="_blank" rel="noopener">Firecracker</a></h3>
+        <div class="tool-meta">
+          <span>By <a href="https://aws.amazon.com/" target="_blank" rel="noopener">AWS</a></span>
+          <span>Apache 2.0</span>
+          <span>Linux (KVM required)</span>
+        </div>
+        <p>The microVM monitor that powers <a href="https://aws.amazon.com/lambda/" target="_blank" rel="noopener">AWS Lambda</a>. <a href="https://github.com/firecracker-microvm/firecracker" target="_blank" rel="noopener">Firecracker</a> launches a minimal virtual machine with its own kernel in under 150ms with less than 5MB of memory overhead. It uses KVM for hardware virtualization, providing the same isolation guarantees as a full VM at near-container performance. <a href="https://e2b.dev/" target="_blank" rel="noopener">E2B</a> is built on top of Firecracker.</p>
+        <ul>
+          <li><strong>&lt;150ms boot</strong> &mdash; comparable to container startup, far faster than traditional VMs</li>
+          <li><strong>&lt;5MB overhead</strong> &mdash; minimal memory footprint per VM, enabling thousands of concurrent instances</li>
+          <li><strong>Hardware isolation</strong> &mdash; KVM-backed, separate kernel per VM, no shared kernel attack surface</li>
+          <li><strong>Production-proven</strong> &mdash; runs millions of <a href="https://aws.amazon.com/lambda/" target="_blank" rel="noopener">Lambda</a> functions per second at AWS scale</li>
+          <li><strong>Minimalist</strong> &mdash; no BIOS, no USB, no PCI &mdash; reduced attack surface by design</li>
+        </ul>
+        <div class="tool-verdict"><strong>Best for:</strong> self-hosted infrastructure teams who need VM-level isolation with container-speed performance. Requires Linux with KVM.</div>
+      </div>
+
+    </div>
+
+    <!-- ═══════════════════════════════════════════════════════════════
+         KERNEL LEVEL
+         ═══════════════════════════════════════════════════════════════ -->
+    <h2 id="kernel">Kernel-Level Sandboxing</h2>
+    <p><a href="https://gvisor.dev/" target="_blank" rel="noopener">gVisor</a> takes a different approach: instead of running a separate kernel (like <a href="https://github.com/firecracker-microvm/firecracker" target="_blank" rel="noopener">Firecracker</a>) or sharing the host kernel (like <a href="https://www.docker.com/" target="_blank" rel="noopener">Docker</a>), it reimplements ~200 Linux syscalls in a user-space application kernel. This intercepts and validates every system call without hardware virtualization overhead.</p>
+
+    <div class="compare-grid">
+
+      <!-- gVisor -->
+      <div class="tool-card">
+        <span class="layer-label layer-kernel">Kernel Sandbox</span>
+        <h3><a href="https://gvisor.dev/" target="_blank" rel="noopener">gVisor</a></h3>
+        <div class="tool-meta">
+          <span>By <a href="https://google.com/" target="_blank" rel="noopener">Google</a></span>
+          <span>Apache 2.0</span>
+          <span>Linux</span>
+        </div>
+        <p><a href="https://gvisor.dev/" target="_blank" rel="noopener">gVisor</a>&rsquo;s application kernel (<code>runsc</code>) runs as a <a href="https://www.docker.com/" target="_blank" rel="noopener">Docker</a> or <a href="https://containerd.io/" target="_blank" rel="noopener">containerd</a> runtime. Install it, set <code>--runtime=runsc</code>, and every container gets syscall-level isolation. This is what <a href="https://cloud.google.com/run" target="_blank" rel="noopener">Google Cloud Run</a>, <a href="https://modal.com/" target="_blank" rel="noopener">Modal</a>, and other cloud platforms use for multi-tenant isolation.</p>
+        <ul>
+          <li><strong>Syscall interception</strong> &mdash; reimplements ~200 Linux syscalls in userspace Go code</li>
+          <li><strong>Docker-compatible</strong> &mdash; <code>docker run --runtime=runsc</code> &mdash; no code changes to your containers</li>
+          <li><strong>Kernel exploit protection</strong> &mdash; host kernel never sees untrusted application syscalls directly</li>
+          <li><strong>Netstack</strong> &mdash; userspace TCP/IP stack for network isolation without iptables complexity</li>
+          <li><strong>5&ndash;15% overhead</strong> &mdash; mostly on syscall-heavy workloads; near-zero for typical coding tasks</li>
+        </ul>
+        <div class="tool-verdict"><strong>Best for:</strong> teams already using <a href="https://www.docker.com/" target="_blank" rel="noopener">Docker</a> who want stronger isolation without switching to microVMs. The best middle ground between containers and VMs.</div>
+      </div>
+
+    </div>
+
+    <!-- ═══════════════════════════════════════════════════════════════
+         CLOUD PLATFORMS
+         ═══════════════════════════════════════════════════════════════ -->
+    <h2 id="cloud">Cloud Sandbox Platforms</h2>
+    <p>Managed platforms that handle the infrastructure for you &mdash; provision an isolated environment via API, execute agent code, and tear it down. Best for teams that don&rsquo;t want to manage their own container/VM infrastructure.</p>
+
+    <div class="compare-grid">
+
+      <!-- Modal -->
+      <div class="tool-card">
+        <span class="layer-label layer-cloud">Cloud Platform</span>
+        <h3><a href="https://modal.com/" target="_blank" rel="noopener">Modal</a></h3>
+        <div class="tool-meta">
+          <span>By <a href="https://modal.com/" target="_blank" rel="noopener">Modal</a></span>
+          <span>Proprietary (managed)</span>
+          <span>Cloud</span>
+        </div>
+        <p>Serverless cloud platform for AI/ML workloads. <a href="https://modal.com/" target="_blank" rel="noopener">Modal</a>&rsquo;s <a href="https://modal.com/docs/guide/sandboxes" target="_blank" rel="noopener">Sandbox API</a> provides <a href="https://gvisor.dev/" target="_blank" rel="noopener">gVisor</a>-isolated containers that spin up in under a second with programmatic command execution. Unlike <a href="https://e2b.dev/" target="_blank" rel="noopener">E2B</a>, <a href="https://modal.com/" target="_blank" rel="noopener">Modal</a> also supports GPUs &mdash; critical for agents that need to run ML inference or GPU-accelerated builds.</p>
+        <ul>
+          <li><strong>gVisor isolation</strong> &mdash; syscall-level sandboxing for every container</li>
+          <li><strong>GPU support</strong> &mdash; A100, H100, L40S for ML workloads inside sandboxes</li>
+          <li><strong>Python-native API</strong> &mdash; <code>modal.Sandbox.create()</code> with file mounting, command execution, and output streaming</li>
+          <li><strong>Sub-second cold start</strong> &mdash; cached images start near-instantly</li>
+        </ul>
+        <div class="tool-verdict"><strong>Best for:</strong> AI platforms and agents that need GPU-accelerated sandboxes in the cloud with zero infrastructure management.</div>
+      </div>
+
+      <!-- Daytona -->
+      <div class="tool-card">
+        <span class="layer-label layer-cloud">Cloud Platform</span>
+        <h3><a href="https://www.daytona.io/" target="_blank" rel="noopener">Daytona</a></h3>
+        <div class="tool-meta">
+          <span>By <a href="https://www.daytona.io/" target="_blank" rel="noopener">Daytona</a></span>
+          <span><a href="https://github.com/daytonaio/daytona" target="_blank" rel="noopener">GitHub</a></span>
+          <span>Apache 2.0</span>
+        </div>
+        <p>Open-source development environment manager purpose-built for AI agent workflows. <a href="https://www.daytona.io/" target="_blank" rel="noopener">Daytona</a> provides full Linux workspaces with IDE support, pre-configured toolchains, and network isolation. Unlike <a href="https://e2b.dev/" target="_blank" rel="noopener">E2B</a> (which is optimized for short-lived code execution), <a href="https://www.daytona.io/" target="_blank" rel="noopener">Daytona</a> environments persist &mdash; making them better for long-running agents that need to build, test, and iterate.</p>
+        <ul>
+          <li><strong>Persistent environments</strong> &mdash; full dev workspace that survives agent restarts</li>
+          <li><strong>Self-hostable</strong> &mdash; run on your own infrastructure or use the managed cloud</li>
+          <li><strong>IDE integration</strong> &mdash; connect <a href="https://code.visualstudio.com/" target="_blank" rel="noopener">VS Code</a>, <a href="https://www.jetbrains.com/" target="_blank" rel="noopener">JetBrains</a>, or any SSH-compatible editor</li>
+          <li><strong>GPU support</strong> &mdash; GPU pass-through for ML workloads</li>
+          <li><strong>Network policies</strong> &mdash; fine-grained network access control per workspace</li>
+        </ul>
+        <div class="tool-verdict"><strong>Best for:</strong> teams running long-lived AI agents that need persistent, full-featured development environments with network isolation.</div>
+      </div>
+
+      <!-- Fly.io -->
+      <div class="tool-card">
+        <span class="layer-label layer-cloud">Cloud Platform</span>
+        <h3><a href="https://fly.io/" target="_blank" rel="noopener">Fly.io Machines</a></h3>
+        <div class="tool-meta">
+          <span>By <a href="https://fly.io/" target="_blank" rel="noopener">Fly.io</a></span>
+          <span>Proprietary (managed)</span>
+          <span>Cloud</span>
+        </div>
+        <p>Fast-launching <a href="https://github.com/firecracker-microvm/firecracker" target="_blank" rel="noopener">Firecracker</a> microVMs with a REST API. <a href="https://fly.io/" target="_blank" rel="noopener">Fly.io</a> Machines boot in under 300ms, run in 35+ regions worldwide, and provide full VM isolation. The <a href="https://docs.machines.dev/" target="_blank" rel="noopener">Machines API</a> lets you programmatically create, start, stop, and destroy VMs &mdash; ideal for agent sandboxes that need to be provisioned on demand.</p>
+        <ul>
+          <li><strong>Firecracker-based</strong> &mdash; hardware-virtualized microVMs, same isolation as <a href="https://aws.amazon.com/lambda/" target="_blank" rel="noopener">Lambda</a></li>
+          <li><strong>&lt;300ms boot</strong> &mdash; fast enough for on-demand sandbox provisioning</li>
+          <li><strong>REST API</strong> &mdash; <a href="https://docs.machines.dev/" target="_blank" rel="noopener">full API</a> for programmatic VM lifecycle management</li>
+          <li><strong>Global regions</strong> &mdash; deploy sandboxes close to your users/developers</li>
+          <li><strong>GPU support</strong> &mdash; L40S GPUs available for ML/AI workloads</li>
+        </ul>
+        <div class="tool-verdict"><strong>Best for:</strong> teams that want Firecracker-level isolation with a managed API and global deployment &mdash; without running their own KVM infrastructure.</div>
+      </div>
+
+    </div>
+
+    <!-- ═══════════════════════════════════════════════════════════════
+         BUILT-IN TOOL SANDBOXES
+         ═══════════════════════════════════════════════════════════════ -->
+    <h2 id="builtin">Built-In Tool Sandboxes</h2>
+    <p>The major AI coding agents ship with their own permission and isolation models. These aren&rsquo;t full sandboxes &mdash; they&rsquo;re guardrails that control what the agent can do within your existing environment.</p>
+
+    <div class="compare-grid">
+
+      <!-- Codex CLI -->
+      <div class="tool-card">
+        <span class="layer-label layer-builtin">Built-In</span>
+        <h3><a href="https://github.com/openai/codex" target="_blank" rel="noopener">Codex CLI</a> <span class="winner-badge">Strongest</span></h3>
+        <div class="tool-meta">
+          <span>By <a href="https://openai.com/" target="_blank" rel="noopener">OpenAI</a></span>
+          <span><a href="https://developers.openai.com/codex/concepts/sandboxing" target="_blank" rel="noopener">Sandbox docs</a></span>
+        </div>
+        <p>The only mainstream coding agent with OS-level sandboxing built in. <a href="https://github.com/openai/codex" target="_blank" rel="noopener">Codex CLI</a> runs all code execution in an isolated container with the filesystem restricted to the working directory and <strong>network disabled by default</strong>. Three modes: <code>suggest</code> (read-only), <code>auto-edit</code> (file writes, no commands), and <code>full-auto</code> (all permissions).</p>
+        <ul>
+          <li><strong>Network disabled by default</strong> &mdash; no outbound connections unless explicitly enabled</li>
+          <li><strong>Filesystem restricted</strong> &mdash; can only access the project directory</li>
+          <li><strong>OS-level isolation</strong> &mdash; runs in a container sandbox, not just permission checks</li>
+          <li><strong>Three permission modes</strong> &mdash; progressive trust from read-only to full access</li>
+        </ul>
+      </div>
+
+      <!-- Claude Code -->
+      <div class="tool-card">
+        <span class="layer-label layer-builtin">Built-In</span>
+        <h3><a href="https://code.claude.com/" target="_blank" rel="noopener">Claude Code</a></h3>
+        <div class="tool-meta">
+          <span>By <a href="https://anthropic.com/" target="_blank" rel="noopener">Anthropic</a></span>
+          <span><a href="https://www.anthropic.com/engineering/claude-code-sandboxing" target="_blank" rel="noopener">Sandboxing deep-dive</a></span>
+        </div>
+        <p><a href="https://code.claude.com/" target="_blank" rel="noopener">Claude Code</a> uses a permission-based model rather than OS-level sandboxing. In default mode, it asks for approval before running shell commands, editing files outside the project, or making network requests. In <code>--dangerously-skip-permissions</code> (YOLO) mode, all guardrails are removed. <a href="https://code.claude.com/" target="_blank" rel="noopener">Claude Code</a>&rsquo;s <a href="/guides/claude-code-hooks-cookbook/">hooks system</a> lets you add custom validation &mdash; block specific commands, require confirmation for destructive operations, or log all actions.</p>
+        <ul>
+          <li><strong>Permission prompts</strong> &mdash; asks before shell commands, file edits outside project, network access</li>
+          <li><strong>Hooks</strong> &mdash; pre/post tool-use hooks for custom guardrails (e.g., block <code>rm -rf</code>, require <code>git diff</code> review)</li>
+          <li><strong>Allowlists</strong> &mdash; configure trusted commands in <code>.claude/settings.json</code></li>
+          <li><strong>No OS-level sandbox</strong> &mdash; runs with your user permissions; for stronger isolation, run inside <a href="https://www.docker.com/" target="_blank" rel="noopener">Docker</a></li>
+        </ul>
+      </div>
+
+      <!-- Cursor -->
+      <div class="tool-card">
+        <span class="layer-label layer-builtin">Built-In</span>
+        <h3><a href="https://cursor.com" target="_blank" rel="noopener">Cursor</a></h3>
+        <div class="tool-meta">
+          <span>By <a href="https://cursor.com" target="_blank" rel="noopener">Anysphere</a></span>
+        </div>
+        <p><a href="https://cursor.com" target="_blank" rel="noopener">Cursor</a>&rsquo;s agent mode runs terminal commands with user approval by default. Background agents execute in cloud sandboxes (using <a href="https://cursor.com" target="_blank" rel="noopener">Cursor</a>&rsquo;s infrastructure) with isolated filesystems and restricted network access. The YOLO mode bypass lets the agent run commands without confirmation.</p>
+        <ul>
+          <li><strong>Agent mode approval</strong> &mdash; asks before running terminal commands</li>
+          <li><strong>Background agent sandboxes</strong> &mdash; cloud-based isolated environments for background tasks</li>
+          <li><strong>YOLO mode</strong> &mdash; bypass approvals for trusted development workflows</li>
+          <li><strong>Rules system</strong> &mdash; <code>.cursorrules</code> for project-specific behavior constraints</li>
+        </ul>
+      </div>
+
+    </div>
+
+    <!-- ═══════════════════════════════════════════════════════════════
+         HOW TO CHOOSE
+         ═══════════════════════════════════════════════════════════════ -->
+    <h2 id="choose">How to Choose Your Sandboxing Approach</h2>
+    <p>Match the isolation level to your risk tolerance and use case:</p>
+
+    <div class="axis-grid">
+      <div class="axis-card">
+        <h4>Trusted code, local dev</h4>
+        <p>Built-in tool permissions (<a href="https://code.claude.com/" target="_blank" rel="noopener">Claude Code</a> prompts, <a href="https://github.com/openai/codex" target="_blank" rel="noopener">Codex</a> suggest mode) are sufficient. The agent only touches your project, and you&rsquo;re reviewing changes.</p>
+      </div>
+      <div class="axis-card">
+        <h4>Unattended / overnight agents</h4>
+        <p><a href="https://www.docker.com/" target="_blank" rel="noopener">Docker</a> with <code>--network=none</code> and project mounted read-write. Add <a href="https://gvisor.dev/" target="_blank" rel="noopener">gVisor</a> runtime for kernel exploit protection. Pair with <a href="https://github.com/mixpeek/amux" target="_blank" rel="noopener">amux</a>&rsquo;s watchdog for crash recovery.</p>
+      </div>
+      <div class="axis-card">
+        <h4>Untrusted code execution</h4>
+        <p><a href="https://e2b.dev/" target="_blank" rel="noopener">E2B</a> or <a href="https://github.com/firecracker-microvm/firecracker" target="_blank" rel="noopener">Firecracker</a> microVMs. Hardware-level isolation with separate kernels. No shared kernel attack surface.</p>
+      </div>
+      <div class="axis-card">
+        <h4>Cloud / multi-tenant</h4>
+        <p><a href="https://modal.com/" target="_blank" rel="noopener">Modal</a> for GPU workloads. <a href="https://fly.io/" target="_blank" rel="noopener">Fly.io</a> for global distribution. <a href="https://www.daytona.io/" target="_blank" rel="noopener">Daytona</a> for persistent dev environments.</p>
+      </div>
+      <div class="axis-card">
+        <h4>Enterprise compliance</h4>
+        <p><a href="https://github.com/firecracker-microvm/firecracker" target="_blank" rel="noopener">Firecracker</a> or <a href="https://gvisor.dev/" target="_blank" rel="noopener">gVisor</a> on-premises. Both are open-source and self-hosted. Add seccomp, AppArmor, and audit logging for compliance requirements.</p>
+      </div>
+      <div class="axis-card">
+        <h4>Budget-conscious</h4>
+        <p><a href="https://www.docker.com/" target="_blank" rel="noopener">Docker</a> or <a href="https://podman.io/" target="_blank" rel="noopener">Podman</a> (free, runs locally). <a href="https://gvisor.dev/" target="_blank" rel="noopener">gVisor</a> (free, adds isolation to existing containers). All Apache 2.0 licensed.</p>
+      </div>
+    </div>
+
+    <div class="verdict-box">
+      <h3>The recommended stack for most teams</h3>
+      <ul>
+        <li><strong>Layer 1 &mdash; Git isolation:</strong> Each agent gets its own branch or <a href="https://git-scm.com/docs/git-worktree" target="_blank" rel="noopener">git worktree</a> to prevent merge conflicts</li>
+        <li><strong>Layer 2 &mdash; Container:</strong> <a href="https://www.docker.com/" target="_blank" rel="noopener">Docker</a> with <code>--network=none --cap-drop=ALL</code> for filesystem and network isolation</li>
+        <li><strong>Layer 3 &mdash; Runtime hardening:</strong> <a href="https://gvisor.dev/" target="_blank" rel="noopener">gVisor</a> as the container runtime for kernel exploit protection</li>
+        <li><strong>Layer 4 &mdash; Orchestration:</strong> <a href="https://github.com/mixpeek/amux" target="_blank" rel="noopener">amux</a> watchdog for crash recovery, resource monitoring, and session management</li>
+      </ul>
+    </div>
+
+    <!-- ═══════════════════════════════════════════════════════════════
+         FLEET SANDBOXING
+         ═══════════════════════════════════════════════════════════════ -->
+    <h2 id="fleet">Sandboxing Agent Fleets</h2>
+    <p>Running 10&ndash;50 agents in parallel multiplies both productivity and risk. Each agent is an independent process that can fail independently. Sandboxing at fleet scale requires combining isolation with orchestration.</p>
+
+    <div class="tool-card">
+      <h3><a href="https://github.com/mixpeek/amux" target="_blank" rel="noopener">amux</a> + Containerized Agents</h3>
+      <div class="tool-meta">
+        <span>By <a href="https://mixpeek.com" target="_blank" rel="noopener">Mixpeek</a></span>
+        <span>MIT License</span>
+        <span>Free &amp; open source</span>
+      </div>
+      <p><a href="https://github.com/mixpeek/amux" target="_blank" rel="noopener">amux</a> manages fleets of AI agents in <a href="https://github.com/tmux/tmux" target="_blank" rel="noopener">tmux</a> sessions with built-in isolation features. For sandboxing at fleet scale:</p>
+      <ul>
+        <li><strong>Git worktree isolation</strong> &mdash; each agent gets its own branch and working directory via <a href="https://git-scm.com/docs/git-worktree" target="_blank" rel="noopener">git worktrees</a>, preventing merge conflicts between parallel agents</li>
+        <li><strong>Atomic task claiming</strong> &mdash; SQLite-backed kanban board with atomic <code>CLAIM</code> operations ensures no two agents work on the same task</li>
+        <li><strong>Self-healing watchdog</strong> &mdash; detects crashed, stuck, or runaway agents and restarts them automatically</li>
+        <li><strong>Token tracking</strong> &mdash; per-session daily spend monitoring catches cost runaways before they escalate</li>
+        <li><strong>Container integration</strong> &mdash; run each <a href="https://github.com/tmux/tmux" target="_blank" rel="noopener">tmux</a> session inside a <a href="https://www.docker.com/" target="_blank" rel="noopener">Docker</a> container for filesystem/network isolation</li>
+        <li><strong>REST API</strong> &mdash; programmatic control over session lifecycle, enabling automated sandbox provisioning and teardown</li>
+      </ul>
+      <div class="tool-verdict"><strong>The pattern:</strong> <a href="https://github.com/mixpeek/amux" target="_blank" rel="noopener">amux</a> handles orchestration (session management, crash recovery, task coordination). <a href="https://www.docker.com/" target="_blank" rel="noopener">Docker</a> / <a href="https://gvisor.dev/" target="_blank" rel="noopener">gVisor</a> handles isolation. <a href="https://git-scm.com/docs/git-worktree" target="_blank" rel="noopener">Git worktrees</a> handle code isolation. Each layer addresses a different risk.</div>
+    </div>
+
+    <div style="background:var(--surface);border:1px solid var(--border);border-radius:8px;padding:1.6rem;margin:2rem 0;">
+      <h3 style="margin:0 0 0.6rem;">Get started with sandboxed agent fleets</h3>
+      <p style="font-size:0.88rem;color:var(--dim);margin:0 0 1.2rem;line-height:1.7;">Run 50+ <a href="https://code.claude.com/" target="_blank" rel="noopener">Claude Code</a> agents in parallel with self-healing, git isolation, and a web dashboard. Free, open-source, MIT licensed.</p>
+      <pre style="background:var(--bg);border:1px solid var(--border);border-radius:6px;padding:1rem;font-size:0.82rem;overflow-x:auto;margin:0 0 1.2rem;"><code>git clone https://github.com/mixpeek/amux && cd amux && ./install.sh
+amux register myproject --dir ~/Dev/myproject --yolo
+amux start myproject
+amux serve  # open https://localhost:8822</code></pre>
+      <a class="btn btn-primary" href="https://github.com/mixpeek/amux" target="_blank" rel="noopener" style="display:inline-block;background:var(--green);color:var(--bg);padding:0.6rem 1.4rem;border-radius:6px;text-decoration:none;font-weight:600;font-size:0.88rem;">View on GitHub</a>
+    </div>
+
+    <!-- ═══════════════════════════════════════════════════════════════
+         FAQ
+         ═══════════════════════════════════════════════════════════════ -->
+    <h2 id="faq">Frequently Asked Questions</h2>
+
+    <div class="compare-grid">
+      <div class="tool-card">
+        <h3>Why do AI coding agents need sandboxing?</h3>
+        <p>AI agents execute arbitrary code &mdash; shell commands, package installs, file modifications, network requests. Without sandboxing, prompt injection, hallucinated commands, or malicious dependencies can escalate to full system compromise. <a href="https://www.microsoft.com/en-us/security/blog/2026/05/07/prompts-become-shells-rce-vulnerabilities-ai-agent-frameworks/" target="_blank" rel="noopener">Microsoft disclosed CVEs in May 2026</a> showing how prompt injection in <a href="https://github.com/microsoft/semantic-kernel" target="_blank" rel="noopener">Semantic Kernel</a> achieved host-level RCE. Sandboxing confines the blast radius.</p>
+      </div>
+      <div class="tool-card">
+        <h3>Container vs. microVM: what&rsquo;s the difference?</h3>
+        <p>Containers (<a href="https://www.docker.com/" target="_blank" rel="noopener">Docker</a>, <a href="https://podman.io/" target="_blank" rel="noopener">Podman</a>) share the host kernel &mdash; fast startup (&lt;1s) but vulnerable to kernel exploits. MicroVMs (<a href="https://github.com/firecracker-microvm/firecracker" target="_blank" rel="noopener">Firecracker</a>, <a href="https://e2b.dev/" target="_blank" rel="noopener">E2B</a>) run a separate kernel &mdash; slightly slower (&lt;150ms) but immune to kernel-level escapes. <a href="https://gvisor.dev/" target="_blank" rel="noopener">gVisor</a> offers a middle ground: container-speed startup with userspace syscall interception.</p>
+      </div>
+      <div class="tool-card">
+        <h3>Which coding agent has the best built-in sandbox?</h3>
+        <p><a href="https://github.com/openai/codex" target="_blank" rel="noopener">Codex CLI</a> has the strongest built-in sandboxing &mdash; OS-level isolation with network disabled by default. <a href="https://code.claude.com/" target="_blank" rel="noopener">Claude Code</a> uses permission prompts and hooks (not OS-level isolation). <a href="https://cursor.com" target="_blank" rel="noopener">Cursor</a>&rsquo;s background agents run in cloud sandboxes. For maximum security with any tool, add <a href="https://www.docker.com/" target="_blank" rel="noopener">Docker</a> or <a href="https://e2b.dev/" target="_blank" rel="noopener">E2B</a> on top.</p>
+      </div>
+      <div class="tool-card">
+        <h3>Can I sandbox agents without losing performance?</h3>
+        <p>Yes. <a href="https://www.docker.com/" target="_blank" rel="noopener">Docker</a> adds &lt;2% CPU overhead. <a href="https://gvisor.dev/" target="_blank" rel="noopener">gVisor</a> adds 5&ndash;15% on syscall-heavy workloads, near-zero on typical coding tasks. <a href="https://e2b.dev/" target="_blank" rel="noopener">E2B</a> sandboxes boot in under 100ms. <a href="https://github.com/firecracker-microvm/firecracker" target="_blank" rel="noopener">Firecracker</a> microVMs boot in under 150ms with &lt;5MB memory overhead. The main bottleneck is startup latency, not runtime performance.</p>
+      </div>
+      <div class="tool-card">
+        <h3>How do I sandbox agents running in parallel with amux?</h3>
+        <p>Options: (1) <a href="https://git-scm.com/docs/git-worktree" target="_blank" rel="noopener">Git worktree</a> isolation &mdash; each agent gets its own branch. (2) <a href="https://www.docker.com/" target="_blank" rel="noopener">Docker</a> containers per session with mounted project directories. (3) <a href="https://e2b.dev/" target="_blank" rel="noopener">E2B</a> sandboxes connected via the <a href="https://github.com/mixpeek/amux" target="_blank" rel="noopener">amux</a> REST API. (4) Combined: git worktrees + <a href="https://www.docker.com/" target="_blank" rel="noopener">Docker</a> for both code and system isolation. <a href="https://github.com/mixpeek/amux" target="_blank" rel="noopener">amux</a>&rsquo;s watchdog works with all configurations.</p>
+      </div>
+      <div class="tool-card">
+        <h3>Is Docker secure enough?</h3>
+        <p><a href="https://www.docker.com/" target="_blank" rel="noopener">Docker</a> with defaults is reasonable but not bulletproof. Container escapes via kernel exploits have been demonstrated (<a href="https://nvd.nist.gov/vuln/detail/CVE-2024-21626" target="_blank" rel="noopener">CVE-2024-21626</a>). Hardening checklist: <code>--network=none</code>, <code>--cap-drop=ALL</code>, <code>--security-opt=no-new-privileges</code>, non-root user, seccomp/AppArmor profiles. For higher security, add <a href="https://gvisor.dev/" target="_blank" rel="noopener">gVisor</a> as the runtime or switch to <a href="https://github.com/firecracker-microvm/firecracker" target="_blank" rel="noopener">Firecracker</a>.</p>
+      </div>
+      <div class="tool-card">
+        <h3>What is E2B and why is it popular?</h3>
+        <p><a href="https://e2b.dev/" target="_blank" rel="noopener">E2B</a> provides cloud sandboxes built on <a href="https://github.com/firecracker-microvm/firecracker" target="_blank" rel="noopener">Firecracker</a> microVMs, purpose-built for AI agent code execution. Each sandbox boots in under 100ms with full Linux and complete isolation. The API is designed for agents: create, upload, execute, download, tear down. Used by AI coding tools, chatbots, and data analysis agents for safe untrusted code execution.</p>
+      </div>
+      <div class="tool-card">
+        <h3>Best free / open-source sandboxing options?</h3>
+        <p><a href="https://www.docker.com/" target="_blank" rel="noopener">Docker</a> (Apache 2.0) &mdash; the most widely available. <a href="https://podman.io/" target="_blank" rel="noopener">Podman</a> (Apache 2.0) &mdash; rootless by default. <a href="https://github.com/firecracker-microvm/firecracker" target="_blank" rel="noopener">Firecracker</a> (Apache 2.0) &mdash; microVMs, requires KVM. <a href="https://gvisor.dev/" target="_blank" rel="noopener">gVisor</a> (Apache 2.0) &mdash; userspace kernel for containers. <a href="https://github.com/google/nsjail" target="_blank" rel="noopener">nsjail</a> (Apache 2.0) &mdash; lightweight Linux process isolation. All free and self-hostable.</p>
+      </div>
+    </div>
+
+  </main>
+  <footer class="sub-footer">
+    <div class="footer-inner">
+      <div class="footer-top">
+        <div class="footer-brand-col">
+          <a href="/" class="footer-logo">amux</a>
+          <p>Open-source control plane for AI agents.</p>
+        </div>
+        <div class="footer-col">
+          <div class="footer-col-label">Resources</div>
+          <ul>
+            <li><a href="/guides/">Guides</a></li>
+            <li><a href="/blog/">Blog</a></li>
+            <li><a href="/demos/">Demos</a></li>
+            <li><a href="/glossary/">Glossary</a></li>
+            <li><a href="/faq/">FAQ</a></li>
+          </ul>
+        </div>
+        <div class="footer-col">
+          <div class="footer-col-label">Compare</div>
+          <ul>
+            <li><a href="/compare/amux-vs-cursor/">vs Cursor</a></li>
+            <li><a href="/compare/amux-vs-devin/">vs Devin</a></li>
+            <li><a href="/compare/amux-vs-cline/">vs Cline</a></li>
+            <li><a href="/compare/">All comparisons</a></li>
+          </ul>
+        </div>
+        <div class="footer-col">
+          <div class="footer-col-label">More</div>
+          <ul>
+            <li><a href="/use-cases/">Use Cases</a></li>
+            <li><a href="/solutions/">Solutions</a></li>
+            <li><a href="/for/">For your stack</a></li>
+            <li><a href="/changelog/">Changelog</a></li>
+          </ul>
+        </div>
+      </div>
+      <div class="footer-bottom">
+        <span>MIT License. Built by <a href="https://mixpeek.com">Mixpeek</a></span>
+        <div class="footer-bottom-links">
+          <a href="https://apps.apple.com/us/app/amux-agent-multiplexer/id6760410435" target="_blank" rel="noopener">iOS App</a>
+          <a href="https://github.com/mixpeek/amux" target="_blank" rel="noopener">GitHub</a>
+        </div>
+      </div>
+    </div>
+  </footer>
+
+<script>fetch('https://api.github.com/repos/mixpeek/amux').then(function(r){return r.json()}).then(function(d){var el=document.getElementById('gh-stars');if(el&&d.stargazers_count) el.textContent='★ '+d.stargazers_count}).catch(function(){})</script>
+</body>
+</html>
