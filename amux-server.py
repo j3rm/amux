@@ -12524,10 +12524,10 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
     </div>
     <div class="field-group">
       <label class="field-label" style="display:flex;align-items:center;gap:6px;cursor:pointer;">
-        <input type="checkbox" id="create-branch-enabled" checked onchange="_toggleCreateBranch(this.checked)" style="width:auto;margin:0;">
-        Create branch <span class="field-optional">(uncheck to work directly on main)</span>
+        <input type="checkbox" id="create-branch-enabled" onchange="_toggleCreateBranch(this.checked)" style="width:auto;margin:0;">
+        Create branch <span class="field-optional">(check to work on a separate branch)</span>
       </label>
-      <div id="create-branch-wrap" style="margin-top:8px;">
+      <div id="create-branch-wrap" style="margin-top:8px;display:none;">
         <div style="display:flex;gap:6px;align-items:center;">
           <input id="create-branch" type="text" placeholder="session/my-project" autocomplete="off" autocorrect="off" style="flex:1;" oninput="_onBranchInput(this.value);_filterBranches()" onfocus="_loadExistingBranches()">
           <button class="btn" id="create-branch-suggest-btn" onclick="_suggestBranch()" title="Ask Claude to suggest branch names" style="flex-shrink:0;font-size:0.9rem;">✨</button>
@@ -19603,7 +19603,7 @@ async function copyFileContent() {
 
 // ═══════ FILE EXPLORER ═══════
 let _explorePath = '';
-let _exploreShowHidden = false;
+let _exploreShowHidden = true;
 let _exploreLastData = null;  // last loaded dir data (for search re-filter)
 let _filesLastData = null;    // last loaded dir data for Files tab
 let _filesSort = { col: 'name', dir: 1 }; // sort state
@@ -19669,7 +19669,7 @@ function _fileTypeIcon(name, type) {
 // ═══════ FILES TAB (inline directory browser) ═══════
 let _filesPath = '/';
 let _filesCwd = '/';   // saved working directory (persisted on server)
-let _filesShowHidden = false;
+let _filesShowHidden = true;
 
 async function openInFinder() {
   const path = _filesPath || '/';
@@ -19747,12 +19747,17 @@ function _filesRemoveBookmark(idx) {
 document.addEventListener('DOMContentLoaded', _filesRenderBookmarks);
 
 let _exploreSession = null;  // set when explore overlay is opened from a session
-// Load saved working dir from server prefs
+// Load saved working dir + hidden files pref from server prefs
 (async () => {
   try {
-    const r = await fetch(API + '/api/prefs?key=files_cwd');
-    const d = await r.json();
-    if (d.value) { _filesPath = d.value; _filesCwd = d.value; }
+    const [r1, r2] = await Promise.all([
+      fetch(API + '/api/prefs?key=files_cwd'),
+      fetch(API + '/api/prefs?key=files_show_hidden'),
+    ]);
+    const d1 = await r1.json();
+    if (d1.value) { _filesPath = d1.value; _filesCwd = d1.value; }
+    const d2 = await r2.json();
+    if (d2.value !== undefined && d2.value !== null) _filesShowHidden = d2.value === '1';
   } catch(e) {}
 })();
 function setFilesCwd() {
@@ -19780,6 +19785,7 @@ function toggleFilesHidden() {
   if (lbl) lbl.textContent = _filesShowHidden ? 'Hide hidden files' : 'Show hidden files';
   const oitem = document.getElementById('files-hidden-oitem');
   if (oitem) oitem.classList.toggle('active', _filesShowHidden);
+  fetch(API + '/api/prefs', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({key:'files_show_hidden', value:_filesShowHidden?'1':'0'})}).catch(()=>{});
   loadFiles(_filesPath);
 }
 function _filesOverflowToggle() {
@@ -20462,7 +20468,7 @@ function openCreate() {
   document.getElementById('create-prompt').value = '';
   document.getElementById('create-branch').value = '';
   document.getElementById('create-branch-enabled').checked = false;
-  document.getElementById('create-branch-wrap').style.display = '';
+  document.getElementById('create-branch-wrap').style.display = 'none';
   document.getElementById('create-branch-suggestions').style.display = 'none';
   document.getElementById('create-branch-suggestions').innerHTML = '';
   document.getElementById('create-branch-existing').style.display = 'none';
