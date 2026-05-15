@@ -9109,7 +9109,7 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
   .peek-highlight.current { background: rgba(210,153,34,0.85); color: #000; }
 
   /* Peek overlay — flush to bottom, cmd bar handles its own safe-area padding */
-  #peek-overlay { padding-bottom: 0; }
+  #peek-overlay { padding-bottom: 0 !important; bottom: 0 !important; }
 
   /* Peek focus mode — collapse everything above terminal on mobile */
   #peek-overlay.peek-focus .overlay-header,
@@ -17019,7 +17019,7 @@ function _syncPeekOverlayToVisualViewport() {
   const ov = document.getElementById('peek-overlay');
   if (!window.visualViewport || !ov) return;
   const vv = window.visualViewport;
-  const constrained = vv.height < window.innerHeight - 1 || vv.offsetTop > 1;
+  const constrained = vv.height < window.innerHeight * 0.95 || vv.offsetTop > 5;
   if (constrained) {
     ov.style.top = vv.offsetTop + 'px';
     ov.style.height = vv.height + 'px';
@@ -17028,7 +17028,7 @@ function _syncPeekOverlayToVisualViewport() {
   } else {
     ov.style.top = '';
     ov.style.height = '';
-    ov.style.bottom = '';
+    ov.style.bottom = '0';
     ov.style.paddingBottom = '';
   }
   ov.classList.toggle('vv-compact', constrained && vv.height < window.innerHeight * 0.7);
