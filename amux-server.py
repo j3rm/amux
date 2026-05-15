@@ -1559,7 +1559,7 @@ def _claude_ui_visible(clean_output: str) -> bool:
             continue
         if "\u23f5\u23f5" in l or "bypass permissions" in ls or "plan mode" in ls:
             return True
-        if "codex" in ls and ("full-auto" in ls or "suggest" in ls or "workspace" in ls or "approval" in ls or "-a never" in ls):
+        if "codex" in ls and ("full-auto" in ls or "dangerously-bypass" in ls or "suggest" in ls or "workspace" in ls or "approval" in ls or "-a never" in ls):
             return True
     # Check last 12 lines for an active spinner (dingbat-prefixed status line
     # like "\u273b Crunched for 1m 38s"). Exclude U+276F \u276f \u2014 that's Claude's input
@@ -5737,8 +5737,8 @@ def start_session(name: str, extra_flags: str = "", _skip_conv_id: bool = False)
                 cmd += f" {_shell_quote_flags(extra_flags)}"
             if "--model" not in cmd and "-m " not in cmd:
                 cmd += " --model gpt-5.5"
-            if "--full-auto" not in cmd and "-a " not in cmd:
-                cmd += " --full-auto" if _codex_yolo else " -a never"
+            if "--dangerously-bypass-approvals-and-sandbox" not in cmd and "-a " not in cmd:
+                cmd += " --dangerously-bypass-approvals-and-sandbox" if _codex_yolo else " -a never"
             # If work_dir is a subdirectory of a git repo, add the repo root
             # so codex's sandbox can write to .git (needed for commits)
             if "--add-dir" not in cmd:
