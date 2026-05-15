@@ -9108,6 +9108,9 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
   .peek-highlight { background: rgba(210,153,34,0.35); color: #fff; border-radius: 2px; }
   .peek-highlight.current { background: rgba(210,153,34,0.85); color: #000; }
 
+  /* Peek overlay — flush to bottom, cmd bar handles its own safe-area padding */
+  #peek-overlay { padding-bottom: 0; }
+
   /* Peek focus mode — collapse everything above terminal on mobile */
   #peek-overlay.peek-focus .overlay-header,
   #peek-overlay.peek-focus .peek-tabs,
@@ -9131,7 +9134,7 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
   .overlay.vv-compact .peek-attach-btn { min-height: 30px; }
 
   /* Peek command bar */
-  .peek-cmd-bar { flex-shrink: 0; }
+  .peek-cmd-bar { flex-shrink: 0; padding-bottom: max(8px, env(safe-area-inset-bottom)); }
   .peek-cmd-toggle {
     width: 100%; padding: 6px; border: none; background: transparent;
     color: var(--dim); font-size: 0.75rem; cursor: pointer; text-align: center;
@@ -9224,10 +9227,10 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
   .peek-memory-editor { display: none; flex-direction: column; flex: 1; min-height: 0;
     padding: 14px 16px; gap: 10px; overflow: hidden; }
   .peek-memory-editor.active { display: flex; }
-  .peek-git-panel { display: none; flex-direction: column; flex: 1; min-height: 0; overflow: hidden; }
+  .peek-git-panel { display: none; flex-direction: column; flex: 1; min-height: 0; overflow: hidden; padding-bottom: max(8px, env(safe-area-inset-bottom)); }
   .peek-git-panel.active { display: flex; }
   /* Commits panel */
-  .peek-commits-panel { display: none; flex-direction: column; flex: 1; min-height: 0; overflow: hidden; }
+  .peek-commits-panel { display: none; flex-direction: column; flex: 1; min-height: 0; overflow: hidden; padding-bottom: max(8px, env(safe-area-inset-bottom)); }
   .peek-commits-panel.active { display: flex; }
   .commits-layout { display: flex; flex: 1; min-height: 0; overflow: hidden; }
   .commits-sidebar { width: 280px; flex-shrink: 0; border-right: 1px solid var(--border); overflow-y: auto; background: var(--bg); }
@@ -9308,7 +9311,7 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
     padding: 10px 12px; resize: none; outline: none; box-sizing: border-box; min-height: 0; }
   .peek-memory-textarea:focus { border-color: var(--accent); box-shadow: 0 0 0 3px rgba(88,166,255,0.12); }
   /* Tasks panel */
-  .peek-tasks-panel { display: none; flex-direction: column; flex: 1; min-height: 0; padding: 14px 16px; gap: 10px; }
+  .peek-tasks-panel { display: none; flex-direction: column; flex: 1; min-height: 0; padding: 14px 16px; padding-bottom: max(14px, env(safe-area-inset-bottom)); gap: 10px; }
   .peek-tasks-panel.active { display: flex; }
   #peek-notes-panel.active { display: flex; padding: 0; gap: 0; }
   #peek-notes-panel .notes-sidebar { min-width: 160px; width: 220px; }
