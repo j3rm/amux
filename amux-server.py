@@ -192,6 +192,21 @@ _S3_CAL_URL = (
     f"https://{_S3_BUCKET}.s3.{_S3_REGION}.amazonaws.com/{_S3_KEY}"
     if _S3_BUCKET else ""
 )
+# Rate-limit watchdog (fleet-level). Mode controls auto-resume behavior:
+#   off       — detect the prompt and press 1, but do NOT auto-resume.
+#   capped    — auto-resume up to AMUX_RATE_LIMIT_BUDGET times per session
+#               per UTC day; after the budget is exhausted, fall back to
+#               manual (user must steer resume themselves).
+#   unlimited — auto-resume every time, no cap.
+_RATE_LIMIT_MODE = (os.environ.get("AMUX_RATE_LIMIT_MODE", "capped") or "capped").lower()
+if _RATE_LIMIT_MODE not in ("off", "capped", "unlimited"):
+    _RATE_LIMIT_MODE = "capped"
+try:
+    _RATE_LIMIT_BUDGET = int(os.environ.get("AMUX_RATE_LIMIT_BUDGET", "3"))
+except ValueError:
+    _RATE_LIMIT_BUDGET = 3
+if _RATE_LIMIT_BUDGET < 0:
+    _RATE_LIMIT_BUDGET = 0
 MAX_LOG_BYTES = 10 * 1024 * 1024  # 10MB per session
 SERVER_LOG = CC_LOGS / "server.log"
 _server_log_lock = threading.Lock()
@@ -1166,7 +1181,8 @@ def is_running(session: str) -> bool:
             ["tmux", "list-sessions", "-F", "#{session_name}"],
             capture_output=True, text=True,
         )
-        if tmux_name(session) not in r.stdout.splitlines():
+        tmux_sess = tmux_name(session)
+        if tmux_sess not in r.stdout.splitlines():
             return False
         # Tmux exists -- check if Claude is actually running (not at shell prompt)
         output = tmux_capture(session, 10)
@@ -1174,6 +1190,22 @@ def is_running(session: str) -> bool:
             return True  # empty output but tmux exists -- assume running (startup)
         if _at_shell_prompt(output):
             return False
+        # Terminal-based check can false-positive when Claude's status bar text
+        # leaks into scrollback after a SIGKILL. Cross-check by verifying the
+        # shell actually has a child process (Claude).
+        try:
+            r_pp = subprocess.run(
+                ["tmux", "list-panes", "-t", tmux_sess, "-F", "#{pane_pid}"],
+                capture_output=True, text=True, timeout=5)
+            if r_pp.returncode == 0 and r_pp.stdout.strip():
+                shell_pid = r_pp.stdout.strip().split("\n")[0]
+                r_ch = subprocess.run(
+                    ["pgrep", "-P", shell_pid],
+                    capture_output=True, text=True, timeout=5)
+                if not r_ch.stdout.strip():
+                    return False
+        except Exception:
+            pass
         return True
     except FileNotFoundError:
         return False
@@ -1420,6 +1452,478 @@ def _yolo_loop():
         pass
 
 
+# ── Rate-limit watchdog ──────────────────────────────────────────────────────
+# Claude Code's /rate-limit-options prompt appears when a subscription usage
+# cap is hit. The three-option menu lets the user either wait, add funds, or
+# upgrade. amux auto-selects option 1 ("Stop and wait for limit to reset")
+# fleet-wide — when one Max account hits its cap, every active session blocks
+# at once, and pressing 1 by hand on each is impractical at scale.
+#
+# Unlike _YOLO_PROMPTS, this runs regardless of --dangerously-skip-permissions:
+# the rate-limit prompt blocks every session equally, YOLO or not.
+_RATE_LIMIT_PROMPTS = [
+    # Anchor on the option-1 menu line. The "1." prefix confirms it's a menu
+    # render and not the phrase appearing in arbitrary scrollback noise; the
+    # full phrase ("Stop and wait for limit to reset") is distinctive enough
+    # that we don't need to also match options 2/3, which keeps the pattern
+    # robust if Anthropic relabels the other choices.
+    (re.compile(r'1\.\s*stop and wait for limit to reset', re.IGNORECASE), '1'),
+]
+
+
+# Reset-time formats Claude Code is known to render in scrollback when a
+# session hits the cap. We scan the surrounding tmux capture for any of them
+# and convert to a unix timestamp so the watchdog can schedule an auto-resume.
+_RATE_LIMIT_RESET_PATTERNS = [
+    # "resets HH:MM" — wall-clock; today if still ahead, otherwise tomorrow.
+    re.compile(r'resets?\s+(?:at\s+)?(\d{1,2}):(\d{2})\s*(am|pm)?\b', re.IGNORECASE),
+    # "Resets in: 4 hours 23 minutes" — relative duration (hours and/or minutes).
+    re.compile(r'resets?\s+in[:\s]+(?:(\d+)\s*h(?:ours?)?)?\s*(?:(\d+)\s*m(?:in(?:ute)?s?)?)?', re.IGNORECASE),
+    # "reset on April 15, 2026 at 10:49 PM" — absolute date + 12h time.
+    re.compile(
+        r'reset(?:s|\s+on)?\s+(?:on\s+)?'
+        r'(jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|jul(?:y)?|'
+        r'aug(?:ust)?|sep(?:tember)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)'
+        r'\s+(\d{1,2}),?\s+(\d{4})\s+at\s+(\d{1,2}):(\d{2})\s*(am|pm)',
+        re.IGNORECASE,
+    ),
+]
+
+_MONTHS = {
+    'jan': 1, 'feb': 2, 'mar': 3, 'apr': 4, 'may': 5, 'jun': 6,
+    'jul': 7, 'aug': 8, 'sep': 9, 'oct': 10, 'nov': 11, 'dec': 12,
+}
+
+# Permissive fallback: any bare HH:MM (optionally with AM/PM) in the
+# scrollback when none of the labeled patterns above match. Real-world
+# Claude Code rendering wraps lines and may push the "resets" label off
+# the same line as the time, so a bare-time scan within the menu's
+# scrollback window is more robust than requiring the strict label.
+# A >=5min-in-the-future filter blocks pickup of the current-time status
+# bar (e.g. "✦ 14:23 thinking…").
+_RATE_LIMIT_BARE_TIME_RE = re.compile(r'\b(\d{1,2}):(\d{2})\s*(am|pm)?\b', re.IGNORECASE)
+
+
+def _parse_rate_limit_reset(text: str, now: float | None = None) -> int | None:
+    """Scan text for a Claude Code rate-limit reset time and return a unix ts.
+
+    Recognizes three TUI formats:
+      - "resets HH:MM" or "resets at H:MM PM" (today, or tomorrow if past)
+      - "Resets in: <N> hours <M> minutes" (relative duration)
+      - "reset on <Month> <D>, <YYYY> at <H:MM AM/PM>" (absolute)
+
+    Returns None if no recognizable format is present. The wall-clock formats
+    are interpreted in the server's local time zone — Claude Code renders
+    them in the user's local zone, and amux runs on the same machine.
+    """
+    import datetime as _dt
+    if not text:
+        return None
+    now_ts = now if now is not None else time.time()
+    base = _dt.datetime.fromtimestamp(now_ts)
+    # Defensive ANSI strip — the handler already cleans the capture before
+    # calling this, but selftests and any future direct caller may pass
+    # raw tmux output.
+    text = _STRIP_ANSI.sub("", text)
+
+    # 1. "Resets in: N hours M minutes" — check first so it doesn't get
+    #    swallowed by the bare "resets HH:MM" pattern (no colon → no match
+    #    anyway, but ordering keeps intent obvious).
+    m = _RATE_LIMIT_RESET_PATTERNS[1].search(text)
+    if m and (m.group(1) or m.group(2)):
+        hours = int(m.group(1) or 0)
+        minutes = int(m.group(2) or 0)
+        if hours or minutes:
+            return int(now_ts + hours * 3600 + minutes * 60)
+
+    # 2. Absolute "reset on April 15, 2026 at 10:49 PM"
+    m = _RATE_LIMIT_RESET_PATTERNS[2].search(text)
+    if m:
+        month_key = m.group(1).lower()[:3]
+        month = _MONTHS.get(month_key)
+        day = int(m.group(2))
+        year = int(m.group(3))
+        hour = int(m.group(4))
+        minute = int(m.group(5))
+        meridiem = m.group(6).lower()
+        if meridiem == 'pm' and hour != 12:
+            hour += 12
+        elif meridiem == 'am' and hour == 12:
+            hour = 0
+        if month and 0 <= hour < 24 and 0 <= minute < 60:
+            try:
+                dt = _dt.datetime(year, month, day, hour, minute)
+                return int(dt.timestamp())
+            except ValueError:
+                pass
+
+    # 3. "resets HH:MM" — today if still ahead, otherwise tomorrow.
+    m = _RATE_LIMIT_RESET_PATTERNS[0].search(text)
+    if m:
+        hour = int(m.group(1))
+        minute = int(m.group(2))
+        meridiem = (m.group(3) or '').lower()
+        if meridiem == 'pm' and hour != 12:
+            hour += 12
+        elif meridiem == 'am' and hour == 12:
+            hour = 0
+        if 0 <= hour < 24 and 0 <= minute < 60:
+            candidate = base.replace(hour=hour, minute=minute, second=0, microsecond=0)
+            if candidate.timestamp() <= now_ts:
+                candidate += _dt.timedelta(days=1)
+            return int(candidate.timestamp())
+
+    # 4. Bare-time fallback. Take the earliest HH:MM at least 5 minutes
+    # in the future — that filters out current-time status-bar renders
+    # like "✦ 14:23 thinking…" while still catching a "resets 14:30"
+    # that landed on its own wrapped line away from the "resets" word.
+    candidates = []
+    for mm in _RATE_LIMIT_BARE_TIME_RE.finditer(text):
+        hour = int(mm.group(1))
+        minute = int(mm.group(2))
+        meridiem = (mm.group(3) or '').lower()
+        if meridiem == 'pm' and hour != 12:
+            hour += 12
+        elif meridiem == 'am' and hour == 12:
+            hour = 0
+        if not (0 <= hour < 24 and 0 <= minute < 60):
+            continue
+        cand = base.replace(hour=hour, minute=minute, second=0, microsecond=0)
+        if cand.timestamp() <= now_ts:
+            cand += _dt.timedelta(days=1)
+        if cand.timestamp() - now_ts < 300:
+            continue  # too close to now — likely the current-time bar
+        candidates.append(int(cand.timestamp()))
+    if candidates:
+        return min(candidates)
+
+    return None
+
+
+_RATE_LIMIT_DEFAULT_RESUME_TEXT = "continue"
+
+
+def _should_skip_rate_limit_resume(scrollback_clean: str) -> tuple[bool, str]:
+    """Decide whether auto-resume should be skipped at reset time.
+
+    The watchdog parks a session by pressing 1 on the /rate-limit-options
+    menu, which leaves Claude Code displaying a "waiting for limit to reset"
+    confirmation. If at reset time the scrollback still shows that wait
+    state, auto-resume is safe — we're just unblocking what we parked.
+
+    If the user intervened (picked option 2 or 3 from the menu, typed
+    something new, or otherwise moved past the wait state), the session
+    is no longer parked where we left it, and steering "continue" would
+    fight the user. Skip in that case.
+
+    Returns (skip, reason). Reason is a short human-readable string for
+    the log line; empty string when skip is False.
+    """
+    if not scrollback_clean:
+        # Empty scrollback usually means the session is stopped/archived
+        # and we can't see anything; safest to skip rather than risk
+        # poking a session in an unknown state.
+        return True, "no scrollback to inspect"
+    tail = "\n".join(scrollback_clean.splitlines()[-30:]).lower()
+    # Positive markers: Claude is still parked at the wait-for-reset state.
+    if "waiting for" in tail and "reset" in tail:
+        return False, ""
+    if "stop and wait for limit to reset" in tail:
+        # User hasn't pressed anything yet — pattern was matched but
+        # the menu is still showing. Resume is premature; the auto-respond
+        # cycle will press 1 first.
+        return True, "rate-limit menu still showing"
+    if "rate-limit-options" in tail or "rate limit" in tail:
+        # Some related rate-limit UI is still on screen; user may be
+        # interacting with it.
+        return False, ""
+    # No rate-limit-related markers anywhere in the tail → the session
+    # has moved on. Don't fight the user.
+    return True, "session moved past wait-state"
+
+
+def _session_rate_limit_resume_text(cfg: dict) -> str:
+    """Return the per-session text to steer at rate-limit reset.
+
+    Read from CC_RATE_LIMIT_RESUME_TEXT in ~/.amux/sessions/<name>.env
+    (defaults to "continue"). Lets supervisors/orchestrators use a
+    richer resume prompt than a bare "continue".
+    """
+    val = cfg.get("CC_RATE_LIMIT_RESUME_TEXT", "").strip()
+    return val or _RATE_LIMIT_DEFAULT_RESUME_TEXT
+
+
+# Seconds between consecutive auto-responses for the same session. The
+# scheduler tick is 3s, so with a 10s cooldown the watchdog fires no more
+# than once every ~12s on a persistently-matching prompt (matches the
+# behavior observed during manual verification). Real Claude clears the
+# menu immediately after pressing 1, so this loop only matters when the
+# menu text persists in scrollback — typically a simulation artifact
+# where the prompt was injected via tmux send-keys without Enter and
+# stayed pinned in the input area.
+_RATE_LIMIT_COOLDOWN = 10
+_RATE_LIMIT_DRIFT_TOLERANCE = 30  # seconds; reset times closer than this are "in sync"
+_RATE_LIMIT_DRIFT_LOG_COOLDOWN = 600  # don't repeat the drift warning more than every 10 min
+_rate_limit_last_responded: dict = {}
+_rate_limit_last_drift_log: float = 0.0
+
+
+def _rate_limit_budget_state(actions: dict, today_utc: str, budget: int) -> tuple[bool, int]:
+    """Return (exhausted, used) for a session's auto-resume budget.
+
+    Resets the per-session counter when the stored UTC day differs from
+    today_utc (mutating `actions`). Isolated here so the selftest can verify
+    midnight-rollover behavior without spinning up tmux.
+    """
+    if actions.get("rate_limit_budget_day") != today_utc:
+        actions["rate_limit_budget_day"] = today_utc
+        actions["rate_limit_resumes_today"] = 0
+    used = int(actions.get("rate_limit_resumes_today", 0))
+    return (used >= budget, used)
+
+
+def _check_rate_limit_drift():
+    """Warn if reset times parsed across the fleet disagree by >30s.
+
+    The subscription cap is account-wide, so every blocked session should
+    have the same reset time (within ~seconds). Larger drift usually means
+    our parser misread one session's scrollback. Log-only — no behavior
+    change.
+    """
+    global _rate_limit_last_drift_log
+    now = time.time()
+    if now - _rate_limit_last_drift_log < _RATE_LIMIT_DRIFT_LOG_COOLDOWN:
+        return
+    future_resets = []
+    for name, actions in _session_auto_actions.items():
+        r = actions.get("rate_limit_reset_at")
+        if r and r > now:
+            future_resets.append((name, r))
+    if len(future_resets) < 2:
+        return
+    spread = max(r for _, r in future_resets) - min(r for _, r in future_resets)
+    if spread > _RATE_LIMIT_DRIFT_TOLERANCE:
+        _rate_limit_last_drift_log = now
+        sample = ", ".join(f"{n}={r}" for n, r in sorted(future_resets)[:6])
+        slog(f"[rate-limit] reset-time drift across fleet: spread={int(spread)}s "
+             f"across {len(future_resets)} sessions ({sample}). "
+             f"Likely a parser mis-read — verify by peeking each session.")
+
+
+def _rate_limit_auto_respond():
+    """Detect /rate-limit-options across the fleet and press 1 on each match.
+
+    Mirrors _yolo_auto_respond's shape but runs on every running session
+    regardless of YOLO mode — the rate-limit prompt blocks YOLO and
+    non-YOLO sessions equally. On match, presses 1 to park the session
+    at "waiting for limit to reset", parses the reset time from the
+    surrounding scrollback, and stores it in _session_auto_actions[name]
+    for the auto-resume scheduler to pick up later.
+    """
+    now = time.time()
+    running_sessions = set()
+    try:
+        r = subprocess.run(
+            ["tmux", "list-sessions", "-F", "#{session_name}"],
+            capture_output=True, text=True, timeout=5,
+        )
+        if r.returncode == 0:
+            running_sessions = set(r.stdout.splitlines())
+    except Exception:
+        return  # tmux not available
+    for f in CC_SESSIONS.glob("*.env"):
+        name = f.stem
+        try:
+            if tmux_name(name) not in running_sessions:
+                continue
+            if now - _rate_limit_last_responded.get(name, 0) < _RATE_LIMIT_COOLDOWN:
+                continue
+            # 300 lines is enough to catch the reset-time line, which can
+            # appear ~10-20 lines above the menu in Claude Code's UI.
+            raw = tmux_capture(name, 300)
+            if not raw:
+                continue
+            clean = _STRIP_ANSI.sub("", raw)
+            matched_idx = -1
+            for i, (pattern, response) in enumerate(_RATE_LIMIT_PROMPTS):
+                if pattern.search(clean):
+                    send_text(name, response)
+                    _rate_limit_last_responded[name] = now
+                    matched_idx = i
+                    break
+            if matched_idx < 0:
+                continue
+            actions = _session_auto_actions.setdefault(name, {})
+            parsed_reset = _parse_rate_limit_reset(clean, now=now)
+            actions["rate_limit_last_event_ts"] = int(now)
+            if parsed_reset:
+                reset_at = parsed_reset
+                actions["rate_limit_reset_at"] = reset_at
+                actions.pop("rate_limit_reset_at_fallback", None)
+                slog(f"[rate-limit] session={name} auto-selected option 1, "
+                     f"reset_at={reset_at}")
+            else:
+                # Couldn't parse a reset time. Apply a 5-minute safety
+                # fallback so auto-resume still has a target — Claude
+                # Code's actual rate-limit windows are always much
+                # longer (1h+, usually 5h), so 5 min cannot trigger a
+                # premature resume. If the prompt is still showing
+                # when the fallback fires, the auto-respond loop will
+                # press 1 again and the auto-resume's state-aware skip
+                # predicate prevents fighting.
+                reset_at = int(now + 300)
+                actions["rate_limit_reset_at"] = reset_at
+                actions["rate_limit_reset_at_fallback"] = True
+                # Log a sanitized snippet so future debugging can see
+                # what the parser actually saw. Single-line, capped
+                # length so the server log stays readable.
+                snippet = " | ".join(
+                    l.strip() for l in clean.splitlines()[-12:] if l.strip()
+                )[:240]
+                slog(f"[rate-limit] session={name} auto-selected option 1, "
+                     f"reset_at={reset_at} (5min safety fallback — no "
+                     f"parseable reset time in scrollback); "
+                     f"tail-snippet={snippet!r}")
+            _posthog_emit("rate_limit_auto_handled", {
+                "session": name,
+                "pattern_idx": matched_idx,
+                "reset_at": reset_at,
+                "fallback": not parsed_reset,
+            }, distinct_id=name)
+        except Exception:
+            pass
+
+
+def _rate_limit_auto_resume():
+    """Steer the configured resume text to sessions whose reset time passed.
+
+    Respects fleet mode (off/capped/unlimited) and per-session budget.
+    Calls the state-aware skip predicate to avoid fighting a user who
+    moved past the wait-for-reset state.
+    """
+    import datetime as _dt
+    now = time.time()
+    today_utc = _dt.datetime.utcnow().strftime("%Y-%m-%d")
+
+    # Collect candidates first so we can bail out cheaply when nothing's due.
+    candidates = [name for name, actions in list(_session_auto_actions.items())
+                  if actions.get("rate_limit_reset_at")
+                  and actions["rate_limit_reset_at"] <= now]
+    if not candidates:
+        return
+
+    if _RATE_LIMIT_MODE == "off":
+        # Clear stale reset-at so the badge doesn't linger past reset time.
+        # The user has to steer the resume themselves in this mode.
+        for name in candidates:
+            actions = _session_auto_actions.get(name) or {}
+            actions.pop("rate_limit_reset_at", None)
+            slog(f"[rate-limit] session={name} reset time reached; "
+                 f"auto-resume disabled (mode=off)")
+        return
+
+    running_sessions = set()
+    try:
+        r = subprocess.run(
+            ["tmux", "list-sessions", "-F", "#{session_name}"],
+            capture_output=True, text=True, timeout=5,
+        )
+        if r.returncode == 0:
+            running_sessions = set(r.stdout.splitlines())
+    except Exception:
+        return
+
+    resumed = 0
+    skipped = 0
+    budget_exhausted = 0
+    for name in candidates:
+        actions = _session_auto_actions.get(name) or {}
+        env_file = CC_SESSIONS / f"{name}.env"
+        if not env_file.exists():
+            actions.pop("rate_limit_reset_at", None)
+            continue
+        try:
+            cfg = parse_env_file(env_file)
+
+            # Always run the rollover so the per-day counter doesn't grow
+            # forever in unlimited mode; second return is ignored unless
+            # we're enforcing a cap.
+            exhausted, used = _rate_limit_budget_state(
+                actions, today_utc, _RATE_LIMIT_BUDGET)
+            if _RATE_LIMIT_MODE == "capped":
+                if exhausted:
+                    actions.pop("rate_limit_reset_at", None)
+                    budget_exhausted += 1
+                    slog(f"[rate-limit] session={name} auto-resume budget "
+                         f"exhausted ({used}/{_RATE_LIMIT_BUDGET}), "
+                         f"falling back to manual")
+                    _push_alert("rate_limit_manual", name,
+                                f"Rate-limit auto-resume budget exhausted for "
+                                f"'{name}' — manual resume required")
+                    continue
+
+            scrollback = ""
+            if tmux_name(name) in running_sessions:
+                raw = tmux_capture(name, 100)
+                if raw:
+                    scrollback = _STRIP_ANSI.sub("", raw)
+            skip, reason = _should_skip_rate_limit_resume(scrollback)
+            if skip:
+                actions.pop("rate_limit_reset_at", None)
+                skipped += 1
+                slog(f"[rate-limit] session={name} auto-resume skipped at "
+                     f"reset, {reason}")
+                continue
+
+            resume_text = _session_rate_limit_resume_text(cfg)
+            ok, err = send_text(name, resume_text)
+            if ok:
+                actions.pop("rate_limit_reset_at", None)
+                actions["rate_limit_resumes_today"] = \
+                    actions.get("rate_limit_resumes_today", 0) + 1
+                resumed += 1
+                slog(f"[rate-limit] session={name} resumed at reset, "
+                     f"resume_text={resume_text!r}")
+                _posthog_emit("rate_limit_auto_resumed", {
+                    "session": name,
+                    "resume_text": resume_text,
+                }, distinct_id=name)
+            else:
+                # Don't clear reset_at — next tick will retry. Send can fail
+                # transiently if tmux is briefly unavailable.
+                slog(f"[rate-limit] session={name} resume send failed: {err}")
+        except Exception as e:
+            slog(f"[rate-limit] session={name} resume error: {e}")
+
+    total = resumed + skipped + budget_exhausted
+    if total > 1:
+        slog(f"[rate-limit] fleet resume: {resumed} sessions steered, "
+             f"{skipped} skipped (user intervened), "
+             f"{budget_exhausted} budget-exhausted")
+        _posthog_emit("rate_limit_fleet_event", {
+            "kind": "resume",
+            "resumed": resumed,
+            "skipped": skipped,
+            "budget_exhausted": budget_exhausted,
+        })
+
+
+def _rate_limit_loop():
+    """Single rate-limit watchdog tick: detect prompts, handle reset."""
+    try:
+        _rate_limit_auto_respond()
+    except Exception:
+        pass
+    try:
+        _check_rate_limit_drift()
+    except Exception:
+        pass
+    try:
+        _rate_limit_auto_resume()
+    except Exception:
+        pass
+
+
 def _push_alert(alert_type: str, session: str, message: str):
     """Enqueue an alert to be streamed to all SSE clients."""
     global _sse_alerts
@@ -1641,6 +2145,8 @@ def _snapshot_all_sessions():
             running_sessions = set(r.stdout.splitlines())
     except Exception:
         return
+    _HIBERNATE_IDLE_SECS = 1800  # 30 minutes
+    _HIBERNATE_STARTUP_GRACE = 600  # 10 min grace after server restart
     for f in CC_SESSIONS.glob("*.env"):
         name = f.stem
         if tmux_name(name) not in running_sessions:
@@ -1695,16 +2201,38 @@ def _snapshot_all_sessions():
             # Sessions using browser screenshots fill context with large images
             # until Claude errors with "image exceeds the dimension limit".
             # The session gets stuck at the prompt unable to proceed.
-            if (_ac_enabled and
-                    "image" in clean_recent and "exceeds the dimension limit" in clean_recent and
+            # Guard: only fire once per error. The error text persists in tmux
+            # scrollback after compaction, so without this flag the handler
+            # re-triggers every 120s and floods /compact commands.
+            _img_dim_error = "image" in clean and "exceeds the dimension limit" in clean
+            if (_img_dim_error and not actions.get("img_dim_compacted") and
                     now - actions.get("last_compact", 0) > 120):
                 actions["last_compact"] = now
-                _update_meta(name, last_compact=now)
+                actions["img_dim_compacted"] = True
                 actions["post_compact_continue"] = True
                 threading.Thread(target=backup_session_jsonl, args=(name, "pre_compact_img"), daemon=True).start()
                 send_text(name, "/compact")
                 _push_alert("auto_compact", name,
                             f"Auto-compacted '{name}' — image dimension limit hit")
+            elif not _img_dim_error:
+                actions.pop("img_dim_compacted", None)
+
+            # ── 1c. Reactive: corrupted image in context → auto-compact ────
+            # When a malformed image (truncated PNG, SVG-as-PNG, etc.) gets
+            # loaded via Read, every subsequent API call fails with "Could not
+            # process image". The bad image is stuck in conversation history.
+            _img_corrupt_error = "Could not process image" in clean
+            if (_img_corrupt_error and not actions.get("img_corrupt_compacted") and
+                    now - actions.get("last_compact", 0) > 120):
+                actions["last_compact"] = now
+                actions["img_corrupt_compacted"] = True
+                actions["post_compact_continue"] = True
+                threading.Thread(target=backup_session_jsonl, args=(name, "pre_compact_img"), daemon=True).start()
+                send_text(name, "/compact")
+                _push_alert("auto_compact", name,
+                            f"Auto-compacted '{name}' — corrupted image in context")
+            elif not _img_corrupt_error:
+                actions.pop("img_corrupt_compacted", None)
 
             # ── 1c. Reactive: stuck in --resume/--name picker → accept top item ─
             # Press Enter to select the most-recent session (top of list).
@@ -1800,27 +2328,85 @@ def _snapshot_all_sessions():
             # ── 4. Auto-restart: Claude exited to shell prompt ────────────────
             # Triggered when: CC_AUTO_CONTINUE=1 AND terminal shows a bare shell
             # prompt (no Claude UI). Rate-limited to once per 90s.
-            # Also fires after server restart (last_claude_alive unknown) if
-            # "Killed" appears in scrollback — handles OOM kills across restarts.
+            # Always restarts when CC_AUTO_CONTINUE=1 — the user explicitly opted
+            # in. Previous logic required last_alive < 600s which failed after
+            # macOS hibernate (hours-long SIGKILL gaps).
             if _at_shell_prompt(clean) and not actions.get("restarting") and not actions.get("hibernated"):
                 cfg_ar = parse_env_file(f)
                 if cfg_ar.get("CC_ARCHIVED") == "1":
                     pass  # don't auto-restart archived sessions
                 elif cfg_ar.get("CC_AUTO_CONTINUE") in ("1", "true", "yes"):
-                    last_alive = actions.get("last_claude_alive", 0)
                     last_restart = actions.get("last_auto_restart", 0)
-                    _killed_in_output = "Killed" in clean and ("$ " in clean or "%" in clean)
-                    if ((last_alive and now - last_alive < 600) or
-                            (not last_alive and _killed_in_output)) and now - last_restart > 90:
+                    if now - last_restart > 90:
                         actions["restarting"] = True
                         actions["last_auto_restart"] = now
                         def _do_restart(sname=name, _actions=actions):
                             time.sleep(3)
                             start_session(sname)
+                            # Wait for Claude UI to appear before clearing
+                            # restarting flag — prevents auto-continue from
+                            # sending text into the resume picker.
+                            for _w in range(30):
+                                time.sleep(1)
+                                _o = tmux_capture(sname, 10)
+                                if _o and _claude_ui_visible(_o):
+                                    break
                             _actions.pop("restarting", None)
                         threading.Thread(target=_do_restart, daemon=True).start()
                         _push_alert("auto_restart", name,
                                     f"Claude exited in '{name}' — auto-restarting")
+
+            # ── 4b. Process-level auto-restart: Claude killed (OOM / signal 9) ──
+            # _at_shell_prompt can miss exits when Claude's status bar text leaks
+            # into scrollback after a kill (causes _claude_ui_visible to
+            # false-positive). This check doesn't parse terminal output — it
+            # directly checks if the shell's child process is gone.
+            # During startup grace, only fire if stale Claude UI is visible
+            # (killed mid-operation) — skip bare shell prompts (legitimately hibernated).
+            _in_grace = now - _server_start_time < _HIBERNATE_STARTUP_GRACE
+            _ui_stale = _claude_ui_visible(clean) and not _at_resume_picker(clean)
+            if (not actions.get("restarting") and not actions.get("hibernated")
+                    and (not _in_grace or _ui_stale)):
+                cfg_pl = parse_env_file(f)
+                if (cfg_pl.get("CC_AUTO_CONTINUE") in ("1", "true", "yes")
+                        and cfg_pl.get("CC_ARCHIVED") != "1"):
+                    last_restart = actions.get("last_auto_restart", 0)
+                    if now - last_restart > 90:
+                        try:
+                            tmux_sess = tmux_name(name)
+                            r_pp = subprocess.run(
+                                ["tmux", "list-panes", "-t", tmux_sess, "-F", "#{pane_pid}"],
+                                capture_output=True, text=True, timeout=5)
+                            if r_pp.returncode == 0 and r_pp.stdout.strip():
+                                shell_pid = r_pp.stdout.strip().split("\n")[0]
+                                r_ch = subprocess.run(
+                                    ["pgrep", "-P", shell_pid],
+                                    capture_output=True, text=True, timeout=5)
+                                if not r_ch.stdout.strip():
+                                    # Shell has no children — Claude is gone
+                                    slog(f"[4b] {name}: no child process under shell PID {shell_pid} — triggering OOM restart")
+                                    actions["restarting"] = True
+                                    actions["last_auto_restart"] = now
+                                    def _do_oom_restart(sname=name, _actions=actions):
+                                        time.sleep(3)
+                                        start_session(sname)
+                                        for _w in range(30):
+                                            time.sleep(1)
+                                            _o = tmux_capture(sname, 10)
+                                            if _o and _claude_ui_visible(_o):
+                                                break
+                                        _actions.pop("restarting", None)
+                                    threading.Thread(target=_do_oom_restart, daemon=True).start()
+                                    _push_alert("auto_restart", name,
+                                                f"Claude process died in '{name}' (OOM/signal) — auto-restarting")
+                                else:
+                                    pass  # Claude child exists — healthy
+                            else:
+                                slog(f"[4b] {name}: list-panes failed rc={r_pp.returncode}")
+                        except Exception as e:
+                            slog(f"[4b] {name}: exception: {e}")
+                    else:
+                        pass  # rate-limited (restart < 90s ago)
 
             # ── 5. Stale process reaper: restart idle sessions with old Claude processes
             # Claude processes lose their API connection after ~2 days but stay running.
@@ -1867,6 +2453,11 @@ def _snapshot_all_sessions():
                                                 _hard_kill_claude(sname)
                                                 time.sleep(3)
                                                 start_session(sname)
+                                                for _w in range(30):
+                                                    time.sleep(1)
+                                                    _o = tmux_capture(sname, 10)
+                                                    if _o and _claude_ui_visible(_o):
+                                                        break
                                                 _actions.pop("restarting", None)
                                             threading.Thread(target=_do_stale_restart, daemon=True).start()
                                             _push_alert("auto_restart", name,
@@ -1878,18 +2469,16 @@ def _snapshot_all_sessions():
             # ── 6. Auto-hibernate: stop idle sessions to reclaim memory ───────
             # Claude processes hold 400-750 MB each even when idle. With 30+
             # sessions that causes OOM kills. Stop Claude in sessions idle for
-            # >2 hours. The conversation is preserved — next send auto-wakes it.
-            _HIBERNATE_IDLE_SECS = 7200  # 2 hours
-            _HIBERNATE_STARTUP_GRACE = 600  # 10 min after server restart
+            # >30 min. The conversation is preserved — next send auto-wakes it.
+            # Auto-continue sessions are hibernated too — auto-restart already
+            # checks `not actions.get("hibernated")` so they won't bounce back.
+            # They wake on next send_text (which calls start_session).
             if status == "idle" and not actions.get("restarting"):
                 cfg_hib = parse_env_file(f)
                 _skip_hibernate = (
-                    # Don't hibernate auto-continue sessions — auto-restart
-                    # would just bring them back, creating a pointless cycle
-                    cfg_hib.get("CC_AUTO_CONTINUE") in ("1", "true", "yes")
                     # Grace period after server restart: actions dict is wiped
                     # so we can't tell if a session was recently active
-                    or now - _server_start_time < _HIBERNATE_STARTUP_GRACE
+                    now - _server_start_time < _HIBERNATE_STARTUP_GRACE
                 )
                 if not _skip_hibernate:
                     last_activity = actions.get("last_claude_alive", 0)
@@ -1899,7 +2488,6 @@ def _snapshot_all_sessions():
                     if last_real_activity and now - last_real_activity > _HIBERNATE_IDLE_SECS:
                         if not actions.get("hibernated"):
                             actions["hibernated"] = True
-                            slog(f"[watchdog] {name}: hibernating (idle {int(now - last_real_activity)//60}min)")
                             def _do_hibernate(sname=name):
                                 try:
                                     stop_session(sname)
@@ -1912,7 +2500,8 @@ def _snapshot_all_sessions():
             # After we trigger auto-compact, the session goes idle at the ❯ prompt.
             # status == 'idle' doesn't trigger normal auto-continue, so we handle
             # it explicitly: wait ≥30s for compact to finish, then send a continue msg.
-            if actions.get("post_compact_continue") and status in ("idle", "waiting"):
+            # Skip if mid-restart — text would land in resume picker search box.
+            if actions.get("post_compact_continue") and status in ("idle", "waiting") and not actions.get("restarting"):
                 elapsed_since_compact = now - actions.get("last_compact", 0)
                 if elapsed_since_compact > 30 and now - actions.get("last_auto_continue", 0) > 60:
                     cfg_ac = parse_env_file(f)
@@ -1923,7 +2512,7 @@ def _snapshot_all_sessions():
                     _push_alert("auto_continue", name,
                                 f"Post-compact auto-continue sent to '{name}'")
 
-            if status == "waiting":
+            if status == "waiting" and not actions.get("restarting"):
                 if "ac_waiting_since" not in actions:
                     # First snapshot seeing this session waiting — remember it
                     actions["ac_waiting_since"] = now
@@ -4852,6 +5441,7 @@ def list_sessions() -> list:
             "archived": cfg.get("CC_ARCHIVED", "") == "1",
             "auto_continue": cfg.get("CC_AUTO_CONTINUE") in ("1", "true", "yes"),
             "steering": _steering_queue.get(name, []),
+            "rate_limited_until": _session_auto_actions.get(name, {}).get("rate_limit_reset_at", 0),
             "tags": [t.strip() for t in cfg.get("CC_TAGS", "").split(",") if t.strip()],
             "flags": cfg.get("CC_FLAGS", ""),
             "creator": cfg.get("CC_CREATOR", ""),
@@ -5720,25 +6310,27 @@ def start_session(name: str, extra_flags: str = "", _skip_conv_id: bool = False)
         if provider == "codex":
             # Resume from stored codex session ID (per amux session), not by cwd
             codex_session_id = meta.get("codex_session_id", "")
-            if codex_session_id:
-                cmd = f"codex resume {codex_session_id}"
-                print(f"[start] {name}: codex resume {codex_session_id}")
-            else:
-                cmd = "codex"
-                print(f"[start] {name}: codex fresh start")
             _codex_yolo = False
             _codex_flags = flags or ""
             if any(f in _codex_flags for f in ('--dangerously-skip-permissions', '--dangerously-bypass-approvals-and-sandbox')):
                 _codex_yolo = True
                 _codex_flags = re.sub(r'--dangerously-(?:skip-permissions|bypass-approvals-and-sandbox)\s*', '', _codex_flags).strip()
+            # Build options list first (before session ID for `codex resume`)
+            _codex_opts = ""
             if _codex_flags:
-                cmd += f" {_shell_quote_flags(_codex_flags)}"
+                _codex_opts += f" {_shell_quote_flags(_codex_flags)}"
             if extra_flags:
-                cmd += f" {_shell_quote_flags(extra_flags)}"
-            if "--model" not in cmd and "-m " not in cmd:
-                cmd += " --model gpt-5.5"
-            if "--dangerously-bypass-approvals-and-sandbox" not in cmd and "-a " not in cmd:
-                cmd += " --dangerously-bypass-approvals-and-sandbox" if _codex_yolo else " -a never"
+                _codex_opts += f" {_shell_quote_flags(extra_flags)}"
+            if "--model" not in _codex_opts and "-m " not in _codex_opts:
+                _codex_opts += " --model gpt-5.5"
+            if "--dangerously-bypass" not in _codex_opts and "-a " not in _codex_opts:
+                _codex_opts += " --dangerously-bypass-approvals-and-sandbox" if _codex_yolo else " -a never"
+            if codex_session_id:
+                cmd = f"codex resume{_codex_opts} {codex_session_id}"
+                print(f"[start] {name}: codex resume {codex_session_id}")
+            else:
+                cmd = f"codex{_codex_opts}"
+                print(f"[start] {name}: codex fresh start")
             # If work_dir is a subdirectory of a git repo, add the repo root
             # so codex's sandbox can write to .git (needed for commits)
             if "--add-dir" not in cmd:
@@ -6266,6 +6858,17 @@ def _get_send_lock(name: str) -> threading.Lock:
 _auto_waking = set()
 
 def send_text(name: str, text: str) -> tuple[bool, str]:
+    # Don't send into a resume picker — text lands in the search box and
+    # corrupts session selection. Wait for Claude to finish loading.
+    _actions_st = _session_auto_actions.get(name, {})
+    if _actions_st.get("restarting"):
+        return False, "session is restarting"
+    try:
+        _out_st = tmux_capture(name, 10)
+        if _out_st and _at_resume_picker(_out_st):
+            return False, "session is in resume picker"
+    except Exception:
+        pass
     if not is_running(name):
         if name in _auto_waking:
             return False, "not running"
@@ -7516,13 +8119,13 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
   .report-last-refresh { font-size:0.72rem; color:var(--dim); }
   .report-total { font-weight:600; }
   @keyframes spin { to { transform: rotate(360deg); } }
-  html { font-size: 16px; }
+  html { font-size: 16px; overflow-x: clip; }
   body {
     font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif;
     background: var(--bg); color: var(--text);
     min-height: 100vh; min-height: 100dvh;
-    max-width: 100vw; overflow-x: hidden;
-    padding: 16px; padding-top: max(16px, env(safe-area-inset-top));
+    width: 100%; overflow-x: clip;
+    padding: 16px; padding-top: max(16px, var(--chrome-tab-h, 0px), env(safe-area-inset-top));
     padding-bottom: max(16px, env(safe-area-inset-bottom));
     -webkit-text-size-adjust: 100%;
   }
@@ -7818,7 +8421,7 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
 
   /* Peek overlay */
   .overlay {
-    position: fixed; top: var(--chrome-tab-h, 0px); left: 0; right: 0; bottom: 0;
+    position: fixed; top: max(var(--chrome-tab-h, 0px), env(safe-area-inset-top, 0px)); left: 0; right: 0; bottom: 0;
     background: var(--bg);
     z-index: 100; flex-direction: column;
   }
@@ -7878,7 +8481,7 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
 
   /* File preview overlay */
   .file-overlay {
-    display: none; position: fixed; top: var(--chrome-tab-h, 0px); left: 0; right: 0; bottom: 0; background: rgba(1,4,9,0.92);
+    display: none; position: fixed; top: max(var(--chrome-tab-h, 0px), env(safe-area-inset-top, 0px)); left: 0; right: 0; bottom: 0; background: rgba(1,4,9,0.92);
     z-index: 200; flex-direction: column;
     padding: 12px; padding-top: max(12px, env(safe-area-inset-top));
   }
@@ -8226,7 +8829,7 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
   /* Create session */
   .header-row {
     display: flex; align-items: center; justify-content: space-between;
-    position: sticky; top: var(--chrome-tab-h, 0px); z-index: 40;
+    position: sticky; top: max(var(--chrome-tab-h, 0px), env(safe-area-inset-top, 0px)); z-index: 40;
     background: var(--bg); padding: 12px 16px;
     margin: 0 -16px 0 -16px;
     border-bottom: 1px solid var(--border);
@@ -8255,6 +8858,17 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
   .btn-active .active-count {
     font-variant-numeric: tabular-nums;
   }
+  /* Fleet-wide rate-limit indicator */
+  .btn-rate-limit {
+    display: none; font-size: 0.78rem; padding: 6px 10px; border-radius: 8px;
+    border: 1px solid rgba(248,81,73,0.45);
+    background: rgba(248,81,73,0.12); color: #f85149;
+    cursor: pointer; font-weight: 500; min-height: 40px;
+    align-items: center; gap: 6px; font-variant-numeric: tabular-nums;
+    -webkit-tap-highlight-color: transparent;
+  }
+  .btn-rate-limit.show { display: flex; }
+  .btn-rate-limit:active { background: rgba(248,81,73,0.22); }
   .active-dropdown {
     display: none; position: fixed; top: auto; right: 16px;
     background: var(--card); border: 1px solid var(--border);
@@ -8604,6 +9218,9 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
   .peek-highlight { background: rgba(210,153,34,0.35); color: #fff; border-radius: 2px; }
   .peek-highlight.current { background: rgba(210,153,34,0.85); color: #000; }
 
+  /* Peek overlay — flush to bottom, cmd bar handles its own safe-area padding */
+  #peek-overlay { padding-bottom: 0 !important; bottom: 0 !important; }
+
   /* Peek focus mode — collapse everything above terminal on mobile */
   #peek-overlay.peek-focus .overlay-header,
   #peek-overlay.peek-focus .peek-tabs,
@@ -8627,7 +9244,7 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
   .overlay.vv-compact .peek-attach-btn { min-height: 30px; }
 
   /* Peek command bar */
-  .peek-cmd-bar { flex-shrink: 0; }
+  .peek-cmd-bar { flex-shrink: 0; padding-bottom: max(8px, env(safe-area-inset-bottom)); }
   .peek-cmd-toggle {
     width: 100%; padding: 6px; border: none; background: transparent;
     color: var(--dim); font-size: 0.75rem; cursor: pointer; text-align: center;
@@ -8640,6 +9257,11 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
   .peek-cmd-row.open { display: flex; min-width: 0; overflow: visible; position: relative; }
   .peek-cmd-row .send-input { font-size: 0.85rem; padding: 8px 12px; min-height: 36px; min-width: 0; }
   .peek-cmd-row .btn { min-height: 36px; padding: 6px 12px; font-size: 0.82rem; }
+  .send-split { display: flex; flex-shrink: 0; }
+  .send-split-main { border-radius: 8px 0 0 8px; padding-right: 8px; }
+  .send-split-arrow { border-radius: 0 8px 8px 0; padding: 6px 6px; border-left: 1px solid rgba(255,255,255,0.2); font-size: 0.55rem; min-width: 28px; min-height: 44px; }
+  .send-split.mode-queue .send-split-main { background: var(--purple, #a371f7); border-color: var(--purple, #a371f7); }
+  .send-split.mode-queue .send-split-arrow { background: var(--purple, #a371f7); border-color: var(--purple, #a371f7); }
   /* File attachment bar */
   .peek-attach-bar { display: none; gap: 6px; padding: 4px 0 2px; flex-wrap: wrap; width: 100%; }
   .peek-attach-bar.has-files { display: flex; }
@@ -8715,10 +9337,10 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
   .peek-memory-editor { display: none; flex-direction: column; flex: 1; min-height: 0;
     padding: 14px 16px; gap: 10px; overflow: hidden; }
   .peek-memory-editor.active { display: flex; }
-  .peek-git-panel { display: none; flex-direction: column; flex: 1; min-height: 0; overflow: hidden; }
+  .peek-git-panel { display: none; flex-direction: column; flex: 1; min-height: 0; overflow: hidden; padding-bottom: max(8px, env(safe-area-inset-bottom)); }
   .peek-git-panel.active { display: flex; }
   /* Commits panel */
-  .peek-commits-panel { display: none; flex-direction: column; flex: 1; min-height: 0; overflow: hidden; }
+  .peek-commits-panel { display: none; flex-direction: column; flex: 1; min-height: 0; overflow: hidden; padding-bottom: max(8px, env(safe-area-inset-bottom)); }
   .peek-commits-panel.active { display: flex; }
   .commits-layout { display: flex; flex: 1; min-height: 0; overflow: hidden; }
   .commits-sidebar { width: 280px; flex-shrink: 0; border-right: 1px solid var(--border); overflow-y: auto; background: var(--bg); }
@@ -8799,7 +9421,7 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
     padding: 10px 12px; resize: none; outline: none; box-sizing: border-box; min-height: 0; }
   .peek-memory-textarea:focus { border-color: var(--accent); box-shadow: 0 0 0 3px rgba(88,166,255,0.12); }
   /* Tasks panel */
-  .peek-tasks-panel { display: none; flex-direction: column; flex: 1; min-height: 0; padding: 14px 16px; gap: 10px; }
+  .peek-tasks-panel { display: none; flex-direction: column; flex: 1; min-height: 0; padding: 14px 16px; padding-bottom: max(14px, env(safe-area-inset-bottom)); gap: 10px; }
   .peek-tasks-panel.active { display: flex; }
   #peek-notes-panel.active { display: flex; padding: 0; gap: 0; }
   #peek-notes-panel .notes-sidebar { min-width: 160px; width: 220px; }
@@ -8859,6 +9481,7 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
   .status-badge.waiting { background: rgba(210,153,34,0.2); color: var(--yellow); }
   .status-badge.idle { background: rgba(139,148,158,0.15); color: var(--dim); }
   .status-badge.steering { background: rgba(137,87,229,0.2); color: var(--purple,#8957e5); }
+  .status-badge.rate-limited { background: rgba(248,81,73,0.18); color: #f85149; }
   .last-active { font-size: 0.7rem; color: var(--dim); flex-shrink: 0; }
   .token-count { font-size: 0.65rem; color: var(--dim); flex-shrink: 0; font-family: "SF Mono","Fira Code",monospace; opacity: 0.7; }
 
@@ -9001,7 +9624,7 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
 
   /* In-app notification banners */
   .notif-banners {
-    position: fixed; top: env(safe-area-inset-top, 0px); right: 12px; z-index: 510;
+    position: fixed; top: calc(max(var(--chrome-tab-h, 0px), env(safe-area-inset-top, 0px)) + 8px); right: 12px; z-index: 1002;
     display: flex; flex-direction: column; gap: 6px; pointer-events: none;
     max-width: 360px; width: calc(100% - 24px);
   }
@@ -9350,15 +9973,20 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
   }
   .chrome-tab-menu-item:hover { background: var(--hover); }
   .chrome-tab-collapse {
-    flex-shrink: 0; margin-left: auto; padding: 0 10px;
+    flex-shrink: 0; margin-left: auto; padding: 4px 10px;
     background: none; border: none; color: var(--dim); cursor: pointer;
     font-size: 0.7rem; line-height: 1; display: flex; align-items: center;
-    height: 100%; transition: color 0.12s;
+    transition: color 0.12s; min-width: 44px; min-height: 20px; justify-content: center;
   }
   .chrome-tab-collapse:hover { color: var(--fg); }
   .chrome-tabs-bar.collapsed .chrome-tab,
-  .chrome-tabs-bar.collapsed .chrome-tab-add-wrap { display: none; }
-  .chrome-tabs-bar.collapsed { padding-bottom: 4px; }
+  .chrome-tabs-bar.collapsed .chrome-tab-add { display: none; }
+  .chrome-tabs-bar.collapsed { padding: 0; height: 0; min-height: 0; overflow: visible; background: none; }
+  .chrome-tabs-bar.collapsed .chrome-tab-collapse {
+    position: absolute; top: env(safe-area-inset-top, 4px); right: 4px;
+    opacity: 0.3; z-index: 1001; padding: 6px 10px;
+  }
+  .chrome-tabs-bar.collapsed .chrome-tab-collapse:hover { opacity: 1; }
   .chrome-tab-frames { position: fixed; top: var(--chrome-tab-h, 36px); left: 0; right: 0; bottom: 0; z-index: 999; display: none; }
   .chrome-tab-frames.active { display: block; }
   .chrome-tab-frames iframe { position: absolute; inset: 0; width: 100%; height: 100%; border: none; background: var(--bg); }
@@ -10887,6 +11515,9 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
   </div>
   <div style="display:flex;gap:8px;align-items:center;">
     <div id="org-switcher-wrap" style="display:none;"></div>
+    <button class="btn-rate-limit" id="rate-limit-pill" title="" onclick="event.stopPropagation();_scrollToFirstRateLimited()">
+      <span id="rate-limit-pill-text">0 rate-limited</span>
+    </button>
     <div class="active-wrap">
       <button class="btn-active" id="active-btn" onclick="event.stopPropagation();toggleActiveDropdown()">
         <span class="active-dot"></span>
@@ -12030,10 +12661,10 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
     </div>
     <div class="field-group">
       <label class="field-label" style="display:flex;align-items:center;gap:6px;cursor:pointer;">
-        <input type="checkbox" id="create-branch-enabled" checked onchange="_toggleCreateBranch(this.checked)" style="width:auto;margin:0;">
-        Create branch <span class="field-optional">(uncheck to work directly on main)</span>
+        <input type="checkbox" id="create-branch-enabled" onchange="_toggleCreateBranch(this.checked)" style="width:auto;margin:0;">
+        Create branch <span class="field-optional">(check to work on a separate branch)</span>
       </label>
-      <div id="create-branch-wrap" style="margin-top:8px;">
+      <div id="create-branch-wrap" style="margin-top:8px;display:none;">
         <div style="display:flex;gap:6px;align-items:center;">
           <input id="create-branch" type="text" placeholder="session/my-project" autocomplete="off" autocorrect="off" style="flex:1;" oninput="_onBranchInput(this.value);_filterBranches()" onfocus="_loadExistingBranches()">
           <button class="btn" id="create-branch-suggest-btn" onclick="_suggestBranch()" title="Ask Claude to suggest branch names" style="flex-shrink:0;font-size:0.9rem;">✨</button>
@@ -12144,7 +12775,7 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
           style="position:absolute;width:0;height:0;opacity:0;overflow:hidden;pointer-events:none;" onchange="handlePeekFileInput(event)">
         <button class="peek-attach-btn" title="Attach file" onclick="document.getElementById('peek-file-input').click()">&#128206;</button>
         <button class="peek-attach-btn" id="peek-hist-btn" onclick="openCmdHistoryModal()" title="Message history">&#x1F551;</button>
-        <button class="btn primary" onclick="sendPeekCmd()">Send</button>
+        <div class="send-split"><button class="btn primary send-split-main" onclick="sendPeekCmd()">Send</button><button class="btn primary send-split-arrow" onclick="_toggleSendMode(event)" title="Switch send mode">&#x25BC;</button></div>
       </div>
       <!-- Drag-over hint (shown by CSS when drag-over class is on peek-overlay) -->
       <div class="peek-drag-hint" style="display:none;">&#128206; Drop to attach</div>
@@ -13692,6 +14323,9 @@ function updatePeekStatus() {
   else if (s.status === 'waiting') badge = '<span class="status-badge waiting">needs input</span>';
   else if (s.status === 'idle')    badge = '<span class="status-badge idle">idle</span>';
   else if (!s.running)             badge = '<span class="status-badge" style="background:rgba(255,255,255,0.06);color:var(--dim);border:1px solid var(--border);">stopped</span>';
+  if (s.rate_limited_until) {
+    badge += `<span class="status-badge rate-limited" style="margin-left:6px;">Rate-limited until ${_fmtClockTime(s.rate_limited_until)}</span>`;
+  }
   el.innerHTML = badge;
   // Update input placeholder based on session state
   const cmdInp = document.getElementById('peek-cmd-input');
@@ -13726,6 +14360,7 @@ function render() {
   // Save focused element before ANY DOM changes — captures search-input, send-input, or anything else
   const focusedId = _active && _active.id ? _active.id : null;
   updateActiveCount();
+  updateRateLimitPill();
   // Build tag filter bar
   const tagEl = document.getElementById('tag-filters');
   const allTags = [...new Set(sessions.filter(s => !s.archived).flatMap(s => s.tags || []))].sort();
@@ -13829,10 +14464,11 @@ function render() {
           <div class="card-menu-item danger" onclick="event.stopPropagation();deleteSession('${s.name}')"><span class="mi">&#x2716;</span> Delete</div>
         </div>
         </div>
-        ${(s.status || s.tokens || s.last_activity || !online) ? `<div class="card-header-meta">
+        ${(s.status || s.tokens || s.last_activity || s.rate_limited_until || !online) ? `<div class="card-header-meta">
           ${s.status === 'active' ? '<span class="status-badge active">working</span>' : ''}
           ${s.status === 'waiting' ? '<span class="status-badge waiting">needs input</span>' : ''}
           ${s.status === 'idle' ? '<span class="status-badge idle">idle</span>' : ''}
+          ${s.rate_limited_until ? `<span class="status-badge rate-limited" title="Rate-limited — auto-resume at ${_fmtClockTime(s.rate_limited_until)}">Rate-limited until ${_fmtClockTime(s.rate_limited_until)}</span>` : ''}
           ${s.steering && s.steering.length ? `<span class="status-badge steering" title="${s.steering.length} steering message${s.steering.length>1?'s':''} queued">${s.steering.length} queued</span>` : ''}
           ${s.tokens ? `<span class="token-count">${fmtTokens(s.tokens)}</span>` : ''}
           ${s.last_activity ? `<span class="last-active">${timeAgo(s.last_activity)}</span>` : ''}
@@ -14016,6 +14652,13 @@ function fmtDuration(sec) {
   if (h > 0) return h + 'h ' + m + 'm';
   if (m > 0) return m + 'm';
   return sec + 's';
+}
+function _fmtClockTime(epoch) {
+  if (!epoch) return '';
+  const d = new Date(epoch * 1000);
+  const hh = String(d.getHours()).padStart(2, '0');
+  const mm = String(d.getMinutes()).padStart(2, '0');
+  return hh + ':' + mm;
 }
 
 // ═══════ GIT BRANCH AWARENESS ═══════
@@ -14461,7 +15104,7 @@ function _renderArchivedSection() {
     (q ? archived : allArchived).forEach(s => {
       const ago = s.last_activity ? timeAgo(s.last_activity) : '';
       const preview = esc(s.preview || s.desc || '');
-      html += `<div class="archived-card">
+      html += `<div class="archived-card" data-session="${esc(s.name)}">
         <div class="archived-card-name">${esc(s.name)}</div>
         ${ago ? `<div class="archived-card-meta">${ago}</div>` : ''}
         ${preview ? `<div class="archived-card-preview">${preview}</div>` : ''}
@@ -14522,6 +15165,31 @@ function updateActiveCount() {
   const btn = document.getElementById('active-btn');
   if (el) el.textContent = count;
   if (btn) btn.style.display = count > 0 ? 'flex' : 'none';
+}
+function updateRateLimitPill() {
+  const pill = document.getElementById('rate-limit-pill');
+  const txt = document.getElementById('rate-limit-pill-text');
+  if (!pill || !txt) return;
+  const blocked = sessions.filter(s => s.rate_limited_until);
+  if (!blocked.length) {
+    pill.classList.remove('show');
+    return;
+  }
+  // All sessions on one account share a reset time; show the earliest if
+  // they drift, and indicate "N of M" so the user sees the fleet picture.
+  const earliest = Math.min(...blocked.map(s => s.rate_limited_until));
+  const total = sessions.filter(s => !s.archived).length || blocked.length;
+  txt.textContent = blocked.length + ' of ' + total +
+    ' rate-limited, reset ' + _fmtClockTime(earliest);
+  pill.title = blocked.map(s => s.name).join(', ');
+  pill.classList.add('show');
+}
+function _scrollToFirstRateLimited() {
+  const target = sessions.find(s => s.rate_limited_until);
+  if (!target) return;
+  const sel = '[data-session="' + target.name.replace(/"/g, '\\"') + '"]';
+  const card = document.querySelector(sel);
+  if (card && card.scrollIntoView) card.scrollIntoView({ behavior: 'smooth', block: 'center' });
 }
 
 // ── Header + dropdown ──
@@ -16485,20 +17153,18 @@ function _syncPeekOverlayToVisualViewport() {
   const ov = document.getElementById('peek-overlay');
   if (!window.visualViewport || !ov) return;
   const vv = window.visualViewport;
-  const constrained = vv.height < window.innerHeight - 1 || vv.offsetTop > 1;
+  const constrained = vv.height < window.innerHeight * 0.95 || vv.offsetTop > 5;
   if (constrained) {
     ov.style.top = vv.offsetTop + 'px';
-    ov.style.bottom = '0px';
-    ov.style.height = '';
-    const kbHeight = window.innerHeight - vv.offsetTop - vv.height;
-    ov.style.paddingBottom = Math.max(0, kbHeight) + 'px';
+    ov.style.height = vv.height + 'px';
+    ov.style.bottom = 'auto';
+    ov.style.paddingBottom = '0px';
   } else {
     ov.style.top = '';
-    ov.style.bottom = '';
     ov.style.height = '';
+    ov.style.bottom = '0';
     ov.style.paddingBottom = '';
   }
-  // Compact mode: hide chips, shrink padding when viewport is tight
   ov.classList.toggle('vv-compact', constrained && vv.height < window.innerHeight * 0.7);
 }
 (function() {
@@ -16512,6 +17178,11 @@ function _syncPeekOverlayToVisualViewport() {
     if (document.getElementById('peek-overlay')?.classList.contains('active')) {
       _syncPeekOverlayToVisualViewport();
     }
+  });
+  // iOS keyboard: re-sync after animation settles so input stays visible
+  document.getElementById('peek-cmd-input')?.addEventListener('focus', () => {
+    setTimeout(_syncPeekOverlayToVisualViewport, 100);
+    setTimeout(_syncPeekOverlayToVisualViewport, 400);
   });
 })();
 
@@ -16922,15 +17593,39 @@ function handlePeekPaste(e) {
   });
 })();
 
+let _sendMode = localStorage.getItem('amux_send_mode') || 'send'; // 'send' or 'queue'
+function _toggleSendMode(e) {
+  e?.stopPropagation();
+  _sendMode = _sendMode === 'send' ? 'queue' : 'send';
+  localStorage.setItem('amux_send_mode', _sendMode);
+  _updateSendSplit();
+}
+function _updateSendSplit() {
+  const split = document.querySelector('.send-split');
+  if (!split) return;
+  split.classList.toggle('mode-queue', _sendMode === 'queue');
+  split.querySelector('.send-split-main').textContent = _sendMode === 'queue' ? 'Queue' : 'Send';
+}
+setTimeout(_updateSendSplit, 0);
+
 async function sendPeekCmd() {
   if (!peekSession) return;
   const inp = document.getElementById('peek-cmd-input');
   const text = inp.value.trim();
-  const files = peekFiles.filter(f => f.path); // only successfully uploaded
+  const files = peekFiles.filter(f => f.path);
   if (!text && files.length === 0) return;
-  // If session is actively working, ask whether to queue or send now
   const sess = (sessions || []).find(s => s.name === peekSession);
-  if (sess && sess.status === 'active' && files.length === 0 && !text.startsWith('/')) {
+  // Queue mode: bypass dialog, always queue at next turn boundary
+  if (_sendMode === 'queue' && sess && sess.status === 'active' && files.length === 0 && !text.startsWith('/')) {
+    cmdHistoryAdd(text, {type:'steering'});
+    inp.value = '';
+    inp.style.height = 'auto';
+    delete _peekDrafts[peekSession];
+    await steerSession(peekSession, text);
+    return;
+  }
+  // Send mode with active session: show dialog
+  if (_sendMode === 'send' && sess && sess.status === 'active' && files.length === 0 && !text.startsWith('/')) {
     const choice = await _showSteerPrompt(text);
     if (choice === 'queue') {
       cmdHistoryAdd(text, {type:'steering'});
@@ -18164,7 +18859,7 @@ function slashAcKeydown(e) {
     e.preventDefault();
     if (getSel() >= 0) slashAcPick(getSel());
     else if (atMode) slashAcPick(0);
-    else el.classList.remove('open');
+    else { el.classList.remove('open'); sendPeekCmd(); }
   } else if (e.key === 'Tab') {
     e.preventDefault();
     slashAcPick(getSel() >= 0 ? getSel() : 0);
@@ -19046,7 +19741,7 @@ async function copyFileContent() {
 
 // ═══════ FILE EXPLORER ═══════
 let _explorePath = '';
-let _exploreShowHidden = false;
+let _exploreShowHidden = true;
 let _exploreLastData = null;  // last loaded dir data (for search re-filter)
 let _filesLastData = null;    // last loaded dir data for Files tab
 let _filesSort = { col: 'name', dir: 1 }; // sort state
@@ -19112,7 +19807,7 @@ function _fileTypeIcon(name, type) {
 // ═══════ FILES TAB (inline directory browser) ═══════
 let _filesPath = '/';
 let _filesCwd = '/';   // saved working directory (persisted on server)
-let _filesShowHidden = false;
+let _filesShowHidden = true;
 
 async function openInFinder() {
   const path = _filesPath || '/';
@@ -19190,12 +19885,17 @@ function _filesRemoveBookmark(idx) {
 document.addEventListener('DOMContentLoaded', _filesRenderBookmarks);
 
 let _exploreSession = null;  // set when explore overlay is opened from a session
-// Load saved working dir from server prefs
+// Load saved working dir + hidden files pref from server prefs
 (async () => {
   try {
-    const r = await fetch(API + '/api/prefs?key=files_cwd');
-    const d = await r.json();
-    if (d.value) { _filesPath = d.value; _filesCwd = d.value; }
+    const [r1, r2] = await Promise.all([
+      fetch(API + '/api/prefs?key=files_cwd'),
+      fetch(API + '/api/prefs?key=files_show_hidden'),
+    ]);
+    const d1 = await r1.json();
+    if (d1.value) { _filesPath = d1.value; _filesCwd = d1.value; }
+    const d2 = await r2.json();
+    if (d2.value !== undefined && d2.value !== null) _filesShowHidden = d2.value === '1';
   } catch(e) {}
 })();
 function setFilesCwd() {
@@ -19223,6 +19923,7 @@ function toggleFilesHidden() {
   if (lbl) lbl.textContent = _filesShowHidden ? 'Hide hidden files' : 'Show hidden files';
   const oitem = document.getElementById('files-hidden-oitem');
   if (oitem) oitem.classList.toggle('active', _filesShowHidden);
+  fetch(API + '/api/prefs', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({key:'files_show_hidden', value:_filesShowHidden?'1':'0'})}).catch(()=>{});
   loadFiles(_filesPath);
 }
 function _filesOverflowToggle() {
@@ -19905,7 +20606,7 @@ function openCreate() {
   document.getElementById('create-prompt').value = '';
   document.getElementById('create-branch').value = '';
   document.getElementById('create-branch-enabled').checked = false;
-  document.getElementById('create-branch-wrap').style.display = '';
+  document.getElementById('create-branch-wrap').style.display = 'none';
   document.getElementById('create-branch-suggestions').style.display = 'none';
   document.getElementById('create-branch-suggestions').innerHTML = '';
   document.getElementById('create-branch-existing').style.display = 'none';
@@ -21209,10 +21910,13 @@ function _chromeUpdateOffsets() {
     const ctb = document.getElementById('chrome-tabs-bar');
     const hr = document.querySelector('.header-row');
     if (ctb) {
-      const h = ctb.offsetHeight;
+      const h = _chromeCollapsed ? 0 : ctb.offsetHeight;
       document.documentElement.style.setProperty('--chrome-tab-h', h + 'px');
-      if (!_isInTab) document.body.style.paddingTop = h + 'px';
-      if (hr) document.documentElement.style.setProperty('--sticky-nav-top', (h + hr.offsetHeight) + 'px');
+      // Body padding-top is handled by CSS: max(16px, --chrome-tab-h, safe-area-inset-top)
+      if (hr) {
+        const bodyPadTop = parseInt(getComputedStyle(document.body).paddingTop) || 0;
+        document.documentElement.style.setProperty('--sticky-nav-top', (bodyPadTop + hr.offsetHeight) + 'px');
+      }
     }
   });
 }
@@ -35911,8 +36615,17 @@ p{{color:#888;margin:12px 0 28px;font-size:0.9rem;line-height:1.5}}
 
                 # Change directory
                 if "dir" in body:
-                    cfg["CC_DIR"] = body["dir"].strip()
+                    new_dir = body["dir"].strip()
+                    old_dir = cfg.get("CC_DIR", "")
+                    cfg["CC_DIR"] = new_dir
                     _write_env(env_file, cfg)
+                    if new_dir != old_dir and is_running(name):
+                        def _restart_in_new_dir(sname=name):
+                            _hard_kill_claude(sname)
+                            time.sleep(2)
+                            start_session(sname)
+                        threading.Thread(target=_restart_in_new_dir, daemon=True).start()
+                        return self._json({"ok": True, "message": "directory updated — restarting session"})
                     return self._json({"ok": True, "message": "directory updated"})
 
                 # Change description
@@ -36641,7 +37354,43 @@ def _kill_stale_port(port: int):
 
 
 def main():
-    port = int(sys.argv[1]) if len(sys.argv) > 1 else 8822
+    # CLI: optional positional port, optional --bind host[,host,...]
+    # Examples:
+    #   amux serve
+    #   amux serve 8822
+    #   amux serve 8822 --bind 127.0.0.1
+    #   amux serve 8822 --bind 127.0.0.1,172.17.0.1
+    if any(a in ("-h", "--help") for a in sys.argv[1:]):
+        print(
+            "Usage: amux-server.py [port] [--bind host[,host,...]] [--no-tls]\n"
+            "\n"
+            "  port                  TCP port to listen on (default: 8822).\n"
+            "                        The cert helper uses port+1.\n"
+            "  --bind host[,host..]  Comma-separated list of interface IPs to bind.\n"
+            "                        Default: 0.0.0.0 (every interface). Pass 127.0.0.1\n"
+            "                        to restrict to loopback, or e.g.\n"
+            "                        127.0.0.1,172.17.0.1 for loopback + docker0.\n"
+            "  --no-tls              Serve plain HTTP instead of HTTPS.\n"
+            "\n"
+            "Default 0.0.0.0 exposes the dashboard on every interface this host is\n"
+            "attached to (incl. public Wi-Fi LANs and public IPs). Use --bind to\n"
+            "restrict, or add a firewall rule on top."
+        )
+        return
+    port = 8822
+    bind_hosts = ["0.0.0.0"]
+    _args = sys.argv[1:]
+    _i = 0
+    while _i < len(_args):
+        _a = _args[_i]
+        if _a == "--bind" and _i + 1 < len(_args):
+            bind_hosts = [h.strip() for h in _args[_i + 1].split(",") if h.strip()]
+            _i += 2
+        elif _a.isdigit():
+            port = int(_a)
+            _i += 1
+        else:
+            _i += 1
     lan_ip = get_lan_ip()
     no_tls = "--no-tls" in sys.argv
 
@@ -36670,17 +37419,20 @@ def main():
     # Pre-configure ~/.claude.json to skip interactive setup wizard
     _init_claude_config()
 
-    # Retry binding in case port is in TIME_WAIT after a restart
-    for _attempt in range(10):
-        try:
-            server = ResilientHTTPSServer(("0.0.0.0", port), CCHandler)
-            break
-        except OSError as e:
-            if e.errno == 48 and _attempt < 9:  # Address already in use
-                slog(f"[startup] port {port} busy, retrying ({_attempt + 1}/10)...")
-                time.sleep(2)
-            else:
-                raise
+    # Bind one HTTPS server per host in bind_hosts. Retry on TIME_WAIT after restart.
+    servers = []
+    for _host in bind_hosts:
+        for _attempt in range(10):
+            try:
+                servers.append(ResilientHTTPSServer((_host, port), CCHandler))
+                break
+            except OSError as e:
+                if e.errno == 48 and _attempt < 9:  # Address already in use
+                    slog(f"[startup] {_host}:{port} busy, retrying ({_attempt + 1}/10)...")
+                    time.sleep(2)
+                else:
+                    raise
+    server = servers[0]  # primary: used by file watcher & graceful shutdown
 
     scheme = "http"
     ts_hostname = ""
@@ -36695,7 +37447,8 @@ def main():
                     if server_name != ts_hostname:
                         sock.context = fb_ctx
                 ctx.sni_callback = _sni_cb
-            server.ssl_ctx = ctx  # per-connection TLS in process_request_thread()
+            for _s in servers:
+                _s.ssl_ctx = ctx  # per-connection TLS in process_request_thread()
             scheme = "https"
         except Exception as e:
             print(f"\033[33m  TLS setup failed ({e}), falling back to HTTP\033[0m")
@@ -36729,13 +37482,19 @@ def main():
     except Exception:
         pass
     print("\033[1m\033[34mamux\033[0m web dashboard running")
+    print(f"  Bind:    {', '.join(f'{h}:{port}' for h in bind_hosts)}")
+    if "0.0.0.0" in bind_hosts:
+        print("\033[33m  ⚠ Bound to 0.0.0.0 — reachable on every network interface (incl. public IP).\033[0m")
+        print(f"\033[33m    Restrict with: amux serve {port} --bind 127.0.0.1[,<other-ips>]\033[0m")
     print(f"  Local:   {scheme}://localhost:{port}")
     if ts_hostname:
         print(f"  Tailscale: {scheme}://{ts_hostname}:{port}")
-    print(f"  Network: {scheme}://{lan_ip}:{port}")
+    _net_reachable = "0.0.0.0" in bind_hosts or lan_ip in bind_hosts
+    if _net_reachable:
+        print(f"  Network: {scheme}://{lan_ip}:{port}")
     if ts_hostname:
         print(f"\n  Open on your phone → \033[1m{scheme}://{ts_hostname}:{port}\033[0m")
-    else:
+    elif _net_reachable:
         print(f"\n  Open on your phone → {scheme}://{lan_ip}:{port}")
     if scheme == "https":
         if ts_hostname:
@@ -36753,7 +37512,7 @@ def main():
 
     # Plain HTTP cert server (so phones can fetch cert before trusting it)
     if scheme == "https":
-        def _cert_server(port):
+        def _cert_server(port, _host):
             from http.server import HTTPServer, BaseHTTPRequestHandler
             class H(BaseHTTPRequestHandler):
                 def do_GET(self):
@@ -36790,17 +37549,19 @@ def main():
                 allow_reuse_port = True
             for _att in range(10):
                 try:
-                    IPv4HTTPServer(("0.0.0.0", port + 1), H).serve_forever()
+                    IPv4HTTPServer((_host, port + 1), H).serve_forever()
                     break
                 except OSError:
                     if _att < 9:
                         time.sleep(2)
                     # silently give up after retries — cert server is optional
-        threading.Thread(target=_cert_server, args=(port,), daemon=True).start()
+        for _h in bind_hosts:
+            threading.Thread(target=_cert_server, args=(port, _h), daemon=True).start()
         print(f"  Cert:    http://{lan_ip}:{port + 1}/api/cert")
 
     # Register all recurring jobs with the unified scheduler
     schedule_job(_yolo_loop,             interval=3,                    name="yolo",        initial_delay=3)
+    schedule_job(_rate_limit_loop,       interval=3,                    name="rate_limit",  initial_delay=4)
     schedule_job(_snapshot_loop,         interval=60,                   name="snapshot",    initial_delay=0)
     schedule_job(_reap_stale_browsers,  interval=120,                  name="browser_reap", initial_delay=60)
     schedule_job(_kill_stale_ray,        interval=600,                  name="ray_reap",     initial_delay=120)
@@ -36834,12 +37595,241 @@ def main():
     # Warm the metrics cache in background so first UI open is fast
     threading.Thread(target=_refresh_metrics_cache, daemon=True).start()
 
+    # Run secondary servers in background threads; primary in main thread
+    for _s in servers[1:]:
+        threading.Thread(target=_s.serve_forever, daemon=True).start()
     try:
         server.serve_forever()
     except KeyboardInterrupt:
         print("\n\033[2mStopped.\033[0m")
-        server.server_close()
+        for _s in servers:
+            try:
+                _s.server_close()
+            except Exception:
+                pass
+
+
+def _run_selftests() -> int:
+    """Inline unit tests for the rate-limit watchdog.
+
+    Triggered by `AMUX_SELFTEST=1 python3 amux-server.py`. Touches no DB,
+    no network, no filesystem — covers the pure helpers added for this
+    feature. Returns process exit code (0 = all pass).
+    """
+    import datetime as _dt
+    failures: list[str] = []
+
+    def check(label: str, ok: bool, *, detail: str = ""):
+        status = "PASS" if ok else "FAIL"
+        line = f"  [{status}] {label}"
+        if detail and not ok:
+            line += f"  — {detail}"
+        print(line)
+        if not ok:
+            failures.append(label)
+
+    # ── 1. _RATE_LIMIT_PROMPTS pattern match ─────────────────────────────
+    print("rate-limit prompt pattern:")
+    positive = (
+        "What do you want to do?\n"
+        "❯ 1. Stop and wait for limit to reset\n"
+        "  2. Add funds to continue with extra usage\n"
+        "  3. Upgrade your plan\n"
+    )
+    pat = _RATE_LIMIT_PROMPTS[0][0]
+    check("matches real /rate-limit-options menu", bool(pat.search(positive)))
+    check("matches case-insensitively",
+          bool(pat.search(positive.upper())))
+    check("does not match empty string", not pat.search(""))
+    check("does not match a YOLO 'Do you want to proceed?' prompt",
+          not pat.search("Do you want to proceed?\n❯ 1. Yes\n  2. No\nEsc to cancel"))
+    check("does not match the /usage slash-command palette entry",
+          not pat.search("/usage    Show plan usage and rate limits"))
+    check("does not match the bare phrase without a '1.' menu prefix",
+          not pat.search("the system will stop and wait for limit to reset later"))
+
+    # ── 2. _parse_rate_limit_reset across all three formats ──────────────
+    print("reset-time parser:")
+    # Use a fixed reference time so wall-clock tests are deterministic.
+    ref_dt = _dt.datetime(2026, 5, 11, 9, 0, 0)  # 09:00 local
+    ref_ts = ref_dt.timestamp()
+
+    # Format 1: "resets HH:MM" later today
+    out = _parse_rate_limit_reset(
+        "You've used 95% of your session limit · resets 14:30",
+        now=ref_ts,
+    )
+    expected = _dt.datetime(2026, 5, 11, 14, 30).timestamp()
+    check("format1 'resets HH:MM' later today", out == int(expected),
+          detail=f"got {out}, want {int(expected)}")
+
+    # Format 1b: "resets HH:MM" already past → tomorrow
+    out = _parse_rate_limit_reset("resets 03:00", now=ref_ts)
+    expected = _dt.datetime(2026, 5, 12, 3, 0).timestamp()
+    check("format1 'resets HH:MM' past today rolls to tomorrow",
+          out == int(expected),
+          detail=f"got {out}, want {int(expected)}")
+
+    # Format 2: "Resets in: 4 hours 23 minutes"
+    out = _parse_rate_limit_reset("Resets in: 4 hours 23 minutes", now=ref_ts)
+    expected = int(ref_ts + 4 * 3600 + 23 * 60)
+    check("format2 'Resets in: N hours M minutes'", out == expected,
+          detail=f"got {out}, want {expected}")
+
+    # Format 2b: minutes-only relative
+    out = _parse_rate_limit_reset("resets in 45 minutes", now=ref_ts)
+    expected = int(ref_ts + 45 * 60)
+    check("format2 minutes-only relative", out == expected,
+          detail=f"got {out}, want {expected}")
+
+    # Format 3: absolute date+time
+    out = _parse_rate_limit_reset(
+        "Please upgrade your plan or wait for your limit to reset on "
+        "April 15, 2026 at 10:49 PM",
+        now=ref_ts,
+    )
+    expected = int(_dt.datetime(2026, 4, 15, 22, 49).timestamp())
+    check("format3 absolute 'Month D, YYYY at H:MM PM'",
+          out == expected, detail=f"got {out}, want {expected}")
+
+    # Malformed input
+    check("malformed input returns None",
+          _parse_rate_limit_reset("resets at bananas o'clock", now=ref_ts) is None)
+    check("empty input returns None",
+          _parse_rate_limit_reset("", now=ref_ts) is None)
+
+    # Realistic boxed UI sample — Claude renders rate-limit context inside
+    # a bordered panel; the strict "resets HH:MM" pattern catches the
+    # in-panel time even with the box-drawing characters around it.
+    boxed = (
+        "  ╭──────────────────────────────────────────╮\n"
+        "  │ You've used 95% of your session limit ·   │\n"
+        "  │ resets 14:30                              │\n"
+        "  ╰──────────────────────────────────────────╯\n"
+        "\n"
+        "What do you want to do?\n"
+        "❯ 1. Stop and wait for limit to reset\n"
+        "  2. Add funds to continue with extra usage\n"
+        "  3. Upgrade your plan\n"
+    )
+    out = _parse_rate_limit_reset(boxed, now=ref_ts)
+    expected = int(_dt.datetime(2026, 5, 11, 14, 30).timestamp())
+    check("realistic boxed UI scrollback parses to 14:30",
+          out == expected, detail=f"got {out}, want {expected}")
+
+    # Bare-time fallback — strict label not present, but a usable HH:MM
+    # sits in the menu area. Should still parse.
+    bare_only = (
+        "What do you want to do?\n"
+        "❯ 1. Stop and wait for limit to reset\n"
+        "  2. Add funds\n  3. Upgrade\n"
+        "\n"
+        "Try again at 19:00.\n"
+    )
+    out = _parse_rate_limit_reset(bare_only, now=ref_ts)
+    expected = int(_dt.datetime(2026, 5, 11, 19, 0).timestamp())
+    check("bare-time fallback catches '19:00' without 'resets' label",
+          out == expected, detail=f"got {out}, want {expected}")
+
+    # Status-bar current time should NOT be picked up — it's within 5 min
+    # of now, which the filter rejects. Without a reset time anywhere
+    # else in the scrollback, the parser returns None.
+    status_bar = (
+        "✦ 09:02 Crunched for 2m 14s — Sonnet 4.6\n"
+        "What do you want to do?\n"
+        "❯ 1. Stop and wait for limit to reset\n"
+    )
+    check("status-bar current time is filtered out (<5min in future)",
+          _parse_rate_limit_reset(status_bar, now=ref_ts) is None,
+          detail=f"got {_parse_rate_limit_reset(status_bar, now=ref_ts)}")
+
+    # ANSI-laden input — parser strips defensively, so the same bytes the
+    # handler would feed it still resolve.
+    ansi_text = "\x1b[31mYou've used 95% of your limit · resets 14:30\x1b[0m\n"
+    out = _parse_rate_limit_reset(ansi_text, now=ref_ts)
+    expected = int(_dt.datetime(2026, 5, 11, 14, 30).timestamp())
+    check("ANSI-laden input is stripped and parsed",
+          out == expected, detail=f"got {out}, want {expected}")
+
+    # ── 3. Budget accounting via _rate_limit_budget_state ────────────────
+    print("budget accounting:")
+    today = "2026-05-11"
+    a = {"rate_limit_budget_day": today, "rate_limit_resumes_today": 1}
+    exhausted, used = _rate_limit_budget_state(a, today, 3)
+    check("under cap (1/3) not exhausted", (not exhausted) and used == 1)
+
+    a = {"rate_limit_budget_day": today, "rate_limit_resumes_today": 3}
+    exhausted, used = _rate_limit_budget_state(a, today, 3)
+    check("at cap (3/3) is exhausted", exhausted and used == 3)
+
+    a = {"rate_limit_budget_day": today, "rate_limit_resumes_today": 5}
+    exhausted, used = _rate_limit_budget_state(a, today, 3)
+    check("over cap (5/3) is exhausted", exhausted and used == 5)
+
+    # Midnight UTC rollover — different day key triggers reset.
+    a = {"rate_limit_budget_day": "2026-05-10", "rate_limit_resumes_today": 99}
+    exhausted, used = _rate_limit_budget_state(a, today, 3)
+    check("midnight UTC rollover resets counter to 0",
+          (not exhausted) and used == 0 and a["rate_limit_budget_day"] == today)
+
+    # No prior day recorded — first observation of the day.
+    a = {}
+    exhausted, used = _rate_limit_budget_state(a, today, 3)
+    check("first observation of the day initializes counter",
+          (not exhausted) and used == 0 and a["rate_limit_budget_day"] == today)
+
+    # ── 4. _should_skip_rate_limit_resume predicate ──────────────────────
+    print("state-aware skip predicate:")
+    in_wait_state = (
+        "Session limit reached. Waiting for the limit to reset at 14:30...\n"
+        "❯"
+    )
+    skip, reason = _should_skip_rate_limit_resume(in_wait_state)
+    check("in wait state → resume", not skip,
+          detail=f"reason={reason!r}")
+
+    past_wait_state = (
+        "user: do something else\n"
+        "assistant: sure, here is the result\n"
+        "❯ "
+    )
+    skip, reason = _should_skip_rate_limit_resume(past_wait_state)
+    check("past wait state → skip", skip and "moved past" in reason,
+          detail=f"reason={reason!r}")
+
+    archived_or_empty = ""
+    skip, reason = _should_skip_rate_limit_resume(archived_or_empty)
+    check("empty scrollback (archived/stopped) → skip",
+          skip and "no scrollback" in reason, detail=f"reason={reason!r}")
+
+    menu_still_showing = (
+        "❯ 1. Stop and wait for limit to reset\n"
+        "  2. Add funds\n  3. Upgrade\n"
+    )
+    skip, reason = _should_skip_rate_limit_resume(menu_still_showing)
+    check("rate-limit menu still showing → skip (premature)",
+          skip and "menu still showing" in reason,
+          detail=f"reason={reason!r}")
+
+    # ── 5. _session_rate_limit_resume_text default + override ────────────
+    print("resume-text helper:")
+    check("default is 'continue'",
+          _session_rate_limit_resume_text({}) == "continue")
+    check("blank value falls back to 'continue'",
+          _session_rate_limit_resume_text({"CC_RATE_LIMIT_RESUME_TEXT": "  "}) == "continue")
+    check("override is returned as-is",
+          _session_rate_limit_resume_text(
+              {"CC_RATE_LIMIT_RESUME_TEXT": "resume polling"}) == "resume polling")
+
+    print()
+    if failures:
+        print(f"FAILED: {len(failures)} test(s): {', '.join(failures)}")
+        return 1
+    print("All rate-limit watchdog selftests passed.")
+    return 0
 
 
 if __name__ == "__main__":
+    if os.environ.get("AMUX_SELFTEST") == "1":
+        sys.exit(_run_selftests())
     main()

@@ -1,0 +1,789 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="dark">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="theme-color" content="#1e2330">
+  <title>Claude Code vs Cursor vs Windsurf (2026): Which AI Coding Tool Wins? &mdash; amux</title>
+  <link rel="icon" href="/icon.svg" type="image/svg+xml">
+  <meta name="description" content="In-depth comparison of Claude Code, Cursor, and Windsurf in 2026. Pricing, features, models, agent capabilities, and when to use each. Includes side-by-side benchmarks and a decision framework.">
+  <meta name="keywords" content="Claude Code vs Cursor, Claude Code vs Windsurf, Cursor vs Windsurf, best AI coding tool 2026, AI coding agent comparison, Claude Code review, Cursor review, Windsurf review, AI IDE comparison, agentic coding tools">
+  <link rel="canonical" href="https://amux.io/blog/claude-code-vs-cursor-vs-windsurf/">
+  <meta property="og:title" content="Claude Code vs Cursor vs Windsurf (2026): Which AI Coding Tool Wins?">
+  <meta property="og:description" content="The definitive three-way comparison. Pricing, features, agent capabilities, benchmarks, and a decision framework to pick the right tool for your workflow.">
+  <meta property="og:url" content="https://amux.io/blog/claude-code-vs-cursor-vs-windsurf/">
+  <meta property="og:image" content="https://amux.io/og-image.png">
+  <meta property="og:type" content="article">
+  <meta name="twitter:card" content="summary_large_image">
+  <link rel="alternate" type="application/rss+xml" title="amux Blog" href="https://amux.io/blog/rss.xml">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600;700&family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="/style.css">
+
+  <script type="application/ld+json">{
+    "@context":"https://schema.org",
+    "@type":"BreadcrumbList",
+    "itemListElement":[
+      {"@type":"ListItem","position":1,"name":"amux","item":"https://amux.io/"},
+      {"@type":"ListItem","position":2,"name":"Blog","item":"https://amux.io/blog/"},
+      {"@type":"ListItem","position":3,"name":"Claude Code vs Cursor vs Windsurf","item":"https://amux.io/blog/claude-code-vs-cursor-vs-windsurf/"}
+    ]
+  }</script>
+  <script type="application/ld+json">{
+    "@context":"https://schema.org",
+    "@type":"BlogPosting",
+    "headline":"Claude Code vs Cursor vs Windsurf (2026): Which AI Coding Tool Wins?",
+    "description":"In-depth comparison of Claude Code, Cursor, and Windsurf in 2026. Pricing, features, models, agent capabilities, and when to use each.",
+    "author":{"@type":"Organization","name":"amux","url":"https://amux.io"},
+    "publisher":{"@type":"Organization","name":"amux","url":"https://amux.io","logo":{"@type":"ImageObject","url":"https://amux.io/icon.png"}},
+    "datePublished":"2026-05-09",
+    "dateModified":"2026-05-09",
+    "mainEntityOfPage":"https://amux.io/blog/claude-code-vs-cursor-vs-windsurf/"
+  }</script>
+  <script type="application/ld+json">{
+    "@context":"https://schema.org",
+    "@type":"ItemList",
+    "name":"Claude Code vs Cursor vs Windsurf",
+    "numberOfItems":3,
+    "itemListElement":[
+      {"@type":"ListItem","position":1,"name":"Claude Code","url":"https://code.claude.com/"},
+      {"@type":"ListItem","position":2,"name":"Cursor","url":"https://www.cursor.com/"},
+      {"@type":"ListItem","position":3,"name":"Windsurf","url":"https://windsurf.com/"}
+    ]
+  }</script>
+  <script type="application/ld+json">{
+    "@context":"https://schema.org",
+    "@type":"FAQPage",
+    "mainEntity":[
+      {"@type":"Question","name":"Is Claude Code better than Cursor in 2026?","acceptedAnswer":{"@type":"Answer","text":"It depends on your workflow. Claude Code excels at terminal-first, headless, and multi-agent workflows with the strongest underlying model (Opus 4.7, 82% SWE-bench Verified). Cursor excels at interactive IDE editing with inline completions, Background Agents on cloud VMs, and codebase indexing. Many developers use both: Claude Code for autonomous agent tasks and Cursor for interactive editing sessions."}},
+      {"@type":"Question","name":"Is Windsurf free to use?","acceptedAnswer":{"@type":"Answer","text":"Windsurf offers a free tier with 5 Cascade sessions per day. The Pro plan is $15/month (unlimited Cascade, all models), Pro Plus is $35/month with priority access to flagship models. Windsurf's proprietary SWE-1.6 model consumes 0 credits on all plans, making it one of the most cost-effective options for AI-assisted coding."}},
+      {"@type":"Question","name":"Can I use Claude Code, Cursor, and Windsurf together?","acceptedAnswer":{"@type":"Answer","text":"Yes, and many professional developers do. A common pattern: use Cursor or Windsurf as your primary IDE for interactive coding (inline completions, quick edits, chat), and run Claude Code agents in the terminal for autonomous tasks (large refactors, test generation, overnight batch work). Tools like amux let you orchestrate dozens of Claude Code agents while you work in your IDE of choice."}},
+      {"@type":"Question","name":"Which AI coding tool has the best code quality?","acceptedAnswer":{"@type":"Answer","text":"As of May 2026, Claude Code with Opus 4.7 leads SWE-bench Verified at 82%. Cursor's Composer 2 model scores 73.7 on SWE-bench Multilingual. Windsurf's SWE-1.6 improves 10%+ over SWE-1.5 on SWE-Bench Pro. However, both Cursor and Windsurf also support Claude Opus 4.7 as an optional model, so you can get top-tier code quality from any tool by choosing the right model."}},
+      {"@type":"Question","name":"What happened to Windsurf? Did OpenAI buy it?","acceptedAnswer":{"@type":"Answer","text":"OpenAI announced a $3B acquisition of Windsurf (then Codeium) in 2025, but the deal fell through, reportedly due to Microsoft's contractual rights over OpenAI acquisitions. Google hired Windsurf's CEO and ~40 senior engineers. Cognition AI (makers of Devin) then acquired the remaining company — IP, product, brand, and 210 employees — for approximately $250M in December 2025. Windsurf now ships with Devin integration and Cognition's proprietary SWE-1 model family."}},
+      {"@type":"Question","name":"Claude Code vs Cursor pricing: which is cheaper?","acceptedAnswer":{"@type":"Answer","text":"Both start at $20/month for their Pro tiers, but the pricing models differ significantly. Claude Code (via Claude Pro) gives you access to Claude Code in terminal, web, desktop, and IDE extensions with usage limits that reset monthly. Cursor Pro gives you $20 in monthly model credits plus unlimited Tab completions and Auto mode. For heavy agentic use, Claude Max ($100-200/month) or Cursor Pro+ ($60/month) offer higher limits. Windsurf Pro at $15/month is the cheapest option with unlimited Cascade and free SWE-1.6 model usage."}},
+      {"@type":"Question","name":"Which tool is best for running multiple AI agents in parallel?","acceptedAnswer":{"@type":"Answer","text":"Claude Code is the strongest choice for parallel agent workflows. It runs as a CLI that can be spawned in multiple terminal sessions, supports subagents within each session, and has a full Agent SDK for programmatic control. Cursor's Background Agents run up to 8 parallel agents on cloud VMs. Windsurf (via Devin integration) supports autonomous agent tasks. For orchestrating large fleets of agents (10-50+), tools like amux wrap around Claude Code to provide fleet management, crash recovery, and task coordination."}},
+      {"@type":"Question","name":"Do I need an IDE or can I just use Claude Code in the terminal?","acceptedAnswer":{"@type":"Answer","text":"Claude Code works entirely in the terminal — no IDE required. Many power users prefer this workflow because it's faster, scriptable, and better suited for automation. Claude Code also has VS Code and JetBrains extensions, a desktop app, and a web interface at claude.ai/code if you want a GUI. Cursor and Windsurf are IDE-first tools that require their desktop applications. The choice comes down to whether you prefer terminal or GUI workflows."}}
+    ]
+  }</script>
+
+  <style>
+    .compare-grid{display:grid;gap:1.5rem;margin:2rem 0}
+    .tool-card{background:var(--surface);border:1px solid var(--border);border-radius:8px;padding:1.6rem}
+    .tool-card h3{margin:0 0 0.3rem;font-size:1.1rem}
+    .tool-card h3 a{color:inherit}
+    .tool-meta{font-size:0.8rem;color:var(--muted);margin-bottom:1rem;display:flex;gap:1rem;flex-wrap:wrap}
+    .tool-meta span{display:inline-flex;align-items:center;gap:0.3rem}
+    .tool-meta a{color:var(--dim);text-decoration:underline;text-decoration-color:var(--border)}
+    .tool-meta a:hover{color:var(--text)}
+    .tool-card p{font-size:0.88rem;color:var(--dim);margin-bottom:1rem;line-height:1.7}
+    .tool-card p a{color:var(--dim);text-decoration:underline;text-decoration-color:var(--border)}
+    .tool-card p a:hover{color:var(--text)}
+    .tool-card ul{font-size:0.88rem;line-height:1.7;padding-left:1.2rem;color:var(--dim)}
+    .tool-card ul li strong{color:var(--text)}
+    .tool-verdict{margin-top:1rem;padding-top:0.8rem;border-top:1px solid var(--border);font-size:0.85rem;color:var(--dim)}
+    .tool-verdict strong{color:var(--amber)}
+    .compare-table-wrap{overflow-x:auto;margin:2rem 0;-webkit-overflow-scrolling:touch}
+    .compare-table{width:100%;border-collapse:collapse;font-size:0.82rem;min-width:700px}
+    .compare-table th,.compare-table td{padding:0.7rem 0.8rem;text-align:left;border-bottom:1px solid var(--border);white-space:nowrap}
+    .compare-table th{background:var(--surface);color:var(--muted);font-weight:600;text-transform:uppercase;letter-spacing:0.04em;font-size:0.72rem;position:sticky;top:0}
+    .compare-table td:first-child{font-weight:600;color:var(--text)}
+    .compare-table tr:hover td{background:var(--surface)}
+    .y{color:var(--green)}
+    .n{color:var(--red)}
+    .p{color:var(--amber)}
+    .tl{color:var(--text);text-decoration:underline;text-decoration-color:var(--border)}
+    .tl:hover{color:var(--green)}
+    .verdict-box{background:var(--surface);border:1px solid var(--border);border-radius:8px;padding:1.4rem 1.6rem;margin:1.2rem 0}
+    .verdict-box h3{margin:0 0 0.8rem;font-size:1rem}
+    .verdict-box ul{font-size:0.88rem;line-height:1.8;padding-left:1.2rem;color:var(--dim)}
+    .verdict-box ul li strong{color:var(--text)}
+    .axis-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:1rem;margin:1.5rem 0}
+    .axis-card{background:var(--surface);border:1px solid var(--border);border-radius:8px;padding:1.2rem 1.4rem}
+    .axis-card h4{margin:0 0 0.4rem;font-size:0.9rem;color:var(--amber)}
+    .axis-card p{font-size:0.85rem;color:var(--dim);margin:0;line-height:1.6}
+    .tldr{background:oklch(0.82 0.17 85 / .08);border:1px solid oklch(0.82 0.17 85 / .25);border-radius:8px;padding:1.4rem 1.6rem;margin:2rem 0}
+    .tldr h3{margin:0 0 0.6rem;font-size:0.95rem;color:var(--amber)}
+    .tldr p{font-size:0.88rem;color:var(--dim);margin:0 0 0.3rem;line-height:1.7}
+    .tldr p:last-child{margin:0}
+    .winner-badge{display:inline-block;font-family:var(--font-mono);font-size:10px;font-weight:700;letter-spacing:0.04em;text-transform:uppercase;padding:2px 6px;border-radius:3px;background:oklch(0.80 0.18 145 / .15);color:var(--green);margin-left:0.4rem;vertical-align:middle}
+    .pricing-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:1rem;margin:1.5rem 0}
+    .pricing-card{background:var(--surface);border:1px solid var(--border);border-radius:8px;padding:1.2rem}
+    .pricing-card h4{margin:0 0 0.2rem;font-size:0.95rem}
+    .pricing-card h4 a{color:inherit;text-decoration:none}
+    .pricing-card h4 a:hover{color:var(--amber)}
+    .pricing-card .price{font-family:var(--font-mono);font-size:1.3rem;font-weight:700;color:var(--amber);margin:0.3rem 0}
+    .pricing-card .price-note{font-size:0.75rem;color:var(--muted)}
+    .pricing-card ul{font-size:0.8rem;margin:0.6rem 0 0;padding-left:1rem;color:var(--dim);line-height:1.7}
+    @media(max-width:700px){
+      .pricing-grid{grid-template-columns:1fr}
+      .axis-grid{grid-template-columns:1fr}
+    }
+  </style>
+</head>
+<body>
+  <header class="site-header">
+    <a class="logo" href="/">amux</a>
+    <nav>
+      <a href="/docs/" class="hide-mobile">docs</a>
+      <a href="/guides/" class="hide-mobile">guides</a>
+      <a href="/compare/" class="hide-mobile">compare</a>
+      <a href="/demos/" class="hide-mobile">demos</a>
+      <a href="/blog/" class="hide-mobile">blog</a>
+      <a href="https://apps.apple.com/us/app/amux-agent-multiplexer/id6760410435" target="_blank" rel="noopener" class="nav-cta-primary nav-cta">iOS app</a>
+      <a href="https://github.com/mixpeek/amux" target="_blank" rel="noopener" class="nav-cta">GitHub <span class="gh-stars" id="gh-stars"></span></a>
+    </nav>
+  </header>
+  <main>
+    <div class="breadcrumb"><a href="/">amux</a> <span class="sep">&rsaquo;</span> <a href="/blog/">Blog</a> <span class="sep">&rsaquo;</span> <span>Claude Code vs Cursor vs Windsurf</span></div>
+
+    <h1>Claude Code vs Cursor vs Windsurf (2026)</h1>
+    <p class="subtitle">Three tools dominate AI-assisted coding in 2026: <a href="https://code.claude.com/" target="_blank" rel="noopener">Claude Code</a> by <a href="https://anthropic.com/" target="_blank" rel="noopener">Anthropic</a>, <a href="https://www.cursor.com/" target="_blank" rel="noopener">Cursor</a> by <a href="https://www.cursor.com/" target="_blank" rel="noopener">Anysphere</a>, and <a href="https://windsurf.com/" target="_blank" rel="noopener">Windsurf</a> by <a href="https://cognition.ai/" target="_blank" rel="noopener">Cognition AI</a>. Each takes a fundamentally different approach to the same problem. This guide compares them honestly so you can pick the right one &mdash; or use all three together.</p>
+
+    <!-- ───────── TL;DR ───────── -->
+    <div class="tldr">
+      <h3>TL;DR</h3>
+      <p><strong><a href="https://code.claude.com/" target="_blank" rel="noopener">Claude Code</a></strong> &mdash; best for terminal-first developers, multi-agent workflows, and autonomous coding. Strongest model (Opus 4.7). Runs anywhere: CLI, IDE, desktop, web.</p>
+      <p><strong><a href="https://www.cursor.com/" target="_blank" rel="noopener">Cursor</a></strong> &mdash; best for interactive IDE editing with inline completions, codebase indexing, and Background Agents on cloud VMs. Most polished GUI experience.</p>
+      <p><strong><a href="https://windsurf.com/" target="_blank" rel="noopener">Windsurf</a></strong> &mdash; best value at $15/mo with free proprietary models. Strong agentic features via Cascade and <a href="https://devin.ai/" target="_blank" rel="noopener">Devin</a> integration. Understands your full workflow context.</p>
+    </div>
+
+    <nav class="toc" style="background:var(--surface);border:1px solid var(--border);border-radius:8px;padding:1.2rem 1.6rem;margin:2rem 0;">
+      <strong style="font-size:0.82rem;text-transform:uppercase;letter-spacing:0.05em;color:var(--muted);">Contents</strong>
+      <ol style="margin:0.6rem 0 0;padding-left:1.2rem;font-size:0.88rem;line-height:2;">
+        <li><a href="#table" style="color:var(--dim);text-decoration:none;">Comparison Table</a></li>
+        <li><a href="#architecture" style="color:var(--dim);text-decoration:none;">Architecture: Three Different Philosophies</a></li>
+        <li><a href="#claude-code" style="color:var(--dim);text-decoration:none;">Claude Code Deep Dive</a></li>
+        <li><a href="#cursor" style="color:var(--dim);text-decoration:none;">Cursor Deep Dive</a></li>
+        <li><a href="#windsurf" style="color:var(--dim);text-decoration:none;">Windsurf Deep Dive</a></li>
+        <li><a href="#pricing" style="color:var(--dim);text-decoration:none;">Pricing Comparison</a></li>
+        <li><a href="#benchmarks" style="color:var(--dim);text-decoration:none;">Benchmarks &amp; Code Quality</a></li>
+        <li><a href="#agents" style="color:var(--dim);text-decoration:none;">Agent Capabilities</a></li>
+        <li><a href="#choose" style="color:var(--dim);text-decoration:none;">How to Choose</a></li>
+        <li><a href="#together" style="color:var(--dim);text-decoration:none;">Using Them Together</a></li>
+        <li><a href="#faq" style="color:var(--dim);text-decoration:none;">FAQ</a></li>
+      </ol>
+    </nav>
+
+    <!-- ═══════════════════════════════════════════════════════════════
+         COMPARISON TABLE
+         ═══════════════════════════════════════════════════════════════ -->
+    <h2 id="table">Comparison Table</h2>
+    <div class="compare-table-wrap">
+      <table class="compare-table">
+        <thead>
+          <tr>
+            <th>Feature</th>
+            <th><a href="https://code.claude.com/" target="_blank" rel="noopener" class="tl">Claude Code</a></th>
+            <th><a href="https://www.cursor.com/" target="_blank" rel="noopener" class="tl">Cursor</a></th>
+            <th><a href="https://windsurf.com/" target="_blank" rel="noopener" class="tl">Windsurf</a></th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td>Maker</td>
+            <td><a href="https://anthropic.com/" target="_blank" rel="noopener" class="tl">Anthropic</a></td>
+            <td><a href="https://www.cursor.com/" target="_blank" rel="noopener" class="tl">Anysphere</a></td>
+            <td><a href="https://cognition.ai/" target="_blank" rel="noopener" class="tl">Cognition AI</a></td>
+          </tr>
+          <tr>
+            <td>Type</td>
+            <td>CLI + IDE + Web + Desktop</td>
+            <td>IDE (VS Code fork)</td>
+            <td>IDE (standalone)</td>
+          </tr>
+          <tr>
+            <td>Starting Price</td>
+            <td>$20/mo (Pro)</td>
+            <td>$20/mo (Pro)</td>
+            <td>$15/mo (Pro)</td>
+          </tr>
+          <tr>
+            <td>Free Tier</td>
+            <td class="p">Limited</td>
+            <td class="p">Hobby tier</td>
+            <td class="y">5 sessions/day</td>
+          </tr>
+          <tr>
+            <td>Best Model</td>
+            <td><span class="y">Opus 4.7 (82%)</span></td>
+            <td>Composer 2 + Opus 4.7</td>
+            <td>SWE-1.6 + Opus 4.7</td>
+          </tr>
+          <tr>
+            <td>Multi-model</td>
+            <td class="p">Claude family only</td>
+            <td class="y">Claude, GPT, Gemini, xAI, local</td>
+            <td class="y">Claude, GPT, SWE-1 family</td>
+          </tr>
+          <tr>
+            <td>Inline completions</td>
+            <td class="n">No</td>
+            <td class="y">Tab (unlimited)</td>
+            <td class="y">Tab</td>
+          </tr>
+          <tr>
+            <td>Agent mode</td>
+            <td class="y">Native (always-on)</td>
+            <td class="y">Agent mode</td>
+            <td class="y">Cascade</td>
+          </tr>
+          <tr>
+            <td>Background agents</td>
+            <td class="y">Via tmux / amux</td>
+            <td class="y">Cloud VMs (up to 8)</td>
+            <td class="y">Via Devin</td>
+          </tr>
+          <tr>
+            <td>Subagents</td>
+            <td class="y">Built-in</td>
+            <td class="y">Agents Window</td>
+            <td class="p">Via Devin</td>
+          </tr>
+          <tr>
+            <td>Agent SDK</td>
+            <td class="y">Python + TypeScript</td>
+            <td class="y">TypeScript</td>
+            <td class="n">No</td>
+          </tr>
+          <tr>
+            <td>MCP support</td>
+            <td class="y">Yes</td>
+            <td class="y">Yes</td>
+            <td class="p">Integrations</td>
+          </tr>
+          <tr>
+            <td>Hooks / automation</td>
+            <td class="y">7 hook types + Routines</td>
+            <td class="y">Skills + hooks</td>
+            <td class="p">Limited</td>
+          </tr>
+          <tr>
+            <td>Terminal-native</td>
+            <td class="y">Yes (primary)</td>
+            <td class="p">Built-in terminal</td>
+            <td class="p">Built-in terminal</td>
+          </tr>
+          <tr>
+            <td>Codebase indexing</td>
+            <td class="p">Grep / Glob tools</td>
+            <td class="y">Semantic search</td>
+            <td class="y">Codemaps</td>
+          </tr>
+          <tr>
+            <td>Mobile access</td>
+            <td class="y">Web + iOS app</td>
+            <td class="n">Desktop only</td>
+            <td class="n">Desktop only</td>
+          </tr>
+          <tr>
+            <td>Open source</td>
+            <td class="p">Source-available</td>
+            <td class="n">No</td>
+            <td class="n">No</td>
+          </tr>
+          <tr>
+            <td>VS Code extensions</td>
+            <td class="y">Yes</td>
+            <td class="y">Built-in (fork)</td>
+            <td class="p">Some compatible</td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+    <p style="font-size:0.78rem;color:var(--muted);margin-top:-1rem;">
+      <span class="y">Green</span> = full support &nbsp;
+      <span class="p">Amber</span> = partial/limited &nbsp;
+      <span class="n">Red</span> = not supported
+    </p>
+
+    <!-- ═══════════════════════════════════════════════════════════════
+         ARCHITECTURE
+         ═══════════════════════════════════════════════════════════════ -->
+    <h2 id="architecture">Architecture: Three Different Philosophies</h2>
+    <p>These tools look similar on the surface but are built on fundamentally different assumptions about how developers should work with AI.</p>
+
+    <div class="axis-grid">
+      <div class="axis-card">
+        <h4><a href="https://code.claude.com/" target="_blank" rel="noopener" style="color:var(--amber);text-decoration:none;">Claude Code</a>: Terminal-First Agent</h4>
+        <p>An AI agent that lives in your terminal. No IDE required. It reads your codebase, runs commands, edits files, and calls external tools autonomously. Designed to be spawned in multiple sessions, scripted, and orchestrated.</p>
+      </div>
+      <div class="axis-card">
+        <h4><a href="https://www.cursor.com/" target="_blank" rel="noopener" style="color:var(--amber);text-decoration:none;">Cursor</a>: AI-Native IDE</h4>
+        <p>A full IDE rebuilt around AI. Inline completions, chat, and agent mode integrated directly into the editor. Your code is semantically indexed for deep context. Background Agents offload work to cloud VMs.</p>
+      </div>
+      <div class="axis-card">
+        <h4><a href="https://windsurf.com/" target="_blank" rel="noopener" style="color:var(--amber);text-decoration:none;">Windsurf</a>: Context-Aware IDE + Devin</h4>
+        <p>An IDE that tracks everything &mdash; your edits, terminal commands, clipboard, and browsing &mdash; to infer intent in real time. Cascade acts autonomously based on this context. Backed by <a href="https://devin.ai/" target="_blank" rel="noopener">Devin</a>&rsquo;s autonomous agent for complex tasks.</p>
+      </div>
+    </div>
+
+    <p>The key architectural distinction: <a href="https://code.claude.com/" target="_blank" rel="noopener">Claude Code</a> is a <strong>headless agent</strong> you can run anywhere. <a href="https://www.cursor.com/" target="_blank" rel="noopener">Cursor</a> and <a href="https://windsurf.com/" target="_blank" rel="noopener">Windsurf</a> are <strong>GUI applications</strong> that wrap AI capabilities into an editor. This has major implications for automation, parallelism, and workflow design.</p>
+
+    <!-- ═══════════════════════════════════════════════════════════════
+         CLAUDE CODE
+         ═══════════════════════════════════════════════════════════════ -->
+    <h2 id="claude-code"><a href="https://code.claude.com/" target="_blank" rel="noopener" style="color:inherit;text-decoration:none;">Claude Code</a></h2>
+    <div class="tool-card">
+      <h3><a href="https://code.claude.com/" target="_blank" rel="noopener">Claude Code</a></h3>
+      <div class="tool-meta">
+        <span>By <a href="https://anthropic.com/" target="_blank" rel="noopener">Anthropic</a></span>
+        <span>CLI + VS Code + JetBrains + Desktop + Web</span>
+        <span><a href="https://github.com/anthropics/claude-code" target="_blank" rel="noopener">Source on GitHub</a></span>
+      </div>
+      <p><a href="https://code.claude.com/" target="_blank" rel="noopener">Claude Code</a> is <a href="https://anthropic.com/" target="_blank" rel="noopener">Anthropic</a>&rsquo;s agentic coding tool. It runs as a CLI command (<code>claude</code>) in your terminal, but also ships as extensions for <a href="https://code.visualstudio.com/" target="_blank" rel="noopener">VS Code</a> and <a href="https://www.jetbrains.com/" target="_blank" rel="noopener">JetBrains IDEs</a>, a native <a href="https://code.claude.com/docs/en/desktop" target="_blank" rel="noopener">desktop app</a> (Mac + Windows), and a <a href="https://claude.ai/code" target="_blank" rel="noopener">web interface</a>. The source code is <a href="https://github.com/anthropics/claude-code" target="_blank" rel="noopener">available on GitHub</a>.</p>
+      <ul>
+        <li><strong>Always agentic</strong> &mdash; there&rsquo;s no &ldquo;chat mode&rdquo; vs &ldquo;agent mode&rdquo; toggle. Claude Code is always an agent that can read files, run commands, edit code, and call tools.</li>
+        <li><strong><a href="https://code.claude.com/docs/en/sub-agents" target="_blank" rel="noopener">Subagents</a></strong> &mdash; spawn specialized child agents with custom system prompts, scoped tools, and independent context windows. Define them as Markdown files in <code>.claude/agents/</code>.</li>
+        <li><strong><a href="https://code.claude.com/docs/en/hooks" target="_blank" rel="noopener">Hooks</a></strong> &mdash; 7 lifecycle events (PreToolUse, PostToolUse, Stop, etc.) that trigger shell commands. Auto-format after edits, lint before commits, run security scans on file changes.</li>
+        <li><strong><a href="https://modelcontextprotocol.io/" target="_blank" rel="noopener">MCP</a> servers</strong> &mdash; connect to <a href="https://github.com/modelcontextprotocol/servers" target="_blank" rel="noopener">hundreds of MCP servers</a> for databases, browsers, APIs, and external services.</li>
+        <li><strong><a href="https://code.claude.com/docs/en/agent-sdk/overview" target="_blank" rel="noopener">Agent SDK</a></strong> &mdash; the same engine available as a Python and TypeScript library for building custom agents programmatically.</li>
+        <li><strong><a href="https://code.claude.com/docs/en/routines" target="_blank" rel="noopener">Routines</a></strong> &mdash; async automations running on <a href="https://anthropic.com/" target="_blank" rel="noopener">Anthropic</a>&rsquo;s cloud infrastructure. Schedule agents, trigger from GitHub events, run without your machine being on.</li>
+      </ul>
+      <div class="tool-verdict">
+        <strong>Strengths:</strong> Most powerful underlying models (Opus 4.7). Terminal-native design enables scripting, parallelism, and headless operation. Richest extensibility via hooks, MCP, subagents, and Agent SDK. Runs on every surface (CLI, IDE, desktop, web, mobile).<br>
+        <strong>Weaknesses:</strong> No inline Tab completions. Locked to Claude models only. Terminal-first design has a learning curve for developers coming from GUI IDEs. Requires <a href="https://anthropic.com/" target="_blank" rel="noopener">Anthropic</a> API key or subscription.
+      </div>
+    </div>
+
+    <!-- ═══════════════════════════════════════════════════════════════
+         CURSOR
+         ═══════════════════════════════════════════════════════════════ -->
+    <h2 id="cursor"><a href="https://www.cursor.com/" target="_blank" rel="noopener" style="color:inherit;text-decoration:none;">Cursor</a></h2>
+    <div class="tool-card">
+      <h3><a href="https://www.cursor.com/" target="_blank" rel="noopener">Cursor</a></h3>
+      <div class="tool-meta">
+        <span>By <a href="https://www.cursor.com/" target="_blank" rel="noopener">Anysphere</a></span>
+        <span>Desktop IDE</span>
+        <span><a href="https://www.cursor.com/pricing" target="_blank" rel="noopener">Pricing</a></span>
+      </div>
+      <p><a href="https://www.cursor.com/" target="_blank" rel="noopener">Cursor</a> is an AI-native code editor built by <a href="https://www.cursor.com/" target="_blank" rel="noopener">Anysphere</a>. Originally a <a href="https://code.visualstudio.com/" target="_blank" rel="noopener">VS Code</a> fork, <a href="https://www.cursor.com/" target="_blank" rel="noopener">Cursor 3</a> (April 2026) rebuilt the interface around parallel AI agents. It supports Claude, GPT, Gemini, xAI models, and Cursor&rsquo;s proprietary <strong>Composer 2</strong> model, with the ability to bring your own API keys.</p>
+      <ul>
+        <li><strong>Tab completions</strong> &mdash; unlimited inline code completions on all paid plans. The feature that hooked most users initially.</li>
+        <li><strong>Agent mode</strong> &mdash; autonomous multi-file editing, terminal command execution, and iterative error correction within the IDE.</li>
+        <li><strong>Background Agents</strong> &mdash; clone your repo to cloud VMs, run up to 8 agents in parallel, and deliver pull requests when done. No local compute required.</li>
+        <li><strong>Agents Window</strong> &mdash; <a href="https://www.cursor.com/" target="_blank" rel="noopener">Cursor 3</a> replaced the Composer pane with a full-screen workspace for managing multiple agents simultaneously.</li>
+        <li><strong>Codebase indexing</strong> &mdash; automatically indexes your entire codebase for semantic search, giving the AI deep project context.</li>
+        <li><strong>Auto mode</strong> &mdash; Cursor automatically selects the optimal model for each task. Unlimited on all paid plans.</li>
+        <li><strong><a href="https://www.cursor.com/blog/typescript-sdk" target="_blank" rel="noopener">Cursor SDK</a></strong> &mdash; TypeScript library for building programmatic agents on <a href="https://www.cursor.com/" target="_blank" rel="noopener">Cursor</a>&rsquo;s cloud infrastructure.</li>
+      </ul>
+      <div class="tool-verdict">
+        <strong>Strengths:</strong> Most polished IDE experience. Inline Tab completions are addictive. Background Agents offload heavy work to the cloud. Multi-model support lets you use the best model for each task. Enormous ecosystem (VS Code extension compatibility).<br>
+        <strong>Weaknesses:</strong> Desktop-only &mdash; no terminal CLI, web, or mobile access. Closed source. Credit-based pricing can be unpredictable for heavy use. Less suited for headless/automated workflows.
+      </div>
+    </div>
+
+    <!-- ═══════════════════════════════════════════════════════════════
+         WINDSURF
+         ═══════════════════════════════════════════════════════════════ -->
+    <h2 id="windsurf"><a href="https://windsurf.com/" target="_blank" rel="noopener" style="color:inherit;text-decoration:none;">Windsurf</a></h2>
+    <div class="tool-card">
+      <h3><a href="https://windsurf.com/" target="_blank" rel="noopener">Windsurf</a></h3>
+      <div class="tool-meta">
+        <span>By <a href="https://cognition.ai/" target="_blank" rel="noopener">Cognition AI</a> (formerly Codeium)</span>
+        <span>Desktop IDE</span>
+        <span><a href="https://windsurf.com/" target="_blank" rel="noopener">windsurf.com</a></span>
+      </div>
+      <p><a href="https://windsurf.com/" target="_blank" rel="noopener">Windsurf</a> was originally built by Codeium, which was <a href="https://cognition.ai/blog/windsurf" target="_blank" rel="noopener">acquired by Cognition AI</a> (makers of <a href="https://devin.ai/" target="_blank" rel="noopener">Devin</a>) in December 2025 after <a href="https://openai.com/" target="_blank" rel="noopener">OpenAI</a>&rsquo;s $3B acquisition attempt fell through. Now it ships with <a href="https://devin.ai/" target="_blank" rel="noopener">Devin</a> integration and <a href="https://cognition.ai/" target="_blank" rel="noopener">Cognition</a>&rsquo;s proprietary <a href="https://cognition.ai/blog/swe-1-6" target="_blank" rel="noopener">SWE-1 model family</a>, which consume zero credits for users.</p>
+      <ul>
+        <li><strong><a href="https://windsurf.com/cascade" target="_blank" rel="noopener">Cascade</a></strong> &mdash; agentic AI that tracks your edits, terminal commands, clipboard, and browsing to infer intent in real time. Multi-file edits, command execution, and context-aware suggestions.</li>
+        <li><strong><a href="https://cognition.ai/blog/swe-1-6" target="_blank" rel="noopener">SWE-1.6</a></strong> &mdash; <a href="https://cognition.ai/" target="_blank" rel="noopener">Cognition</a>&rsquo;s latest proprietary model. Free for all users (0 credits). Up to 950 tokens/sec for paid plans.</li>
+        <li><strong>Codemaps</strong> &mdash; AI-annotated visual code navigation. Unique to <a href="https://windsurf.com/" target="_blank" rel="noopener">Windsurf</a>.</li>
+        <li><strong><a href="https://devin.ai/" target="_blank" rel="noopener">Devin</a> integration</strong> &mdash; launch autonomous <a href="https://devin.ai/" target="_blank" rel="noopener">Devin</a> agent sessions directly from the IDE for complex, long-running tasks.</li>
+        <li><strong>Windsurf 2.0</strong> &mdash; redesigned workspace with Agent Command Center for managing multiple concurrent agent sessions.</li>
+        <li><strong>SWE-grep / Fast Context</strong> &mdash; retrieves code context 10x faster than standard approaches.</li>
+      </ul>
+      <div class="tool-verdict">
+        <strong>Strengths:</strong> Best price-to-value ratio at $15/mo with free proprietary models. Deep workflow awareness (tracks everything you do). <a href="https://devin.ai/" target="_blank" rel="noopener">Devin</a> integration for autonomous complex tasks. Codemaps are genuinely unique for codebase navigation.<br>
+        <strong>Weaknesses:</strong> Ownership transitions (Codeium &rarr; <a href="https://cognition.ai/" target="_blank" rel="noopener">Cognition</a>) created uncertainty. No SDK for programmatic use. Desktop-only. Smaller extension ecosystem than <a href="https://www.cursor.com/" target="_blank" rel="noopener">Cursor</a>. Proprietary models have less public benchmark data than Claude.
+      </div>
+    </div>
+
+    <!-- ═══════════════════════════════════════════════════════════════
+         PRICING
+         ═══════════════════════════════════════════════════════════════ -->
+    <h2 id="pricing">Pricing Comparison</h2>
+    <div class="pricing-grid">
+      <div class="pricing-card">
+        <h4><a href="https://code.claude.com/" target="_blank" rel="noopener">Claude Code</a></h4>
+        <div class="price">$20/mo</div>
+        <div class="price-note">Pro plan &middot; <a href="https://claude.com/pricing" target="_blank" rel="noopener" style="color:var(--dim);">full pricing</a></div>
+        <ul>
+          <li>Pro: $20/mo</li>
+          <li>Max 5x: $100/mo</li>
+          <li>Max 20x: $200/mo</li>
+          <li>API: pay per token</li>
+          <li>Team &amp; Enterprise available</li>
+        </ul>
+      </div>
+      <div class="pricing-card">
+        <h4><a href="https://www.cursor.com/" target="_blank" rel="noopener">Cursor</a></h4>
+        <div class="price">$20/mo</div>
+        <div class="price-note">Pro plan &middot; <a href="https://www.cursor.com/pricing" target="_blank" rel="noopener" style="color:var(--dim);">full pricing</a></div>
+        <ul>
+          <li>Hobby: free (limited)</li>
+          <li>Pro: $20/mo</li>
+          <li>Pro+: $60/mo</li>
+          <li>Ultra: $200/mo</li>
+          <li>Teams: $40/user/mo</li>
+        </ul>
+      </div>
+      <div class="pricing-card">
+        <h4><a href="https://windsurf.com/" target="_blank" rel="noopener">Windsurf</a></h4>
+        <div class="price">$15/mo<span class="winner-badge">cheapest</span></div>
+        <div class="price-note">Pro plan &middot; <a href="https://windsurf.com/" target="_blank" rel="noopener" style="color:var(--dim);">full pricing</a></div>
+        <ul>
+          <li>Free: 5 sessions/day</li>
+          <li>Pro: $15/mo</li>
+          <li>Pro Plus: $35/mo</li>
+          <li>Teams: $25/user/mo</li>
+          <li>SWE-1.6 model: 0 credits</li>
+        </ul>
+      </div>
+    </div>
+    <p><strong>Cost analysis:</strong> For light use (a few agent sessions daily), all three are comparable at $15&ndash;20/mo. For heavy agentic use, <a href="https://windsurf.com/" target="_blank" rel="noopener">Windsurf</a>&rsquo;s free <a href="https://cognition.ai/blog/swe-1-6" target="_blank" rel="noopener">SWE-1.6</a> model makes it the cheapest. <a href="https://code.claude.com/" target="_blank" rel="noopener">Claude Code</a> on the API (pay-per-token) gives the most predictable pricing for automation workloads. <a href="https://www.cursor.com/" target="_blank" rel="noopener">Cursor</a>&rsquo;s credit-based system can surprise heavy users who burn through their monthly allowance.</p>
+
+    <!-- ═══════════════════════════════════════════════════════════════
+         BENCHMARKS
+         ═══════════════════════════════════════════════════════════════ -->
+    <h2 id="benchmarks">Benchmarks &amp; Code Quality</h2>
+    <div class="compare-table-wrap">
+      <table class="compare-table">
+        <thead>
+          <tr>
+            <th>Metric</th>
+            <th><a href="https://code.claude.com/" target="_blank" rel="noopener" class="tl">Claude Code</a></th>
+            <th><a href="https://www.cursor.com/" target="_blank" rel="noopener" class="tl">Cursor</a></th>
+            <th><a href="https://windsurf.com/" target="_blank" rel="noopener" class="tl">Windsurf</a></th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td>SWE-bench Verified</td>
+            <td class="y">82.0% (Opus 4.7)</td>
+            <td>~77% (agent harness)</td>
+            <td>~77% (agent harness)</td>
+          </tr>
+          <tr>
+            <td>Best proprietary model</td>
+            <td><a href="https://docs.anthropic.com/en/docs/about-claude/models" target="_blank" rel="noopener" class="tl">Opus 4.7</a></td>
+            <td>Composer 2</td>
+            <td><a href="https://cognition.ai/blog/swe-1-6" target="_blank" rel="noopener" class="tl">SWE-1.6</a></td>
+          </tr>
+          <tr>
+            <td>Multi-file editing</td>
+            <td class="y">Strong</td>
+            <td class="y">Strong (Composer)</td>
+            <td class="y">Strong (Cascade)</td>
+          </tr>
+          <tr>
+            <td>Context handling</td>
+            <td>200K tokens</td>
+            <td>Semantic index</td>
+            <td>Full workflow tracking</td>
+          </tr>
+          <tr>
+            <td>Speed (tokens/sec)</td>
+            <td>Varies by model</td>
+            <td>Varies by model</td>
+            <td>Up to 950 tok/s (SWE-1.6)</td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+    <p>The benchmark picture is nuanced. <a href="https://code.claude.com/" target="_blank" rel="noopener">Claude Code</a> with <a href="https://docs.anthropic.com/en/docs/about-claude/models" target="_blank" rel="noopener">Opus 4.7</a> leads <a href="https://www.swebench.com/" target="_blank" rel="noopener">SWE-bench Verified</a> outright. But both <a href="https://www.cursor.com/" target="_blank" rel="noopener">Cursor</a> and <a href="https://windsurf.com/" target="_blank" rel="noopener">Windsurf</a> also let you use Claude Opus 4.7 as a model option, so the gap narrows. The real differentiator is <em>how each tool orchestrates its models</em> &mdash; <a href="https://www.cursor.com/" target="_blank" rel="noopener">Cursor</a>&rsquo;s codebase indexing and <a href="https://windsurf.com/" target="_blank" rel="noopener">Windsurf</a>&rsquo;s workflow tracking both add context that raw benchmarks don&rsquo;t capture.</p>
+
+    <!-- ═══════════════════════════════════════════════════════════════
+         AGENT CAPABILITIES
+         ═══════════════════════════════════════════════════════════════ -->
+    <h2 id="agents">Agent Capabilities</h2>
+    <p>All three tools have agent modes, but the depth differs significantly:</p>
+
+    <div class="compare-table-wrap">
+      <table class="compare-table">
+        <thead>
+          <tr>
+            <th>Capability</th>
+            <th><a href="https://code.claude.com/" target="_blank" rel="noopener" class="tl">Claude Code</a></th>
+            <th><a href="https://www.cursor.com/" target="_blank" rel="noopener" class="tl">Cursor</a></th>
+            <th><a href="https://windsurf.com/" target="_blank" rel="noopener" class="tl">Windsurf</a></th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td>Headless (no GUI)</td>
+            <td class="y">Yes &mdash; <code>claude -p</code></td>
+            <td class="n">No</td>
+            <td class="n">No</td>
+          </tr>
+          <tr>
+            <td>Parallel agents</td>
+            <td class="y">Unlimited (local)</td>
+            <td class="y">Up to 8 (cloud)</td>
+            <td class="p">Via Devin</td>
+          </tr>
+          <tr>
+            <td>Unattended overnight</td>
+            <td class="y">Native (tmux)</td>
+            <td class="y">Background Agents</td>
+            <td class="y">Via Devin</td>
+          </tr>
+          <tr>
+            <td>Custom subagents</td>
+            <td class="y">Markdown definitions</td>
+            <td class="p">Agents Window</td>
+            <td class="n">No</td>
+          </tr>
+          <tr>
+            <td>Programmable SDK</td>
+            <td class="y"><a href="https://code.claude.com/docs/en/agent-sdk/overview" target="_blank" rel="noopener" class="tl">Python + TS</a></td>
+            <td class="y"><a href="https://www.cursor.com/blog/typescript-sdk" target="_blank" rel="noopener" class="tl">TypeScript</a></td>
+            <td class="n">No</td>
+          </tr>
+          <tr>
+            <td>Fleet orchestration</td>
+            <td class="y">Via <a href="https://github.com/mixpeek/amux" target="_blank" rel="noopener" class="tl">amux</a></td>
+            <td class="p">Background queue</td>
+            <td class="p">Via Devin platform</td>
+          </tr>
+          <tr>
+            <td>Crash recovery</td>
+            <td class="y">Self-healing (amux)</td>
+            <td class="y">Cloud-managed</td>
+            <td class="y">Cloud-managed</td>
+          </tr>
+          <tr>
+            <td>CI/CD integration</td>
+            <td class="y"><a href="https://code.claude.com/docs/en/routines" target="_blank" rel="noopener" class="tl">Routines</a> + <a href="https://github.com/anthropics/claude-code-action" target="_blank" rel="noopener" class="tl">GitHub Action</a></td>
+            <td class="p">Background Agents</td>
+            <td class="p">Devin automations</td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+
+    <p><a href="https://code.claude.com/" target="_blank" rel="noopener">Claude Code</a> is the clear winner for agent-heavy workflows. Its terminal-native design makes it trivially parallelizable: spawn 20 <code>claude</code> processes in <a href="https://github.com/tmux/tmux" target="_blank" rel="noopener">tmux</a>, orchestrate them with <a href="https://github.com/mixpeek/amux" target="_blank" rel="noopener">amux</a>, and let them run overnight. <a href="https://www.cursor.com/" target="_blank" rel="noopener">Cursor</a>&rsquo;s Background Agents are the best cloud-managed option (up to 8 parallel agents, zero local compute). <a href="https://windsurf.com/" target="_blank" rel="noopener">Windsurf</a> delegates autonomous work to <a href="https://devin.ai/" target="_blank" rel="noopener">Devin</a>, which is powerful but is a separate product with its own pricing.</p>
+
+    <!-- ═══════════════════════════════════════════════════════════════
+         HOW TO CHOOSE
+         ═══════════════════════════════════════════════════════════════ -->
+    <h2 id="choose">How to Choose</h2>
+
+    <div class="verdict-box">
+      <h3>Choose <a href="https://code.claude.com/" target="_blank" rel="noopener">Claude Code</a> if&hellip;</h3>
+      <ul>
+        <li>You prefer <strong>terminal workflows</strong> over GUI editors</li>
+        <li>You want to run <strong>many agents in parallel</strong> on your own machine</li>
+        <li>You need <strong>headless, unattended</strong> agent sessions (overnight runs, CI/CD)</li>
+        <li>You want an <strong>Agent SDK</strong> to build custom tooling</li>
+        <li>You need the <strong>highest code quality</strong> (<a href="https://docs.anthropic.com/en/docs/about-claude/models" target="_blank" rel="noopener">Opus 4.7</a>)</li>
+        <li>You want to <strong>monitor agents from your phone</strong> (web + iOS app)</li>
+      </ul>
+    </div>
+
+    <div class="verdict-box">
+      <h3>Choose <a href="https://www.cursor.com/" target="_blank" rel="noopener">Cursor</a> if&hellip;</h3>
+      <ul>
+        <li>You want the <strong>best inline completions</strong> (Tab is unmatched)</li>
+        <li>You prefer a <strong>full GUI IDE</strong> with integrated AI</li>
+        <li>You want <strong>multi-model flexibility</strong> (Claude, GPT, Gemini, xAI, local)</li>
+        <li>You need <strong>cloud-managed background agents</strong> (no local compute)</li>
+        <li>You&rsquo;re already comfortable with <strong><a href="https://code.visualstudio.com/" target="_blank" rel="noopener">VS Code</a></strong> and want to keep your extensions</li>
+        <li>Your team needs <strong>admin controls and seat management</strong></li>
+      </ul>
+    </div>
+
+    <div class="verdict-box">
+      <h3>Choose <a href="https://windsurf.com/" target="_blank" rel="noopener">Windsurf</a> if&hellip;</h3>
+      <ul>
+        <li>You want the <strong>best value</strong> ($15/mo with free <a href="https://cognition.ai/blog/swe-1-6" target="_blank" rel="noopener">SWE-1.6</a>)</li>
+        <li>You value <strong>workflow-aware AI</strong> that tracks your full context</li>
+        <li>You want <strong><a href="https://devin.ai/" target="_blank" rel="noopener">Devin</a> integration</strong> for complex autonomous tasks</li>
+        <li>You like <strong>visual code navigation</strong> (Codemaps)</li>
+        <li>You want a <strong>free tier</strong> that&rsquo;s actually usable (5 sessions/day)</li>
+        <li>You&rsquo;re budget-conscious and want <strong>fast proprietary models at zero cost</strong></li>
+      </ul>
+    </div>
+
+    <!-- ═══════════════════════════════════════════════════════════════
+         USING THEM TOGETHER
+         ═══════════════════════════════════════════════════════════════ -->
+    <h2 id="together">Using Them Together</h2>
+    <p>These tools are not mutually exclusive. The most productive developers in 2026 use a combination:</p>
+
+    <div class="axis-grid">
+      <div class="axis-card">
+        <h4>Interactive editing</h4>
+        <p><a href="https://www.cursor.com/" target="_blank" rel="noopener">Cursor</a> or <a href="https://windsurf.com/" target="_blank" rel="noopener">Windsurf</a> for day-to-day coding: inline completions, quick refactors, chat-driven edits. The GUI gives immediate visual feedback.</p>
+      </div>
+      <div class="axis-card">
+        <h4>Autonomous batch work</h4>
+        <p><a href="https://code.claude.com/" target="_blank" rel="noopener">Claude Code</a> for tasks that should run without you: test generation across a monorepo, overnight feature implementation, parallel bug fixing. Terminal-native = scriptable.</p>
+      </div>
+      <div class="axis-card">
+        <h4>Fleet orchestration</h4>
+        <p><a href="https://github.com/mixpeek/amux" target="_blank" rel="noopener">amux</a> wraps around <a href="https://code.claude.com/" target="_blank" rel="noopener">Claude Code</a> to manage 10&ndash;50+ agent sessions: web dashboard, crash recovery, task coordination via kanban board, mobile monitoring.</p>
+      </div>
+    </div>
+
+    <p>The pattern: <strong>IDE for writing, agents for scaling.</strong> Use <a href="https://www.cursor.com/" target="_blank" rel="noopener">Cursor</a> or <a href="https://windsurf.com/" target="_blank" rel="noopener">Windsurf</a> when you&rsquo;re actively coding. Launch <a href="https://code.claude.com/" target="_blank" rel="noopener">Claude Code</a> agents when you want to multiply yourself. <a href="https://github.com/mixpeek/amux" target="_blank" rel="noopener">amux</a> makes the agent fleet manageable.</p>
+
+    <div class="tool-card" style="border-color:var(--amber);">
+      <h3><a href="https://github.com/mixpeek/amux" target="_blank" rel="noopener">amux</a> &mdash; orchestrate the fleet</h3>
+      <div class="tool-meta">
+        <span>By <a href="https://mixpeek.com/" target="_blank" rel="noopener">Mixpeek</a></span>
+        <span>Open source (MIT)</span>
+        <span><a href="https://github.com/mixpeek/amux" target="_blank" rel="noopener">GitHub</a></span>
+      </div>
+      <p>Whether you pick <a href="https://code.claude.com/" target="_blank" rel="noopener">Claude Code</a>, <a href="https://www.cursor.com/" target="_blank" rel="noopener">Cursor</a>, or <a href="https://windsurf.com/" target="_blank" rel="noopener">Windsurf</a> as your primary tool, you&rsquo;ll eventually want to run multiple <a href="https://code.claude.com/" target="_blank" rel="noopener">Claude Code</a> agents for batch work. <a href="https://github.com/mixpeek/amux" target="_blank" rel="noopener">amux</a> is the open-source control plane: spawn dozens of agents, monitor them from a web dashboard or mobile PWA, auto-recover from crashes, and coordinate tasks through a shared kanban board.</p>
+      <ul>
+        <li><strong>Complements any IDE</strong> &mdash; keeps working in the background while you use <a href="https://www.cursor.com/" target="_blank" rel="noopener">Cursor</a> or <a href="https://windsurf.com/" target="_blank" rel="noopener">Windsurf</a></li>
+        <li><strong>Self-healing watchdog</strong> &mdash; detects context overflow, API errors, and session corruption, then auto-restarts</li>
+        <li><strong>REST API + kanban</strong> &mdash; programmatic session management with atomic task claiming</li>
+        <li><strong>Single Python file, zero dependencies</strong> &mdash; installs in one command</li>
+      </ul>
+    </div>
+
+    <pre><code><span class="dim"># Install amux and run 5 Claude Code agents on your project</span>
+git clone https://github.com/mixpeek/amux && cd amux && ./install.sh
+amux register myproject --dir ~/Dev/myproject --yolo
+amux scale myproject --count 5
+amux serve  <span class="dim"># → https://localhost:8822</span></code></pre>
+
+    <!-- ═══════════════════════════════════════════════════════════════
+         FAQ
+         ═══════════════════════════════════════════════════════════════ -->
+    <h2 id="faq">FAQ</h2>
+    <div style="margin:1.5rem 0;">
+      <details style="background:var(--surface);border:1px solid var(--border);border-radius:8px;margin-bottom:0.8rem;">
+        <summary style="padding:1rem 1.2rem;cursor:pointer;font-weight:600;font-size:0.92rem;">Is Claude Code better than Cursor in 2026?</summary>
+        <div style="padding:0 1.2rem 1rem;font-size:0.88rem;color:var(--dim);line-height:1.7;">
+          <p>It depends on your workflow. <a href="https://code.claude.com/" target="_blank" rel="noopener">Claude Code</a> excels at terminal-first, headless, and multi-agent workflows with the strongest underlying model (<a href="https://docs.anthropic.com/en/docs/about-claude/models" target="_blank" rel="noopener">Opus 4.7</a>, 82% SWE-bench Verified). <a href="https://www.cursor.com/" target="_blank" rel="noopener">Cursor</a> excels at interactive IDE editing with inline completions, Background Agents, and codebase indexing. Many developers use both: <a href="https://code.claude.com/" target="_blank" rel="noopener">Claude Code</a> for autonomous agent tasks and <a href="https://www.cursor.com/" target="_blank" rel="noopener">Cursor</a> for interactive editing sessions.</p>
+        </div>
+      </details>
+
+      <details style="background:var(--surface);border:1px solid var(--border);border-radius:8px;margin-bottom:0.8rem;">
+        <summary style="padding:1rem 1.2rem;cursor:pointer;font-weight:600;font-size:0.92rem;">Is Windsurf free to use?</summary>
+        <div style="padding:0 1.2rem 1rem;font-size:0.88rem;color:var(--dim);line-height:1.7;">
+          <p><a href="https://windsurf.com/" target="_blank" rel="noopener">Windsurf</a> offers a free tier with 5 <a href="https://windsurf.com/cascade" target="_blank" rel="noopener">Cascade</a> sessions per day. The Pro plan is $15/month (unlimited Cascade, all models). <a href="https://cognition.ai/" target="_blank" rel="noopener">Cognition</a>&rsquo;s proprietary <a href="https://cognition.ai/blog/swe-1-6" target="_blank" rel="noopener">SWE-1.6</a> model consumes 0 credits on all plans, making it one of the most cost-effective options for AI-assisted coding.</p>
+        </div>
+      </details>
+
+      <details style="background:var(--surface);border:1px solid var(--border);border-radius:8px;margin-bottom:0.8rem;">
+        <summary style="padding:1rem 1.2rem;cursor:pointer;font-weight:600;font-size:0.92rem;">Can I use Claude Code, Cursor, and Windsurf together?</summary>
+        <div style="padding:0 1.2rem 1rem;font-size:0.88rem;color:var(--dim);line-height:1.7;">
+          <p>Yes, and many professional developers do. A common pattern: use <a href="https://www.cursor.com/" target="_blank" rel="noopener">Cursor</a> or <a href="https://windsurf.com/" target="_blank" rel="noopener">Windsurf</a> as your primary IDE for interactive coding (inline completions, quick edits, chat), and run <a href="https://code.claude.com/" target="_blank" rel="noopener">Claude Code</a> agents in the terminal for autonomous tasks (large refactors, test generation, overnight batch work). Tools like <a href="https://github.com/mixpeek/amux" target="_blank" rel="noopener">amux</a> let you orchestrate dozens of <a href="https://code.claude.com/" target="_blank" rel="noopener">Claude Code</a> agents while you work in your IDE of choice.</p>
+        </div>
+      </details>
+
+      <details style="background:var(--surface);border:1px solid var(--border);border-radius:8px;margin-bottom:0.8rem;">
+        <summary style="padding:1rem 1.2rem;cursor:pointer;font-weight:600;font-size:0.92rem;">Which AI coding tool has the best code quality?</summary>
+        <div style="padding:0 1.2rem 1rem;font-size:0.88rem;color:var(--dim);line-height:1.7;">
+          <p>As of May 2026, <a href="https://code.claude.com/" target="_blank" rel="noopener">Claude Code</a> with <a href="https://docs.anthropic.com/en/docs/about-claude/models" target="_blank" rel="noopener">Opus 4.7</a> leads <a href="https://www.swebench.com/" target="_blank" rel="noopener">SWE-bench Verified</a> at 82%. <a href="https://www.cursor.com/" target="_blank" rel="noopener">Cursor</a>&rsquo;s Composer 2 model scores 73.7% on SWE-bench Multilingual. <a href="https://windsurf.com/" target="_blank" rel="noopener">Windsurf</a>&rsquo;s <a href="https://cognition.ai/blog/swe-1-6" target="_blank" rel="noopener">SWE-1.6</a> improves 10%+ over SWE-1.5 on SWE-Bench Pro. However, both <a href="https://www.cursor.com/" target="_blank" rel="noopener">Cursor</a> and <a href="https://windsurf.com/" target="_blank" rel="noopener">Windsurf</a> also support Claude Opus 4.7 as an optional model, so you can get top-tier quality from any tool.</p>
+        </div>
+      </details>
+
+      <details style="background:var(--surface);border:1px solid var(--border);border-radius:8px;margin-bottom:0.8rem;">
+        <summary style="padding:1rem 1.2rem;cursor:pointer;font-weight:600;font-size:0.92rem;">What happened to Windsurf? Did OpenAI buy it?</summary>
+        <div style="padding:0 1.2rem 1rem;font-size:0.88rem;color:var(--dim);line-height:1.7;">
+          <p><a href="https://openai.com/" target="_blank" rel="noopener">OpenAI</a> announced a $3B acquisition of <a href="https://windsurf.com/" target="_blank" rel="noopener">Windsurf</a> (then Codeium) in 2025, but the deal fell through due to Microsoft&rsquo;s contractual rights. Google hired <a href="https://windsurf.com/" target="_blank" rel="noopener">Windsurf</a>&rsquo;s CEO and ~40 senior engineers. <a href="https://cognition.ai/" target="_blank" rel="noopener">Cognition AI</a> (makers of <a href="https://devin.ai/" target="_blank" rel="noopener">Devin</a>) then <a href="https://cognition.ai/blog/windsurf" target="_blank" rel="noopener">acquired the remaining company</a> &mdash; IP, product, brand, and 210 employees &mdash; for ~$250M in December 2025. <a href="https://windsurf.com/" target="_blank" rel="noopener">Windsurf</a> now ships with <a href="https://devin.ai/" target="_blank" rel="noopener">Devin</a> integration and <a href="https://cognition.ai/" target="_blank" rel="noopener">Cognition</a>&rsquo;s <a href="https://cognition.ai/blog/swe-1-6" target="_blank" rel="noopener">SWE-1</a> model family.</p>
+        </div>
+      </details>
+
+      <details style="background:var(--surface);border:1px solid var(--border);border-radius:8px;margin-bottom:0.8rem;">
+        <summary style="padding:1rem 1.2rem;cursor:pointer;font-weight:600;font-size:0.92rem;">Claude Code vs Cursor pricing: which is cheaper?</summary>
+        <div style="padding:0 1.2rem 1rem;font-size:0.88rem;color:var(--dim);line-height:1.7;">
+          <p>Both start at $20/month for Pro tiers, but the models differ. <a href="https://code.claude.com/" target="_blank" rel="noopener">Claude Code</a> (via <a href="https://claude.com/pricing" target="_blank" rel="noopener">Claude Pro</a>) gives access to terminal, web, desktop, and IDE extensions with usage limits. <a href="https://www.cursor.com/" target="_blank" rel="noopener">Cursor</a> Pro gives $20 in monthly model credits plus unlimited Tab and Auto mode. For heavy use, Claude Max ($100&ndash;200/mo) or Cursor Pro+ ($60/mo) offer higher limits. <a href="https://windsurf.com/" target="_blank" rel="noopener">Windsurf</a> Pro at $15/mo is the cheapest with unlimited <a href="https://windsurf.com/cascade" target="_blank" rel="noopener">Cascade</a> and free <a href="https://cognition.ai/blog/swe-1-6" target="_blank" rel="noopener">SWE-1.6</a>.</p>
+        </div>
+      </details>
+
+      <details style="background:var(--surface);border:1px solid var(--border);border-radius:8px;margin-bottom:0.8rem;">
+        <summary style="padding:1rem 1.2rem;cursor:pointer;font-weight:600;font-size:0.92rem;">Which tool is best for running multiple AI agents in parallel?</summary>
+        <div style="padding:0 1.2rem 1rem;font-size:0.88rem;color:var(--dim);line-height:1.7;">
+          <p><a href="https://code.claude.com/" target="_blank" rel="noopener">Claude Code</a> is the strongest for parallel agent workflows. It runs as a CLI that can be spawned in multiple terminal sessions, supports subagents within each session, and has a full <a href="https://code.claude.com/docs/en/agent-sdk/overview" target="_blank" rel="noopener">Agent SDK</a>. <a href="https://www.cursor.com/" target="_blank" rel="noopener">Cursor</a>&rsquo;s Background Agents run up to 8 parallel on cloud VMs. For orchestrating large fleets (10&ndash;50+ agents), <a href="https://github.com/mixpeek/amux" target="_blank" rel="noopener">amux</a> wraps around <a href="https://code.claude.com/" target="_blank" rel="noopener">Claude Code</a> with fleet management, crash recovery, and task coordination.</p>
+        </div>
+      </details>
+
+      <details style="background:var(--surface);border:1px solid var(--border);border-radius:8px;margin-bottom:0.8rem;">
+        <summary style="padding:1rem 1.2rem;cursor:pointer;font-weight:600;font-size:0.92rem;">Do I need an IDE or can I just use Claude Code in the terminal?</summary>
+        <div style="padding:0 1.2rem 1rem;font-size:0.88rem;color:var(--dim);line-height:1.7;">
+          <p><a href="https://code.claude.com/" target="_blank" rel="noopener">Claude Code</a> works entirely in the terminal. Many power users prefer this because it&rsquo;s faster, scriptable, and better for automation. It also has <a href="https://code.visualstudio.com/" target="_blank" rel="noopener">VS Code</a> and <a href="https://www.jetbrains.com/" target="_blank" rel="noopener">JetBrains</a> extensions, a <a href="https://code.claude.com/docs/en/desktop" target="_blank" rel="noopener">desktop app</a>, and a <a href="https://claude.ai/code" target="_blank" rel="noopener">web interface</a> if you want a GUI. <a href="https://www.cursor.com/" target="_blank" rel="noopener">Cursor</a> and <a href="https://windsurf.com/" target="_blank" rel="noopener">Windsurf</a> are IDE-first tools that require their desktop apps. The choice is terminal vs GUI preference.</p>
+        </div>
+      </details>
+    </div>
+
+    <!-- ───────── CTA ───────── -->
+    <div style="background:var(--accent-dim);border:1px solid var(--amber);border-radius:8px;padding:1.4rem 1.6rem;margin:3rem 0 2rem;text-align:center;">
+      <p style="font-size:1rem;font-weight:600;margin:0 0 0.5rem;">Run 50 Claude Code agents while you use Cursor.</p>
+      <p style="font-size:0.88rem;color:var(--dim);margin:0 0 1rem;">amux orchestrates the fleet. Open source, single file, installs in one command.</p>
+      <a href="/guides/getting-started/" style="display:inline-block;background:var(--amber);color:var(--bg);padding:0.6rem 1.4rem;border-radius:6px;text-decoration:none;font-weight:600;font-size:0.88rem;">Get Started</a>
+      <a href="https://github.com/mixpeek/amux" target="_blank" rel="noopener" style="display:inline-block;background:var(--surface);color:var(--text);padding:0.6rem 1.4rem;border-radius:6px;text-decoration:none;font-weight:600;font-size:0.88rem;margin-left:0.6rem;border:1px solid var(--border);">View on GitHub</a>
+    </div>
+
+    <!-- ───────── Related ───────── -->
+    <div class="related-guides" style="background:var(--surface);border:1px solid var(--border);border-radius:8px;padding:1.2rem 1.6rem;margin:2rem 0;">
+      <strong style="font-size:0.82rem;text-transform:uppercase;letter-spacing:0.05em;color:var(--muted);">Related</strong>
+      <ul style="margin:0.6rem 0 0;padding-left:1.2rem;font-size:0.88rem;line-height:2;">
+        <li><a href="/blog/best-ai-agent-sdks-2026/" style="color:var(--dim);text-decoration:none;">Best AI Agent SDKs in 2026</a></li>
+        <li><a href="/blog/best-ai-coding-tools-2026/" style="color:var(--dim);text-decoration:none;">Best AI Coding Tools 2026</a></li>
+        <li><a href="/blog/best-multi-agent-orchestrators-2026/" style="color:var(--dim);text-decoration:none;">Best Multi-Agent Orchestrators 2026</a></li>
+        <li><a href="/guides/claude-code-cursor-hybrid-workflow/" style="color:var(--dim);text-decoration:none;">Claude Code + Cursor Hybrid Workflow</a></li>
+        <li><a href="/compare/amux-vs-cursor/" style="color:var(--dim);text-decoration:none;">amux vs Cursor</a></li>
+        <li><a href="/compare/amux-vs-windsurf/" style="color:var(--dim);text-decoration:none;">amux vs Windsurf</a></li>
+      </ul>
+    </div>
+
+  </main>
+  <footer class="sub-footer">
+    <div class="footer-inner">
+      <div class="footer-top">
+        <div class="footer-brand-col">
+          <a href="/" class="footer-logo">amux</a>
+          <p>Open-source control plane for AI agents.</p>
+        </div>
+        <div class="footer-col">
+          <div class="footer-col-label">Resources</div>
+          <ul>
+            <li><a href="/guides/">Guides</a></li>
+            <li><a href="/blog/">Blog</a></li>
+            <li><a href="/demos/">Demos</a></li>
+            <li><a href="/glossary/">Glossary</a></li>
+            <li><a href="/faq/">FAQ</a></li>
+          </ul>
+        </div>
+        <div class="footer-col">
+          <div class="footer-col-label">Compare</div>
+          <ul>
+            <li><a href="/compare/amux-vs-cursor/">vs Cursor</a></li>
+            <li><a href="/compare/amux-vs-devin/">vs Devin</a></li>
+            <li><a href="/compare/amux-vs-cline/">vs Cline</a></li>
+            <li><a href="/compare/">All comparisons</a></li>
+          </ul>
+        </div>
+        <div class="footer-col">
+          <div class="footer-col-label">More</div>
+          <ul>
+            <li><a href="/use-cases/">Use Cases</a></li>
+            <li><a href="/solutions/">Solutions</a></li>
+            <li><a href="/for/">For your stack</a></li>
+            <li><a href="/changelog/">Changelog</a></li>
+          </ul>
+        </div>
+      </div>
+      <div class="footer-bottom">
+        <span>MIT License. Built by <a href="https://mixpeek.com">Mixpeek</a></span>
+        <div class="footer-bottom-links">
+          <a href="https://apps.apple.com/us/app/amux-agent-multiplexer/id6760410435" target="_blank" rel="noopener">iOS App</a>
+          <a href="https://github.com/mixpeek/amux" target="_blank" rel="noopener">GitHub</a>
+        </div>
+      </div>
+    </div>
+  </footer>
+  <script>
+    fetch('https://api.github.com/repos/mixpeek/amux')
+      .then(r=>r.json())
+      .then(d=>{if(d.stargazers_count){const e=document.getElementById('gh-stars');if(e)e.textContent='('+d.stargazers_count.toLocaleString()+')'}})
+      .catch(()=>{});
+  </script>
+</body>
+</html>

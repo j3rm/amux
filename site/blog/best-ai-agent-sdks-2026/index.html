@@ -1,0 +1,599 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="dark">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="theme-color" content="#1e2330">
+  <title>Best AI Agent SDKs for Coding in 2026: Claude Agent SDK, Cursor SDK, Codex &amp; Cosmos Compared — amux</title>
+  <link rel="icon" href="/icon.svg" type="image/svg+xml">
+  <meta name="description" content="Comprehensive comparison of AI coding agent SDKs in 2026. Claude Agent SDK, Cursor SDK, OpenAI Codex, and Augment Cosmos compared on language support, pricing, multi-agent capabilities, and when to use each.">
+  <meta name="keywords" content="AI agent SDK, Claude Agent SDK, Cursor SDK, OpenAI Codex SDK, Augment Cosmos, AI coding agent SDK comparison, build AI coding agents, programmatic AI agents 2026, Claude Agent SDK vs Cursor SDK, best AI agent SDK">
+  <link rel="canonical" href="https://amux.io/blog/best-ai-agent-sdks-2026/">
+  <meta property="og:title" content="Best AI Agent SDKs for Coding in 2026: Claude, Cursor, Codex & Cosmos — amux">
+  <meta property="og:description" content="The definitive comparison of AI coding agent SDKs. 4 platforms compared on language support, pricing, multi-agent orchestration, and production readiness.">
+  <meta property="og:url" content="https://amux.io/blog/best-ai-agent-sdks-2026/">
+  <meta property="og:image" content="https://amux.io/og-image.png">
+  <meta property="og:type" content="article">
+  <meta name="twitter:card" content="summary_large_image">
+  <link rel="alternate" type="application/rss+xml" title="amux Blog" href="https://amux.io/blog/rss.xml">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600;700&family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="/style.css">
+
+  <script type="application/ld+json">{
+    "@context":"https://schema.org",
+    "@type":"BreadcrumbList",
+    "itemListElement":[
+      {"@type":"ListItem","position":1,"name":"amux","item":"https://amux.io/"},
+      {"@type":"ListItem","position":2,"name":"Blog","item":"https://amux.io/blog/"},
+      {"@type":"ListItem","position":3,"name":"Best AI Agent SDKs 2026","item":"https://amux.io/blog/best-ai-agent-sdks-2026/"}
+    ]
+  }</script>
+  <script type="application/ld+json">{
+    "@context":"https://schema.org",
+    "@type":"BlogPosting",
+    "headline":"Best AI Agent SDKs for Coding in 2026: Claude Agent SDK, Cursor SDK, Codex & Cosmos Compared",
+    "description":"Comprehensive comparison of AI coding agent SDKs in 2026. Claude Agent SDK, Cursor SDK, OpenAI Codex, and Augment Cosmos compared on language support, pricing, multi-agent capabilities, and when to use each.",
+    "author":{"@type":"Organization","name":"amux","url":"https://amux.io"},
+    "publisher":{"@type":"Organization","name":"amux","url":"https://amux.io","logo":{"@type":"ImageObject","url":"https://amux.io/icon.png"}},
+    "datePublished":"2026-05-08",
+    "dateModified":"2026-05-08",
+    "mainEntityOfPage":"https://amux.io/blog/best-ai-agent-sdks-2026/"
+  }</script>
+  <script type="application/ld+json">{
+    "@context":"https://schema.org",
+    "@type":"ItemList",
+    "name":"Best AI Agent SDKs for Coding in 2026",
+    "numberOfItems":4,
+    "itemListElement":[
+      {"@type":"ListItem","position":1,"name":"Claude Agent SDK","url":"https://code.claude.com/docs/en/agent-sdk/overview"},
+      {"@type":"ListItem","position":2,"name":"Cursor SDK","url":"https://www.cursor.com/blog/typescript-sdk"},
+      {"@type":"ListItem","position":3,"name":"OpenAI Codex","url":"https://github.com/openai/codex"},
+      {"@type":"ListItem","position":4,"name":"Augment Cosmos","url":"https://www.augmentcode.com/blog/cosmos-now-in-public-preview"}
+    ]
+  }</script>
+  <script type="application/ld+json">{
+    "@context":"https://schema.org",
+    "@type":"FAQPage",
+    "mainEntity":[
+      {"@type":"Question","name":"What is an AI coding agent SDK?","acceptedAnswer":{"@type":"Answer","text":"An AI coding agent SDK is a library that lets developers build custom AI agents programmatically. Unlike using an AI coding tool interactively (like typing prompts in Claude Code or Cursor), an SDK lets you write code that creates, controls, and orchestrates AI agents. The agent reads files, runs commands, edits code, and calls external tools — all driven by your program rather than manual prompts. The main SDKs in 2026 are Anthropic's Claude Agent SDK (Python + TypeScript), Cursor SDK (TypeScript), OpenAI Codex (Rust CLI + cloud platform), and Augment Cosmos (team-level coordination)."}},
+      {"@type":"Question","name":"What is the difference between Claude Agent SDK and Claude Code?","acceptedAnswer":{"@type":"Answer","text":"Claude Code is an interactive tool — you type prompts in a terminal, IDE, or browser and Claude responds. The Claude Agent SDK gives you the same capabilities as a library: you write Python or TypeScript code that programmatically sends prompts, controls which tools are available, handles results, and manages sessions. The SDK includes the same built-in tools (Read, Edit, Bash, Glob, Grep, WebSearch, etc.), hooks, MCP servers, and subagent support. Use Claude Code for interactive work. Use the Agent SDK for CI/CD pipelines, custom applications, production automation, and building your own agent products."}},
+      {"@type":"Question","name":"How does Cursor SDK compare to Claude Agent SDK?","acceptedAnswer":{"@type":"Answer","text":"Both are TypeScript libraries for building programmatic coding agents, but they differ in important ways. Claude Agent SDK supports both Python and TypeScript, includes all Claude Code built-in tools (Read, Edit, Bash, etc.), and runs locally in your process. Cursor SDK is TypeScript-only, runs agents on Cursor's cloud infrastructure with dedicated VMs, and includes codebase indexing and semantic search. Claude Agent SDK gives you more control over execution (local, Bedrock, Vertex, Azure). Cursor SDK offloads compute to the cloud. Choose based on whether you want local control (Claude) or cloud-managed infrastructure (Cursor)."}},
+      {"@type":"Question","name":"Can I use these SDKs with amux?","acceptedAnswer":{"@type":"Answer","text":"Yes. amux orchestrates multiple Claude Code sessions running in tmux, and those sessions can be driven by the Claude Agent SDK. The typical pattern is: use amux for fleet management (starting sessions, monitoring health, crash recovery, task coordination) and the Agent SDK for programmatic agent logic within each session. amux's REST API lets you create sessions, assign tasks via the kanban board, and monitor progress — while the SDK handles the actual code generation and tool execution inside each agent."}},
+      {"@type":"Question","name":"What is the cheapest AI agent SDK?","acceptedAnswer":{"@type":"Answer","text":"OpenAI Codex CLI is open source (Apache 2.0) and free to use locally — you pay only for API tokens. Claude Agent SDK is free to use with an Anthropic API key (pay per token). Cursor SDK pricing is token-based. For the lowest absolute cost, use Codex CLI with GPT-5.3-Codex for routine tasks and reserve Opus or GPT-5.4 for complex work. For the best value per quality, Claude Agent SDK with Sonnet 4.6 offers strong code quality at lower token costs than Opus."}},
+      {"@type":"Question","name":"What is Augment Cosmos and how does it differ from agent SDKs?","acceptedAnswer":{"@type":"Answer","text":"Augment Cosmos is an 'operating system for agentic software development' — it coordinates agents at the team level rather than the individual level. While Claude Agent SDK and Cursor SDK let individual developers build agents, Cosmos provides a shared context layer, expert registry (reusable agent templates), knowledge base, and human-in-the-loop checkpoints for the entire team. Think of SDKs as building blocks for individual agents, and Cosmos as the orchestration layer for agent teams across an organization."}},
+      {"@type":"Question","name":"Should I use an SDK or just run Claude Code in a script?","acceptedAnswer":{"@type":"Answer","text":"For simple automation, running Claude Code in a script with 'claude -p' works fine. An SDK becomes worth it when you need: programmatic control over which tools are available, custom hooks that run code at specific points in the agent loop, session management (resume, fork, replay), subagent orchestration, structured output handling, or integration into a larger application. The SDK also handles the agent loop for you — with raw scripting, you implement tool execution yourself."}},
+      {"@type":"Question","name":"What is the difference between Claude Agent SDK and Claude Managed Agents?","acceptedAnswer":{"@type":"Answer","text":"Claude Agent SDK runs the agent loop inside your own process on your infrastructure. You control the execution environment, have direct filesystem access, and manage your own sessions. Claude Managed Agents is a hosted REST API where Anthropic runs the agent and sandbox — your application sends events and streams results. The Agent SDK is best for local development, CI/CD, and custom products. Managed Agents is best for production workloads where you don't want to operate sandbox infrastructure, and for long-running asynchronous sessions."}},
+      {"@type":"Question","name":"Can these SDKs spawn multiple agents in parallel?","acceptedAnswer":{"@type":"Answer","text":"Yes, all of them support some form of parallelism. Claude Agent SDK has built-in subagent support — your main agent delegates tasks to specialized child agents. Cursor SDK supports subagent delegation on cloud VMs. OpenAI Codex can run dozens of parallel cloud sandbox tasks. For local parallel execution of many agents, pair any SDK with an orchestrator like amux (for Claude Code agents) or use Claude Squad / dmux for terminal multiplexing. The orchestrator handles fleet-level concerns (crash recovery, task coordination, monitoring) while the SDK handles individual agent logic."}},
+      {"@type":"Question","name":"Which SDK has the best code quality?","acceptedAnswer":{"@type":"Answer","text":"Code quality depends primarily on the underlying model, not the SDK. Claude Agent SDK with Opus 4.7 produces the highest-quality code output as of May 2026, leading SWE-bench Verified at 80.8%. Cursor SDK uses proprietary models including Composer 2, which excels at multi-file edits. OpenAI Codex uses GPT-5.4 and GPT-5.3-Codex. All SDKs support switching models per task, so the best practice is to use the most capable model for complex work and a faster, cheaper model for routine tasks."}}
+    ]
+  }</script>
+
+  <style>
+    .compare-grid{display:grid;gap:1.5rem;margin:2rem 0}
+    .tool-card{background:var(--surface);border:1px solid var(--border);border-radius:8px;padding:1.6rem}
+    .tool-card h3{margin:0 0 0.3rem;font-size:1.1rem}
+    .tool-card h3 a{color:inherit}
+    .tool-meta{font-size:0.8rem;color:var(--muted);margin-bottom:1rem;display:flex;gap:1rem;flex-wrap:wrap}
+    .tool-meta span{display:inline-flex;align-items:center;gap:0.3rem}
+    .tool-meta a{color:var(--dim);text-decoration:underline;text-decoration-color:var(--border)}
+    .tool-meta a:hover{color:var(--text)}
+    .tool-card p{font-size:0.88rem;color:var(--dim);margin-bottom:1rem;line-height:1.7}
+    .tool-card p a{color:var(--dim);text-decoration:underline;text-decoration-color:var(--border)}
+    .tool-card p a:hover{color:var(--text)}
+    .tool-card ul{font-size:0.88rem;line-height:1.7;padding-left:1.2rem;color:var(--dim)}
+    .tool-card ul li strong{color:var(--text)}
+    .tool-verdict{margin-top:1rem;padding-top:0.8rem;border-top:1px solid var(--border);font-size:0.85rem;color:var(--dim)}
+    .tool-verdict strong{color:var(--amber)}
+    .compare-table-wrap{overflow-x:auto;margin:2rem 0;-webkit-overflow-scrolling:touch}
+    .compare-table{width:100%;border-collapse:collapse;font-size:0.82rem;min-width:800px}
+    .compare-table th,.compare-table td{padding:0.7rem 0.8rem;text-align:left;border-bottom:1px solid var(--border);white-space:nowrap}
+    .compare-table th{background:var(--surface);color:var(--muted);font-weight:600;text-transform:uppercase;letter-spacing:0.04em;font-size:0.72rem;position:sticky;top:0}
+    .compare-table td:first-child{font-weight:600;color:var(--text)}
+    .compare-table tr:hover td{background:var(--surface)}
+    .y{color:var(--green)}
+    .n{color:var(--red)}
+    .p{color:var(--amber)}
+    .tl{color:var(--text);text-decoration:underline;text-decoration-color:var(--border)}
+    .tl:hover{color:var(--green)}
+    .verdict-box{background:var(--surface);border:1px solid var(--border);border-radius:8px;padding:1.4rem 1.6rem;margin:1.2rem 0}
+    .verdict-box h3{margin:0 0 0.8rem;font-size:1rem}
+    .verdict-box ul{font-size:0.88rem;line-height:1.8;padding-left:1.2rem;color:var(--dim)}
+    .verdict-box ul li strong{color:var(--text)}
+    .axis-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(280px,1fr));gap:1rem;margin:1.5rem 0}
+    .axis-card{background:var(--surface);border:1px solid var(--border);border-radius:8px;padding:1.2rem 1.4rem}
+    .axis-card h4{margin:0 0 0.4rem;font-size:0.9rem;color:var(--amber)}
+    .axis-card p{font-size:0.85rem;color:var(--dim);margin:0;line-height:1.6}
+    .code-compare{display:grid;grid-template-columns:1fr 1fr;gap:1rem;margin:1.5rem 0}
+    .code-compare pre{margin:0;font-size:0.75rem;line-height:1.6}
+    .code-compare .code-label{font-size:0.72rem;font-weight:600;text-transform:uppercase;letter-spacing:0.04em;color:var(--muted);margin-bottom:0.4rem}
+    @media(max-width:600px){
+      .tool-meta{flex-direction:column;gap:0.3rem}
+      .axis-grid{grid-template-columns:1fr}
+      .code-compare{grid-template-columns:1fr}
+    }
+  </style>
+</head>
+<body>
+  <header class="site-header">
+    <a class="logo" href="/">amux</a>
+    <nav>
+      <a href="/docs/" class="hide-mobile">docs</a>
+      <a href="/guides/" class="hide-mobile">guides</a>
+      <a href="/compare/" class="hide-mobile">compare</a>
+      <a href="/demos/" class="hide-mobile">demos</a>
+      <a href="/blog/" class="hide-mobile">blog</a>
+      <a href="https://apps.apple.com/us/app/amux-agent-multiplexer/id6760410435" target="_blank" rel="noopener" class="nav-cta-primary nav-cta">iOS app</a>
+      <a href="https://github.com/mixpeek/amux" target="_blank" rel="noopener" class="nav-cta">GitHub <span class="gh-stars" id="gh-stars"></span></a>
+    </nav>
+  </header>
+  <main>
+    <div class="breadcrumb"><a href="/">amux</a> <span class="sep">&rsaquo;</span> <a href="/blog/">Blog</a> <span class="sep">&rsaquo;</span> <span>Best AI Agent SDKs 2026</span></div>
+
+    <h1>Best AI Agent SDKs for Coding in 2026</h1>
+    <p class="subtitle">In the span of two weeks, four companies shipped SDKs and platforms for building programmatic AI coding agents. <a href="https://anthropic.com/" target="_blank" rel="noopener">Anthropic</a> launched the <a href="https://code.claude.com/docs/en/agent-sdk/overview" target="_blank" rel="noopener">Claude Agent SDK</a> (Python + TypeScript). <a href="https://www.cursor.com/" target="_blank" rel="noopener">Cursor</a> released a <a href="https://www.cursor.com/blog/typescript-sdk" target="_blank" rel="noopener">TypeScript SDK</a> for programmatic agents on cloud VMs. <a href="https://openai.com/" target="_blank" rel="noopener">OpenAI</a>&rsquo;s <a href="https://github.com/openai/codex" target="_blank" rel="noopener">Codex</a> expanded its Automations API. And <a href="https://www.augmentcode.com/" target="_blank" rel="noopener">Augment Code</a> shipped <a href="https://www.augmentcode.com/blog/cosmos-now-in-public-preview" target="_blank" rel="noopener">Cosmos</a>, a team-level agent orchestration platform. This guide compares all four for developers choosing how to build their next generation of AI-powered development workflows.</p>
+
+    <nav class="toc" style="background:var(--surface);border:1px solid var(--border);border-radius:8px;padding:1.2rem 1.6rem;margin:2rem 0;">
+      <strong style="font-size:0.82rem;text-transform:uppercase;letter-spacing:0.05em;color:var(--muted);">Contents</strong>
+      <ol style="margin:0.6rem 0 0;padding-left:1.2rem;font-size:0.88rem;line-height:2;">
+        <li><a href="#why" style="color:var(--dim);text-decoration:none;">Why Agent SDKs Matter</a></li>
+        <li><a href="#table" style="color:var(--dim);text-decoration:none;">Comparison Table</a></li>
+        <li><a href="#claude-agent-sdk" style="color:var(--dim);text-decoration:none;">Claude Agent SDK</a></li>
+        <li><a href="#cursor-sdk" style="color:var(--dim);text-decoration:none;">Cursor SDK</a></li>
+        <li><a href="#codex" style="color:var(--dim);text-decoration:none;">OpenAI Codex</a></li>
+        <li><a href="#cosmos" style="color:var(--dim);text-decoration:none;">Augment Cosmos</a></li>
+        <li><a href="#code" style="color:var(--dim);text-decoration:none;">Code Examples</a></li>
+        <li><a href="#orchestration" style="color:var(--dim);text-decoration:none;">The Orchestration Layer</a></li>
+        <li><a href="#choose" style="color:var(--dim);text-decoration:none;">How to Choose</a></li>
+        <li><a href="#faq" style="color:var(--dim);text-decoration:none;">FAQ</a></li>
+      </ol>
+    </nav>
+
+    <!-- ───────── Why ───────── -->
+    <h2 id="why">Why Agent SDKs Matter</h2>
+    <p>Using an AI coding tool interactively &mdash; typing prompts in <a href="https://code.claude.com/docs/en/overview" target="_blank" rel="noopener">Claude Code</a>, <a href="https://www.cursor.com/" target="_blank" rel="noopener">Cursor</a>, or <a href="https://github.com/openai/codex" target="_blank" rel="noopener">Codex</a> &mdash; is powerful but fundamentally manual. You sit at a terminal or IDE, describe what you want, review the output, and iterate. This works for one task at a time.</p>
+    <p>Agent SDKs let you <strong>program the agents themselves</strong>. Instead of typing prompts, you write code that creates agents, controls their tools, handles their output, chains them together, and runs them in CI/CD pipelines, production services, or custom applications. The shift from &ldquo;using AI tools&rdquo; to &ldquo;building with AI SDKs&rdquo; is the same as the shift from using a spreadsheet to writing software.</p>
+    <p>Three trends drove this moment:</p>
+    <ul>
+      <li><strong>Multi-agent patterns matured</strong> &mdash; developers proved that running 10&ndash;50 agents in parallel (via orchestrators like <a href="https://github.com/mixpeek/amux" target="_blank" rel="noopener">amux</a> and <a href="https://github.com/smtg-ai/claude-squad" target="_blank" rel="noopener">Claude Squad</a>) delivers 5&ndash;10x throughput gains</li>
+      <li><strong>Agents moved to production</strong> &mdash; teams want agents in CI/CD, deploy pipelines, and alerting systems, not just developer terminals</li>
+      <li><strong>Custom workflows emerged</strong> &mdash; off-the-shelf tools can&rsquo;t handle specialized domain logic, compliance requirements, or proprietary codebases without programmatic customization</li>
+    </ul>
+
+    <!-- ───────── Table ───────── -->
+    <h2 id="table">Comparison Table</h2>
+    <div class="compare-table-wrap">
+      <table class="compare-table">
+        <thead>
+          <tr>
+            <th>SDK</th>
+            <th>Maker</th>
+            <th>Languages</th>
+            <th>Execution</th>
+            <th>Built-in Tools</th>
+            <th>Subagents</th>
+            <th>MCP</th>
+            <th>Hooks</th>
+            <th>Sessions</th>
+            <th>Pricing</th>
+            <th>Open Source</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td><a href="https://code.claude.com/docs/en/agent-sdk/overview" target="_blank" rel="noopener" class="tl">Claude Agent SDK</a></td>
+            <td><a href="https://anthropic.com/" target="_blank" rel="noopener" class="tl">Anthropic</a></td>
+            <td>Python, TS</td>
+            <td>Local</td>
+            <td class="y">10+ tools</td>
+            <td class="y">Yes</td>
+            <td class="y">Yes</td>
+            <td class="y">7 hook types</td>
+            <td class="y">Resume, fork</td>
+            <td>Per token</td>
+            <td class="p">SDK open</td>
+          </tr>
+          <tr>
+            <td><a href="https://www.cursor.com/blog/typescript-sdk" target="_blank" rel="noopener" class="tl">Cursor SDK</a></td>
+            <td><a href="https://www.cursor.com/" target="_blank" rel="noopener" class="tl">Anysphere</a></td>
+            <td>TypeScript</td>
+            <td>Cloud VMs</td>
+            <td class="y">Codebase index</td>
+            <td class="y">Yes</td>
+            <td class="y">Yes</td>
+            <td class="y">Skills, hooks</td>
+            <td class="p">Cloud-managed</td>
+            <td>Per token</td>
+            <td class="n">No</td>
+          </tr>
+          <tr>
+            <td><a href="https://github.com/openai/codex" target="_blank" rel="noopener" class="tl">OpenAI Codex</a></td>
+            <td><a href="https://openai.com/" target="_blank" rel="noopener" class="tl">OpenAI</a></td>
+            <td>Rust (CLI)</td>
+            <td>Cloud sandboxes</td>
+            <td class="y">Full environment</td>
+            <td class="p">Via Automations</td>
+            <td class="y">Yes</td>
+            <td class="p">Automations</td>
+            <td class="y">Task-based</td>
+            <td>$20&ndash;200/mo</td>
+            <td class="p">CLI only</td>
+          </tr>
+          <tr>
+            <td><a href="https://www.augmentcode.com/blog/cosmos-now-in-public-preview" target="_blank" rel="noopener" class="tl">Augment Cosmos</a></td>
+            <td><a href="https://www.augmentcode.com/" target="_blank" rel="noopener" class="tl">Augment Code</a></td>
+            <td>Platform</td>
+            <td>Cloud + local</td>
+            <td class="y">Context engine</td>
+            <td class="y">Expert agents</td>
+            <td class="p">Integrations</td>
+            <td class="y">Checkpoints</td>
+            <td class="y">Shared memory</td>
+            <td>Enterprise</td>
+            <td class="n">No</td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+    <p style="font-size:0.78rem;color:var(--muted);margin-top:-1rem;">
+      <span class="y">Green</span> = full support &nbsp;
+      <span class="p">Amber</span> = partial/limited &nbsp;
+      <span class="n">Red</span> = not supported
+    </p>
+
+    <!-- ═══════════════════════════════════════════════════════════════
+         CLAUDE AGENT SDK
+         ═══════════════════════════════════════════════════════════════ -->
+    <h2 id="claude-agent-sdk"><a href="https://code.claude.com/docs/en/agent-sdk/overview" target="_blank" rel="noopener" style="color:inherit;text-decoration:none;">Claude Agent SDK</a></h2>
+    <div class="tool-card">
+      <h3><a href="https://code.claude.com/docs/en/agent-sdk/overview" target="_blank" rel="noopener">Claude Agent SDK</a></h3>
+      <div class="tool-meta">
+        <span>By <a href="https://anthropic.com/" target="_blank" rel="noopener">Anthropic</a></span>
+        <span>Python + TypeScript</span>
+        <span><a href="https://github.com/anthropics/claude-agent-sdk-typescript" target="_blank" rel="noopener">TS SDK</a> &middot; <a href="https://github.com/anthropics/claude-agent-sdk-python" target="_blank" rel="noopener">Python SDK</a></span>
+      </div>
+      <p>The same tools, agent loop, and context management that power <a href="https://code.claude.com/docs/en/overview" target="_blank" rel="noopener">Claude Code</a>, available as a library. Your agent can read files, run commands, edit code, search the web, and call MCP servers &mdash; all driven by your program. Runs locally in your process with support for <a href="https://aws.amazon.com/bedrock/" target="_blank" rel="noopener">Amazon Bedrock</a>, <a href="https://cloud.google.com/vertex-ai" target="_blank" rel="noopener">Google Vertex AI</a>, and <a href="https://azure.microsoft.com/en-us/products/ai-foundry" target="_blank" rel="noopener">Azure AI Foundry</a>.</p>
+      <ul>
+        <li><strong>10+ built-in tools</strong> &mdash; Read, Write, Edit, Bash, Monitor, Glob, Grep, WebSearch, WebFetch, AskUserQuestion &mdash; no tool implementation needed</li>
+        <li><strong>7 hook types</strong> &mdash; PreToolUse, PostToolUse, Stop, SessionStart, SessionEnd, UserPromptSubmit &mdash; run custom code at every point in the agent lifecycle</li>
+        <li><strong>Subagents</strong> &mdash; define specialized child agents with their own tools, instructions, and permissions; the parent delegates and collects results</li>
+        <li><strong>Sessions</strong> &mdash; resume conversations with full context, fork sessions to explore alternatives, replay from checkpoints</li>
+        <li><strong>MCP servers</strong> &mdash; connect to <a href="https://github.com/modelcontextprotocol/servers" target="_blank" rel="noopener">hundreds of MCP servers</a> for databases, browsers, APIs, and external services</li>
+        <li><strong>Multi-cloud</strong> &mdash; route to Anthropic API, Bedrock, Vertex, or Azure without changing agent code</li>
+      </ul>
+      <div class="tool-verdict">
+        <strong>Best for:</strong> Building production agents that need full filesystem access, local execution, and maximum control over the agent loop. The most complete SDK with the broadest tool set and deepest customization via hooks.<br>
+        <strong>Limitation:</strong> Local execution means you manage your own infrastructure. For hosted agents, see <a href="https://platform.claude.com/docs/en/managed-agents/overview" target="_blank" rel="noopener">Claude Managed Agents</a>. Locked to Anthropic models (Claude Opus, Sonnet, Haiku).
+      </div>
+    </div>
+
+    <!-- ═══════════════════════════════════════════════════════════════
+         CURSOR SDK
+         ═══════════════════════════════════════════════════════════════ -->
+    <h2 id="cursor-sdk"><a href="https://www.cursor.com/blog/typescript-sdk" target="_blank" rel="noopener" style="color:inherit;text-decoration:none;">Cursor SDK</a></h2>
+    <div class="tool-card">
+      <h3><a href="https://www.cursor.com/blog/typescript-sdk" target="_blank" rel="noopener">Cursor SDK</a></h3>
+      <div class="tool-meta">
+        <span>By <a href="https://www.cursor.com/" target="_blank" rel="noopener">Anysphere</a></span>
+        <span>TypeScript (<code>@cursor/sdk</code>)</span>
+        <span>Public beta</span>
+      </div>
+      <p>Build programmatic coding agents using the same runtime that powers <a href="https://www.cursor.com/" target="_blank" rel="noopener">Cursor</a>&rsquo;s IDE features. Each agent runs on a dedicated cloud VM with intelligent codebase indexing and semantic search. Supports <a href="https://modelcontextprotocol.io/" target="_blank" rel="noopener">MCP</a> servers, subagent delegation, and Cursor&rsquo;s Composer 2 model alongside third-party models.</p>
+      <ul>
+        <li><strong>Cloud VMs</strong> &mdash; each agent gets its own cloud environment with full system access, no local resource constraints</li>
+        <li><strong>Codebase indexing</strong> &mdash; intelligent context management through semantic search of your entire codebase</li>
+        <li><strong>Subagents</strong> &mdash; delegate specialized tasks to child agents running on their own VMs</li>
+        <li><strong>Multi-model</strong> &mdash; use Composer 2, Claude, GPT, or Gemini models per task</li>
+        <li><strong>Skills and hooks</strong> &mdash; customize agent behavior with reusable skill definitions and lifecycle hooks</li>
+        <li><strong>Self-hosted option</strong> &mdash; run agents on your own infrastructure instead of Cursor&rsquo;s cloud</li>
+      </ul>
+      <div class="tool-verdict">
+        <strong>Best for:</strong> Teams that want cloud-managed agent infrastructure without operating VMs themselves. The codebase indexing is a differentiator for agents working on large repos.<br>
+        <strong>Limitation:</strong> TypeScript only (no Python). Cloud-first design means less control over execution than the Claude Agent SDK. Newer SDK with a smaller ecosystem.
+      </div>
+    </div>
+
+    <!-- ═══════════════════════════════════════════════════════════════
+         OPENAI CODEX
+         ═══════════════════════════════════════════════════════════════ -->
+    <h2 id="codex"><a href="https://github.com/openai/codex" target="_blank" rel="noopener" style="color:inherit;text-decoration:none;">OpenAI Codex</a></h2>
+    <div class="tool-card">
+      <h3><a href="https://github.com/openai/codex" target="_blank" rel="noopener">OpenAI Codex</a></h3>
+      <div class="tool-meta">
+        <span>By <a href="https://openai.com/" target="_blank" rel="noopener">OpenAI</a></span>
+        <span>Rust CLI + cloud platform</span>
+        <span><a href="https://github.com/openai/codex" target="_blank" rel="noopener">Open source CLI (Apache 2.0) &middot; 75k+ stars</a></span>
+      </div>
+      <p>A dual-mode platform: an open-source Rust CLI for local terminal work, plus a cloud platform with sandboxed environments, Automations API, and a web dashboard. The Automations API turns Codex into a programmable agent platform that triggers on issues, CI events, and custom webhooks.</p>
+      <ul>
+        <li><strong>Automations API</strong> &mdash; configure triggers for unprompted work: issue triage, CI failure response, deploy verification, and custom webhooks</li>
+        <li><strong>Cloud sandboxes</strong> &mdash; each task runs in its own isolated environment, preloaded with your repo</li>
+        <li><strong>MCP support</strong> &mdash; extensible via <a href="https://modelcontextprotocol.io/" target="_blank" rel="noopener">Model Context Protocol</a> servers in the CLI</li>
+        <li><strong>Open-source CLI</strong> &mdash; the local Rust agent is Apache 2.0, use it as a building block</li>
+        <li><strong>Massive parallelism</strong> &mdash; run dozens of cloud tasks simultaneously</li>
+      </ul>
+      <div class="tool-verdict">
+        <strong>Best for:</strong> Teams already on OpenAI who want a cloud-native automation platform with event-driven triggers. The Automations API is the most production-ready CI/CD integration.<br>
+        <strong>Limitation:</strong> Locked to OpenAI models. Cloud tasks take 1&ndash;30 minutes (not instant). The CLI and cloud platform are different products with different APIs. See <a href="/compare/amux-vs-codex/">amux vs Codex</a>.
+      </div>
+    </div>
+
+    <!-- ═══════════════════════════════════════════════════════════════
+         AUGMENT COSMOS
+         ═══════════════════════════════════════════════════════════════ -->
+    <h2 id="cosmos"><a href="https://www.augmentcode.com/blog/cosmos-now-in-public-preview" target="_blank" rel="noopener" style="color:inherit;text-decoration:none;">Augment Cosmos</a></h2>
+    <div class="tool-card">
+      <h3><a href="https://www.augmentcode.com/blog/cosmos-now-in-public-preview" target="_blank" rel="noopener">Augment Cosmos</a></h3>
+      <div class="tool-meta">
+        <span>By <a href="https://www.augmentcode.com/" target="_blank" rel="noopener">Augment Code</a></span>
+        <span>Platform (MAX plan)</span>
+        <span>Public preview &middot; May 2026</span>
+      </div>
+      <p>An &ldquo;operating system for agentic software development&rdquo; that coordinates AI agents at the team level. Rather than individual developers working with individual agents, Cosmos provides a shared context layer, expert registry, knowledge base, and human-in-the-loop checkpoints for entire engineering organizations.</p>
+      <ul>
+        <li><strong>Expert Registry</strong> &mdash; create custom specialized agents (&ldquo;Experts&rdquo;) through a description-based interface, share them across the team</li>
+        <li><strong>Context engine</strong> &mdash; maintains a live understanding of your entire stack: code, dependencies, architecture, and history</li>
+        <li><strong>Knowledge base</strong> &mdash; organizational memory layer that agents share, learning from past work</li>
+        <li><strong>Human-in-the-loop</strong> &mdash; reduces workflow interruptions from eight steps to three checkpoints at key decision points</li>
+        <li><strong>Model-agnostic routing</strong> &mdash; sends tasks to the best model for each job</li>
+        <li><strong>Deep code review</strong> &mdash; AI reviewer powered by full codebase context, inline <a href="https://github.com/" target="_blank" rel="noopener">GitHub</a> comments</li>
+      </ul>
+      <div class="tool-verdict">
+        <strong>Best for:</strong> Engineering teams (10+ developers) who want to coordinate AI agents across the organization with shared context, templates, and governance. The most enterprise-ready approach.<br>
+        <strong>Limitation:</strong> Requires MAX plan (enterprise pricing). Not a code-level SDK &mdash; you configure via platform UI, not Python/TypeScript. Newest product (public preview May 2026).
+      </div>
+    </div>
+
+    <!-- ═══════════════════════════════════════════════════════════════
+         CODE EXAMPLES
+         ═══════════════════════════════════════════════════════════════ -->
+    <h2 id="code">Side-by-Side: Building a Bug-Fixing Agent</h2>
+    <p>The same task &mdash; &ldquo;find and fix the bug in auth.py&rdquo; &mdash; expressed in each SDK:</p>
+
+    <h3 style="font-size:0.9rem;color:var(--amber);margin-bottom:0.5rem;"><a href="https://code.claude.com/docs/en/agent-sdk/overview" target="_blank" rel="noopener" style="color:var(--amber);">Claude Agent SDK</a> (Python)</h3>
+    <pre><code>from claude_agent_sdk import query, ClaudeAgentOptions
+
+async for message in query(
+    prompt="Find and fix the bug in auth.py",
+    options=ClaudeAgentOptions(
+        allowed_tools=["Read", "Edit", "Bash", "Grep"]
+    ),
+):
+    if hasattr(message, "result"):
+        print(message.result)</code></pre>
+
+    <h3 style="font-size:0.9rem;color:var(--amber);margin-bottom:0.5rem;"><a href="https://code.claude.com/docs/en/agent-sdk/overview" target="_blank" rel="noopener" style="color:var(--amber);">Claude Agent SDK</a> (TypeScript)</h3>
+    <pre><code>import { query } from "@anthropic-ai/claude-agent-sdk";
+
+for await (const message of query({
+  prompt: "Find and fix the bug in auth.ts",
+  options: { allowedTools: ["Read", "Edit", "Bash", "Grep"] }
+})) {
+  if ("result" in message) console.log(message.result);
+}</code></pre>
+
+    <h3 style="font-size:0.9rem;color:var(--amber);margin-bottom:0.5rem;"><a href="https://www.cursor.com/blog/typescript-sdk" target="_blank" rel="noopener" style="color:var(--amber);">Cursor SDK</a> (TypeScript)</h3>
+    <pre><code>import { Agent } from "@cursor/sdk";
+
+const agent = new Agent({
+  task: "Find and fix the bug in auth.ts",
+  model: "composer-2",
+});
+const result = await agent.run();
+console.log(result.output);</code></pre>
+
+    <h3 style="font-size:0.9rem;color:var(--amber);margin-bottom:0.5rem;"><a href="https://github.com/openai/codex" target="_blank" rel="noopener" style="color:var(--amber);">OpenAI Codex</a> (CLI)</h3>
+    <pre><code># Local execution via the Rust CLI
+codex "Find and fix the bug in auth.py" --approval-mode full-auto
+
+# Cloud execution via the platform API
+curl -X POST https://api.openai.com/v1/codex/tasks \
+  -H "Authorization: Bearer $OPENAI_API_KEY" \
+  -d '{"prompt": "Find and fix the bug in auth.py", "repo": "org/repo"}'</code></pre>
+
+    <p>Notice the key architectural difference: the <a href="https://code.claude.com/docs/en/agent-sdk/overview" target="_blank" rel="noopener">Claude Agent SDK</a> runs the agent loop inside your process. <a href="https://www.cursor.com/blog/typescript-sdk" target="_blank" rel="noopener">Cursor SDK</a> offloads to cloud VMs. <a href="https://github.com/openai/codex" target="_blank" rel="noopener">Codex</a> offers both local CLI and cloud API modes.</p>
+
+    <!-- ═══════════════════════════════════════════════════════════════
+         ORCHESTRATION
+         ═══════════════════════════════════════════════════════════════ -->
+    <h2 id="orchestration">The Orchestration Layer</h2>
+    <p>An SDK builds one agent. An orchestrator manages a fleet. These are complementary, not competing:</p>
+
+    <div class="axis-grid">
+      <div class="axis-card">
+        <h4>SDK (Agent Logic)</h4>
+        <p>Controls what a single agent does: which tools it uses, how it handles errors, what hooks run at each step, how subagents coordinate.</p>
+      </div>
+      <div class="axis-card">
+        <h4>Orchestrator (Fleet Management)</h4>
+        <p>Controls how many agents run, monitors their health, recovers from crashes, coordinates tasks, tracks costs, and provides a dashboard.</p>
+      </div>
+    </div>
+
+    <p>For example, you might use the <a href="https://code.claude.com/docs/en/agent-sdk/overview" target="_blank" rel="noopener">Claude Agent SDK</a> to define a specialized code review agent with custom hooks and security checks, then deploy 10 instances of it via <a href="https://github.com/mixpeek/amux" target="_blank" rel="noopener">amux</a> to review PRs in parallel overnight. The SDK handles the agent logic; amux handles session lifecycle, crash recovery, and the task board.</p>
+
+    <p>See our <a href="/blog/best-multi-agent-orchestrators-2026/">complete orchestrator comparison</a> for the full landscape of tools that manage agent fleets.</p>
+
+    <div class="tool-card" style="border-color:var(--amber);">
+      <h3><a href="https://github.com/mixpeek/amux" target="_blank" rel="noopener">amux</a> &mdash; local fleet orchestration</h3>
+      <div class="tool-meta">
+        <span>By <a href="https://mixpeek.com/" target="_blank" rel="noopener">Mixpeek</a></span>
+        <span>Open source (MIT)</span>
+      </div>
+      <p>While the SDKs above handle individual agent logic, amux handles everything else: spawning 20&ndash;50+ <a href="https://code.claude.com/docs/en/overview" target="_blank" rel="noopener">Claude Code</a> sessions in tmux, monitoring them from a web dashboard and mobile PWA, auto-recovering from crashes with a self-healing watchdog, and coordinating work via a shared kanban board with atomic task claiming.</p>
+      <ul>
+        <li><strong>SDK-compatible</strong> &mdash; sessions managed by amux can run Agent SDK&ndash;powered agents, plain Claude Code, or any terminal-based AI agent</li>
+        <li><strong>Self-healing</strong> &mdash; detects context overflow, session corruption, and API errors, then recovers automatically</li>
+        <li><strong>REST API</strong> &mdash; programmatic session creation, task assignment, and monitoring for building custom pipelines</li>
+        <li><strong>Zero dependencies</strong> &mdash; single Python file, no Docker, no npm</li>
+      </ul>
+    </div>
+
+    <h3 style="margin-top:2rem;">When to use what</h3>
+    <table style="font-size:0.85rem;margin-bottom:2rem;">
+      <thead><tr><th>You want to&hellip;</th><th>Use</th></tr></thead>
+      <tbody>
+        <tr><td>Build a custom agent with specific tools and logic</td><td><a href="https://code.claude.com/docs/en/agent-sdk/overview" target="_blank" rel="noopener">Claude Agent SDK</a> or <a href="https://www.cursor.com/blog/typescript-sdk" target="_blank" rel="noopener">Cursor SDK</a></td></tr>
+        <tr><td>Run 10+ agents overnight with crash recovery</td><td><a href="https://github.com/mixpeek/amux" target="_blank" rel="noopener">amux</a> or <a href="https://github.com/smtg-ai/claude-squad" target="_blank" rel="noopener">Claude Squad</a></td></tr>
+        <tr><td>Automate responses to GitHub events and CI failures</td><td><a href="https://github.com/openai/codex" target="_blank" rel="noopener">Codex</a> Automations or <a href="https://code.claude.com/docs/en/routines" target="_blank" rel="noopener">Claude Code Routines</a></td></tr>
+        <tr><td>Coordinate agents across a 10+ person team</td><td><a href="https://www.augmentcode.com/blog/cosmos-now-in-public-preview" target="_blank" rel="noopener">Augment Cosmos</a></td></tr>
+        <tr><td>Schedule recurring tasks on cloud infrastructure</td><td><a href="https://code.claude.com/docs/en/routines" target="_blank" rel="noopener">Claude Code Routines</a></td></tr>
+        <tr><td>Build a custom product powered by AI coding</td><td><a href="https://code.claude.com/docs/en/agent-sdk/overview" target="_blank" rel="noopener">Claude Agent SDK</a></td></tr>
+      </tbody>
+    </table>
+
+    <!-- ═══════════════════════════════════════════════════════════════
+         CHOOSE
+         ═══════════════════════════════════════════════════════════════ -->
+    <h2 id="choose">How to Choose</h2>
+
+    <div class="verdict-box">
+      <h3>I want maximum control and local execution</h3>
+      <ul>
+        <li><strong><a href="https://code.claude.com/docs/en/agent-sdk/overview" target="_blank" rel="noopener">Claude Agent SDK</a></strong> &mdash; runs in your process, supports Python and TypeScript, fullest tool set and hook system. Pair with <a href="https://github.com/mixpeek/amux" target="_blank" rel="noopener">amux</a> for fleet management.</li>
+      </ul>
+    </div>
+
+    <div class="verdict-box">
+      <h3>I want cloud-managed infrastructure and don&rsquo;t want to operate VMs</h3>
+      <ul>
+        <li><strong><a href="https://www.cursor.com/blog/typescript-sdk" target="_blank" rel="noopener">Cursor SDK</a></strong> &mdash; dedicated cloud VMs per agent with codebase indexing</li>
+        <li><strong><a href="https://github.com/openai/codex" target="_blank" rel="noopener">OpenAI Codex</a></strong> &mdash; cloud sandboxes with event-driven Automations API</li>
+        <li><strong><a href="https://platform.claude.com/docs/en/managed-agents/overview" target="_blank" rel="noopener">Claude Managed Agents</a></strong> &mdash; Anthropic-hosted agents with REST API</li>
+      </ul>
+    </div>
+
+    <div class="verdict-box">
+      <h3>I want to automate work on a schedule or triggered by events</h3>
+      <ul>
+        <li><strong><a href="https://code.claude.com/docs/en/routines" target="_blank" rel="noopener">Claude Code Routines</a></strong> &mdash; scheduled, API-triggered, and GitHub-triggered automation on Anthropic cloud</li>
+        <li><strong><a href="https://github.com/openai/codex" target="_blank" rel="noopener">Codex</a> Automations</strong> &mdash; issue triage, CI failure response, deploy verification</li>
+      </ul>
+    </div>
+
+    <div class="verdict-box">
+      <h3>I need team-level coordination for 10+ developers</h3>
+      <ul>
+        <li><strong><a href="https://www.augmentcode.com/blog/cosmos-now-in-public-preview" target="_blank" rel="noopener">Augment Cosmos</a></strong> &mdash; shared context, expert registry, knowledge base, human-in-the-loop governance</li>
+      </ul>
+    </div>
+
+    <div class="verdict-box">
+      <h3>I want the cheapest path to production</h3>
+      <ul>
+        <li><strong><a href="https://github.com/openai/codex" target="_blank" rel="noopener">OpenAI Codex CLI</a></strong> (Apache 2.0) for local work with pay-per-token API costs</li>
+        <li><strong><a href="https://code.claude.com/docs/en/agent-sdk/overview" target="_blank" rel="noopener">Claude Agent SDK</a></strong> with <a href="https://docs.anthropic.com/en/docs/about-claude/models" target="_blank" rel="noopener">Sonnet 4.6</a> for strong quality at lower token costs</li>
+      </ul>
+    </div>
+
+    <div class="verdict-box">
+      <h3>I&rsquo;m building a product that embeds AI coding as a feature</h3>
+      <ul>
+        <li><strong><a href="https://code.claude.com/docs/en/agent-sdk/overview" target="_blank" rel="noopener">Claude Agent SDK</a></strong> &mdash; most complete library with branding guidelines for white-label use</li>
+        <li><strong><a href="https://www.cursor.com/blog/typescript-sdk" target="_blank" rel="noopener">Cursor SDK</a></strong> &mdash; cloud infrastructure means less ops burden for your team</li>
+      </ul>
+    </div>
+
+    <!-- ═══════════════════════════════════════════════════════════════
+         FAQ
+         ═══════════════════════════════════════════════════════════════ -->
+    <h2 id="faq">FAQ</h2>
+    <div style="margin:1.5rem 0;">
+      <details style="background:var(--surface);border:1px solid var(--border);border-radius:8px;margin-bottom:0.8rem;">
+        <summary style="padding:1rem 1.2rem;cursor:pointer;font-weight:600;font-size:0.92rem;">What is an AI coding agent SDK?</summary>
+        <div style="padding:0 1.2rem 1rem;font-size:0.88rem;color:var(--dim);line-height:1.7;">
+          <p>An AI coding agent SDK is a library that lets developers build custom AI agents programmatically. Unlike typing prompts interactively in <a href="https://code.claude.com/docs/en/overview" target="_blank" rel="noopener">Claude Code</a> or <a href="https://www.cursor.com/" target="_blank" rel="noopener">Cursor</a>, an SDK lets you write code that creates, controls, and orchestrates agents. The agent reads files, runs commands, edits code, and calls external tools &mdash; all driven by your program. The main SDKs are <a href="https://code.claude.com/docs/en/agent-sdk/overview" target="_blank" rel="noopener">Claude Agent SDK</a> (Python + TypeScript), <a href="https://www.cursor.com/blog/typescript-sdk" target="_blank" rel="noopener">Cursor SDK</a> (TypeScript), <a href="https://github.com/openai/codex" target="_blank" rel="noopener">OpenAI Codex</a> (Rust CLI + cloud), and <a href="https://www.augmentcode.com/blog/cosmos-now-in-public-preview" target="_blank" rel="noopener">Augment Cosmos</a> (team platform).</p>
+        </div>
+      </details>
+
+      <details style="background:var(--surface);border:1px solid var(--border);border-radius:8px;margin-bottom:0.8rem;">
+        <summary style="padding:1rem 1.2rem;cursor:pointer;font-weight:600;font-size:0.92rem;">What is the difference between Claude Agent SDK and Claude Code?</summary>
+        <div style="padding:0 1.2rem 1rem;font-size:0.88rem;color:var(--dim);line-height:1.7;">
+          <p><a href="https://code.claude.com/docs/en/overview" target="_blank" rel="noopener">Claude Code</a> is an interactive tool: you type prompts in a terminal, IDE, or browser and Claude responds. The <a href="https://code.claude.com/docs/en/agent-sdk/overview" target="_blank" rel="noopener">Agent SDK</a> gives you the same capabilities as a library: you write Python or TypeScript code that sends prompts, controls tools, handles results, and manages sessions. Use Claude Code for interactive development. Use the SDK for CI/CD, custom applications, and production automation.</p>
+        </div>
+      </details>
+
+      <details style="background:var(--surface);border:1px solid var(--border);border-radius:8px;margin-bottom:0.8rem;">
+        <summary style="padding:1rem 1.2rem;cursor:pointer;font-weight:600;font-size:0.92rem;">How does Cursor SDK compare to Claude Agent SDK?</summary>
+        <div style="padding:0 1.2rem 1rem;font-size:0.88rem;color:var(--dim);line-height:1.7;">
+          <p>Both are TypeScript libraries for programmatic coding agents but differ architecturally. <a href="https://code.claude.com/docs/en/agent-sdk/overview" target="_blank" rel="noopener">Claude Agent SDK</a> supports Python and TypeScript, includes 10+ built-in tools, runs locally in your process, and supports multi-cloud (Bedrock, Vertex, Azure). <a href="https://www.cursor.com/blog/typescript-sdk" target="_blank" rel="noopener">Cursor SDK</a> is TypeScript-only, runs on Cursor&rsquo;s cloud VMs, and includes codebase indexing and semantic search. Choose Claude for local control and Python support. Choose Cursor for cloud-managed infrastructure.</p>
+        </div>
+      </details>
+
+      <details style="background:var(--surface);border:1px solid var(--border);border-radius:8px;margin-bottom:0.8rem;">
+        <summary style="padding:1rem 1.2rem;cursor:pointer;font-weight:600;font-size:0.92rem;">Can I use these SDKs with amux?</summary>
+        <div style="padding:0 1.2rem 1rem;font-size:0.88rem;color:var(--dim);line-height:1.7;">
+          <p>Yes. <a href="https://github.com/mixpeek/amux" target="_blank" rel="noopener">amux</a> manages Claude Code sessions in tmux. Those sessions can run Agent SDK&ndash;powered scripts or plain Claude Code. Use amux for fleet management (starting sessions, crash recovery, task coordination) and the SDK for programmatic agent logic within each session. amux&rsquo;s REST API lets you create sessions, assign tasks, and monitor progress programmatically.</p>
+        </div>
+      </details>
+
+      <details style="background:var(--surface);border:1px solid var(--border);border-radius:8px;margin-bottom:0.8rem;">
+        <summary style="padding:1rem 1.2rem;cursor:pointer;font-weight:600;font-size:0.92rem;">What is the cheapest AI agent SDK?</summary>
+        <div style="padding:0 1.2rem 1rem;font-size:0.88rem;color:var(--dim);line-height:1.7;">
+          <p><a href="https://github.com/openai/codex" target="_blank" rel="noopener">OpenAI Codex CLI</a> is open source (Apache 2.0) and free &mdash; you pay only for API tokens. <a href="https://code.claude.com/docs/en/agent-sdk/overview" target="_blank" rel="noopener">Claude Agent SDK</a> is free with an Anthropic API key. For the lowest cost per task, use Claude Agent SDK with <a href="https://docs.anthropic.com/en/docs/about-claude/models" target="_blank" rel="noopener">Sonnet 4.6</a> &mdash; strong code quality at significantly lower token costs than Opus.</p>
+        </div>
+      </details>
+
+      <details style="background:var(--surface);border:1px solid var(--border);border-radius:8px;margin-bottom:0.8rem;">
+        <summary style="padding:1rem 1.2rem;cursor:pointer;font-weight:600;font-size:0.92rem;">What is Augment Cosmos and how does it differ from SDKs?</summary>
+        <div style="padding:0 1.2rem 1rem;font-size:0.88rem;color:var(--dim);line-height:1.7;">
+          <p><a href="https://www.augmentcode.com/blog/cosmos-now-in-public-preview" target="_blank" rel="noopener">Augment Cosmos</a> is a team-level coordination platform, not a code-level SDK. SDKs let individual developers build agents in Python or TypeScript. Cosmos coordinates agents at the organizational level: shared context, expert templates, knowledge base, and governance checkpoints. Think of SDKs as building blocks for individual agents, and Cosmos as the orchestration platform for agent teams across a company.</p>
+        </div>
+      </details>
+
+      <details style="background:var(--surface);border:1px solid var(--border);border-radius:8px;margin-bottom:0.8rem;">
+        <summary style="padding:1rem 1.2rem;cursor:pointer;font-weight:600;font-size:0.92rem;">Should I use an SDK or just run Claude Code in a script?</summary>
+        <div style="padding:0 1.2rem 1rem;font-size:0.88rem;color:var(--dim);line-height:1.7;">
+          <p>For simple automation, <code>claude -p &quot;your prompt&quot;</code> works fine. An SDK is worth it when you need: programmatic tool control, custom hooks at each step of the agent loop, session management (resume, fork, replay), subagent orchestration, structured output handling, or integration into a larger application. The SDK also manages the agent loop &mdash; with raw scripting, you handle tool execution yourself.</p>
+        </div>
+      </details>
+
+      <details style="background:var(--surface);border:1px solid var(--border);border-radius:8px;margin-bottom:0.8rem;">
+        <summary style="padding:1rem 1.2rem;cursor:pointer;font-weight:600;font-size:0.92rem;">What is the difference between Claude Agent SDK and Managed Agents?</summary>
+        <div style="padding:0 1.2rem 1rem;font-size:0.88rem;color:var(--dim);line-height:1.7;">
+          <p><a href="https://code.claude.com/docs/en/agent-sdk/overview" target="_blank" rel="noopener">Claude Agent SDK</a> runs in your process on your infrastructure &mdash; you have direct filesystem access and full session control. <a href="https://platform.claude.com/docs/en/managed-agents/overview" target="_blank" rel="noopener">Managed Agents</a> is a hosted REST API where Anthropic runs the agent and sandbox. The SDK is best for local development, CI/CD, and custom products. Managed Agents is best for production workloads without operating sandbox infrastructure.</p>
+        </div>
+      </details>
+
+      <details style="background:var(--surface);border:1px solid var(--border);border-radius:8px;margin-bottom:0.8rem;">
+        <summary style="padding:1rem 1.2rem;cursor:pointer;font-weight:600;font-size:0.92rem;">Can these SDKs spawn multiple agents in parallel?</summary>
+        <div style="padding:0 1.2rem 1rem;font-size:0.88rem;color:var(--dim);line-height:1.7;">
+          <p>Yes. <a href="https://code.claude.com/docs/en/agent-sdk/overview" target="_blank" rel="noopener">Claude Agent SDK</a> has built-in subagent support. <a href="https://www.cursor.com/blog/typescript-sdk" target="_blank" rel="noopener">Cursor SDK</a> supports subagent delegation on cloud VMs. <a href="https://github.com/openai/codex" target="_blank" rel="noopener">Codex</a> runs dozens of parallel cloud tasks. For local parallel execution of many agents, pair any SDK with <a href="https://github.com/mixpeek/amux" target="_blank" rel="noopener">amux</a> for fleet management or <a href="https://github.com/smtg-ai/claude-squad" target="_blank" rel="noopener">Claude Squad</a> for terminal multiplexing. See our <a href="/blog/best-multi-agent-orchestrators-2026/">orchestrator comparison</a>.</p>
+        </div>
+      </details>
+
+      <details style="background:var(--surface);border:1px solid var(--border);border-radius:8px;margin-bottom:0.8rem;">
+        <summary style="padding:1rem 1.2rem;cursor:pointer;font-weight:600;font-size:0.92rem;">Which SDK has the best code quality?</summary>
+        <div style="padding:0 1.2rem 1rem;font-size:0.88rem;color:var(--dim);line-height:1.7;">
+          <p>Code quality depends primarily on the underlying model. <a href="https://code.claude.com/docs/en/agent-sdk/overview" target="_blank" rel="noopener">Claude Agent SDK</a> with <a href="https://docs.anthropic.com/en/docs/about-claude/models" target="_blank" rel="noopener">Opus 4.7</a> produces the highest-quality output as of May 2026, leading SWE-bench Verified. <a href="https://www.cursor.com/blog/typescript-sdk" target="_blank" rel="noopener">Cursor SDK</a> uses Composer 2 which excels at multi-file edits. <a href="https://github.com/openai/codex" target="_blank" rel="noopener">Codex</a> uses GPT-5.4. All SDKs support switching models per task &mdash; use the best model for complex work and a cheaper one for routine tasks.</p>
+        </div>
+      </details>
+    </div>
+
+    <!-- ───────── CTA ───────── -->
+    <div style="background:var(--accent-dim);border:1px solid var(--amber);border-radius:8px;padding:1.4rem 1.6rem;margin:3rem 0 2rem;text-align:center;">
+      <p style="font-size:1rem;font-weight:600;margin:0 0 0.5rem;">Build agents. Orchestrate fleets.</p>
+      <p style="font-size:0.88rem;color:var(--dim);margin:0 0 1rem;">Use the Agent SDK for logic. Use amux for fleet management. Open source, installs in one command.</p>
+      <a href="/guides/getting-started/" style="display:inline-block;background:var(--amber);color:var(--bg);padding:0.6rem 1.4rem;border-radius:6px;text-decoration:none;font-weight:600;font-size:0.88rem;">Get Started</a>
+      <a href="https://github.com/mixpeek/amux" target="_blank" rel="noopener" style="display:inline-block;background:var(--surface);color:var(--text);padding:0.6rem 1.4rem;border-radius:6px;text-decoration:none;font-weight:600;font-size:0.88rem;margin-left:0.6rem;border:1px solid var(--border);">View on GitHub</a>
+    </div>
+
+  </main>
+  <footer class="sub-footer">
+    <div class="footer-grid">
+      <div><strong>Product</strong><br><a href="/docs/">Docs</a><br><a href="/guides/">Guides</a><br><a href="/demos/">Demos</a><br><a href="/pricing/">Pricing</a></div>
+      <div><strong>Compare</strong><br><a href="/compare/">All comparisons</a><br><a href="/compare/amux-vs-cursor/">vs Cursor</a><br><a href="/compare/amux-vs-devin/">vs Devin</a><br><a href="/compare/amux-vs-cline/">vs Cline</a></div>
+      <div><strong>Resources</strong><br><a href="/blog/">Blog</a><br><a href="/changelog/">Changelog</a><br><a href="/faq/">FAQ</a><br><a href="/glossary/">Glossary</a></div>
+      <div><strong>Community</strong><br><a href="https://github.com/mixpeek/amux" target="_blank" rel="noopener">GitHub</a><br><a href="https://discord.gg/amux" target="_blank" rel="noopener">Discord</a><br><a href="/blog/rss.xml">RSS</a></div>
+    </div>
+    <p style="text-align:center;color:var(--muted);font-size:0.75rem;margin-top:2rem;">amux &mdash; the agent multiplexer. Open source under MIT.</p>
+  </footer>
+  <script>
+    fetch('https://api.github.com/repos/mixpeek/amux')
+      .then(r=>r.json())
+      .then(d=>{if(d.stargazers_count){const e=document.getElementById('gh-stars');if(e)e.textContent='('+d.stargazers_count.toLocaleString()+')'}})
+      .catch(()=>{});
+  </script>
+</body>
+</html>

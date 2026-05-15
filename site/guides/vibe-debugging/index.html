@@ -1,0 +1,659 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="dark">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="theme-color" content="#1e2330">
+  <title>Vibe Debugging: How to Fix AI-Generated Code That Breaks (2026 Guide) &mdash; amux</title>
+  <link rel="icon" href="/icon.svg" type="image/svg+xml">
+  <meta name="description" content="The complete guide to vibe debugging — systematically fixing AI-generated code that works in demos but breaks in production. 7 failure patterns, 6 debugging workflows, multi-agent investigation techniques, and the tools that make it practical.">
+  <meta name="keywords" content="vibe debugging, fix AI generated code, AI code debugging, vibe coding problems, debug AI code, AI generated code breaks, fix vibe coded app, AI code quality, vibe coding debugging, debug cursor code, debug claude code output, AI generated bugs, vibe code production issues, multi-agent debugging">
+  <link rel="canonical" href="https://amux.io/guides/vibe-debugging/">
+  <meta property="og:title" content="Vibe Debugging: How to Fix AI-Generated Code That Breaks (2026 Guide)">
+  <meta property="og:description" content="Your vibe-coded app worked in the demo. Now it's broken in production. Here's how to systematically debug AI-generated code — 7 failure patterns, 6 workflows, and the multi-agent approach that actually scales.">
+  <meta property="og:url" content="https://amux.io/guides/vibe-debugging/">
+  <meta property="og:image" content="https://amux.io/og-image.png">
+  <meta property="og:type" content="article">
+  <meta name="twitter:card" content="summary_large_image">
+  <link rel="alternate" type="application/rss+xml" title="amux Blog" href="https://amux.io/blog/rss.xml">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600;700&family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="/style.css">
+
+  <script type="application/ld+json">{
+    "@context":"https://schema.org",
+    "@type":"BreadcrumbList",
+    "itemListElement":[
+      {"@type":"ListItem","position":1,"name":"amux","item":"https://amux.io/"},
+      {"@type":"ListItem","position":2,"name":"Guides","item":"https://amux.io/guides/"},
+      {"@type":"ListItem","position":3,"name":"Vibe Debugging","item":"https://amux.io/guides/vibe-debugging/"}
+    ]
+  }</script>
+  <script type="application/ld+json">{
+    "@context":"https://schema.org",
+    "@type":"TechArticle",
+    "headline":"Vibe Debugging: How to Fix AI-Generated Code That Breaks (2026 Guide)",
+    "description":"The complete guide to vibe debugging — systematically fixing AI-generated code that works in demos but breaks in production. 7 failure patterns, 6 debugging workflows, multi-agent investigation techniques.",
+    "author":{"@type":"Organization","name":"amux","url":"https://amux.io"},
+    "publisher":{"@type":"Organization","name":"amux","url":"https://amux.io","logo":{"@type":"ImageObject","url":"https://amux.io/icon.png"}},
+    "datePublished":"2026-05-13",
+    "dateModified":"2026-05-13",
+    "mainEntityOfPage":"https://amux.io/guides/vibe-debugging/"
+  }</script>
+  <script type="application/ld+json">{
+    "@context":"https://schema.org",
+    "@type":"FAQPage",
+    "mainEntity":[
+      {"@type":"Question","name":"What is vibe debugging?","acceptedAnswer":{"@type":"Answer","text":"Vibe debugging is the process of systematically diagnosing and fixing bugs in AI-generated code — code that was produced by tools like Claude Code, Cursor, Codex, v0, Bolt, or Lovable with minimal human review. The term emerged in 2026 as a counterpart to 'vibe coding' (writing software by describing what you want to an AI). Where vibe coding is about generation, vibe debugging is about the cleanup that follows when that generated code breaks in production."}},
+      {"@type":"Question","name":"Why does AI-generated code break in production?","acceptedAnswer":{"@type":"Answer","text":"AI-generated code typically breaks for seven reasons: (1) shallow logic that handles the happy path but not edge cases, (2) hallucinated APIs or functions that don't exist, (3) missing error handling and retry logic, (4) dependency bloat from packages the AI chose without evaluating alternatives, (5) implicit state assumptions that fail under concurrency, (6) no tests to catch regressions, and (7) copy-paste patterns that duplicate bugs across files. These failures compound — a vibe-coded app might work for 10 users but collapse at 100."}},
+      {"@type":"Question","name":"How is vibe debugging different from normal debugging?","acceptedAnswer":{"@type":"Answer","text":"Traditional debugging starts with understanding the code you wrote. Vibe debugging starts with understanding code you didn't write and may not fully comprehend. The developer didn't make the architectural decisions, didn't choose the libraries, and may not understand the internal data flow. This means vibe debugging requires an extra 'comprehension' phase before you can even begin root-cause analysis. Multi-agent approaches help by parallelizing this comprehension step — separate agents can map the architecture, trace data flow, and audit dependencies simultaneously."}},
+      {"@type":"Question","name":"Can I use AI to debug AI-generated code?","acceptedAnswer":{"@type":"Answer","text":"Yes — and it's often the most effective approach. A single AI agent writing code can produce bugs because of context window limits, hallucinations, and missing constraints. But multiple AI agents reviewing that code from different angles (security, performance, correctness, edge cases) catch problems the generating agent missed. The key is using different prompts and sometimes different models for investigation versus generation. Claude Code, Codex CLI, and Aider are all effective debugging agents. Running them in parallel with a tool like amux lets you investigate multiple hypotheses simultaneously."}},
+      {"@type":"Question","name":"What tools are best for vibe debugging?","acceptedAnswer":{"@type":"Answer","text":"The most effective vibe debugging stack in 2026 combines: (1) a terminal-based AI agent like Claude Code or Codex CLI for investigation, (2) static analysis tools like TypeScript, ESLint, Ruff, or Mypy to catch type errors and code smells the AI left behind, (3) an error monitoring service like Sentry or Datadog for production issues, (4) a test framework like pytest or Jest for writing regression tests, and (5) an agent orchestrator like amux for running parallel debugging sessions. The orchestrator is what turns debugging from a serial process into a parallel one."}},
+      {"@type":"Question","name":"When should I debug vibe-coded code versus rewrite it?","acceptedAnswer":{"@type":"Answer","text":"Rewrite when: the code has no tests, no clear architecture, touches more than 3 subsystems with intertwined bugs, or when you've spent more time debugging than the original generation took. Debug when: the issue is localized (1-2 files), the code has some test coverage, the architecture is sound but the implementation has bugs, or when the code is already deployed and a rewrite would cause downtime. A useful heuristic: if you can explain the bug to a colleague in one sentence, debug it. If you need a whiteboard, rewrite it."}},
+      {"@type":"Question","name":"How do I prevent vibe coding bugs in the first place?","acceptedAnswer":{"@type":"Answer","text":"The most effective prevention strategy is quality gates — automated checks that run before AI-generated code is merged. At minimum: type checking (TypeScript or Mypy), linting (ESLint or Ruff), and a test suite that the AI must make pass. Beyond tooling: write specs before generating code, review AI output before committing, use CLAUDE.md or .cursorrules to constrain the AI's choices, and break large features into small, testable units. The amux guide on vibe coding quality gates covers this in detail with pipeline configurations for different team sizes."}}
+    ]
+  }</script>
+
+  <style>
+    .compare-grid{display:grid;gap:1.5rem;margin:2rem 0}
+    .pattern-card{background:var(--surface);border:1px solid var(--border);border-radius:8px;padding:1.6rem}
+    .pattern-card h3{margin:0 0 0.3rem;font-size:1.1rem}
+    .pattern-card h3 a{color:inherit}
+    .pattern-meta{font-size:0.8rem;color:var(--muted);margin-bottom:1rem;display:flex;gap:1rem;flex-wrap:wrap}
+    .pattern-meta span{display:inline-flex;align-items:center;gap:0.3rem}
+    .pattern-card p{font-size:0.88rem;color:var(--dim);margin-bottom:1rem;line-height:1.7}
+    .pattern-card p a{color:var(--dim);text-decoration:underline;text-decoration-color:var(--border)}
+    .pattern-card p a:hover{color:var(--text)}
+    .pattern-card ul{font-size:0.88rem;line-height:1.7;padding-left:1.2rem;color:var(--dim)}
+    .pattern-card ul li{margin-bottom:0.3rem}
+    .pattern-card ul li strong{color:var(--text)}
+    .pattern-card code{font-family:var(--font-mono);font-size:0.82rem;background:var(--bg);padding:0.15rem 0.4rem;border-radius:3px}
+    .pattern-verdict{margin-top:1rem;padding-top:0.8rem;border-top:1px solid var(--border);font-size:0.85rem;color:var(--dim)}
+    .pattern-verdict strong{color:var(--amber)}
+    .compare-table-wrap{overflow-x:auto;margin:2rem 0;-webkit-overflow-scrolling:touch}
+    .compare-table{width:100%;border-collapse:collapse;font-size:0.82rem;min-width:700px}
+    .compare-table th,.compare-table td{padding:0.7rem 0.8rem;text-align:left;border-bottom:1px solid var(--border);white-space:nowrap}
+    .compare-table th{background:var(--surface);color:var(--muted);font-weight:600;text-transform:uppercase;letter-spacing:0.04em;font-size:0.72rem;position:sticky;top:0}
+    .compare-table td:first-child{font-weight:600;color:var(--text)}
+    .compare-table tr:hover td{background:var(--surface)}
+    .y{color:var(--green)}
+    .n{color:var(--red)}
+    .p{color:var(--amber)}
+    .tl{color:var(--text);text-decoration:underline;text-decoration-color:var(--border)}
+    .tl:hover{color:var(--green)}
+    .tldr{background:oklch(0.82 0.17 85 / .08);border:1px solid oklch(0.82 0.17 85 / .25);border-radius:8px;padding:1.4rem 1.6rem;margin:2rem 0}
+    .tldr h3{margin:0 0 0.6rem;font-size:0.95rem;color:var(--amber)}
+    .tldr p{font-size:0.88rem;color:var(--dim);margin:0 0 0.3rem;line-height:1.7}
+    .tldr p:last-child{margin:0}
+    .failure-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(300px,1fr));gap:1rem;margin:1.5rem 0}
+    .failure-card{background:var(--surface);border:1px solid oklch(0.65 0.20 25 / .3);border-radius:8px;padding:1.2rem 1.4rem}
+    .failure-card h4{margin:0 0 0.4rem;font-size:0.9rem;color:oklch(0.75 0.17 25)}
+    .failure-card p{font-size:0.85rem;color:var(--dim);margin:0;line-height:1.6}
+    .failure-card code{font-family:var(--font-mono);font-size:0.78rem;background:var(--bg);padding:0.1rem 0.35rem;border-radius:3px}
+    .signal-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:1rem;margin:1.5rem 0}
+    .signal-card{background:var(--surface);border:1px solid var(--border);border-radius:8px;padding:1.2rem 1.4rem}
+    .signal-card h4{margin:0 0 0.4rem;font-size:0.9rem;color:var(--amber)}
+    .signal-card p{font-size:0.85rem;color:var(--dim);margin:0;line-height:1.6}
+    .step-num{display:inline-flex;align-items:center;justify-content:center;width:28px;height:28px;border-radius:50%;background:oklch(0.80 0.18 145 / .15);color:var(--green);font-family:var(--font-mono);font-size:0.8rem;font-weight:700;margin-right:0.6rem;flex-shrink:0}
+    .step-row{display:flex;align-items:flex-start;margin-bottom:1.2rem}
+    .step-row p{font-size:0.88rem;color:var(--dim);line-height:1.7;margin:0}
+    .step-row p strong{color:var(--text)}
+    .callout{background:oklch(0.72 0.14 240 / .08);border:1px solid oklch(0.72 0.14 240 / .25);border-radius:8px;padding:1.2rem 1.4rem;margin:1.5rem 0}
+    .callout p{font-size:0.88rem;color:var(--dim);margin:0;line-height:1.7}
+    .callout a{color:var(--dim);text-decoration:underline;text-decoration-color:var(--border)}
+    .callout a:hover{color:var(--text)}
+    .callout strong{color:oklch(0.75 0.14 240)}
+    .tool-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(280px,1fr));gap:1rem;margin:1.5rem 0}
+    .tool-card{background:var(--surface);border:1px solid var(--border);border-radius:8px;padding:1.2rem 1.4rem}
+    .tool-card h4{margin:0 0 0.4rem;font-size:0.9rem}
+    .tool-card h4 a{color:var(--text);text-decoration:underline;text-decoration-color:var(--border)}
+    .tool-card h4 a:hover{color:var(--green)}
+    .tool-card p{font-size:0.85rem;color:var(--dim);margin:0 0 0.6rem;line-height:1.6}
+    .tool-card .tool-tag{display:inline-block;font-family:var(--font-mono);font-size:0.68rem;font-weight:600;letter-spacing:0.04em;text-transform:uppercase;padding:2px 6px;border-radius:3px;margin-bottom:0.6rem}
+    .tag-investigate{background:oklch(0.72 0.14 240 / .15);color:oklch(0.75 0.14 240)}
+    .tag-analyze{background:oklch(0.80 0.18 145 / .15);color:var(--green)}
+    .tag-monitor{background:oklch(0.82 0.17 85 / .15);color:var(--amber)}
+    .tag-test{background:oklch(0.72 0.16 310 / .15);color:oklch(0.75 0.16 310)}
+    .tag-orchestrate{background:oklch(0.65 0.17 25 / .15);color:oklch(0.75 0.17 25)}
+    .decision-box{background:var(--surface);border:1px solid var(--border);border-radius:8px;padding:1.4rem 1.6rem;margin:1.5rem 0}
+    .decision-box h3{margin:0 0 0.8rem;font-size:1rem}
+    .decision-cols{display:grid;grid-template-columns:1fr 1fr;gap:1.5rem}
+    .decision-col h4{margin:0 0 0.5rem;font-size:0.9rem}
+    .decision-col ul{font-size:0.85rem;line-height:1.8;padding-left:1.2rem;color:var(--dim)}
+    .decision-col ul li strong{color:var(--text)}
+    .col-debug h4{color:var(--green)}
+    .col-rewrite h4{color:var(--amber)}
+    @media(max-width:700px){
+      .failure-grid{grid-template-columns:1fr}
+      .signal-grid{grid-template-columns:1fr}
+      .tool-grid{grid-template-columns:1fr}
+      .decision-cols{grid-template-columns:1fr}
+    }
+  </style>
+</head>
+<body>
+  <header class="site-header">
+    <a class="logo" href="/">amux</a>
+    <nav>
+      <a href="/docs/" class="hide-mobile">docs</a>
+      <a href="/guides/" class="hide-mobile">guides</a>
+      <a href="/compare/" class="hide-mobile">compare</a>
+      <a href="/demos/" class="hide-mobile">demos</a>
+      <a href="/blog/" class="hide-mobile">blog</a>
+      <a href="https://apps.apple.com/us/app/amux-agent-multiplexer/id6760410435" target="_blank" rel="noopener" class="nav-cta-primary nav-cta">iOS app</a>
+      <a href="https://github.com/mixpeek/amux" target="_blank" rel="noopener" class="nav-cta">GitHub <span class="gh-stars" id="gh-stars"></span></a>
+    </nav>
+  </header>
+  <main>
+    <div class="breadcrumb"><a href="/">amux</a> <span class="sep">&rsaquo;</span> <a href="/guides/">Guides</a> <span class="sep">&rsaquo;</span> <span>Vibe Debugging</span></div>
+
+    <h1>Vibe Debugging: How to Fix AI-Generated Code That Breaks</h1>
+    <p class="subtitle">Your app worked in the demo. The AI generated it in 20 minutes. Now it&rsquo;s in production and users are hitting errors you&rsquo;ve never seen before. Welcome to vibe debugging &mdash; the discipline of systematically fixing code you didn&rsquo;t write, may not fully understand, and need working by tomorrow morning. This guide covers the 7 ways vibe-coded apps break, the tools and workflows that fix them, and why multi-agent investigation is replacing single-threaded debugging.</p>
+
+    <!-- ───────── TL;DR ───────── -->
+    <div class="tldr">
+      <h3>The short version</h3>
+      <p><strong>What is vibe debugging?</strong> Systematically diagnosing and fixing bugs in AI-generated code &mdash; code produced by <a href="https://code.claude.com/" target="_blank" rel="noopener">Claude Code</a>, <a href="https://cursor.com" target="_blank" rel="noopener">Cursor</a>, <a href="https://github.com/openai/codex" target="_blank" rel="noopener">Codex</a>, <a href="https://v0.dev/" target="_blank" rel="noopener">v0</a>, <a href="https://bolt.new/" target="_blank" rel="noopener">Bolt</a>, or <a href="https://lovable.dev/" target="_blank" rel="noopener">Lovable</a> with minimal human review.</p>
+      <p><strong>Why it&rsquo;s different:</strong> You&rsquo;re debugging code you didn&rsquo;t write and don&rsquo;t fully understand. That changes the workflow.</p>
+      <p><strong>Key insight:</strong> Use <em>multiple</em> AI agents to debug what a single agent generated. Parallel investigation catches what serial debugging misses.</p>
+      <p><strong>Best tools:</strong> <a href="https://code.claude.com/" target="_blank" rel="noopener">Claude Code</a> or <a href="https://github.com/openai/codex" target="_blank" rel="noopener">Codex CLI</a> for investigation, <a href="https://www.typescriptlang.org/" target="_blank" rel="noopener">TypeScript</a> / <a href="https://github.com/astral-sh/ruff" target="_blank" rel="noopener">Ruff</a> for static analysis, <a href="https://sentry.io/" target="_blank" rel="noopener">Sentry</a> for production monitoring, <a href="https://github.com/mixpeek/amux" target="_blank" rel="noopener">amux</a> for running parallel debugging sessions.</p>
+    </div>
+
+    <nav class="toc" style="background:var(--surface);border:1px solid var(--border);border-radius:8px;padding:1.2rem 1.6rem;margin:2rem 0;">
+      <strong style="font-size:0.82rem;text-transform:uppercase;letter-spacing:0.05em;color:var(--muted);">Contents</strong>
+      <ol style="margin:0.6rem 0 0;padding-left:1.2rem;font-size:0.88rem;line-height:2;">
+        <li><a href="#what" style="color:var(--dim);text-decoration:none;">What Is Vibe Debugging?</a></li>
+        <li><a href="#failures" style="color:var(--dim);text-decoration:none;">The 7 Ways Vibe-Coded Apps Break</a></li>
+        <li><a href="#vs" style="color:var(--dim);text-decoration:none;">Vibe Debugging vs Traditional Debugging</a></li>
+        <li><a href="#toolkit" style="color:var(--dim);text-decoration:none;">The Vibe Debugging Toolkit</a></li>
+        <li><a href="#workflows" style="color:var(--dim);text-decoration:none;">6 Debugging Workflows That Work</a></li>
+        <li><a href="#multi-agent" style="color:var(--dim);text-decoration:none;">Multi-Agent Debugging: Divide and Conquer</a></li>
+        <li><a href="#rewrite" style="color:var(--dim);text-decoration:none;">When to Debug vs. When to Rewrite</a></li>
+        <li><a href="#prevention" style="color:var(--dim);text-decoration:none;">Prevention: Stop Bugs Before They Ship</a></li>
+        <li><a href="#faq" style="color:var(--dim);text-decoration:none;">FAQ</a></li>
+      </ol>
+    </nav>
+
+    <!-- ═══════════════════════════════════════════════════════════════
+         WHAT IS VIBE DEBUGGING
+         ═══════════════════════════════════════════════════════════════ -->
+    <h2 id="what">What Is Vibe Debugging?</h2>
+    <p><strong>Vibe coding</strong> &mdash; the practice of describing what you want and letting an AI build it &mdash; went mainstream in 2025 after <a href="https://x.com/karpathy" target="_blank" rel="noopener">Andrej Karpathy</a> coined the term. Tools like <a href="https://cursor.com" target="_blank" rel="noopener">Cursor</a>, <a href="https://code.claude.com/" target="_blank" rel="noopener">Claude Code</a>, <a href="https://v0.dev/" target="_blank" rel="noopener">v0</a>, <a href="https://bolt.new/" target="_blank" rel="noopener">Bolt</a>, <a href="https://lovable.dev/" target="_blank" rel="noopener">Lovable</a>, and <a href="https://replit.com/" target="_blank" rel="noopener">Replit</a> made it possible for anyone to generate working applications in minutes.</p>
+    <p>But &ldquo;working&rdquo; in a demo and &ldquo;working&rdquo; in production are different things. By mid-2026, a pattern has emerged: vibe-coded apps that handle 10 users collapse at 100. Features that passed a quick manual test break under real-world input. Error handling that looked correct turns out to be a thin wrapper around <code>try/catch</code> blocks that swallow every exception.</p>
+    <p><strong>Vibe debugging</strong> is the discipline that emerged from this gap. It&rsquo;s the systematic process of diagnosing and fixing code that:</p>
+    <ul>
+      <li>You didn&rsquo;t write and may not fully understand</li>
+      <li>Was generated in a single pass without architectural planning</li>
+      <li>Works for the happy path but fails on edge cases</li>
+      <li>Has few or no tests</li>
+      <li>Uses libraries and patterns you didn&rsquo;t choose</li>
+    </ul>
+    <p>The term has been spreading across developer communities on <a href="https://www.reddit.com/r/programming/" target="_blank" rel="noopener">Reddit</a> and <a href="https://news.ycombinator.com/" target="_blank" rel="noopener">Hacker News</a> since early 2026, as developers who enthusiastically adopted vibe coding hit the wall of maintaining what they generated.</p>
+
+    <!-- ═══════════════════════════════════════════════════════════════
+         7 FAILURE PATTERNS
+         ═══════════════════════════════════════════════════════════════ -->
+    <h2 id="failures">The 7 Ways Vibe-Coded Apps Break</h2>
+    <p>After analyzing thousands of AI-generated codebases, these are the failure patterns that appear again and again. Recognizing which pattern you&rsquo;re dealing with is the first step of any vibe debugging session.</p>
+
+    <div class="failure-grid">
+      <div class="failure-card">
+        <h4>1. Shallow Logic</h4>
+        <p>The code handles the happy path perfectly but has no concept of edge cases. A form works with valid input but crashes on empty strings. An API endpoint returns correct data for the first page but breaks on pagination. The AI optimized for the demo, not for reality.</p>
+      </div>
+      <div class="failure-card">
+        <h4>2. Hallucinated APIs</h4>
+        <p>The AI referenced functions, methods, or API endpoints that don&rsquo;t exist in the library version you&rsquo;re using. <code>response.json.data</code> when the actual field is <code>response.body.results</code>. A <a href="https://react.dev/" target="_blank" rel="noopener">React</a> hook that was renamed three versions ago. These are silent until the code path executes.</p>
+      </div>
+      <div class="failure-card">
+        <h4>3. Error Handling Theater</h4>
+        <p>The AI added <code>try/catch</code> blocks everywhere &mdash; but the catch blocks either swallow errors silently, log a generic message, or re-throw without context. The app <em>looks</em> like it handles errors. It doesn&rsquo;t. When something fails, you get no useful information about what went wrong.</p>
+      </div>
+      <div class="failure-card">
+        <h4>4. Dependency Roulette</h4>
+        <p>The AI pulled in 12 packages where 3 would suffice. Some are unmaintained. Some have overlapping functionality. Some have known vulnerabilities that <code>npm audit</code> or <a href="https://pypi.org/project/pip-audit/" target="_blank" rel="noopener">pip-audit</a> will flag. The dependency tree is a liability you didn&rsquo;t choose.</p>
+      </div>
+      <div class="failure-card">
+        <h4>5. Implicit State Assumptions</h4>
+        <p>The code assumes things about state that are true in a single-user demo but false under concurrency. Two users editing the same resource. A WebSocket that reconnects but doesn&rsquo;t re-sync state. A cache that&rsquo;s never invalidated. Race conditions that only appear under load.</p>
+      </div>
+      <div class="failure-card">
+        <h4>6. The Test Desert</h4>
+        <p>No tests. Or worse &mdash; tests that the AI generated alongside the code that test implementation details instead of behavior, mock everything so they can&rsquo;t catch real bugs, and pass even when the code is broken. A green test suite that provides zero confidence.</p>
+      </div>
+      <div class="failure-card">
+        <h4>7. Copy-Paste Propagation</h4>
+        <p>The AI duplicated a pattern across files instead of abstracting it. When one instance has a bug, every instance has the same bug. Fix it in one place and you&rsquo;ve fixed 1 of 7. Grep for the pattern, and you&rsquo;ll find it everywhere &mdash; each copy slightly different, each copy slightly broken.</p>
+      </div>
+    </div>
+
+    <div class="callout">
+      <p><strong>The compounding problem:</strong> These failures rarely occur in isolation. A vibe-coded app typically has shallow logic (1) with hallucinated APIs (2) and no tests (6). Fixing one bug reveals three more. This is why serial debugging fails &mdash; you need parallel investigation to map the full scope of the problem before you start fixing.</p>
+    </div>
+
+    <!-- ═══════════════════════════════════════════════════════════════
+         COMPARISON TABLE
+         ═══════════════════════════════════════════════════════════════ -->
+    <h2 id="vs">Vibe Debugging vs Traditional Debugging</h2>
+    <p>Vibe debugging isn&rsquo;t just &ldquo;debugging but for AI code.&rdquo; The workflow is fundamentally different because your starting point is different.</p>
+
+    <div class="compare-table-wrap">
+      <table class="compare-table">
+        <thead>
+          <tr>
+            <th>Dimension</th>
+            <th>Traditional Debugging</th>
+            <th>Vibe Debugging</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td>Code familiarity</td>
+            <td>You wrote it (or your team did)</td>
+            <td>AI wrote it &mdash; you may not understand the architecture</td>
+          </tr>
+          <tr>
+            <td>First step</td>
+            <td>Reproduce the bug</td>
+            <td>Understand the code, <em>then</em> reproduce the bug</td>
+          </tr>
+          <tr>
+            <td>Root cause analysis</td>
+            <td>Read the code, trace the logic</td>
+            <td>Ask an AI agent to explain the code, then trace the logic</td>
+          </tr>
+          <tr>
+            <td>Test coverage</td>
+            <td>Usually some tests exist</td>
+            <td>Often zero meaningful tests</td>
+          </tr>
+          <tr>
+            <td>Bug distribution</td>
+            <td>Localized to the change that introduced it</td>
+            <td>Spread across files via copy-paste propagation</td>
+          </tr>
+          <tr>
+            <td>Dependency knowledge</td>
+            <td>Team chose the libraries deliberately</td>
+            <td>AI chose libraries &mdash; may be unfamiliar or inappropriate</td>
+          </tr>
+          <tr>
+            <td>Fix confidence</td>
+            <td>High (you understand the system)</td>
+            <td>Low without tests &mdash; fixing one thing often breaks another</td>
+          </tr>
+          <tr>
+            <td>Best approach</td>
+            <td>Single developer, focused session</td>
+            <td>Multiple AI agents investigating in parallel</td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+
+    <!-- ═══════════════════════════════════════════════════════════════
+         TOOLKIT
+         ═══════════════════════════════════════════════════════════════ -->
+    <h2 id="toolkit">The Vibe Debugging Toolkit</h2>
+    <p>Effective vibe debugging requires five categories of tools. You don&rsquo;t need all of them for every bug, but you should have each category available.</p>
+
+    <div class="tool-grid">
+      <div class="tool-card">
+        <span class="tool-tag tag-investigate">Investigation</span>
+        <h4><a href="https://code.claude.com/" target="_blank" rel="noopener">Claude Code</a></h4>
+        <p>Terminal-based AI agent. Ask it to explain unfamiliar code, trace data flow, or generate hypotheses about why something broke. Best for deep investigation of complex bugs. Supports <a href="https://www.anthropic.com/engineering/effective-context-engineering-for-ai-agents" target="_blank" rel="noopener">context engineering</a> via CLAUDE.md.</p>
+      </div>
+      <div class="tool-card">
+        <span class="tool-tag tag-investigate">Investigation</span>
+        <h4><a href="https://github.com/openai/codex" target="_blank" rel="noopener">Codex CLI</a></h4>
+        <p>OpenAI&rsquo;s terminal agent. Strong at step-by-step debugging with its built-in sandboxing. Good for investigating bugs in isolation without risking side effects. Filesystem restrictions prevent accidental damage during debugging.</p>
+      </div>
+      <div class="tool-card">
+        <span class="tool-tag tag-investigate">Investigation</span>
+        <h4><a href="https://aider.chat/" target="_blank" rel="noopener">Aider</a></h4>
+        <p>Open-source AI pair programming tool with strong git integration. Useful for vibe debugging because it shows exactly what it&rsquo;s changing in diff format, making it easy to review fixes before committing. Works with multiple LLM backends.</p>
+      </div>
+      <div class="tool-card">
+        <span class="tool-tag tag-analyze">Static Analysis</span>
+        <h4><a href="https://www.typescriptlang.org/" target="_blank" rel="noopener">TypeScript</a> / <a href="https://mypy-lang.org/" target="_blank" rel="noopener">Mypy</a></h4>
+        <p>Type checkers catch hallucinated APIs immediately. If the AI called <code>response.data.items</code> but the type says <code>response.body.results</code>, the type checker flags it before runtime. The single highest-ROI tool for vibe debugging.</p>
+      </div>
+      <div class="tool-card">
+        <span class="tool-tag tag-analyze">Static Analysis</span>
+        <h4><a href="https://eslint.org/" target="_blank" rel="noopener">ESLint</a> / <a href="https://github.com/astral-sh/ruff" target="_blank" rel="noopener">Ruff</a></h4>
+        <p>Linters catch patterns that type checkers miss &mdash; unused variables, unreachable code, inconsistent returns, unsafe regex. <a href="https://github.com/astral-sh/ruff" target="_blank" rel="noopener">Ruff</a> checks an entire Python project in under a second. Run these before you start debugging to find the low-hanging bugs.</p>
+      </div>
+      <div class="tool-card">
+        <span class="tool-tag tag-monitor">Monitoring</span>
+        <h4><a href="https://sentry.io/" target="_blank" rel="noopener">Sentry</a> / <a href="https://www.datadoghq.com/" target="_blank" rel="noopener">Datadog</a></h4>
+        <p>Error monitoring gives you the actual stack traces from production. Without it, vibe debugging is guesswork. <a href="https://sentry.io/" target="_blank" rel="noopener">Sentry</a>&rsquo;s free tier is enough for most projects. Feed the stack traces to your AI debugging agent for faster root cause analysis.</p>
+      </div>
+      <div class="tool-card">
+        <span class="tool-tag tag-test">Testing</span>
+        <h4><a href="https://docs.pytest.org/" target="_blank" rel="noopener">pytest</a> / <a href="https://jestjs.io/" target="_blank" rel="noopener">Jest</a> / <a href="https://playwright.dev/" target="_blank" rel="noopener">Playwright</a></h4>
+        <p>You need tests to verify your fixes actually work and don&rsquo;t break something else. <a href="https://docs.pytest.org/" target="_blank" rel="noopener">pytest</a> for Python, <a href="https://jestjs.io/" target="_blank" rel="noopener">Jest</a> for JavaScript, <a href="https://playwright.dev/" target="_blank" rel="noopener">Playwright</a> for end-to-end. Write the test <em>before</em> you fix the bug &mdash; confirm it fails, then make it pass.</p>
+      </div>
+      <div class="tool-card">
+        <span class="tool-tag tag-orchestrate">Orchestration</span>
+        <h4><a href="https://github.com/mixpeek/amux" target="_blank" rel="noopener">amux</a></h4>
+        <p>Agent multiplexer for running parallel debugging sessions. Spin up 3&ndash;5 <a href="https://code.claude.com/" target="_blank" rel="noopener">Claude Code</a> agents investigating different subsystems simultaneously. Shared board for tracking findings. Self-healing watchdog restarts agents that crash mid-investigation.</p>
+      </div>
+    </div>
+
+    <!-- ═══════════════════════════════════════════════════════════════
+         6 WORKFLOWS
+         ═══════════════════════════════════════════════════════════════ -->
+    <h2 id="workflows">6 Debugging Workflows That Work</h2>
+    <p>Each workflow targets a specific failure pattern. Start with the one that matches your symptoms.</p>
+
+    <div class="compare-grid">
+
+      <!-- Workflow 1 -->
+      <div class="pattern-card">
+        <h3>1. The Comprehension-First Debug</h3>
+        <p class="pattern-meta"><span>Best for: <strong>unfamiliar AI-generated codebases</strong></span> <span>Time: <strong>30&ndash;60 min</strong></span></p>
+        <p>When you&rsquo;re staring at code you didn&rsquo;t write and don&rsquo;t understand, investigation must precede debugging. Don&rsquo;t guess &mdash; map the system first.</p>
+        <div class="step-row"><span class="step-num">1</span><p><strong>Map the architecture.</strong> Ask an AI agent: &ldquo;Read every file in this project and give me a one-paragraph summary of the architecture &mdash; what frameworks, what data flow, what the entry points are.&rdquo;</p></div>
+        <div class="step-row"><span class="step-num">2</span><p><strong>Trace the bug path.</strong> Starting from the user-facing symptom, ask the agent to trace the code path from the UI action to the backend response. Identify every function in the chain.</p></div>
+        <div class="step-row"><span class="step-num">3</span><p><strong>Check assumptions.</strong> For each function in the chain, verify: does this function handle null input? Does it handle the error case? Does the return type match what the caller expects?</p></div>
+        <div class="step-row"><span class="step-num">4</span><p><strong>Write a failing test.</strong> Before fixing anything, write a test that reproduces the bug. Now you have a concrete target.</p></div>
+        <div class="pattern-verdict"><strong>When to use:</strong> This is your default workflow for any vibe-coded project you&rsquo;re seeing for the first time. Skip step 1 only if you already understand the architecture.</div>
+      </div>
+
+      <!-- Workflow 2 -->
+      <div class="pattern-card">
+        <h3>2. The Static Analysis Sweep</h3>
+        <p class="pattern-meta"><span>Best for: <strong>hallucinated APIs, type errors, dead code</strong></span> <span>Time: <strong>10&ndash;20 min</strong></span></p>
+        <p>Before debugging individual symptoms, let machines find the obvious bugs. This workflow catches failure patterns 2 (hallucinated APIs) and 7 (copy-paste propagation) in minutes.</p>
+        <div class="step-row"><span class="step-num">1</span><p><strong>Run the type checker.</strong> <code>tsc --noEmit</code> for <a href="https://www.typescriptlang.org/" target="_blank" rel="noopener">TypeScript</a>, <code>mypy .</code> for Python with <a href="https://mypy-lang.org/" target="_blank" rel="noopener">Mypy</a>, <code>pyright</code> for <a href="https://github.com/microsoft/pyright" target="_blank" rel="noopener">Pyright</a>. Every error is a real bug or a real gap in type coverage.</p></div>
+        <div class="step-row"><span class="step-num">2</span><p><strong>Run the linter.</strong> <code>ruff check .</code> for Python, <code>eslint .</code> for JavaScript/TypeScript. Focus on errors, not style warnings.</p></div>
+        <div class="step-row"><span class="step-num">3</span><p><strong>Audit dependencies.</strong> <code>npm audit</code> or <code>pip-audit</code>. Check for known vulnerabilities and unused packages.</p></div>
+        <div class="step-row"><span class="step-num">4</span><p><strong>Feed results to an AI agent.</strong> Copy the type checker and linter output into <a href="https://code.claude.com/" target="_blank" rel="noopener">Claude Code</a> or <a href="https://github.com/openai/codex" target="_blank" rel="noopener">Codex</a> and ask it to fix all errors. Review the fixes before committing.</p></div>
+        <div class="pattern-verdict"><strong>When to use:</strong> Run this workflow first on any vibe-coded project, even before you know what the specific bug is. It finds 30&ndash;40% of issues automatically.</div>
+      </div>
+
+      <!-- Workflow 3 -->
+      <div class="pattern-card">
+        <h3>3. The Git Bisect + AI Hybrid</h3>
+        <p class="pattern-meta"><span>Best for: <strong>regressions in projects with commit history</strong></span> <span>Time: <strong>15&ndash;30 min</strong></span></p>
+        <p>If the app used to work and now it doesn&rsquo;t, <code>git bisect</code> finds the breaking commit. Then an AI agent analyzes what changed.</p>
+        <div class="step-row"><span class="step-num">1</span><p><strong>Start bisecting.</strong> <code>git bisect start</code>, mark a known-good commit and the current broken state. Let git find the culprit.</p></div>
+        <div class="step-row"><span class="step-num">2</span><p><strong>Analyze the breaking commit.</strong> Once bisect identifies the commit, ask an AI agent: &ldquo;This commit introduced a regression. Read the diff and explain what it changed and why it might cause [symptom].&rdquo;</p></div>
+        <div class="step-row"><span class="step-num">3</span><p><strong>Generate a targeted fix.</strong> With the breaking change identified, the fix is usually narrow. Ask the agent to fix the specific issue while preserving the intent of the original commit.</p></div>
+        <div class="pattern-verdict"><strong>When to use:</strong> Any time you can say &ldquo;this used to work.&rdquo; Especially effective for vibe-coded apps where the AI made multiple commits and one of them introduced a subtle break.</div>
+      </div>
+
+      <!-- Workflow 4 -->
+      <div class="pattern-card">
+        <h3>4. The Test Harness Retrofit</h3>
+        <p class="pattern-meta"><span>Best for: <strong>test deserts (pattern 6), building confidence for refactoring</strong></span> <span>Time: <strong>1&ndash;2 hours</strong></span></p>
+        <p>You can&rsquo;t safely fix code that has no tests. This workflow creates a test safety net before you start changing things.</p>
+        <div class="step-row"><span class="step-num">1</span><p><strong>Identify the critical paths.</strong> What are the 5&ndash;10 most important user flows? Login, create, read, update, delete, payment, etc.</p></div>
+        <div class="step-row"><span class="step-num">2</span><p><strong>Generate integration tests.</strong> Ask an AI agent to write integration tests (not unit tests) for each critical path. Use <a href="https://docs.pytest.org/" target="_blank" rel="noopener">pytest</a> with a real database, or <a href="https://playwright.dev/" target="_blank" rel="noopener">Playwright</a> for end-to-end browser tests.</p></div>
+        <div class="step-row"><span class="step-num">3</span><p><strong>Run them and fix the tests, not the code.</strong> The tests should pass against the current code. If they don&rsquo;t, fix the tests &mdash; you&rsquo;re characterizing existing behavior, not changing it.</p></div>
+        <div class="step-row"><span class="step-num">4</span><p><strong>Now debug with confidence.</strong> With a test harness in place, every fix you make can be validated. Run tests after each change. Regressions are caught immediately.</p></div>
+        <div class="pattern-verdict"><strong>When to use:</strong> Before any significant refactoring or bug-fixing in a test-free codebase. The time investment pays back immediately. Use multiple AI agents in parallel &mdash; each writing tests for a different subsystem.</div>
+      </div>
+
+      <!-- Workflow 5 -->
+      <div class="pattern-card">
+        <h3>5. The Dependency Audit</h3>
+        <p class="pattern-meta"><span>Best for: <strong>dependency roulette (pattern 4), unexplained runtime errors</strong></span> <span>Time: <strong>20&ndash;40 min</strong></span></p>
+        <p>When errors point to library code or the app breaks after <code>npm install</code> / <code>pip install</code>, the problem is in the dependency tree.</p>
+        <div class="step-row"><span class="step-num">1</span><p><strong>Map what&rsquo;s installed.</strong> Run <code>npm ls --depth=0</code> or <code>pip list</code>. Ask an AI agent: &ldquo;Which of these packages are redundant? Which have overlapping functionality?&rdquo;</p></div>
+        <div class="step-row"><span class="step-num">2</span><p><strong>Check for version conflicts.</strong> <code>npm ls 2&gt;&amp;1 | grep ERESOLVE</code> or <code>pip check</code>. AI-generated code often pins incompatible versions.</p></div>
+        <div class="step-row"><span class="step-num">3</span><p><strong>Audit for vulnerabilities.</strong> <code>npm audit</code> or <a href="https://pypi.org/project/pip-audit/" target="_blank" rel="noopener">pip-audit</a>. AI agents pull in packages without checking the security advisory database.</p></div>
+        <div class="step-row"><span class="step-num">4</span><p><strong>Remove and replace.</strong> Drop packages that are unmaintained, insecure, or redundant. Ask the AI agent to replace them with well-maintained alternatives. Run tests after each removal.</p></div>
+        <div class="pattern-verdict"><strong>When to use:</strong> When your <code>node_modules</code> is 800MB, when you see deprecation warnings on startup, or when errors originate from inside a dependency.</div>
+      </div>
+
+      <!-- Workflow 6 -->
+      <div class="pattern-card">
+        <h3>6. The Production Trace</h3>
+        <p class="pattern-meta"><span>Best for: <strong>bugs that only appear in production</strong></span> <span>Time: <strong>varies</strong></span></p>
+        <p>Some vibe-coded bugs only manifest under real traffic &mdash; race conditions, memory leaks, state corruption under concurrency. You need production data to debug them.</p>
+        <div class="step-row"><span class="step-num">1</span><p><strong>Add monitoring if you haven&rsquo;t.</strong> <a href="https://sentry.io/" target="_blank" rel="noopener">Sentry</a> takes 5 minutes to set up. You need actual stack traces, not user reports that say &ldquo;it&rsquo;s broken.&rdquo;</p></div>
+        <div class="step-row"><span class="step-num">2</span><p><strong>Collect error patterns.</strong> Group errors by endpoint, user action, or time of day. Look for correlation &mdash; does the error only happen during high traffic? After a specific action? With specific input?</p></div>
+        <div class="step-row"><span class="step-num">3</span><p><strong>Feed traces to an AI agent.</strong> Give the agent the stack trace, the request that triggered it, and any relevant log context. Ask it to identify the root cause and suggest a fix.</p></div>
+        <div class="step-row"><span class="step-num">4</span><p><strong>Write a load test.</strong> Use <a href="https://grafana.com/oss/k6/" target="_blank" rel="noopener">k6</a>, <a href="https://locust.io/" target="_blank" rel="noopener">Locust</a>, or <a href="https://playwright.dev/" target="_blank" rel="noopener">Playwright</a> to simulate the traffic pattern that triggers the bug. Verify your fix survives load before deploying.</p></div>
+        <div class="pattern-verdict"><strong>When to use:</strong> When local testing passes but production is broken. Especially common with vibe-coded apps that have implicit state assumptions (pattern 5).</div>
+      </div>
+
+    </div>
+
+    <!-- ═══════════════════════════════════════════════════════════════
+         MULTI-AGENT DEBUGGING
+         ═══════════════════════════════════════════════════════════════ -->
+    <h2 id="multi-agent">Multi-Agent Debugging: Divide and Conquer</h2>
+    <p>The most effective vibe debugging approach in 2026 isn&rsquo;t a single developer staring at code. It&rsquo;s multiple AI agents investigating different angles of the same problem simultaneously.</p>
+    <p>Why? Because vibe-coded bugs compound. Fixing one reveals three more. A single debugging agent gets stuck in a serial loop &mdash; fix, test, discover new bug, context-switch, fix, test. With parallel agents, you map the full problem space before committing to fixes.</p>
+
+    <h3>The 4-Agent Investigation Pattern</h3>
+    <p>This pattern works for any vibe-coded app with multiple interacting issues. Each agent runs in its own session with <a href="https://github.com/mixpeek/amux" target="_blank" rel="noopener">amux</a>, reporting findings to a shared <a href="/guides/kanban-board-for-agents/">board</a>.</p>
+
+    <div class="signal-grid">
+      <div class="signal-card">
+        <h4>Agent 1: Architecture Mapper</h4>
+        <p>Reads every file, maps the module structure, data flow, and API boundaries. Reports: &ldquo;Here&rsquo;s how the system actually works.&rdquo; Identifies dead code, orphaned routes, and circular dependencies.</p>
+      </div>
+      <div class="signal-card">
+        <h4>Agent 2: Type &amp; Lint Auditor</h4>
+        <p>Runs <a href="https://www.typescriptlang.org/" target="_blank" rel="noopener">TypeScript</a> / <a href="https://mypy-lang.org/" target="_blank" rel="noopener">Mypy</a>, <a href="https://eslint.org/" target="_blank" rel="noopener">ESLint</a> / <a href="https://github.com/astral-sh/ruff" target="_blank" rel="noopener">Ruff</a>, and dependency audits. Reports every type error, unused import, and vulnerable package. Fixes what it can automatically.</p>
+      </div>
+      <div class="signal-card">
+        <h4>Agent 3: Test Writer</h4>
+        <p>Generates integration tests for every critical path using <a href="https://docs.pytest.org/" target="_blank" rel="noopener">pytest</a>, <a href="https://jestjs.io/" target="_blank" rel="noopener">Jest</a>, or <a href="https://playwright.dev/" target="_blank" rel="noopener">Playwright</a>. Runs them against the current code. Reports which paths pass and which are broken.</p>
+      </div>
+      <div class="signal-card">
+        <h4>Agent 4: Bug Hunter</h4>
+        <p>Takes the specific reported symptoms and traces each one from the user action to the root cause. Uses findings from agents 1&ndash;3 to accelerate investigation. Proposes targeted fixes.</p>
+      </div>
+    </div>
+
+    <div class="callout">
+      <p><strong>Why this works:</strong> Agent 1 gives you a map. Agent 2 finds the surface-level bugs. Agent 3 creates a safety net. Agent 4 fixes the actual problem. They run in parallel, so the whole investigation takes 15&ndash;20 minutes instead of 2 hours. Use <a href="https://github.com/mixpeek/amux" target="_blank" rel="noopener">amux</a> to manage the sessions and aggregate findings on the shared board. Each agent works in its own <a href="https://git-scm.com/docs/git-worktree" target="_blank" rel="noopener">git worktree</a> to avoid conflicts.</p>
+    </div>
+
+    <h3>Debugging Approaches Compared</h3>
+    <div class="compare-table-wrap">
+      <table class="compare-table">
+        <thead>
+          <tr>
+            <th>Approach</th>
+            <th>Time to Root Cause</th>
+            <th>Bug Coverage</th>
+            <th>Scales to Complex Bugs</th>
+            <th>Requires Codebase Knowledge</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td>Manual debugging</td>
+            <td class="p">Hours</td>
+            <td class="p">Low (serial)</td>
+            <td class="y">Yes (if experienced)</td>
+            <td class="n">Yes</td>
+          </tr>
+          <tr>
+            <td>Single AI agent</td>
+            <td class="y">30&ndash;60 min</td>
+            <td class="p">Medium</td>
+            <td class="p">Sometimes</td>
+            <td class="y">No</td>
+          </tr>
+          <tr>
+            <td>Multi-agent parallel</td>
+            <td class="y">15&ndash;20 min</td>
+            <td class="y">High (parallel)</td>
+            <td class="y">Yes</td>
+            <td class="y">No</td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+
+    <!-- ═══════════════════════════════════════════════════════════════
+         DEBUG VS REWRITE
+         ═══════════════════════════════════════════════════════════════ -->
+    <h2 id="rewrite">When to Debug vs. When to Rewrite</h2>
+    <p>Not every vibe-coded project is worth debugging. Sometimes the fastest path forward is to regenerate the code with better constraints. Here&rsquo;s the decision framework.</p>
+
+    <div class="decision-box">
+      <h3>The one-sentence test</h3>
+      <p style="font-size:0.92rem;color:var(--dim);line-height:1.7;">If you can explain the bug to a colleague in one sentence (&ldquo;the pagination endpoint returns duplicates when page size changes&rdquo;), debug it. If you need a whiteboard (&ldquo;the state management is broken in ways that affect authentication, caching, and real-time updates simultaneously&rdquo;), consider rewriting.</p>
+    </div>
+
+    <div class="decision-box">
+      <div class="decision-cols">
+        <div class="decision-col col-debug">
+          <h4>Debug when&hellip;</h4>
+          <ul>
+            <li><strong>The issue is localized</strong> &mdash; 1&ndash;2 files, one subsystem</li>
+            <li><strong>The architecture is sound</strong> &mdash; structure is good, implementation has bugs</li>
+            <li><strong>Some tests exist</strong> &mdash; you can verify your fixes</li>
+            <li><strong>The code is deployed</strong> &mdash; rewriting means downtime</li>
+            <li><strong>You understand the fix</strong> &mdash; you can describe what needs to change</li>
+          </ul>
+        </div>
+        <div class="decision-col col-rewrite">
+          <h4>Rewrite when&hellip;</h4>
+          <ul>
+            <li><strong>No tests, no types</strong> &mdash; you can&rsquo;t verify anything works</li>
+            <li><strong>3+ subsystems are broken</strong> &mdash; bugs are intertwined</li>
+            <li><strong>The architecture is wrong</strong> &mdash; not bad implementation but bad design</li>
+            <li><strong>Debugging takes longer than generation</strong> &mdash; the ROI has flipped</li>
+            <li><strong>You&rsquo;re pre-launch</strong> &mdash; no users, no migration concerns</li>
+          </ul>
+        </div>
+      </div>
+    </div>
+
+    <p>If you decide to rewrite, don&rsquo;t just re-prompt the same way. Use <a href="/guides/spec-driven-development/">spec-driven development</a> &mdash; write a detailed spec with acceptance criteria, break it into small tasks, and generate each piece separately with tests. An <a href="https://github.com/mixpeek/amux" target="_blank" rel="noopener">amux</a> session per task keeps agents focused and prevents the sprawling, interconnected code that caused the bugs in the first place.</p>
+
+    <!-- ═══════════════════════════════════════════════════════════════
+         PREVENTION
+         ═══════════════════════════════════════════════════════════════ -->
+    <h2 id="prevention">Prevention: Stop Bugs Before They Ship</h2>
+    <p>The best vibe debugging is the debugging you never have to do. These practices catch AI-generated bugs before they reach production.</p>
+
+    <div class="signal-grid">
+      <div class="signal-card">
+        <h4>Type everything</h4>
+        <p>Use <a href="https://www.typescriptlang.org/" target="_blank" rel="noopener">TypeScript</a> instead of JavaScript. Use <a href="https://mypy-lang.org/" target="_blank" rel="noopener">Mypy</a> or <a href="https://github.com/microsoft/pyright" target="_blank" rel="noopener">Pyright</a> with strict mode for Python. Type checkers catch hallucinated APIs at compile time instead of in production at 2am.</p>
+      </div>
+      <div class="signal-card">
+        <h4>Lint aggressively</h4>
+        <p><a href="https://github.com/astral-sh/ruff" target="_blank" rel="noopener">Ruff</a> checks a Python project in milliseconds. <a href="https://eslint.org/" target="_blank" rel="noopener">ESLint</a> with <a href="https://typescript-eslint.io/" target="_blank" rel="noopener">typescript-eslint</a> catches unsafe patterns. Use <a href="https://code.claude.com/" target="_blank" rel="noopener">Claude Code</a> hooks to run linting after every AI edit.</p>
+      </div>
+      <div class="signal-card">
+        <h4>Require tests</h4>
+        <p>Configure your AI agent to write tests alongside code. In CLAUDE.md: &ldquo;Every new function must have a corresponding test. Every bug fix must include a regression test.&rdquo; Enforce with pre-commit hooks.</p>
+      </div>
+      <div class="signal-card">
+        <h4>Review before merging</h4>
+        <p>AI-generated PRs need review just like human PRs. Use a cross-model review pattern &mdash; if <a href="https://cursor.com" target="_blank" rel="noopener">Cursor</a> wrote the code, have <a href="https://code.claude.com/" target="_blank" rel="noopener">Claude Code</a> review it. Different models catch different mistakes. See the <a href="/guides/reviewing-ai-agent-code/">review guide</a>.</p>
+      </div>
+      <div class="signal-card">
+        <h4>Write specs first</h4>
+        <p>Don&rsquo;t vibe code from a one-line prompt. Write a spec with acceptance criteria, data models, and error cases. The AI produces dramatically better code from a detailed spec. See <a href="/guides/spec-driven-development/">spec-driven development</a>.</p>
+      </div>
+      <div class="signal-card">
+        <h4>Constrain the AI</h4>
+        <p>Use CLAUDE.md, <a href="https://cursor.com" target="_blank" rel="noopener">.cursorrules</a>, or <a href="https://github.com/features/copilot" target="_blank" rel="noopener">AGENTS.md</a> to restrict which libraries the AI uses, enforce coding standards, and require error handling patterns. See <a href="/guides/agent-config-files-compared/">config files compared</a>.</p>
+      </div>
+      <div class="signal-card">
+        <h4>Use quality gates</h4>
+        <p>Automate the prevention pipeline: type check &rarr; lint &rarr; test &rarr; security scan &rarr; cross-model review. Any failure blocks the merge. See <a href="/guides/vibe-coding-quality-gates/">quality gates guide</a> for full pipeline configurations.</p>
+      </div>
+      <div class="signal-card">
+        <h4>Break large tasks</h4>
+        <p>One prompt generating an entire app produces tangled, untestable code. Decompose into small, independent tasks with clear interfaces. Use <a href="https://github.com/mixpeek/amux" target="_blank" rel="noopener">amux</a>&rsquo;s board to track them and assign each task to a separate agent session.</p>
+      </div>
+    </div>
+
+    <!-- ═══════════════════════════════════════════════════════════════
+         FAQ
+         ═══════════════════════════════════════════════════════════════ -->
+    <h2 id="faq">FAQ</h2>
+    <div class="compare-grid">
+      <div class="pattern-card">
+        <h3>What is vibe debugging?</h3>
+        <p>Vibe debugging is the process of systematically diagnosing and fixing bugs in AI-generated code &mdash; code that was produced by tools like <a href="https://code.claude.com/" target="_blank" rel="noopener">Claude Code</a>, <a href="https://cursor.com" target="_blank" rel="noopener">Cursor</a>, <a href="https://github.com/openai/codex" target="_blank" rel="noopener">Codex</a>, <a href="https://v0.dev/" target="_blank" rel="noopener">v0</a>, <a href="https://bolt.new/" target="_blank" rel="noopener">Bolt</a>, or <a href="https://lovable.dev/" target="_blank" rel="noopener">Lovable</a> with minimal human review. The term emerged in 2026 as a counterpart to &ldquo;vibe coding&rdquo; &mdash; where vibe coding is about generation, vibe debugging is about the cleanup that follows when generated code breaks.</p>
+      </div>
+      <div class="pattern-card">
+        <h3>Why does AI-generated code break in production?</h3>
+        <p>Seven common reasons: (1) shallow logic that handles the happy path but not edge cases, (2) hallucinated APIs or functions that don&rsquo;t exist in the library version you&rsquo;re using, (3) error handling theater &mdash; <code>try/catch</code> blocks that swallow errors silently, (4) dependency bloat from packages the AI chose without evaluating alternatives, (5) implicit state assumptions that fail under concurrency, (6) no meaningful tests, and (7) copy-paste propagation that duplicates bugs across files.</p>
+      </div>
+      <div class="pattern-card">
+        <h3>How is vibe debugging different from normal debugging?</h3>
+        <p>Traditional debugging starts with understanding the code you wrote. Vibe debugging starts with understanding code you didn&rsquo;t write and may not fully comprehend. The developer didn&rsquo;t make the architectural decisions, didn&rsquo;t choose the libraries, and may not understand the internal data flow. This means vibe debugging requires an extra &ldquo;comprehension&rdquo; phase before root-cause analysis. Multi-agent approaches help by parallelizing this comprehension &mdash; separate agents can map the architecture, trace data flow, and audit dependencies simultaneously.</p>
+      </div>
+      <div class="pattern-card">
+        <h3>Can I use AI to debug AI-generated code?</h3>
+        <p>Yes &mdash; and it&rsquo;s often the most effective approach. A single AI agent writing code can produce bugs because of context window limits, hallucinations, and missing constraints. But multiple AI agents reviewing that code from different angles (security, performance, correctness, edge cases) catch problems the generating agent missed. The key is using different prompts and sometimes different models for investigation versus generation. <a href="https://code.claude.com/" target="_blank" rel="noopener">Claude Code</a>, <a href="https://github.com/openai/codex" target="_blank" rel="noopener">Codex CLI</a>, and <a href="https://aider.chat/" target="_blank" rel="noopener">Aider</a> are all effective debugging agents. Running them in parallel with <a href="https://github.com/mixpeek/amux" target="_blank" rel="noopener">amux</a> lets you investigate multiple hypotheses simultaneously.</p>
+      </div>
+      <div class="pattern-card">
+        <h3>What tools are best for vibe debugging?</h3>
+        <p>The most effective stack combines: (1) a terminal AI agent like <a href="https://code.claude.com/" target="_blank" rel="noopener">Claude Code</a> or <a href="https://github.com/openai/codex" target="_blank" rel="noopener">Codex CLI</a> for investigation, (2) static analysis with <a href="https://www.typescriptlang.org/" target="_blank" rel="noopener">TypeScript</a>, <a href="https://eslint.org/" target="_blank" rel="noopener">ESLint</a>, <a href="https://github.com/astral-sh/ruff" target="_blank" rel="noopener">Ruff</a>, or <a href="https://mypy-lang.org/" target="_blank" rel="noopener">Mypy</a> to catch type errors and code smells, (3) error monitoring with <a href="https://sentry.io/" target="_blank" rel="noopener">Sentry</a> or <a href="https://www.datadoghq.com/" target="_blank" rel="noopener">Datadog</a>, (4) test frameworks like <a href="https://docs.pytest.org/" target="_blank" rel="noopener">pytest</a>, <a href="https://jestjs.io/" target="_blank" rel="noopener">Jest</a>, or <a href="https://playwright.dev/" target="_blank" rel="noopener">Playwright</a>, and (5) an agent orchestrator like <a href="https://github.com/mixpeek/amux" target="_blank" rel="noopener">amux</a> for parallel debugging sessions.</p>
+      </div>
+      <div class="pattern-card">
+        <h3>When should I debug vibe-coded code versus rewrite it?</h3>
+        <p>Debug when: the issue is localized (1&ndash;2 files), the architecture is sound but the implementation has bugs, some test coverage exists, or the code is deployed and a rewrite would cause downtime. Rewrite when: there are no tests, no types, the bugs span 3+ subsystems, the architecture itself is wrong (not just the implementation), or you&rsquo;ve spent more time debugging than the original generation took. A useful heuristic: if you can explain the bug in one sentence, debug it. If you need a whiteboard, rewrite it.</p>
+      </div>
+      <div class="pattern-card">
+        <h3>How do I prevent vibe coding bugs in the first place?</h3>
+        <p>Write specs before generating code. Use type checking (<a href="https://www.typescriptlang.org/" target="_blank" rel="noopener">TypeScript</a>, <a href="https://mypy-lang.org/" target="_blank" rel="noopener">Mypy</a>) and linting (<a href="https://eslint.org/" target="_blank" rel="noopener">ESLint</a>, <a href="https://github.com/astral-sh/ruff" target="_blank" rel="noopener">Ruff</a>). Require tests alongside generated code. Review AI output before committing. Use CLAUDE.md or .cursorrules to constrain the AI&rsquo;s choices. Break large features into small, testable units. See the <a href="/guides/vibe-coding-quality-gates/">quality gates guide</a> for full pipeline configurations.</p>
+      </div>
+    </div>
+
+  </main>
+  <footer class="sub-footer">
+    <div class="footer-inner">
+      <div class="footer-top">
+        <div class="footer-brand-col">
+          <a href="/" class="footer-logo">amux</a>
+          <p>Open-source control plane for AI agents.</p>
+        </div>
+        <div class="footer-col">
+          <div class="footer-col-label">Resources</div>
+          <ul>
+            <li><a href="/guides/">Guides</a></li>
+            <li><a href="/blog/">Blog</a></li>
+            <li><a href="/demos/">Demos</a></li>
+            <li><a href="/glossary/">Glossary</a></li>
+            <li><a href="/faq/">FAQ</a></li>
+          </ul>
+        </div>
+        <div class="footer-col">
+          <div class="footer-col-label">Compare</div>
+          <ul>
+            <li><a href="/compare/amux-vs-cursor/">vs Cursor</a></li>
+            <li><a href="/compare/amux-vs-devin/">vs Devin</a></li>
+            <li><a href="/compare/amux-vs-cline/">vs Cline</a></li>
+            <li><a href="/compare/">All comparisons</a></li>
+          </ul>
+        </div>
+        <div class="footer-col">
+          <div class="footer-col-label">More</div>
+          <ul>
+            <li><a href="/use-cases/">Use Cases</a></li>
+            <li><a href="/solutions/">Solutions</a></li>
+            <li><a href="/for/">For your stack</a></li>
+            <li><a href="/changelog/">Changelog</a></li>
+          </ul>
+        </div>
+      </div>
+      <div class="footer-bottom">
+        <span>MIT License. Built by <a href="https://mixpeek.com">Mixpeek</a></span>
+        <div class="footer-bottom-links">
+          <a href="https://apps.apple.com/us/app/amux-agent-multiplexer/id6760410435" target="_blank" rel="noopener">iOS App</a>
+          <a href="https://github.com/mixpeek/amux" target="_blank" rel="noopener">GitHub</a>
+        </div>
+      </div>
+    </div>
+  </footer>
+
+<script>fetch('https://api.github.com/repos/mixpeek/amux').then(function(r){return r.json()}).then(function(d){var el=document.getElementById('gh-stars');if(el&&d.stargazers_count) el.textContent='★ '+d.stargazers_count}).catch(function(){})</script>
+</body>
+</html>
