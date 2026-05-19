@@ -2063,7 +2063,7 @@ def _claude_ui_visible(clean_output: str) -> bool:
             continue
         if "\u23f5\u23f5" in l or "bypass permissions" in ls or "plan mode" in ls:
             return True
-        if "codex" in ls and ("full-auto" in ls or "dangerously-bypass" in ls or "suggest" in ls or "workspace" in ls or "approval" in ls or "-a never" in ls):
+        if "codex" in ls and ("full-auto" in ls or "suggest" in ls or "workspace" in ls or "approval" in ls or "-a never" in ls):
             return True
     # Check last 12 lines for an active spinner (dingbat-prefixed status line
     # like "\u273b Crunched for 1m 38s"). Exclude U+276F \u276f \u2014 that's Claude's input
@@ -2088,26 +2088,18 @@ def _claude_ui_visible(clean_output: str) -> bool:
 
 
 def _at_resume_picker(clean_output: str) -> bool:
-    """Return True if Claude's --resume/--name picker is showing (interactive session selector).
-
-    The ⌕ icon is NOT checked — tmux capture-pane drops it inconsistently.
-    Require "Resume Session" (the picker title) plus any one secondary signal.
-    """
-    if not clean_output:
-        return False
-    if "Resume Session" not in clean_output:
-        return False
-    return any(s in clean_output for s in (
-        "Type to Search", "Esc to cancel", "Enter to select",
-        "to select", "to cancel", "1 of ",
-    ))
+    """Return True if Claude's --resume picker is showing (interactive session selector)."""
+    return bool(clean_output and
+                ("Resume Session" in clean_output or "Type to Search" in clean_output or
+                 "Enter to select" in clean_output or "Esc to cancel" in clean_output) and
+                "⌕" in clean_output)  # ⌕ search icon in the picker
 
 
 def _at_shell_prompt(clean_output: str) -> bool:
     """Return True if the terminal looks like a bare shell prompt (no Claude UI)."""
+    if _claude_ui_visible(clean_output):
+        return False
     lines = [l for l in clean_output.splitlines() if l.strip()]
-    # Check last lines FIRST — a shell prompt wins over any older spinner signals
-    # in scrollback (completed spinners persist in history after Claude exits).
     for l in lines[-5:]:
         ls = l.strip()
         # Bash/zsh prompt: ends with $ or % (not Claude's ❯ prompt)
@@ -2117,9 +2109,8 @@ def _at_shell_prompt(clean_output: str) -> bool:
         # e.g. "mixpeek$ ss permissions on · 5 shells"
         if re.match(r'\S+[$%]\s', ls) and "\u276f" not in ls:
             return True
-    if _claude_ui_visible(clean_output):
-        return False
     return False
+
 
 def _snapshot_all_sessions():
     """Capture scrollback for health checks on all running sessions.
@@ -2158,41 +2149,24 @@ def _snapshot_all_sessions():
 
             # Strip ANSI codes for pattern matching
             clean = _STRIP_ANSI.sub("", output)
-            # Use only the last 200 lines for reactive triggers — stale scrollback
-            # from previous compactions/errors persists in tmux history and re-fires
-            # the same trigger repeatedly after every server restart.
-            clean_recent = "\n".join(clean.splitlines()[-200:])
             now = time.time()
             actions = _session_auto_actions.setdefault(name, {})
 
-            # Seed last_compact from meta on first snapshot after server restart
-            # so the cooldown survives restarts and stale scrollback can't re-fire.
-            # If meta has no record (first ever run), use server start time so we
-            # don't fire on stale scrollback before the user has a chance to interact.
-            if "last_compact" not in actions:
-                _meta_lc = _load_meta(name)
-                actions["last_compact"] = _meta_lc.get("last_compact") or _server_start_time
-
-            # Master switch — read once, applied to all compact-triggering sections.
-            _ac_row = get_db().execute("SELECT value FROM prefs WHERE key='auto_compact_enabled'").fetchone()
-            _ac_enabled = (_ac_row is None) or (_ac_row[0] != "0")  # default ON
-
             # ── 1. Proactive: auto-compact when context is low ──────────────
             # Skip if the context % appears in /status output (user was just checking)
-            ctx_match = re.search(r'context left until auto-compact[:\s]+(\d+)%', clean_recent, re.IGNORECASE)
-            _from_status_cmd = bool(ctx_match and re.search(r'❯\s*/status', clean_recent))
+            ctx_match = re.search(r'context left until auto-compact[:\s]+(\d+)%', clean, re.IGNORECASE)
+            _from_status_cmd = bool(ctx_match and re.search(r'❯\s*/status', clean))
             if ctx_match and not _from_status_cmd:
                 pct = int(ctx_match.group(1))
+                _ac_row = get_db().execute("SELECT value FROM prefs WHERE key='auto_compact_enabled'").fetchone()
+                _ac_enabled = (_ac_row is None) or (_ac_row[0] != "0")  # default ON
                 # Backup JSONL before compaction (regardless of whether auto-compact fires)
                 if pct < 30 and now - actions.get("last_backup", 0) > 120:
                     actions["last_backup"] = now
                     threading.Thread(target=backup_session_jsonl, args=(name, "pre_compact"), daemon=True).start()
-                if (_ac_enabled and pct < 20 and now - actions.get("last_compact", 0) > 300
-                        and _detect_claude_status(clean) == "idle"):
+                if _ac_enabled and pct < 50 and now - actions.get("last_compact", 0) > 300:
                     actions["last_compact"] = now
-                    _update_meta(name, last_compact=now)
                     actions["post_compact_continue"] = True  # send continuation when compact finishes
-                    slog(f"[watchdog] {name}: auto-compacting (context at {pct}%)")
                     send_text(name, "/compact")
                     _push_alert("auto_compact", name,
                                 f"Auto-compacted '{name}' — context was at {pct}%")
@@ -2234,54 +2208,11 @@ def _snapshot_all_sessions():
             elif not _img_corrupt_error:
                 actions.pop("img_corrupt_compacted", None)
 
-            # ── 1c. Reactive: stuck in --resume/--name picker → accept top item ─
-            # Press Enter to select the most-recent session (top of list).
-            # Do NOT Escape+Ctrl-C — that exits Claude, triggering auto-restart
-            # which launches Claude again and shows the picker again (loop).
-            if _at_resume_picker(clean_recent) and now - actions.get("last_picker_escape", 0) > 60:
-                actions["last_picker_escape"] = now
-                subprocess.run(["tmux", "send-keys", "-t", tmux_target(name), "Enter"],
-                               capture_output=True, timeout=5)
-                # Count duplicate JSONL files to diagnose root cause
-                try:
-                    wd = _session_work_dir(name)
-                    if wd:
-                        proj_dir = CLAUDE_HOME / "projects" / _project_name(wd)
-                        dupes = [jf for jf in proj_dir.glob("*.jsonl")
-                                 if json.loads(jf.open().readline()).get("customTitle") == name]
-                        if len(dupes) > 1:
-                            dupes.sort(key=lambda p: p.stat().st_mtime, reverse=True)
-                            dupe_names = ", ".join(f"{jf.name[:8]}({jf.stat().st_size//1024}KB)" for jf in dupes)
-                            slog(f"[watchdog] {name}: accepted resume picker — {len(dupes)} duplicate sessions: {dupe_names}")
-                        else:
-                            slog(f"[watchdog] {name}: accepted resume picker (pressed Enter)")
-                except Exception:
-                    slog(f"[watchdog] {name}: accepted resume picker (pressed Enter)")
-
-            # ── 1d. Reactive: corrupted image in context → auto-compact ────
-            # When a malformed image (truncated PNG, SVG-as-PNG, etc.) gets
-            # loaded via Read, every subsequent API call fails with "Could not
-            # process image". The bad image is stuck in conversation history.
-            if (_ac_enabled and
-                    "Could not process image" in clean_recent and
-                    now - actions.get("last_compact", 0) > 120):
-                actions["last_compact"] = now
-                _update_meta(name, last_compact=now)
-                actions["post_compact_continue"] = True
-                threading.Thread(target=backup_session_jsonl, args=(name, "pre_compact_img"), daemon=True).start()
-                send_text(name, "/compact")
-                _push_alert("auto_compact", name,
-                            f"Auto-compacted '{name}' — corrupted image in context")
-
             # ── 2. Reactive: thinking-block corruption → restart + replay ───
-            if ("redacted_thinking" in clean_recent and
-                    "cannot be modified" in clean_recent and
+            if ("redacted_thinking" in clean and
+                    "cannot be modified" in clean and
                     now - actions.get("last_restart", 0) > 120):
                 actions["last_restart"] = now
-                slog(f"[watchdog] {name}: hard-killing — thinking block corruption")
-                # Clear scrollback so stale error strings don't re-trigger
-                subprocess.run(["tmux", "clear-history", "-t", tmux_target(name)],
-                               capture_output=True, timeout=5)
                 wd = _session_work_dir(name)
                 last_msg = _last_meaningful_user_message(wd)
                 _hard_kill_claude(name)
@@ -2298,12 +2229,9 @@ def _snapshot_all_sessions():
             # ── 2b. Reactive: session ID already in use → hard-kill + restart ─
             # Claude Code exits with "Session ID ... is already in use" when a
             # stale process holds the lock.
-            if ("is already in use" in clean_recent and "Session ID" in clean_recent and
+            if ("is already in use" in clean and "Session ID" in clean and
                     now - actions.get("last_restart", 0) > 120):
                 actions["last_restart"] = now
-                slog(f"[watchdog] {name}: hard-killing — session ID conflict")
-                subprocess.run(["tmux", "clear-history", "-t", tmux_target(name)],
-                               capture_output=True, timeout=5)
                 wd = _session_work_dir(name)
                 last_msg = _last_meaningful_user_message(wd)
                 _hard_kill_claude(name)
@@ -2412,15 +2340,9 @@ def _snapshot_all_sessions():
             # Claude processes lose their API connection after ~2 days but stay running.
             # Sends succeed (tmux delivers text) but Claude never processes them.
             # Check once per hour; restart if Claude process uptime > 48h and session is idle.
-            # Guard: skip if Claude was seen alive within 2h — avoids killing active sessions
-            # whose processes happen to cross the 48h mark during a brief idle between steps.
-            # Guard: only fire after we've seen the session alive in this server run — prevents
-            # false-positives immediately after server restart when last_claude_alive=0 for all.
             if status == "idle" and not actions.get("restarting"):
-                _last_alive_stale = actions.get("last_claude_alive", 0)
-                _stale_ok = _last_alive_stale > 0 and (now - _last_alive_stale > 7200)
                 last_stale_check = actions.get("last_stale_check", 0)
-                if _stale_ok and now - last_stale_check > 3600:  # check once per hour
+                if now - last_stale_check > 3600:  # check once per hour
                     actions["last_stale_check"] = now
                     try:
                         tmux_sess = tmux_name(name)
@@ -2448,7 +2370,6 @@ def _snapshot_all_sessions():
                                         if now - last_restart > 300:
                                             actions["restarting"] = True
                                             actions["last_auto_restart"] = now
-                                            slog(f"[watchdog] {name}: recycling stale Claude process ({elapsed_secs//3600}h old)")
                                             def _do_stale_restart(sname=name, _actions=actions, _age=elapsed_secs):
                                                 _hard_kill_claude(sname)
                                                 time.sleep(3)
@@ -2505,13 +2426,12 @@ def _snapshot_all_sessions():
                 elapsed_since_compact = now - actions.get("last_compact", 0)
                 if elapsed_since_compact > 30 and now - actions.get("last_auto_continue", 0) > 60:
                     cfg_ac = parse_env_file(f)
+                    cont_msg = cfg_ac.get("CC_AUTO_CONTINUE_MSG", "continue")
+                    send_text(name, cont_msg)
+                    actions["last_auto_continue"] = now
                     actions.pop("post_compact_continue", None)
-                    if cfg_ac.get("CC_AUTO_CONTINUE") in ("1", "true", "yes"):
-                        cont_msg = cfg_ac.get("CC_AUTO_CONTINUE_MSG", "continue")
-                        send_text(name, cont_msg)
-                        actions["last_auto_continue"] = now
-                        _push_alert("auto_continue", name,
-                                    f"Post-compact auto-continue sent to '{name}'")
+                    _push_alert("auto_continue", name,
+                                f"Post-compact auto-continue sent to '{name}'")
 
             if status == "waiting" and not actions.get("restarting"):
                 if "ac_waiting_since" not in actions:
@@ -6413,11 +6333,7 @@ def start_session(name: str, extra_flags: str = "", _skip_conv_id: bool = False)
             tmux_exists = tmux_sess in r_tmux.stdout.splitlines()
     
             if tmux_exists:
-                # Existing tmux session -- reuse it, but wipe scrollback first so
-                # stale error strings (thinking corruption, session-ID conflicts)
-                # don't trigger the watchdog on the newly started Claude process.
-                subprocess.run(["tmux", "clear-history", "-t", tmux_target(name)],
-                               capture_output=True, timeout=5)
+                # Existing tmux session -- reuse it
                 output = tmux_capture(name, 10)
                 if _at_shell_prompt(output):
                     # At shell prompt -- clear and send Claude command
@@ -6537,21 +6453,28 @@ def start_session(name: str, extra_flags: str = "", _skip_conv_id: bool = False)
                     break
     
             if not _claude_launched and not _skip_conv_id and provider == "claude":
-                # Check if stuck in resume picker (--resume/--name showed interactive selector)
+                # Check if stuck in resume picker (--resume showed interactive selector)
                 _out_check = tmux_capture(name, 10)
                 if _at_resume_picker(_out_check):
-                    print(f"[start] {name}: resume picker showing, pressing Enter to accept top session")
-                    # Press Enter to select the most-recent (top) session — do NOT
-                    # Escape+Ctrl-C, that exits Claude and auto-restart loops back here.
-                    subprocess.run(["tmux", "send-keys", "-t", tmux_target(name), "Enter"],
+                    print(f"[start] {name}: stuck in resume picker, escaping and starting fresh")
+                    # Send Escape to close picker, then Ctrl-C to exit claude
+                    subprocess.run(["tmux", "send-keys", "-t", tmux_target(name), "Escape"],
                                    capture_output=True, timeout=5)
-                    # Wait up to 10s for Claude UI to appear after selection
-                    for _w in range(20):
-                        time.sleep(0.5)
-                        _out_w = tmux_capture(name, 50)
-                        if _out_w and _claude_ui_visible(_out_w):
-                            _claude_launched = True
+                    time.sleep(0.5)
+                    subprocess.run(["tmux", "send-keys", "-t", tmux_target(name), "C-c"],
+                                   capture_output=True, timeout=5)
+                    time.sleep(2)
+                    # Wait for shell prompt
+                    for _w in range(10):
+                        _out_w = tmux_capture(name, 10)
+                        if _out_w and _at_shell_prompt(_out_w):
                             break
+                        time.sleep(0.5)
+                    # Clear stale session name
+                    meta.pop("cc_session_name", None)
+                    meta.pop("cc_conversation_id", None)
+                    _save_meta(name, meta)
+                    # Mark as at shell prompt so the fallback below fires
                     _out_check = tmux_capture(name, 10)
 
                 # Check if Claude exited immediately (--resume failure)
@@ -32617,7 +32540,7 @@ class CCHandler(BaseHTTPRequestHandler):
                 message = (fields.get("message_text") or fields.get("text") or
                            fields.get("body") or fields.get("msg") or "")
             if not message:
-                return self._json({"error": "no message body", "fields": list(fields.keys()) if "application/json" not in ct else list(payload.keys())}, 400)
+                return self._json({"error": "no message body"}, 400)
             text = f"SMS from {sender}: {message}"
             ok, msg = send_text(session_name, text)
             slog(f"[sms-webhook] session={session_name} from={sender} ok={ok}")
@@ -32644,7 +32567,6 @@ class CCHandler(BaseHTTPRequestHandler):
                 slog(f"[smartertrack-webhook] payload={payload}")
             except Exception as e:
                 return self._json({"error": f"parse error: {e}"}, 400)
-            # Extract common SmarterTrack fields (adjust after first hit)
             customer = (payload.get("customerName") or payload.get("customer_name") or
                         payload.get("name") or payload.get("displayName") or "unknown")
             email = payload.get("email") or payload.get("customerEmail") or ""
@@ -37457,31 +37379,6 @@ def main():
     _install_signal_handlers()
     slog(f"[startup] server starting — pid={os.getpid()}, port={port}, scheme={scheme}, python={sys.version.split()[0]}")
     _log_resource_snapshot("startup")
-    # Scan for duplicate Claude session JSONL files that cause the resume picker loop
-    try:
-        for env_f in CC_SESSIONS.glob("*.env"):
-            sname = env_f.stem
-            wd = _session_work_dir(sname)
-            if not wd:
-                continue
-            proj_dir = CLAUDE_HOME / "projects" / _project_name(wd)
-            if not proj_dir.is_dir():
-                continue
-            matches = []
-            for jf in proj_dir.glob("*.jsonl"):
-                try:
-                    first = jf.open().readline()
-                    if first and json.loads(first).get("customTitle") == sname:
-                        matches.append(jf)
-                except Exception:
-                    pass
-            if len(matches) > 1:
-                matches.sort(key=lambda p: p.stat().st_mtime, reverse=True)
-                info = ", ".join(f"{jf.name[:8]}({jf.stat().st_size//1024}KB)" for jf in matches)
-                slog(f"[startup] WARNING: {sname} has {len(matches)} duplicate sessions — will cause picker loop: {info}"
-                     f" — delete older: {matches[-1].name}")
-    except Exception:
-        pass
     print("\033[1m\033[34mamux\033[0m web dashboard running")
     print(f"  Bind:    {', '.join(f'{h}:{port}' for h in bind_hosts)}")
     if "0.0.0.0" in bind_hosts:
