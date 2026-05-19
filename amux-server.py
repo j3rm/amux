@@ -25154,92 +25154,83 @@ let _sseRetries = 0;
 let _sseFallback = false;
 let _pollTimer = null;
 
-// Multi-tab coordination: only one tab opens the SSE connection (the "leader").
-// All tabs share data via BroadcastChannel, elected via navigator.locks.
-// Falls back to direct SSE if either API is unavailable (Safari <15.4, etc).
-const _sseBroadcast = (typeof BroadcastChannel !== 'undefined') ? new BroadcastChannel('amux-sse') : null;
-let _sseIsLeader = false;
-
-function _processSseData(dataStr) {
-  const wasOffline = !_liveSSE;
-  _sseRetries = 0;
-  _lastDataTime = Date.now();
-  if (_initialLoad) { _initialLoad = false; render(); }
-  if (!_liveSSE) { _liveSSE = true; updateConnectionStatus(); }
-  if (!online) setOnline(true);
-  if (wasOffline) {
-    setTimeout(_runDeltaSync, 200);
-    setTimeout(() => { fetchSessions(); fetchBoard(); }, 250);
-  }
-  try {
-    const msg = JSON.parse(dataStr);
-    if (msg.type === 'sessions') {
-      const j = JSON.stringify(msg.payload);
-      if (j !== lastSessionsJSON) {
-        const firstLoad = !lastSessionsJSON;
-        lastSessionsJSON = j;
-        sessions = msg.payload;
-        localStorage.setItem('amux_sessions_cache', j);
-        render();
-        if (firstLoad && _grid && Object.keys(_gridPanes).length === 0) {
-          _gridRestoreLayout();
-        }
-      }
-    } else if (msg.type === 'board') {
-      const j = JSON.stringify(msg.payload);
-      if (j !== lastBoardJSON) {
-        lastBoardJSON = j;
-        boardItems = msg.payload;
-        localStorage.setItem('amux_board_cache', j);
-        _idb.applyIssueDelta(msg.payload);
-        _idb.set('last_sync_ts', Math.floor(Date.now() / 1000));
-        if (activeView === 'board') renderBoard();
-        else if (activeView === 'calendar') renderCalendar();
-      }
-    } else if (msg.type === 'logs') {
-      const newEvts = (msg.payload || []).map(e => ({
-        ...e, type: e.type || e.category, target: e.target || e.detail, ip: e.ip || e.actor,
-        status: e.level === 'error' ? 500 : (e.status || 200),
-      }));
-      if (newEvts.length) {
-        _logsEvents = newEvts.concat(_logsEvents);
-        if (_logsEvents.length > 2000) _logsEvents = _logsEvents.slice(0, 2000);
-        if (activeView === 'logs') renderActivity();
-      }
-    } else if (msg.type === 'alerts') {
-      for (const a of (msg.payload || [])) {
-        _fireAmuxAlert(a);
-        if (a.type === 'steering_delivered' && a.session === peekSession) _steeringUpdateBadge();
-      }
-    } else if (msg.type === 'invalidate') {
-      for (const key of (msg.keys || [])) {
-        if (key === 'notes') {
-          if (activeView === 'notes') _notesLoad();
-          else _notesDirty = true;
-        } else if (key === 'crm') {
-          if (activeView === 'crm') _crmLoad();
-          else _crmDirty = true;
-        } else if (key === 'journal') {
-          if (activeView === 'journal') _journalLoad();
-        }
-      }
-    } else if (msg.type === 'ping') {
-      // Liveness signal — _lastDataTime already updated above.
-    }
-  } catch(err) { console.error('SSE parse:', err); }
-}
-
 function connectSSE() {
   if (_sseFallback || _sse) return;
-  // Non-leader tabs must not open their own SSE connection.
-  // _sseBroadcast being set means leadership is in effect.
-  if (_sseBroadcast && !_sseIsLeader) return;
   _sse = new EventSource(_authUrl(API + '/api/events'));
 
   _sse.onmessage = function(e) {
-    _processSseData(e.data);
-    // Broadcast to follower tabs
-    if (_sseBroadcast) _sseBroadcast.postMessage(e.data);
+    const wasOffline = !_liveSSE;
+    _sseRetries = 0;
+    _lastDataTime = Date.now();
+    if (_initialLoad) { _initialLoad = false; render(); }
+    if (!_liveSSE) { _liveSSE = true; updateConnectionStatus(); }
+    if (!online) setOnline(true);
+    // On reconnect after being offline / zombie: catch up on anything we missed.
+    // Note: _sseRetries is reset above, so we key off wasOffline alone.
+    if (wasOffline) {
+      setTimeout(_runDeltaSync, 200);
+      setTimeout(() => { fetchSessions(); fetchBoard(); }, 250);
+    }
+    try {
+      const msg = JSON.parse(e.data);
+      if (msg.type === 'sessions') {
+        const j = JSON.stringify(msg.payload);
+        if (j !== lastSessionsJSON) {
+          const firstLoad = !lastSessionsJSON;
+          lastSessionsJSON = j;
+          sessions = msg.payload;
+          localStorage.setItem('amux_sessions_cache', j);
+          render();
+          // If workspace is open but no panes were restored yet (e.g. sessions
+          // cache was empty on startup), retry restoration now that we have data.
+          if (firstLoad && _grid && Object.keys(_gridPanes).length === 0) {
+            _gridRestoreLayout();
+          }
+        }
+      } else if (msg.type === 'board') {
+        const j = JSON.stringify(msg.payload);
+        if (j !== lastBoardJSON) {
+          lastBoardJSON = j;
+          boardItems = msg.payload;
+          localStorage.setItem('amux_board_cache', j);
+          // Mirror to IDB for full offline durability (iOS-safe)
+          _idb.applyIssueDelta(msg.payload);
+          _idb.set('last_sync_ts', Math.floor(Date.now() / 1000));
+          if (activeView === 'board') renderBoard();
+          else if (activeView === 'calendar') renderCalendar();
+        }
+      } else if (msg.type === 'logs') {
+        // Always accumulate log events even when tab is not active
+        const newEvts = (msg.payload || []).map(e => ({
+          ...e, type: e.type || e.category, target: e.target || e.detail, ip: e.ip || e.actor,
+          status: e.level === 'error' ? 500 : (e.status || 200),
+        }));
+        if (newEvts.length) {
+          _logsEvents = newEvts.concat(_logsEvents);
+          if (_logsEvents.length > 2000) _logsEvents = _logsEvents.slice(0, 2000);
+          if (activeView === 'logs') renderActivity();
+        }
+      } else if (msg.type === 'alerts') {
+        for (const a of (msg.payload || [])) {
+          _fireAmuxAlert(a);
+          if (a.type === 'steering_delivered' && a.session === peekSession) _steeringUpdateBadge();
+        }
+      } else if (msg.type === 'invalidate') {
+        for (const key of (msg.keys || [])) {
+          if (key === 'notes') {
+            if (activeView === 'notes') _notesLoad();
+            else _notesDirty = true;
+          } else if (key === 'crm') {
+            if (activeView === 'crm') _crmLoad();
+            else _crmDirty = true;
+          } else if (key === 'journal') {
+            if (activeView === 'journal') _journalLoad();
+          }
+        }
+      } else if (msg.type === 'ping') {
+        // Liveness signal — _lastDataTime already updated above. Nothing else to do.
+      }
+    } catch(err) { console.error('SSE parse:', err); }
   };
 
   _sse.onerror = function() {
@@ -25256,27 +25247,6 @@ function connectSSE() {
       setTimeout(connectSSE, 2000 * _sseRetries);
     }
   };
-}
-
-function _initSseLeadership() {
-  if (_sseBroadcast) {
-    // Receive broadcasts from the leader tab
-    _sseBroadcast.onmessage = e => { if (!_sseIsLeader) _processSseData(e.data); };
-  }
-  if (_sseBroadcast && typeof navigator !== 'undefined' && navigator.locks) {
-    // Compete for leader lock. Only one tab holds it; when that tab closes the
-    // next waiting tab acquires it and calls connectSSE(). The never-resolving
-    // promise keeps the lock alive for the lifetime of the tab.
-    navigator.locks.request('amux-sse-leader', () => {
-      _sseIsLeader = true;
-      connectSSE();
-      return new Promise(() => {});
-    });
-  } else {
-    // Locks/BroadcastChannel unavailable — fall back to direct SSE (old behavior)
-    _sseIsLeader = true;
-    connectSSE();
-  }
 }
 
 function enablePollingFallback() {
@@ -25322,8 +25292,8 @@ function _onClientResume(reason) {
   if (_lastDataTime && Date.now() - _lastDataTime > _SSE_REFRESH_MS) {
     _resyncEverything();
   }
-  // Only the SSE leader reconnects — follower tabs rely on BroadcastChannel.
-  if (_sseIsLeader && !_sseFallback && (_sseLooksStale() || !_sse)) {
+  // If the SSE connection looks dead (zombie after iOS background), bounce it.
+  if (!_sseFallback && (_sseLooksStale() || !_sse)) {
     _forceSseReconnect(reason);
   }
 }
@@ -25331,14 +25301,15 @@ document.addEventListener('visibilitychange', () => _onClientResume('visibility'
 window.addEventListener('pageshow',  e => _onClientResume(e.persisted ? 'bfcache' : 'pageshow'));
 window.addEventListener('focus',     () => _onClientResume('focus'));
 window.addEventListener('online',    () => _onClientResume('online'));
-// Periodic stale-watchdog — only fires when visible and only in the leader tab.
+// Periodic stale-watchdog — only fires when visible, so it's cheap on phones.
 setInterval(() => {
-  if (document.hidden || !_sseIsLeader || _sseFallback) return;
+  if (document.hidden) return;
+  if (_sseFallback) return;
   if (_sseLooksStale()) _forceSseReconnect('watchdog stale ' + Math.round((Date.now() - _lastDataTime)/1000) + 's');
 }, 5000);
 
-// Start SSE — leader election via navigator.locks + BroadcastChannel for multi-tab
-_initSseLeadership();
+// Start SSE (falls back to polling on failure)
+connectSSE();
 _notifUpdateBadge();
 loadBranding();
 
