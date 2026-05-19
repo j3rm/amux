@@ -2505,12 +2505,13 @@ def _snapshot_all_sessions():
                 elapsed_since_compact = now - actions.get("last_compact", 0)
                 if elapsed_since_compact > 30 and now - actions.get("last_auto_continue", 0) > 60:
                     cfg_ac = parse_env_file(f)
-                    cont_msg = cfg_ac.get("CC_AUTO_CONTINUE_MSG", "continue")
-                    send_text(name, cont_msg)
-                    actions["last_auto_continue"] = now
                     actions.pop("post_compact_continue", None)
-                    _push_alert("auto_continue", name,
-                                f"Post-compact auto-continue sent to '{name}'")
+                    if cfg_ac.get("CC_AUTO_CONTINUE") in ("1", "true", "yes"):
+                        cont_msg = cfg_ac.get("CC_AUTO_CONTINUE_MSG", "continue")
+                        send_text(name, cont_msg)
+                        actions["last_auto_continue"] = now
+                        _push_alert("auto_continue", name,
+                                    f"Post-compact auto-continue sent to '{name}'")
 
             if status == "waiting" and not actions.get("restarting"):
                 if "ac_waiting_since" not in actions:
