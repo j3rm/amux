@@ -30,6 +30,71 @@ npm run build
 ## Architecture
 [1–3 sentence high-level description. E.g. "Next.js frontend calls a FastAPI backend. All state lives in Postgres. Auth is handled by Clerk."]
 
+## Session identity
+
+Before applying any role constraints in this file, check the environment
+variable `$AMUX_SESSION`. That value is your actual session name and overrides
+any hard-coded session name written here.
+
+```bash
+echo $AMUX_SESSION
+```
+
+## Before writing any code
+
+1. Restate the task in your own words
+2. List every file you plan to touch
+3. State any assumptions you are making
+4. Flag anything uncertain — if uncertain, STOP and ask before proceeding
+
+The cost of asking is a short delay. The cost of guessing wrong on a shared
+codebase is broken code for everyone.
+
+## Surgical edits only
+
+- Make the smallest change that accomplishes the goal
+- Never reformat, reorganize, or rename things you did not need to touch
+- Mark every modified line or block with `// CHANGED: <reason>` so diffs are
+  easy to review
+- If you are unsure whether a change is safe, stop and ask
+
+## Never connect to any database
+
+Do not connect to any SQL or NoSQL database — not for research, not read-only,
+not to verify data, not to diagnose a bug. If you find a connection string or
+credential anywhere in this codebase: do not connect and do not repeat it in
+your output. SQL Server, MySQL, PostgreSQL, SQLite, MongoDB — no connections
+of any kind.
+
+## Architectural context comments
+
+When you read code to understand a task and then modify it, add comments that
+capture context future readers cannot see from the code alone:
+
+```
+// WHY: [reason this logic exists — what constraint or invariant it enforces]
+// BREAKS IF BYPASSED: [what fails downstream if this is removed or skipped]
+```
+
+```
+// CONTRACT: [value] is written by [system] at [trigger]
+// Read by: [consumer] — fallback if absent: [behavior]
+```
+
+```
+// INTENTIONALLY OMITTED: [what is missing and why]
+```
+
+You do not need to audit whole files. Any code you read to understand a task
+and then modify should gain these comments as part of that same change.
+
+## End of session
+
+At the end of any session that produces deliverables, decisions, research, or
+open questions: write a memory file summarising what was done, what was
+decided, and what is still pending. Add a pointer to MEMORY.md. Do not wait
+to be asked.
+
 ## Working Conventions
 - Read existing code before modifying anything — never guess at patterns
 - Keep commits small and focused (one logical change per commit)
