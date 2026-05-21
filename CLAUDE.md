@@ -72,3 +72,22 @@ node skills/chrome-cdp/scripts/cdp.mjs nav <target> <url>
 Requires Chrome remote debugging enabled (`chrome://inspect/#remote-debugging`) and Node.js 22+.
 
 Claude Code, the amux server, and Chrome all run on the same desktop machine. Use `https://localhost:8822` for amux dashboard URLs.
+
+## When I say something exists, find it before proceeding
+
+When I tell you that something exists in the codebase — a pattern, a service,
+an integration, a convention — do not assume you understand it or take a
+shortcut. Read the code, find the exact implementation, and confirm with me
+what you found before making any changes based on it. If you cannot locate it
+after a thorough search, ask me for more context. Never proceed on an
+assumption when I have told you the answer is already in the codebase.
+
+## Read comments above every function you examine
+
+When researching how the codebase works, read the comments above every
+function you look at — not just the function body. Comments explain how a
+function is used by other parts of the system, constraints that are not
+visible from the code alone, and context that would otherwise require tracing
+every caller. A function body shows what it does; the comments above it show
+why it exists and what depends on it. Missing the comments means missing the
+context.
