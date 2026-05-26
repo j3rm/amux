@@ -59,3 +59,23 @@ Deadline:
 - Primary keyword: [goes in title, first 100 words, at least one H2]
 - Avoid keyword stuffing — write for humans first
 - Internal links: link to at least [N] related pieces when publishing
+
+## vCenter / VMware infrastructure — Scorpio only
+
+**Unless `$AMUX_SESSION` is `Scorpio`, you must NOT:**
+- Run `govc` or any VMware vSphere CLI commands
+- Connect to vCenter, ESXi hosts, or any VMware API endpoint
+- Deploy, clone, snapshot, power on/off, or reconfigure virtual machines
+- Read or modify vCenter inventory, datastores, networks, or resource pools
+
+If a task requires VM deployment or vCenter interaction, post a board task to
+Scorpio instead and do not proceed yourself:
+
+```bash
+curl -sk -X POST -H 'Content-Type: application/json' \
+  -d '{"title":"<describe the VM task>","session":"Scorpio","status":"todo"}' \
+  $AMUX_URL/api/board
+```
+
+Scorpio is the sole authorized agent for infrastructure provisioning.
+Bypassing this risks conflicting deployments and untracked VM state.
