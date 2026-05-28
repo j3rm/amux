@@ -5418,6 +5418,7 @@ def list_sessions() -> list:
             "mcp": cfg.get("CC_MCP", ""),
             "worktree": cfg.get("CC_WORKTREE", "") == "1",
             "worktree_repo": cfg.get("CC_WORKTREE_REPO", ""),
+            "icon": cfg.get("CC_ICON", ""),
         })
     status_order = {"active": 0, "waiting": 0, "idle": 1, "": 1}
     sessions.sort(key=lambda s: (not s["pinned"], not s["running"], status_order.get(s["status"], 1), -s["last_activity"]))
@@ -8280,6 +8281,7 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
   .dot.running { background: var(--green); box-shadow: 0 0 6px var(--green); }
   .dot.stopped { background: var(--red); opacity: 0.5; }
   .card-name { font-weight: 600; font-size: 1.05rem; flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .session-icon { font-size: 1.15rem; line-height: 1; vertical-align: middle; display: inline-block; }
   .card-dir { color: var(--dim); font-size: 0.82rem; margin-top: 4px; margin-left: 20px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; display: flex; align-items: center; gap: 5px; }
   .card-dir-path { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .card-dir-edit { flex-shrink: 0; opacity: 0.3; transition: opacity 0.15s; cursor: pointer; font-size: 0.85rem; padding: 0 2px; border-radius: 3px; }
@@ -12931,6 +12933,23 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
 </div>
 
 <!-- Edit modal -->
+<div id="icon-picker-overlay" class="edit-overlay" onclick="if(event.target===this)closeIconPicker()">
+  <div class="edit-box" style="max-width:320px;">
+    <h3 style="margin:0 0 12px;font-size:1rem;">Set session icon</h3>
+    <div id="icon-grid" style="display:grid;grid-template-columns:repeat(8,1fr);gap:6px;margin-bottom:12px;"></div>
+    <div style="display:flex;gap:8px;align-items:center;">
+      <input id="icon-custom-input" type="text" placeholder="or type/paste any emoji…"
+        style="flex:1;padding:7px 10px;background:var(--input-bg);border:1px solid var(--border);border-radius:6px;color:var(--fg);font-size:1.1rem;"
+        oninput="iconCustomPreview(this.value)">
+      <button class="btn" onclick="saveIcon('')" style="white-space:nowrap;color:var(--dim);">✕ Clear</button>
+    </div>
+    <div class="edit-actions" style="margin-top:10px;">
+      <button class="btn" onclick="closeIconPicker()">Cancel</button>
+      <button class="btn primary" onclick="saveIconCustom()">Save</button>
+    </div>
+  </div>
+</div>
+
 <div id="edit-overlay" class="edit-overlay" onclick="if(event.target===this)closeEdit()">
   <div class="edit-box">
     <h3 id="edit-title">Edit</h3>
@@ -14439,13 +14458,14 @@ function render() {
       <div class="card-header" onclick="headerTap('${s.name}', event)" onmousedown="tileMouseDown(event,'${s.name}')">
         <div class="card-header-top">
           <div class="card-drag-handle" title="Drag to reorder"><svg width="10" height="16" viewBox="0 0 10 16" fill="currentColor"><circle cx="3" cy="3" r="1.3"/><circle cx="7" cy="3" r="1.3"/><circle cx="3" cy="8" r="1.3"/><circle cx="7" cy="8" r="1.3"/><circle cx="3" cy="13" r="1.3"/><circle cx="7" cy="13" r="1.3"/></svg></div>
-          <div class="card-name">${s.pinned ? '<span class="pin-icon">&#x1F4CC;</span> ' : ''}${esc(s.name)}</div>
+          <div class="card-name">${s.pinned ? '<span class="pin-icon">&#x1F4CC;</span> ' : ''}${s.icon ? '<span class="session-icon">' + s.icon + '</span> ' : ''}${esc(s.name)}</div>
           <button class="card-menu-btn" onclick="event.stopPropagation();toggleMenu('${s.name}')" title="Options">&#x22EF;</button>
           <div class="card-menu" id="menu-${s.name}">
           <div class="card-menu-item" onclick="event.stopPropagation();closeAllMenus();openPeek('${s.name}')"><span class="mi">&#x1F4BB;</span> Peek terminal</div>
           ${s.dir ? `<div class="card-menu-item" onclick="event.stopPropagation();closeAllMenus();openExplore('${s.dir.replace(/'/g,"\\'")}','${s.name.replace(/'/g,"\\'")}')"><span class="mi">&#x1F4C1;</span> Browse files</div>` : ''}
           <div class="card-menu-item" onclick="event.stopPropagation();closeAllMenus();showSessionInfo('${s.name}')"><span class="mi">&#x2139;</span> Info</div>
           <div class="card-menu-item" onclick="event.stopPropagation();togglePin('${s.name}')"><span class="mi">${s.pinned?'&#x1F4CC;':'&#x1F4CC;'}</span> ${s.pinned ? 'Unpin' : 'Pin to top'}</div>
+          <div class="card-menu-item" onclick="event.stopPropagation();openIconPicker('${s.name}')"><span class="mi">&#x1F3A8;</span> Set icon</div>
           <div class="card-menu-item" onclick="event.stopPropagation();editField('${s.name}','name','${esc(s.name)}')"><span class="mi">&#x270E;</span> Rename</div>
           <div class="card-menu-item" onclick="event.stopPropagation();editField('${s.name}','model','${esc(model||"")}','${esc(s.provider||"claude")}')"><span class="mi">&#x2699;</span> Model${model ? ': '+esc(model) : ''}</div>
           <div class="card-menu-item" onclick="event.stopPropagation();toggleYolo('${s.name}')"><span class="mi">${isYolo?'&#x2611;':'&#x2610;'}</span> YOLO mode</div>
@@ -22148,6 +22168,53 @@ async function _habitsDelete(idx) {
   _habits.splice(idx, 1);
   _habitsRender();
   await _habitsSave();
+}
+
+// ── Icon picker ──────────────────────────────────────────────────────────────
+const _ICON_EMOJIS = [
+  '🤖','🧠','💻','⚡','🔬','🔭','🧪','⚗️',
+  '🛠️','🔧','⚙️','🏗️','🔨','🪛','🔩','📦',
+  '📊','📈','🔍','🎯','💡','📝','📋','🗂️',
+  '🛡️','🔐','🌐','📡','🚀','🌊','🏛️','🦾',
+  '🌿','👁️','🦅','🐉','🌙','⭐','🎨','🔥',
+];
+let _iconPickerSession = null;
+
+function openIconPicker(session) {
+  closeAllMenus();
+  _iconPickerSession = session;
+  const grid = document.getElementById('icon-grid');
+  grid.innerHTML = _ICON_EMOJIS.map(e =>
+    `<button onclick="saveIcon('${e}')" title="${e}"
+       style="font-size:1.4rem;background:var(--card);border:1px solid transparent;border-radius:6px;
+              padding:4px;cursor:pointer;line-height:1;transition:border-color 0.1s;"
+       onmouseenter="this.style.borderColor='var(--accent)'"
+       onmouseleave="this.style.borderColor='transparent'">${e}</button>`
+  ).join('');
+  document.getElementById('icon-custom-input').value = '';
+  document.getElementById('icon-picker-overlay').classList.add('active');
+}
+
+function closeIconPicker() {
+  document.getElementById('icon-picker-overlay').classList.remove('active');
+  _iconPickerSession = null;
+}
+
+function iconCustomPreview(val) { /* live preview hook — currently no-op */ }
+
+async function saveIcon(emoji) {
+  if (!_iconPickerSession) return;
+  closeIconPicker();
+  await apiCall(API + '/api/sessions/' + _iconPickerSession + '/config', {
+    method: 'PATCH', headers: {'Content-Type':'application/json'},
+    body: JSON.stringify({ icon: emoji })
+  });
+  await fetchSessions();
+}
+
+async function saveIconCustom() {
+  const val = document.getElementById('icon-custom-input').value.trim();
+  await saveIcon(val);
 }
 
 // ── Repos tab ────────────────────────────────────────────────────────────────
@@ -36719,6 +36786,12 @@ p{{color:#888;margin:12px 0 28px;font-size:0.9rem;line-height:1.5}}
                     cfg["CC_DESC"] = body["desc"].strip()
                     _write_env(env_file, cfg)
                     return self._json({"ok": True, "message": "description updated"})
+
+                # Set icon (emoji)
+                if "icon" in body:
+                    cfg["CC_ICON"] = body["icon"].strip()
+                    _write_env(env_file, cfg)
+                    return self._json({"ok": True, "message": "icon updated"})
 
                 # Toggle pin
                 if body.get("toggle_pin"):
