@@ -2393,24 +2393,31 @@ def _snapshot_all_sessions():
                                     elif len(_parts) == 4: elapsed_secs = _parts[0]*86400 + _parts[1]*3600 + _parts[2]*60 + _parts[3]
                                     else: elapsed_secs = 0
                                     if elapsed_secs > 48 * 3600:  # > 48 hours
-                                        last_restart = actions.get("last_auto_restart", 0)
-                                        if now - last_restart > 300:
-                                            actions["restarting"] = True
-                                            actions["last_auto_restart"] = now
-                                            def _do_stale_restart(sname=name, _actions=actions, _age=elapsed_secs):
-                                                _hard_kill_claude(sname)
-                                                time.sleep(3)
-                                                start_session(sname)
-                                                for _w in range(30):
-                                                    time.sleep(1)
-                                                    _o = tmux_capture(sname, 10)
-                                                    if _o and _claude_ui_visible(_o):
-                                                        break
-                                                _actions.pop("restarting", None)
-                                            threading.Thread(target=_do_stale_restart, daemon=True).start()
-                                            _push_alert("auto_restart", name,
-                                                        f"Recycled stale session '{name}' — Claude process was "
-                                                        f"{elapsed_secs // 3600}h old")
+                                        # WHY: skip if session was active within the last hour —
+                                        # a session mid-task briefly looks idle between tool calls.
+                                        # BREAKS IF BYPASSED: restarts sessions while agents are working.
+                                        last_alive = actions.get("last_claude_alive", 0)
+                                        if last_alive and now - last_alive < 3600:
+                                            pass  # recently active — skip this cycle
+                                        else:
+                                            last_restart = actions.get("last_auto_restart", 0)
+                                            if now - last_restart > 300:
+                                                actions["restarting"] = True
+                                                actions["last_auto_restart"] = now
+                                                def _do_stale_restart(sname=name, _actions=actions, _age=elapsed_secs):
+                                                    _hard_kill_claude(sname)
+                                                    time.sleep(3)
+                                                    start_session(sname)
+                                                    for _w in range(30):
+                                                        time.sleep(1)
+                                                        _o = tmux_capture(sname, 10)
+                                                        if _o and _claude_ui_visible(_o):
+                                                            break
+                                                    _actions.pop("restarting", None)
+                                                threading.Thread(target=_do_stale_restart, daemon=True).start()
+                                                _push_alert("auto_restart", name,
+                                                            f"Recycled stale session '{name}' — Claude process was "
+                                                            f"{elapsed_secs // 3600}h old")
                     except Exception:
                         pass
 
