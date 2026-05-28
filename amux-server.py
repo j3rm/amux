@@ -3467,6 +3467,7 @@ def _init_db():
         "ALTER TABLE issues ADD COLUMN pos REAL NOT NULL DEFAULT 0",
         "ALTER TABLE issues ADD COLUMN notified INTEGER NOT NULL DEFAULT 0",
         "ALTER TABLE schedules ADD COLUMN kind TEXT NOT NULL DEFAULT 'tmux'",
+        "ALTER TABLE schedules ADD COLUMN notify INTEGER NOT NULL DEFAULT 1",
     ]:
         try:
             db.execute(migration)
@@ -4558,7 +4559,8 @@ def _run_schedule(sched):
         db.commit()
     except Exception as log_err:
         slog(f"[sched] failed to log run: {log_err}")
-    _push_alert("scheduler", session, f"Ran schedule: {sched['title']}")
+    if sched.get("notify", 1):
+        _push_alert("scheduler", session, f"Ran schedule: {sched['title']}")
     # If watch mode is enabled (tmux only), monitor response in background
     if (sched.get("kind") or "tmux") == "tmux" and sched.get("watch") and status == "ok":
         threading.Thread(
@@ -33698,7 +33700,7 @@ class CCHandler(BaseHTTPRequestHandler):
                 sched = _sched_row_to_dict(row, cols)
                 body = self._read_body()
                 for k in ("title","session","command","kind","sched_type","recurrence","run_at","enabled","schedule_expr",
-                          "watch","watch_timeout","done_pattern","done_action"):
+                          "watch","watch_timeout","done_pattern","done_action","notify"):
                     if k in body:
                         sched[k] = body[k]
                 expr = (sched.get("schedule_expr") or "").strip()
@@ -33711,7 +33713,7 @@ class CCHandler(BaseHTTPRequestHandler):
                 db.execute(
                     """UPDATE schedules SET title=?,session=?,command=?,kind=?,sched_type=?,recurrence=?,
                        run_at=?,next_run=?,enabled=?,schedule_expr=?,
-                       watch=?,watch_timeout=?,done_pattern=?,done_action=?,
+                       watch=?,watch_timeout=?,done_pattern=?,done_action=?,notify=?,
                        updated=? WHERE id=?""",
                     (sched["title"], sched["session"], sched["command"], sched.get("kind") or "tmux",
                      sched["sched_type"],
@@ -33719,6 +33721,7 @@ class CCHandler(BaseHTTPRequestHandler):
                      sched["enabled"], sched.get("schedule_expr"),
                      int(sched.get("watch") or 0), int(sched.get("watch_timeout") or 120),
                      sched.get("done_pattern"), sched.get("done_action") or "disable",
+                     int(sched.get("notify", 1)),
                      sched["updated"], sched_id)
                 )
                 db.commit()
