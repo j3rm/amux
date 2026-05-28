@@ -88,6 +88,80 @@ capture context future readers cannot see from the code alone:
 You do not need to audit whole files. Any code you read to understand a task
 and then modify should gain these comments as part of that same change.
 
+## Inter-Agent Communication — Board and Notes, Not Channels
+
+You are running inside amux alongside other sessions. Channel messages inject
+directly into the recipient's terminal — they are non-deferrable and will scroll
+past anything a human is watching. Use pull-based mechanisms by default.
+
+### When to use each
+
+| Need | Use | Why |
+|---|---|---|
+| Hand off a task to another session | **Board** | Pull-based — recipient reads when ready |
+| Report that assigned work is done | **Board** (PATCH to done) | Pull-based — never push a completion notice |
+| Share a document, spec, or research | **Notes** | Pull-based — recipient reads when ready |
+| Two-way dialogue, expect a reply | **Channel** | Push is fine when both sides are in dialogue |
+| Status update to an orchestrator | **Board** | Orchestrator polls — don't inject into their terminal |
+
+**Never use `/send` or channels to notify another session that work is complete.**
+Post the result to the board item and let the other session poll.
+
+### Completing board work assigned to you
+
+When you finish a task that was assigned to you via the board:
+
+```bash
+curl -sk -X PATCH -H 'Content-Type: application/json' \
+  -d '{"status":"done","desc":"Result: <one-line summary of what was done>"}' \
+  $AMUX_URL/api/board/ITEM-ID
+```
+
+If the result is a document or finding, write it to notes first, then reference
+the note slug in the desc:
+
+```bash
+# Write the result to a note
+curl -sk -X POST -H 'Content-Type: application/json' \
+  -d '{"content":"# Result\n\n..."}' \
+  $AMUX_URL/api/notes/result-slug
+
+# Then close the board item with a pointer
+curl -sk -X PATCH -H 'Content-Type: application/json' \
+  -d '{"status":"done","desc":"Result in notes: result-slug"}' \
+  $AMUX_URL/api/board/ITEM-ID
+```
+
+### If you are an orchestrator coordinating sub-agents
+
+Poll your assigned board items at the **start of every turn**, before doing
+anything else. This is how you stay aware of completed work without being
+interrupted by channel messages:
+
+```bash
+curl -sk $AMUX_URL/api/board | python3 -c "
+import json,sys,os
+s = os.getenv('AMUX_SESSION','')
+items = [i for i in json.load(sys.stdin)
+         if i.get('session') == s and i['status'] in ('todo','doing')]
+[print(i['id'], i['title']) for i in items]
+"
+```
+
+When reporting to the human: surface only decisions and milestone results.
+Routing steps, agent names, board item IDs, and commit hashes are silent —
+handle them in tool calls with no narration to the user.
+
+### Self-check before every human-facing response
+
+Before sending any message to the human, ask:
+- Does this contain a commit hash? Drop it unless they asked.
+- Does this contain an agent name or routing step? Drop it unless they need to act.
+- Does this contain a board item ID? Drop it unless they need to reference it.
+- Am I narrating coordination that the human does not need to see?
+
+If yes to any of these: rewrite to show only the result or the decision needed.
+
 ## End of session
 
 At the end of any session that produces deliverables, decisions, research, or
