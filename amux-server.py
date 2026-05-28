@@ -783,6 +783,7 @@ def _term_alive(tid: str) -> bool:
 _sse_cache = {
     "sessions": {"data": None, "json": "", "time": 0},
     "board": {"data": None, "json": "", "time": 0},
+    "repos": {"data": None, "json": "", "time": 0},
 }
 _sse_cache_lock = threading.Lock()  # prevents thundering herd on cache refresh
 _SSE_CACHE_TTL = 2  # seconds
@@ -11709,6 +11710,7 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
   <button id="tab-terminal" onclick="switchView('terminal')">Terminal</button>
   <button id="tab-browser" onclick="switchView('browser')">Browser</button>
   <button id="tab-habits" onclick="switchView('habits')">Habits</button>
+  <button id="tab-repos" onclick="switchView('repos')">Repos</button>
 </div>
 <div class="tab-customize-wrap">
   <button class="tab-customize-btn" onclick="event.stopPropagation();toggleTabCustomizer()" title="Show/hide tabs">&#x229E;</button>
@@ -12401,6 +12403,16 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
 <div id="habits-view" style="display:none;flex-direction:column;align-items:center;padding:12px;overflow-y:auto;-webkit-overflow-scrolling:touch;">
   <div id="habits-container" style="width:100%;max-width:480px;"></div>
   <button onclick="_habitsAdd()" style="margin-top:12px;background:var(--accent);color:#000;border:none;border-radius:50%;width:48px;height:48px;font-size:1.5rem;cursor:pointer;box-shadow:0 2px 8px rgba(0,0,0,0.3);transition:transform 0.15s;" onmousedown="this.style.transform='scale(0.9)'" onmouseup="this.style.transform=''" ontouchstart="this.style.transform='scale(0.9)'" ontouchend="this.style.transform=''">+</button>
+</div>
+
+<div id="repos-view" style="display:none;flex-direction:column;padding:12px 16px;overflow-y:auto;-webkit-overflow-scrolling:touch;gap:8px;">
+  <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:4px;">
+    <span style="font-size:0.8rem;color:var(--dim);" id="repos-updated"></span>
+    <button onclick="_reposLoad()" style="background:transparent;border:1px solid var(--border);border-radius:6px;color:var(--dim);padding:4px 10px;font-size:0.75rem;cursor:pointer;">&#x21bb; Refresh</button>
+  </div>
+  <div id="repos-container">
+    <div style="color:var(--dim);font-size:0.85rem;padding:24px 0;text-align:center;">Loading repositories…</div>
+  </div>
 </div>
 
 <!-- Schedule modal -->
@@ -21974,9 +21986,9 @@ function _chromeSave() {
 function switchView(view) {
   if (document.getElementById('grid-view').classList.contains('active')) exitGridMode();
   activeView = view;
-  const _svIds = ['session','board','calendar','scheduler','files','logs','notes','crm','map','metrics','torrents','terminal','browser','graph','journal','habits'];
-  const _svNames = ['sessions','board','calendar','scheduler','files','logs','notes','crm','map','metrics','torrents','terminal','browser','graph','journal','habits'];
-  const _svDisplay = ['','','flex','','flex','flex','flex','flex','flex','flex','flex','flex','','flex','flex','flex'];
+  const _svIds = ['session','board','calendar','scheduler','files','logs','notes','crm','map','metrics','torrents','terminal','browser','graph','journal','habits','repos'];
+  const _svNames = ['sessions','board','calendar','scheduler','files','logs','notes','crm','map','metrics','torrents','terminal','browser','graph','journal','habits','repos'];
+  const _svDisplay = ['','','flex','','flex','flex','flex','flex','flex','flex','flex','flex','','flex','flex','flex','flex'];
   for (let i = 0; i < _svIds.length; i++) {
     const ve = document.getElementById(_svIds[i] + '-view');
     if (ve) ve.style.display = view === _svNames[i] ? (_svDisplay[i] || '') : 'none';
@@ -21993,6 +22005,7 @@ function switchView(view) {
   if (view === 'browser') _bwInit();
   if (view === 'journal') _journalInit();
   if (view === 'habits') _habitsLoad();
+  if (view === 'repos') _reposLoad();
   if (view === 'files') loadFiles(_filesPath);
   else {
     try { if (location.hash.startsWith('#path=')) history.replaceState({}, '', location.pathname); } catch(e) {}
@@ -22135,6 +22148,59 @@ async function _habitsDelete(idx) {
   _habits.splice(idx, 1);
   _habitsRender();
   await _habitsSave();
+}
+
+// ── Repos tab ────────────────────────────────────────────────────────────────
+let _reposData = [];
+
+async function _reposLoad() {
+  try {
+    const r = await fetch('/api/repos');
+    const data = await r.json();
+    _reposData = data || [];
+    _reposRender();
+    const el = document.getElementById('repos-updated');
+    if (el) el.textContent = 'Updated ' + new Date().toLocaleTimeString();
+  } catch(e) {
+    const c = document.getElementById('repos-container');
+    if (c) c.innerHTML = '<div style="color:var(--dim);padding:24px;text-align:center;">Failed to load repos</div>';
+  }
+}
+
+function _reposRender() {
+  const c = document.getElementById('repos-container');
+  if (!c) return;
+  if (!_reposData.length) {
+    c.innerHTML = '<div style="color:var(--dim);font-size:0.85rem;padding:24px;text-align:center;">No repositories found under /mnt/gitdata/</div>';
+    return;
+  }
+  const rows = _reposData.map(r => {
+    const hasDirty    = r.dirty > 0;
+    const hasUnpushed = r.unpushed > 0;
+    let badge = '';
+    if (hasUnpushed) badge = '<span style="background:rgba(248,81,73,0.18);color:#f85149;border-radius:4px;padding:2px 7px;font-size:0.72rem;font-weight:600;">&#x2191;' + r.unpushed + ' unpushed</span>';
+    else if (hasDirty) badge = '<span style="background:rgba(210,153,34,0.18);color:#d2993e;border-radius:4px;padding:2px 7px;font-size:0.72rem;font-weight:600;">&#x25CF; dirty</span>';
+    else badge = '<span style="background:rgba(63,185,80,0.18);color:#3fb950;border-radius:4px;padding:2px 7px;font-size:0.72rem;font-weight:600;">&#x2713; clean</span>';
+
+    const dirty = hasDirty ? '<span style="color:var(--dim);font-size:0.75rem;">' + r.dirty + ' file' + (r.dirty !== 1 ? 's' : '') + ' changed</span>' : '';
+    const sha   = r.sha ? '<code style="font-size:0.72rem;background:var(--card);border-radius:3px;padding:1px 5px;color:var(--dim);">' + r.sha + '</code>' : '';
+    const when  = r.last_commit_when ? '<span style="color:var(--dim);font-size:0.75rem;">' + r.last_commit_when + '</span>' : '';
+    const msg   = r.last_commit ? '<span style="font-size:0.8rem;color:var(--fg);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:320px;" title="' + r.last_commit.replace(/"/g,'&quot;') + '">' + r.last_commit.substring(0, 72) + (r.last_commit.length > 72 ? '…' : '') + '</span>' : '';
+
+    return `<div style="background:var(--card);border:1px solid var(--border);border-radius:8px;padding:10px 14px;display:flex;flex-direction:column;gap:5px;">
+      <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;">
+        <span style="font-weight:600;font-size:0.9rem;">${r.name}</span>
+        <span style="color:var(--dim);font-size:0.75rem;">&#x2387; ${r.branch}</span>
+        ${badge}
+        ${dirty}
+      </div>
+      <div style="display:flex;align-items:center;gap:6px;flex-wrap:wrap;">
+        ${sha}${msg}${when ? '<span style="color:var(--dim);font-size:0.75rem;">·</span>' + when : ''}
+      </div>
+      <div style="color:var(--dim);font-size:0.7rem;user-select:all;">${r.path}</div>
+    </div>`;
+  }).join('');
+  c.innerHTML = rows;
 }
 
 // ── Map tab ───────────────────────────────────────────────────────────────────
@@ -32680,6 +32746,14 @@ class CCHandler(BaseHTTPRequestHandler):
             return self._json({"ok": ok, "message": msg}, code)
 
         # GET /api/metrics — system + per-session resource metrics
+        if method == "GET" and path == "/api/repos":
+            cached = _sse_cache["repos"]
+            if cached["json"] and time.time() - cached["time"] < 120:
+                return self._json(cached["data"])
+            # Cache cold or stale — kick a background refresh and return what we have
+            threading.Thread(target=_repos_scan, daemon=True).start()
+            return self._json(cached["data"] or [])
+
         if method == "GET" and path == "/api/metrics":
             return self._json(get_system_metrics())
 
@@ -36722,6 +36796,72 @@ _AUTO_UPDATE_BRANCH = os.environ.get("AMUX_AUTO_UPDATE_BRANCH", "main")
 _AUTO_UPDATE_INTERVAL = int(os.environ.get("AMUX_AUTO_UPDATE_INTERVAL", "60"))  # seconds
 
 
+def _repos_scan():
+    """Scan /mnt/gitdata/ for git repos and cache status (branch, dirty, unpushed, last commit).
+
+    Callers: schedule_job every 60s, GET /api/repos (serves from cache).
+    Preconditions: git must be on PATH; /mnt/gitdata/ must be readable.
+    Side effects: writes to _sse_cache["repos"].
+    """
+    scan_root = "/mnt/gitdata"
+    repos = []
+    try:
+        r = subprocess.run(
+            ["find", scan_root, "-maxdepth", "3", "-name", ".git", "-type", "d"],
+            capture_output=True, text=True, timeout=20
+        )
+        git_dirs = [l for l in r.stdout.splitlines() if l.strip()]
+    except Exception:
+        return
+
+    for git_dir in git_dirs:
+        repo_path = os.path.dirname(git_dir)
+        repo_name = os.path.basename(repo_path)
+        try:
+            def _git(*args, cwd=repo_path):
+                return subprocess.run(
+                    ["git", "-C", cwd] + list(args),
+                    capture_output=True, text=True, timeout=8
+                )
+
+            branch = _git("branch", "--show-current").stdout.strip() or "HEAD"
+
+            log_out = _git("log", "-1", "--format=%h\x1f%s\x1f%ar").stdout.strip()
+            sha = msg = when = ""
+            if log_out:
+                parts = log_out.split("\x1f", 2)
+                sha  = parts[0] if len(parts) > 0 else ""
+                msg  = parts[1] if len(parts) > 1 else ""
+                when = parts[2] if len(parts) > 2 else ""
+
+            dirty_lines = [l for l in _git("status", "--porcelain").stdout.splitlines() if l.strip()]
+            dirty = len(dirty_lines)
+
+            up_r = _git("rev-list", "--count", "@{u}..HEAD")
+            unpushed = int(up_r.stdout.strip()) if up_r.returncode == 0 and up_r.stdout.strip().isdigit() else 0
+
+            repos.append({
+                "name": repo_name,
+                "path": repo_path,
+                "branch": branch,
+                "sha": sha,
+                "last_commit": msg,
+                "last_commit_when": when,
+                "dirty": dirty,
+                "unpushed": unpushed,
+            })
+        except Exception:
+            continue
+
+    # Sort: repos with issues first (unpushed > dirty > clean), then alpha
+    repos.sort(key=lambda r: (r["unpushed"] == 0 and r["dirty"] == 0, r["name"].lower()))
+
+    with _sse_cache_lock:
+        _sse_cache["repos"]["data"] = repos
+        _sse_cache["repos"]["json"] = json.dumps(repos)
+        _sse_cache["repos"]["time"] = time.time()
+
+
 def _board_watcher():
     """Nudge idle sessions that have unread todo board items assigned to them.
 
@@ -37554,6 +37694,7 @@ def main():
     schedule_job(_kill_stale_ray,        interval=600,                  name="ray_reap",     initial_delay=120)
     schedule_job(_refresh_token_cache,   interval=120,                  name="token_cache", initial_delay=5)
     schedule_job(_email_sync_job,        interval=_EMAIL_SYNC_INTERVAL, name="email_sync",  initial_delay=20)
+    schedule_job(_repos_scan,            interval=60,                   name="repos_scan",    initial_delay=5)
     schedule_job(_board_watcher,         interval=30,                   name="board_watcher", initial_delay=30)
     schedule_job(_board_watcher_clear_nudged, interval=60,             name="board_watcher_gc", initial_delay=60)
     schedule_job(_evict_stale_caches,    interval=300,                  name="cache_evict", initial_delay=60)
