@@ -22233,8 +22233,9 @@ function iconCustomPreview(val) { /* live preview hook — currently no-op */ }
 
 async function saveIcon(emoji) {
   if (!_iconPickerSession) return;
+  const session = _iconPickerSession;
   closeIconPicker();
-  await apiCall(API + '/api/sessions/' + _iconPickerSession + '/config', {
+  await apiCall(API + '/api/sessions/' + session + '/config', {
     method: 'PATCH', headers: {'Content-Type':'application/json'},
     body: JSON.stringify({ icon: emoji })
   });
@@ -36820,6 +36821,7 @@ p{{color:#888;margin:12px 0 28px;font-size:0.9rem;line-height:1.5}}
                 if "icon" in body:
                     cfg["CC_ICON"] = body["icon"].strip()
                     _write_env(env_file, cfg)
+                    _sse_cache["sessions"]["time"] = 0
                     return self._json({"ok": True, "message": "icon updated"})
 
                 # Toggle pin
