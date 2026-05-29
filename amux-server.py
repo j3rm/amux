@@ -2406,6 +2406,20 @@ def _snapshot_all_sessions():
                                                 actions["restarting"] = True
                                                 actions["last_auto_restart"] = now
                                                 def _do_stale_restart(sname=name, _actions=actions, _age=elapsed_secs):
+                                                    # WHY: capture live UUID before killing so start_session
+                                                    # can resume the exact conversation via --resume <uuid>.
+                                                    # BREAKS IF BYPASSED: loses conversation on stale recycle
+                                                    # when multiple sessions share the same name.
+                                                    try:
+                                                        _cfg = parse_env_file(CC_SESSIONS / f"{sname}.env")
+                                                        _wdir = str(Path(_cfg.get("CC_DIR", str(Path.home()))).expanduser().resolve())
+                                                        _cid = _live_conv_id(sname, _wdir)
+                                                        if _cid:
+                                                            _m = _load_meta(sname)
+                                                            _m["cc_conversation_id"] = _cid
+                                                            _save_meta(sname, _m)
+                                                    except Exception:
+                                                        pass
                                                     _hard_kill_claude(sname)
                                                     time.sleep(3)
                                                     start_session(sname)
@@ -6214,12 +6228,24 @@ def start_session(name: str, extra_flags: str = "", _skip_conv_id: bool = False)
                     session_flag = f'--resume {_sid}'
                     print(f"[start] {name}: resume={cc_session_name} (uuid={_sid})")
                 elif _cc_session_exists_in_project(cc_session_name, work_dir):
-                    # Multiple sessions with this name — start fresh to avoid picker
+                    # Multiple sessions with this name — name lookup is ambiguous.
+                    # WHY: keep cc_conversation_id if it exists — UUID is always authoritative.
+                    # BREAKS IF BYPASSED: clears UUID, loses conversation on every restart when
+                    # multiple conversations share a name (e.g. after stale-reaper recycles).
                     meta.pop("cc_session_name", None)
-                    meta.pop("cc_conversation_id", None)
                     _save_meta(name, meta)
-                    session_flag = f'--name {shlex.quote(name)}'
-                    print(f"[start] {name}: fresh start (ambiguous session name '{cc_session_name}')")
+                    if conv_id and _uuid_re.match(conv_id):
+                        # Have a UUID — resume directly, skip name path entirely
+                        conv_file = CLAUDE_HOME / "projects" / _project_name(work_dir) / f"{conv_id}.jsonl"
+                        if conv_file.exists():
+                            session_flag = f'--resume {conv_id}'
+                            print(f"[start] {name}: resume by uuid (ambiguous name '{cc_session_name}', uuid={conv_id})")
+                        else:
+                            session_flag = f'--name {shlex.quote(name)}'
+                            print(f"[start] {name}: fresh start (ambiguous name, uuid not found)")
+                    else:
+                        session_flag = f'--name {shlex.quote(name)}'
+                        print(f"[start] {name}: fresh start (ambiguous session name '{cc_session_name}')")
                 else:
                     meta.pop("cc_session_name", None)
                     meta.pop("cc_conversation_id", None)
