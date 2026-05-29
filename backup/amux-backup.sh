@@ -105,7 +105,7 @@ for svc in /etc/systemd/system/amux*.service; do
 done
 [ -f "${HOME}/start-projects.sh" ] && cp "${HOME}/start-projects.sh" "${BACKUP_DIR}/system/"
 
-# ── Step 7: Generate RESTORE.md ───────────────────────────────────────────────
+# ── Step 7: Generate README.md (shown on GitHub repo home page) ───────────────
 
 TIMESTAMP=$(date -u '+%Y-%m-%dT%H:%M:%SZ')
 SESSION_LIST=$(ls "${SESSIONS_DIR}"/*.env 2>/dev/null | while read f; do
@@ -115,7 +115,7 @@ SESSION_LIST=$(ls "${SESSIONS_DIR}"/*.env 2>/dev/null | while read f; do
   echo "  - **${name}** — \`${dir}\` ${flags:+| flags: \`${flags}\`}"
 done)
 
-cat > "${BACKUP_DIR}/RESTORE.md" << RESTORE_EOF
+cat > "${BACKUP_DIR}/README.md" << RESTORE_EOF
 # AMUX System Restore Guide
 
 **Backup timestamp:** ${TIMESTAMP}
@@ -296,13 +296,13 @@ And these had significant unpushed commits:
 
 Once AMUX is up and you have a Claude session running, send it this:
 
-> "You are being restored from backup. Read RESTORE.md in the amux-backup repo.
+> "You are being restored from backup. Read README.md in the amux-backup repo.
 > Verify all sessions are configured correctly, check the board for pending items,
 > and audit which agent repos are missing or have unpushed work."
 
 RESTORE_EOF
 
-echo "${LOG_PREFIX} RESTORE.md generated"
+echo "${LOG_PREFIX} README.md generated"
 
 # ── Step 8: Commit and push ───────────────────────────────────────────────────
 
