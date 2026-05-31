@@ -5433,6 +5433,7 @@ def list_sessions() -> list:
             "worktree": cfg.get("CC_WORKTREE", "") == "1",
             "worktree_repo": cfg.get("CC_WORKTREE_REPO", ""),
             "icon": cfg.get("CC_ICON", ""),
+            "color": cfg.get("CC_COLOR", ""),
         })
     status_order = {"active": 0, "waiting": 0, "idle": 1, "": 1}
     sessions.sort(key=lambda s: (not s["pinned"], not s["running"], status_order.get(s["status"], 1), -s["last_activity"]))
@@ -12977,6 +12978,17 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
   </div>
 </div>
 
+<div id="color-picker-overlay" class="edit-overlay" onclick="if(event.target===this)closeColorPicker()">
+  <div class="edit-box" style="max-width:260px;">
+    <h3 style="margin:0 0 12px;font-size:1rem;">Set session color</h3>
+    <div id="color-grid" style="display:grid;grid-template-columns:repeat(6,1fr);gap:10px;margin-bottom:14px;"></div>
+    <div class="edit-actions" style="margin-top:0;">
+      <button class="btn" onclick="saveColor('')" style="color:var(--dim);">✕ Clear</button>
+      <button class="btn" onclick="closeColorPicker()">Cancel</button>
+    </div>
+  </div>
+</div>
+
 <div id="edit-overlay" class="edit-overlay" onclick="if(event.target===this)closeEdit()">
   <div class="edit-box">
     <h3 id="edit-title">Edit</h3>
@@ -14482,7 +14494,7 @@ function render() {
     const model = flagModel || s.active_model || null;
     const shortModel = model ? model.replace(/^claude-/, '').replace(/-\d{8}$/, '') : null;
     return `
-    <div class="card ${isExp ? 'expanded' : ''}" data-session="${esc(s.name)}" onclick="event.stopPropagation();toggle('${s.name}')">
+    <div class="card ${isExp ? 'expanded' : ''}" data-session="${esc(s.name)}" onclick="event.stopPropagation();toggle('${s.name}')" ${s.color ? `style="border-color:${s.color}"` : ''}>
       <div class="card-header" onclick="headerTap('${s.name}', event)" onmousedown="tileMouseDown(event,'${s.name}')">
         <div class="card-header-top">
           <div class="card-drag-handle" title="Drag to reorder"><svg width="10" height="16" viewBox="0 0 10 16" fill="currentColor"><circle cx="3" cy="3" r="1.3"/><circle cx="7" cy="3" r="1.3"/><circle cx="3" cy="8" r="1.3"/><circle cx="7" cy="8" r="1.3"/><circle cx="3" cy="13" r="1.3"/><circle cx="7" cy="13" r="1.3"/></svg></div>
@@ -14494,6 +14506,7 @@ function render() {
           <div class="card-menu-item" onclick="event.stopPropagation();closeAllMenus();showSessionInfo('${s.name}')"><span class="mi">&#x2139;</span> Info</div>
           <div class="card-menu-item" onclick="event.stopPropagation();togglePin('${s.name}')"><span class="mi">${s.pinned?'&#x1F4CC;':'&#x1F4CC;'}</span> ${s.pinned ? 'Unpin' : 'Pin to top'}</div>
           <div class="card-menu-item" onclick="event.stopPropagation();openIconPicker('${s.name}')"><span class="mi">&#x1F3A8;</span> Set icon</div>
+          <div class="card-menu-item" onclick="event.stopPropagation();openColorPicker('${s.name}')"><span class="mi" style="${s.color?'color:'+s.color:''}">&#x25A0;</span> Set color</div>
           <div class="card-menu-item" onclick="event.stopPropagation();editField('${s.name}','name','${esc(s.name)}')"><span class="mi">&#x270E;</span> Rename</div>
           <div class="card-menu-item" onclick="event.stopPropagation();editField('${s.name}','model','${esc(model||"")}','${esc(s.provider||"claude")}')"><span class="mi">&#x2699;</span> Model${model ? ': '+esc(model) : ''}</div>
           <div class="card-menu-item" onclick="event.stopPropagation();toggleYolo('${s.name}')"><span class="mi">${isYolo?'&#x2611;':'&#x2610;'}</span> YOLO mode</div>
@@ -22245,6 +22258,43 @@ async function saveIcon(emoji) {
 async function saveIconCustom() {
   const val = document.getElementById('icon-custom-input').value.trim();
   await saveIcon(val);
+}
+
+// ── Color picker ─────────────────────────────────────────────────────────────
+const _CARD_COLORS = [
+  '#ef4444','#f97316','#eab308','#22c55e',
+  '#14b8a6','#3b82f6','#8b5cf6','#ec4899',
+  '#f43f5e','#84cc16','#06b6d4','#a78bfa',
+];
+let _colorPickerSession = null;
+
+function openColorPicker(session) {
+  closeAllMenus();
+  _colorPickerSession = session;
+  const grid = document.getElementById('color-grid');
+  grid.innerHTML = _CARD_COLORS.map(c =>
+    `<button onclick="saveColor('${c}')" title="${c}"
+       style="width:100%;aspect-ratio:1/1;background:${c};border:2px solid transparent;border-radius:50%;cursor:pointer;transition:transform 0.1s,border-color 0.1s;"
+       onmouseenter="this.style.transform='scale(1.2)';this.style.borderColor='white'"
+       onmouseleave="this.style.transform='';this.style.borderColor='transparent'"></button>`
+  ).join('');
+  document.getElementById('color-picker-overlay').classList.add('active');
+}
+
+function closeColorPicker() {
+  document.getElementById('color-picker-overlay').classList.remove('active');
+  _colorPickerSession = null;
+}
+
+async function saveColor(color) {
+  if (!_colorPickerSession) return;
+  const session = _colorPickerSession;
+  closeColorPicker();
+  await apiCall(API + '/api/sessions/' + session + '/config', {
+    method: 'PATCH', headers: {'Content-Type':'application/json'},
+    body: JSON.stringify({ color: color })
+  });
+  await fetchSessions();
 }
 
 // ── Repos tab ────────────────────────────────────────────────────────────────
@@ -36823,6 +36873,13 @@ p{{color:#888;margin:12px 0 28px;font-size:0.9rem;line-height:1.5}}
                     _write_env(env_file, cfg)
                     _sse_cache["sessions"]["time"] = 0
                     return self._json({"ok": True, "message": "icon updated"})
+
+                # Set card color
+                if "color" in body:
+                    cfg["CC_COLOR"] = body["color"].strip()
+                    _write_env(env_file, cfg)
+                    _sse_cache["sessions"]["time"] = 0
+                    return self._json({"ok": True, "message": "color updated"})
 
                 # Toggle pin
                 if body.get("toggle_pin"):
