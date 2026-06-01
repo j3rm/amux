@@ -6505,6 +6505,15 @@ def start_session(name: str, extra_flags: str = "", _skip_conv_id: bool = False)
                                capture_output=True, timeout=5)
                 _poll_shell_prompt(name, timeout=3.0)  # let profile source complete
     
+            # Apply per-session status bar color (CC_COLOR)
+            _sess_color = cfg.get("CC_COLOR", "").strip()
+            if _sess_color:
+                subprocess.run(
+                    ["tmux", "set-option", "-t", tmux_sess, "status-style",
+                     f"bg={_sess_color},fg=white"],
+                    capture_output=True, timeout=5,
+                )
+
             # Send the Claude command
             subprocess.run(["tmux", "send-keys", "-t", tmux_target(name), "-l", cmd],
                            capture_output=True, timeout=5)
@@ -36876,9 +36885,26 @@ p{{color:#888;margin:12px 0 28px;font-size:0.9rem;line-height:1.5}}
 
                 # Set card color
                 if "color" in body:
-                    cfg["CC_COLOR"] = body["color"].strip()
+                    new_color = body["color"].strip()
+                    cfg["CC_COLOR"] = new_color
                     _write_env(env_file, cfg)
                     _sse_cache["sessions"]["time"] = 0
+                    # Apply immediately to running tmux session's status bar
+                    try:
+                        _tsess = tmux_name(session_name)
+                        if new_color:
+                            subprocess.run(
+                                ["tmux", "set-option", "-t", _tsess, "status-style",
+                                 f"bg={new_color},fg=white"],
+                                capture_output=True, timeout=5,
+                            )
+                        else:
+                            subprocess.run(
+                                ["tmux", "set-option", "-t", _tsess, "-u", "status-style"],
+                                capture_output=True, timeout=5,
+                            )
+                    except Exception:
+                        pass
                     return self._json({"ok": True, "message": "color updated"})
 
                 # Toggle pin
