@@ -53,8 +53,10 @@ CC_LOGS = CC_HOME / "logs"
 CC_MEMORY = CC_HOME / "memory"
 CC_BOARD_DIR = CC_HOME / "board"
 CC_UPLOADS = CC_HOME / "uploads"
-CC_NOTES = CC_HOME / "notes"
+CC_BLOCKED_SESSIONS = CC_HOME / "blocked-sessions.txt"
+CC_NOTES = Path(os.environ.get("AMUX_NOTES_DIR", "")) if os.environ.get("AMUX_NOTES_DIR") else CC_HOME / "notes"
 CC_NOTES_PINS = CC_HOME / "notes" / ".pins.json"
+CC_NOTES_TRASH = CC_HOME / "notes" / ".trash"
 CC_MAP = CC_HOME / "map.json"
 CC_NOTIFICATIONS = CC_HOME / "notifications.json"
 CC_HABITS = CC_HOME / "habits.json"
@@ -134,6 +136,28 @@ def _load_or_create_auth_token() -> str:
 
 AUTH_TOKEN = _load_or_create_auth_token()
 
+# Dedicated guard token for DESTRUCTIVE session ops (delete/archive). It is
+# embedded only in the served dashboard HTML, so a human using the dashboard
+# has it but a session/agent hitting the local API does not — this is what
+# stops sessions from deleting other sessions. Derived from the persisted
+# AUTH_TOKEN so it's stable across restarts, but distinct and never returned
+# by any API endpoint. Override for trusted automation with
+# AMUX_ALLOW_AGENT_SESSION_DELETE=1 in ~/.amux/server.env.
+import hashlib as _hashlib
+_UI_TOKEN = _hashlib.sha256(("amux-ui-guard:" + AUTH_TOKEN).encode()).hexdigest()[:40]
+
+
+def _session_destructive_allowed(headers) -> bool:
+    """True if a delete/archive is authorized: either explicit automation
+    opt-in, or the request carries the dashboard UI token (i.e. a human acting
+    in the dashboard). Sessions/agents calling the API directly have neither."""
+    if os.environ.get("AMUX_ALLOW_AGENT_SESSION_DELETE", "") in ("1", "true", "yes"):
+        return True
+    try:
+        return headers.get("X-Amux-UI-Token", "") == _UI_TOKEN
+    except Exception:
+        return False
+
 
 # ── PostHog server-side telemetry ────────────────────────────────────────────
 # Emits events for signals only the backend observes (YOLO auto-answers,
@@ -174,6 +198,7 @@ CC_MEMORY.mkdir(parents=True, exist_ok=True)
 CC_BOARD_DIR.mkdir(parents=True, exist_ok=True)
 CC_UPLOADS.mkdir(parents=True, exist_ok=True)
 CC_NOTES.mkdir(parents=True, exist_ok=True)
+CC_NOTES_PINS.parent.mkdir(parents=True, exist_ok=True)
 CC_TRANSCRIPTS.mkdir(parents=True, exist_ok=True)
 CC_GMAIL.mkdir(parents=True, exist_ok=True)
 CC_BRANDING.mkdir(parents=True, exist_ok=True)
@@ -484,6 +509,60 @@ def _bu_screenshot(session: str = "amux", path: str = "", retries: int = 3) -> d
             continue
         return result
     return result
+
+def _resolve_claude_bin() -> str:
+    """Locate the claude CLI binary (PATH first, then common install locations)."""
+    found = shutil.which("claude")
+    if found:
+        return found
+    for p in (Path.home() / ".local" / "bin" / "claude",
+              Path.home() / ".claude" / "local" / "claude",
+              Path("/usr/local/bin/claude"),
+              Path("/opt/homebrew/bin/claude")):
+        if p.exists():
+            return str(p)
+    return ""
+
+
+def _on_claude_plan() -> bool:
+    """True when logged in via OAuth (a Claude Plan), independent of any API key."""
+    try:
+        cj = Path.home() / ".claude.json"
+        if cj.exists():
+            return bool(json.loads(cj.read_text()).get("oauthAccount"))
+    except Exception:
+        pass
+    return False
+
+
+def _claude_oneshot(prompt: str, model: str = "haiku", timeout: int = 35) -> tuple:
+    """Run a one-shot headless `claude -p` query using the active Claude Code
+    session's auth — Plan OAuth or API key, whichever the CLI is configured with.
+
+    Returns (text, error). Mirrors amux's session launch: when on a Plan, the
+    ANTHROPIC_API_KEY is unset so the subscription is used rather than a key.
+    """
+    claude_bin = _resolve_claude_bin()
+    if not claude_bin:
+        return ("", "claude CLI not found")
+    env = dict(os.environ)
+    env.pop("CLAUDECODE", None)
+    env.pop("CLAUDE_CODE_ENTRYPOINT", None)
+    if _on_claude_plan():
+        env.pop("ANTHROPIC_API_KEY", None)
+    try:
+        r = subprocess.run(
+            [claude_bin, "-p", prompt, "--model", model],
+            capture_output=True, text=True, timeout=timeout,
+            cwd=str(CC_HOME), env=env)
+        if r.returncode != 0:
+            return ("", (r.stderr or r.stdout or "claude exited non-zero").strip()[:500])
+        return (r.stdout.strip(), "")
+    except subprocess.TimeoutExpired:
+        return ("", "lookup timed out")
+    except Exception as e:
+        return ("", str(e))
+
 
 def _bu_agent_run(task: str, session: str = "amux-agent", profile: str = "default",
                   start_url: str = "", max_iterations: int = 25,
@@ -1175,6 +1254,25 @@ def _write_env(path: Path, cfg: dict):
     _atomic_write_secure(path, "\n".join(lines) + "\n")
 
 
+def _blocked_session_names() -> set[str]:
+    """Return session names quarantined from create/start/wake/auto-resume."""
+    try:
+        names = set()
+        for line in CC_BLOCKED_SESSIONS.read_text().splitlines():
+            line = line.strip()
+            if line and not line.startswith("#"):
+                names.add(line)
+        return names
+    except FileNotFoundError:
+        return set()
+    except Exception:
+        return set()
+
+
+def _is_session_blocked(name: str) -> bool:
+    return name in _blocked_session_names()
+
+
 # ═══════════════════════════════════════════
 # TMUX HELPERS
 # ═══════════════════════════════════════════
@@ -1269,6 +1367,9 @@ def _log_path(session: str) -> Path:
 
 _last_log_save: dict[str, float] = {}  # session -> monotonic time of last save
 _LOG_SAVE_INTERVAL = 30  # seconds between saves per session
+
+_peek_cache: dict[str, tuple[float, int, str]] = {}  # session -> (monotonic_time, lines, output)
+_PEEK_CACHE_TTL = 4.0  # seconds — must exceed client poll interval (3s) to avoid cache misses
 
 
 def save_session_log(session: str, content: str, force: bool = False):
@@ -1831,7 +1932,7 @@ def _rate_limit_auto_resume():
     """
     import datetime as _dt
     now = time.time()
-    today_utc = _dt.datetime.utcnow().strftime("%Y-%m-%d")
+    today_utc = _dt.datetime.now(_dt.timezone.utc).strftime("%Y-%m-%d")
 
     # Collect candidates first so we can bail out cheaply when nothing's due.
     candidates = [name for name, actions in list(_session_auto_actions.items())
@@ -2112,6 +2213,17 @@ def _claude_ui_visible(clean_output: str) -> bool:
             # Codex model status line: "gpt-X xhigh · ~/path"
             if "·" in ls and ("gpt-" in ls or "o3" in ls or "o4" in ls):
                 return True
+    # Gemini CLI prompt/status. Gemini's UI is also Ink-based and may use
+    # ">" / "›" prompt lines, but only treat those as ready if the banner/model
+    # is visible somewhere in the recent pane.
+    has_gemini = any("gemini" in l.lower() for l in lines[:20] + lines[-12:])
+    if has_gemini:
+        for l in lines[-8:]:
+            ls = l.strip().lower()
+            if ls == ">" or ls.startswith("> ") or ls.startswith("›"):
+                return True
+            if "gemini-" in ls or "yolo" in ls or "approval" in ls:
+                return True
     return False
 
 
@@ -2168,6 +2280,8 @@ def _snapshot_all_sessions():
     _HIBERNATE_STARTUP_GRACE = 600  # 10 min grace after server restart
     for f in CC_SESSIONS.glob("*.env"):
         name = f.stem
+        if _is_session_blocked(name):
+            continue
         if tmux_name(name) not in running_sessions:
             continue
         try:
@@ -3349,6 +3463,23 @@ esac
             stub_path.chmod(0o755)
     except Exception:
         pass  # may not have write permission on local dev machines
+
+
+def _auto_trust_codex_dir(work_dir: str):
+    """Pre-trust a directory in ~/.codex/config.toml so Codex starts noninteractively."""
+    try:
+        config_file = Path.home() / ".codex" / "config.toml"
+        config_file.parent.mkdir(parents=True, exist_ok=True)
+        text = config_file.read_text() if config_file.exists() else ""
+        header = f"[projects.{json.dumps(work_dir)}]"
+        if header in text:
+            return
+        if text and not text.endswith("\n"):
+            text += "\n"
+        text += f'\n{header}\ntrust_level = "trusted"\n'
+        config_file.write_text(text)
+    except Exception:
+        pass
 
 
 def _sync_skills_to_commands():
@@ -5301,7 +5432,7 @@ def list_sessions() -> list:
         return sessions
     tmux_info = _tmux_info_map()
     # Pre-compute which sessions are running and batch-capture their panes
-    env_files = sorted(CC_SESSIONS.glob("*.env"))
+    env_files = [f for f in sorted(CC_SESSIONS.glob("*.env")) if not _is_session_blocked(f.stem)]
     running_names = [f.stem for f in env_files if tmux_name(f.stem) in tmux_info]
     captures = _tmux_capture_batch(running_names, 30) if running_names else {}
     # Token cache is refreshed by background job (_refresh_token_cache via scheduler)
@@ -5387,11 +5518,12 @@ def list_sessions() -> list:
             else:
                 # Fallback: show last few non-empty stripped lines (e.g. spinner/tool output during active processing)
                 preview_lines = [strip_ansi(l).strip()[:200] for l in lines[-8:] if strip_ansi(l).strip()][-5:]
-        # Detect active model from JSONL (skip for codex — it has no Claude JSONL)
+        # Detect active model from JSONL (skip providers without Claude JSONL)
         raw_dir = cfg.get("CC_DIR", "")
         resolved_dir = str(Path(raw_dir).expanduser().resolve()) if raw_dir else ""
-        if cfg.get("CC_PROVIDER", "claude") == "codex":
-            active_model = _extract_model_from_flags(cfg.get("CC_FLAGS", "")) or "gpt-5.5"
+        provider = cfg.get("CC_PROVIDER", "claude")
+        if provider in ("codex", "gemini"):
+            active_model = _extract_model_from_flags(cfg.get("CC_FLAGS", "")) or _default_model_for_provider(provider)
         else:
             active_model = detect_active_model(raw_dir, meta.get("cc_conversation_id", ""))
         # Parse task time from spinner line
@@ -5870,12 +6002,36 @@ def _auto_resume_sessions():
     for meta_file in sorted(CC_SESSIONS.glob("*.meta.json")):
         name = meta_file.name.removesuffix(".meta.json")
         try:
+            if _is_session_blocked(name):
+                print(f"[auto-resume] {name}: skipped blocked session")
+                continue
             meta = json.loads(meta_file.read_text())
-            if meta.get("start_count", 0) > 0 and (CC_SESSIONS / f"{name}.env").exists():
+            env_file = CC_SESSIONS / f"{name}.env"
+            if meta.get("start_count", 0) > 0 and env_file.exists():
+                cfg = parse_env_file(env_file)
+                if cfg.get("CC_ARCHIVED") == "1":
+                    print(f"[auto-resume] {name}: skipped archived session")
+                    continue
                 ok, msg = start_session(name)
                 print(f"[auto-resume] {name}: {msg}")
         except Exception as e:
             print(f"[auto-resume] {name} failed: {e}")
+
+
+def _log_pipe_command(log_path: Path) -> str:
+    """Return a tmux pipe-pane command that redacts API keys before logging."""
+    redactor = (
+        "import re,sys\n"
+        "pat=re.compile(rb'((?:mxp|usr|ret)_sk)_[A-Za-z0-9_-]+|((?:AMUX_MIXPEEK_OPS_TOKEN|ANTHROPIC_API_KEY|OPENAI_API_KEY|GOOGLE_MAPS_API_KEY|GOOGLE_API_KEY|CLOUDFLARE_API_TOKEN|ELEVENLABS_API_KEY|POSTHOG_KEY|POSTHOG_PERSONAL_API_KEY)=)[^\\s\\r\\n]+|(?:ghp|gho|ghu|ghs|ghr)_[A-Za-z0-9_]{20,}|github_pat_[A-Za-z0-9_]+|sk-ant-[A-Za-z0-9_-]+|sk-proj-[A-Za-z0-9_-]+|sk[_-][A-Za-z0-9]{32,}|AIza[0-9A-Za-z_-]{30,}|(?:phx|phc)_[A-Za-z0-9]+')\n"
+        "def repl(m):\n"
+        "    if m.group(1): return m.group(1)+b'_REDACTED'\n"
+        "    if m.group(2): return m.group(2)+b'REDACTED'\n"
+        "    return b'SECRET_REDACTED'\n"
+        "for line in sys.stdin.buffer:\n"
+        "    sys.stdout.buffer.write(pat.sub(repl, line))\n"
+        "    sys.stdout.buffer.flush()\n"
+    )
+    return f"python3 -c {shlex.quote(redactor)} >> {shlex.quote(str(log_path))}"
 
 
 def _attach_log_streaming():
@@ -5899,7 +6055,7 @@ def _attach_log_streaming():
             pass
         subprocess.run(
             ["tmux", "pipe-pane", "-t", tmux_name(name), "-o",
-             f"cat >> {shlex.quote(str(lp))}"],
+             _log_pipe_command(lp)],
             capture_output=True, timeout=5,
         )
 
@@ -6123,6 +6279,207 @@ def _validate_model_name(value) -> tuple[bool, str, str]:
     return True, normalized, ""
 
 
+_SESSION_PROVIDERS = ("claude", "codex", "gemini")
+
+
+_PROVIDER_YOLO_FLAGS = (
+    "--dangerously-skip-permissions",
+    "--dangerously-bypass-approvals-and-sandbox",
+    "--yolo",
+)
+
+
+def _default_model_for_provider(provider: str) -> str:
+    if provider == "codex":
+        return "gpt-5.5"
+    if provider == "gemini":
+        return "auto"
+    return _get_default_model()
+
+
+def _provider_label(provider: str) -> str:
+    return {
+        "claude": "Claude Code",
+        "codex": "Codex",
+        "gemini": "Gemini",
+    }.get(provider, provider or "Claude Code")
+
+
+def _provider_yolo_flag(provider: str) -> str:
+    if provider == "codex":
+        return "--dangerously-bypass-approvals-and-sandbox"
+    if provider == "gemini":
+        return "--yolo"
+    return "--dangerously-skip-permissions"
+
+
+def _strip_provider_yolo_flags(flags: str) -> str:
+    """Remove provider-specific YOLO flags while preserving other tokens."""
+    if not flags:
+        return ""
+    try:
+        tokens = shlex.split(flags)
+    except ValueError:
+        out = flags
+        for flag in _PROVIDER_YOLO_FLAGS:
+            out = out.replace(flag, "")
+        out = re.sub(r'--approval-mode(?:=|\s+)yolo\b', '', out)
+        return out.strip()
+    filtered = []
+    i = 0
+    while i < len(tokens):
+        t = tokens[i]
+        if t in _PROVIDER_YOLO_FLAGS:
+            i += 1
+            continue
+        if t == "--approval-mode" and i + 1 < len(tokens) and tokens[i + 1] == "yolo":
+            i += 2
+            continue
+        if t == "--approval-mode=yolo":
+            i += 1
+            continue
+        filtered.append(t)
+        i += 1
+    return " ".join(shlex.quote(t) for t in filtered)
+
+
+def _is_yolo_enabled(flags: str, cfg: dict | None = None) -> bool:
+    return (
+        any(flag in (flags or "") for flag in _PROVIDER_YOLO_FLAGS)
+        or "--approval-mode=yolo" in (flags or "")
+        or "--approval-mode yolo" in (flags or "")
+        or (cfg or {}).get("CC_AUTO_CONTINUE") in ("1", "true", "yes")
+    )
+
+
+def _tail_file_bytes(path: Path, max_bytes: int) -> bytes:
+    if not path.exists():
+        return b""
+    try:
+        size = path.stat().st_size
+        with path.open("rb") as f:
+            if size > max_bytes:
+                f.seek(size - max_bytes)
+            return f.read()
+    except Exception:
+        return b""
+
+
+def _capture_log_tail_for_reload(name: str, reason: str) -> bool:
+    """Persist up to the last MAX_LOG_BYTES of session output before a swap."""
+    if not _VALID_SESSION_NAME_RE.match(name):
+        return False
+    CC_LOGS.mkdir(parents=True, exist_ok=True)
+    lp = _log_path(name)
+    chunks: list[bytes] = []
+    existing = _tail_file_bytes(lp, MAX_LOG_BYTES)
+    if existing:
+        chunks.append(existing)
+
+    captured = b""
+    if is_running(name):
+        try:
+            subprocess.run(
+                ["tmux", "pipe-pane", "-t", tmux_name(name)],
+                capture_output=True, timeout=5,
+            )
+        except Exception:
+            pass
+        try:
+            r = subprocess.run(
+                ["tmux", "capture-pane", "-t", tmux_target(name), "-p", "-S", "-"],
+                capture_output=True, text=True, timeout=30,
+            )
+            if r.stdout.strip():
+                captured = r.stdout.encode("utf-8", errors="replace")
+        except Exception:
+            captured = b""
+    if captured:
+        safe_reason = reason.replace("\n", " ").strip() or "session swap"
+        ts = time.strftime("%Y-%m-%dT%H:%M:%S")
+        marker = f"\n\n=== Captured before {safe_reason}: {ts} ===\n\n".encode()
+        chunks.append(marker + captured)
+
+    if not chunks:
+        return False
+    try:
+        lp.write_bytes(b"".join(chunks)[-MAX_LOG_BYTES:])
+        _last_log_save[name] = time.monotonic()
+        return True
+    except Exception:
+        return False
+
+
+def _mark_pending_log_reload(name: str, reason: str):
+    meta = _load_meta(name)
+    meta["pending_log_reload"] = int(time.time())
+    meta["pending_log_reload_reason"] = reason
+    _save_meta(name, meta)
+
+
+def _log_reload_prompt(name: str, reason: str) -> str:
+    lp = _log_path(name)
+    try:
+        size = lp.stat().st_size if lp.exists() else 0
+    except Exception:
+        size = 0
+    size_mb = size / (1024 * 1024)
+    cap_mb = MAX_LOG_BYTES // (1024 * 1024)
+    reason_text = reason or "session swap"
+    return (
+        "Before continuing, load the previous amux terminal context.\n\n"
+        f"The log tail captured for this {reason_text} is at:\n{lp}\n\n"
+        f"Read that file now. It contains up to the last {cap_mb} MB of this "
+        f"session's terminal history ({size_mb:.1f} MB currently saved). Use it "
+        "as continuity context for the work in this session. Do not summarize it "
+        "back unless asked."
+    )
+
+
+def _start_pending_log_reload_thread(name: str, reason: str):
+    if not _log_path(name).exists():
+        return
+    threading.Thread(
+        target=_send_after_ready,
+        args=(name, _log_reload_prompt(name, reason)),
+        daemon=True,
+    ).start()
+
+
+def _stop_session_for_restart(name: str, provider: str) -> tuple[bool, str]:
+    """Stop the active tool enough for start_session() to relaunch with new config."""
+    if provider == "claude":
+        return stop_session(name)
+    try:
+        subprocess.run(
+            ["tmux", "pipe-pane", "-t", tmux_name(name)],
+            capture_output=True, timeout=5,
+        )
+    except Exception:
+        pass
+    try:
+        subprocess.run(
+            ["tmux", "send-keys", "-t", tmux_target(name), "C-c"],
+            capture_output=True, timeout=5,
+        )
+        time.sleep(1)
+        if _at_shell_prompt(tmux_capture(name, 10)):
+            return True, "stopped"
+        subprocess.run(
+            ["tmux", "respawn-pane", "-k", "-t", tmux_target(name), _USER_SHELL],
+            capture_output=True, timeout=5,
+        )
+        time.sleep(0.2)
+        subprocess.run(
+            ["tmux", "send-keys", "-t", tmux_target(name), "Enter"],
+            capture_output=True, timeout=5,
+        )
+        _poll_shell_prompt(name, timeout=3.0)
+        return True, "stopped"
+    except Exception as e:
+        return False, str(e)
+
+
 def _shell_quote_flags(s: str) -> str:
     """Tokenize a stored flag string and re-quote each token shell-safely.
 
@@ -6191,10 +6548,83 @@ def _get_default_model() -> str:
     return "sonnet"
 
 
+_AMUX_HOOK_MARKER = "# amux-session-stamp"
+_AMUX_HOOK_BODY = """#!/bin/sh
+# amux-session-stamp — tags each commit with the originating amux session.
+# Reads $AMUX_SESSION (exported into every amux session's shell) at commit
+# time, so a single shared hook attributes commits correctly even when
+# multiple sessions work in the same repo. Outside amux ($AMUX_SESSION unset)
+# it does nothing.
+msg_file="$1"
+[ -n "$AMUX_SESSION" ] || exit 0
+grep -q "^Amux-Session: " "$msg_file" 2>/dev/null && exit 0
+printf '\\nAmux-Session: %s\\n' "$AMUX_SESSION" >> "$msg_file"
+exit 0
+"""
+
+
+def _install_amux_commit_hook(work_dir: str) -> None:
+    """Install a non-destructive prepare-commit-msg hook that stamps commits
+    with $AMUX_SESSION. Idempotent; never clobbers a foreign hook (chains onto
+    it instead). Best-effort — failures are swallowed."""
+    try:
+        gr = subprocess.run(["git", "-C", work_dir, "rev-parse", "--git-dir"],
+                            capture_output=True, text=True, timeout=5)
+        if gr.returncode != 0:
+            return
+        git_dir = gr.stdout.strip()
+        if not os.path.isabs(git_dir):
+            git_dir = os.path.join(work_dir, git_dir)
+        hooks_dir = os.path.join(git_dir, "hooks")
+        os.makedirs(hooks_dir, exist_ok=True)
+        hook_path = os.path.join(hooks_dir, "prepare-commit-msg")
+        if os.path.exists(hook_path):
+            try:
+                existing = open(hook_path).read()
+            except Exception:
+                return
+            if _AMUX_HOOK_MARKER in existing:
+                return  # already installed
+            # Foreign hook present — append our stamping logic so both run.
+            snippet = (
+                "\n" + _AMUX_HOOK_MARKER + "\n"
+                'if [ -n "$AMUX_SESSION" ] && ! grep -q "^Amux-Session: " "$1" 2>/dev/null; then\n'
+                "  printf '\\nAmux-Session: %s\\n' \"$AMUX_SESSION\" >> \"$1\"\n"
+                "fi\n"
+            )
+            with open(hook_path, "a") as fh:
+                fh.write(snippet)
+            return
+        with open(hook_path, "w") as fh:
+            fh.write(_AMUX_HOOK_BODY)
+        os.chmod(hook_path, 0o755)
+    except Exception:
+        pass
+
+
+def _install_hooks_all_sessions() -> None:
+    """Proactively install the commit-stamping hook into every existing
+    session's repo, so attribution works for already-created sessions without
+    waiting for a restart or for someone to open the session's commits."""
+    try:
+        for envf in CC_SESSIONS.glob("*.env"):
+            try:
+                cfg = parse_env_file(envf)
+                d = cfg.get("CC_DIR", "")
+                if d:
+                    _install_amux_commit_hook(str(Path(d).expanduser()))
+            except Exception:
+                pass
+    except Exception:
+        pass
+
+
 def start_session(name: str, extra_flags: str = "", _skip_conv_id: bool = False) -> tuple[bool, str]:
     """Start a session headless (no attach). Returns (success, message)."""
     if not _VALID_SESSION_NAME_RE.match(name):
         return False, "invalid session name"
+    if _is_session_blocked(name):
+        return False, "session is blocked; remove it from blocked-sessions.txt first"
     f = CC_SESSIONS / f"{name}.env"
     if not f.exists():
         return False, f"session '{name}' not found"
@@ -6202,12 +6632,11 @@ def start_session(name: str, extra_flags: str = "", _skip_conv_id: bool = False)
         if is_running(name):
             return True, "already running"
         cfg = parse_env_file(f)
-        # Un-archive on start — prevents stale archived flag from hiding active sessions
         if cfg.get("CC_ARCHIVED") == "1":
-            lines = [l for l in f.read_text().splitlines() if "CC_ARCHIVED" not in l]
-            f.write_text("\n".join(lines) + "\n")
-            cfg.pop("CC_ARCHIVED", None)
+            return False, "session is archived; wake it first"
         work_dir = str(Path(cfg.get("CC_DIR", str(Path.home()))).expanduser().resolve())
+        # Stamp this session's commits with its name (durable git trailer).
+        _install_amux_commit_hook(work_dir)
         flags = cfg.get("CC_FLAGS", "")
         # Claude Code v2.1.69+ rejects --dangerously-skip-permissions when running as root.
         if os.getuid() == 0 and "--dangerously-skip-permissions" in flags:
@@ -6229,21 +6658,15 @@ def start_session(name: str, extra_flags: str = "", _skip_conv_id: bool = False)
                     session_flag = f'--resume {_sid}'
                     print(f"[start] {name}: resume={cc_session_name} (uuid={_sid})")
                 elif _cc_session_exists_in_project(cc_session_name, work_dir):
-                    # Multiple sessions with this name — name lookup is ambiguous.
-                    # WHY: keep cc_conversation_id if it exists — UUID is always authoritative.
-                    # BREAKS IF BYPASSED: clears UUID, loses conversation on every restart when
-                    # multiple conversations share a name (e.g. after stale-reaper recycles).
-                    meta.pop("cc_session_name", None)
-                    _save_meta(name, meta)
+                    # Multiple sessions with this name — fall back to UUID if available
                     if conv_id and _uuid_re.match(conv_id):
-                        # Have a UUID — resume directly, skip name path entirely
                         conv_file = CLAUDE_HOME / "projects" / _project_name(work_dir) / f"{conv_id}.jsonl"
                         if conv_file.exists():
                             session_flag = f'--resume {conv_id}'
-                            print(f"[start] {name}: resume by uuid (ambiguous name '{cc_session_name}', uuid={conv_id})")
+                            print(f"[start] {name}: resume via UUID fallback (ambiguous name '{cc_session_name}', uuid={conv_id})")
                         else:
                             session_flag = f'--name {shlex.quote(name)}'
-                            print(f"[start] {name}: fresh start (ambiguous name, uuid not found)")
+                            print(f"[start] {name}: fresh start (ambiguous name, stale uuid)")
                     else:
                         session_flag = f'--name {shlex.quote(name)}'
                         print(f"[start] {name}: fresh start (ambiguous session name '{cc_session_name}')")
@@ -6303,13 +6726,14 @@ def start_session(name: str, extra_flags: str = "", _skip_conv_id: bool = False)
             default_flags = dcfg.get("CC_DEFAULT_FLAGS", "")
 
         if provider == "codex":
+            _auto_trust_codex_dir(work_dir)
             # Resume from stored codex session ID (per amux session), not by cwd
             codex_session_id = meta.get("codex_session_id", "")
             _codex_yolo = False
             _codex_flags = flags or ""
-            if any(f in _codex_flags for f in ('--dangerously-skip-permissions', '--dangerously-bypass-approvals-and-sandbox')):
+            if any(f in _codex_flags for f in _PROVIDER_YOLO_FLAGS):
                 _codex_yolo = True
-                _codex_flags = re.sub(r'--dangerously-(?:skip-permissions|bypass-approvals-and-sandbox)\s*', '', _codex_flags).strip()
+                _codex_flags = _strip_provider_yolo_flags(_codex_flags)
             # Build options list first (before session ID for `codex resume`)
             _codex_opts = ""
             if _codex_flags:
@@ -6320,29 +6744,86 @@ def start_session(name: str, extra_flags: str = "", _skip_conv_id: bool = False)
                 _codex_opts += " --model gpt-5.5"
             if "--dangerously-bypass" not in _codex_opts and "-a " not in _codex_opts:
                 _codex_opts += " --dangerously-bypass-approvals-and-sandbox" if _codex_yolo else " -a never"
+            if (
+                not _codex_yolo
+                and "--dangerously-bypass" not in _codex_opts
+                and "--sandbox" not in _codex_opts
+                and "-s " not in _codex_opts
+            ):
+                _codex_opts += " --sandbox workspace-write"
+            logs_dir = str(CC_LOGS)
+            if logs_dir not in _codex_opts:
+                _codex_opts += f" --add-dir {shlex.quote(logs_dir)}"
+            # If work_dir is a subdirectory of a git repo, add the repo root
+            # so codex's sandbox can write to .git (needed for commits)
+            try:
+                _gr = subprocess.run(
+                    ["git", "-C", work_dir, "rev-parse", "--show-toplevel"],
+                    capture_output=True, text=True, timeout=5,
+                )
+                if _gr.returncode == 0:
+                    git_root = _gr.stdout.strip()
+                    if git_root != work_dir and git_root not in _codex_opts:
+                        _codex_opts += f" --add-dir {shlex.quote(git_root)}"
+                    git_dir = os.path.join(git_root, ".git")
+                    if os.path.isdir(git_dir) and git_dir not in _codex_opts:
+                        _codex_opts += f" --add-dir {shlex.quote(git_dir)}"
+            except Exception:
+                pass
             if codex_session_id:
                 cmd = f"codex resume{_codex_opts} {codex_session_id}"
                 print(f"[start] {name}: codex resume {codex_session_id}")
             else:
                 cmd = f"codex{_codex_opts}"
                 print(f"[start] {name}: codex fresh start")
-            # If work_dir is a subdirectory of a git repo, add the repo root
-            # so codex's sandbox can write to .git (needed for commits)
-            if "--add-dir" not in cmd:
-                try:
-                    _gr = subprocess.run(
-                        ["git", "-C", work_dir, "rev-parse", "--show-toplevel"],
-                        capture_output=True, text=True, timeout=5,
-                    )
-                    if _gr.returncode == 0:
-                        git_root = _gr.stdout.strip()
-                        if git_root != work_dir:
-                            cmd += f" --add-dir {shlex.quote(git_root)}"
-                            git_dir = os.path.join(git_root, ".git")
-                            if os.path.isdir(git_dir):
-                                cmd += f" --add-dir {shlex.quote(git_dir)}"
-                except Exception:
-                    pass
+        elif provider == "gemini":
+            gemini_session_id = meta.get("gemini_session_id", "")
+            _gemini_flags = flags or ""
+            _gemini_yolo = False
+            if (
+                any(f in _gemini_flags for f in _PROVIDER_YOLO_FLAGS)
+                or "--approval-mode=yolo" in _gemini_flags
+                or "--approval-mode yolo" in _gemini_flags
+            ):
+                _gemini_yolo = True
+                _gemini_flags = _strip_provider_yolo_flags(_gemini_flags)
+            _gemini_opts = ""
+            if _gemini_flags:
+                _gemini_opts += f" {_shell_quote_flags(_gemini_flags)}"
+            if extra_flags:
+                _gemini_opts += f" {_shell_quote_flags(extra_flags)}"
+            if "--model" not in _gemini_opts and "-m " not in _gemini_opts:
+                _gemini_opts += " --model auto"
+            if _gemini_yolo and "--yolo" not in _gemini_opts and "--approval-mode" not in _gemini_opts:
+                _gemini_opts += " --yolo"
+            if "--skip-trust" not in _gemini_opts:
+                _gemini_opts += " --skip-trust"
+            include_dirs = [str(CC_LOGS)]
+            try:
+                _gr = subprocess.run(
+                    ["git", "-C", work_dir, "rev-parse", "--show-toplevel"],
+                    capture_output=True, text=True, timeout=5,
+                )
+                if _gr.returncode == 0:
+                    git_root = _gr.stdout.strip()
+                    if git_root and git_root != work_dir:
+                        include_dirs.append(git_root)
+                    git_dir = os.path.join(git_root, ".git")
+                    if os.path.isdir(git_dir):
+                        include_dirs.append(git_dir)
+            except Exception:
+                pass
+            for include_dir in dict.fromkeys(include_dirs):
+                if include_dir and include_dir not in _gemini_opts:
+                    _gemini_opts += f" --include-directories {shlex.quote(include_dir)}"
+            if gemini_session_id:
+                cmd = f"gemini{_gemini_opts} --resume {shlex.quote(gemini_session_id)}"
+                print(f"[start] {name}: gemini resume {gemini_session_id}")
+            else:
+                gemini_session_id = str(uuid.uuid4())
+                meta["gemini_session_id"] = gemini_session_id
+                cmd = f"gemini{_gemini_opts} --session-id {shlex.quote(gemini_session_id)}"
+                print(f"[start] {name}: gemini fresh start {gemini_session_id}")
         else:
             cmd = "claude"
             if default_flags:
@@ -6367,7 +6848,7 @@ def start_session(name: str, extra_flags: str = "", _skip_conv_id: bool = False)
             tmux_sess = tmux_name(name)
             # Build shell setup string — skip Claude env cleanup for codex
             _has_oauth = False
-            if provider == "codex":
+            if provider in ("codex", "gemini"):
                 shell_rc = ""
             else:
                 shell_rc = "unset CLAUDECODE CLAUDE_CODE_ENTRYPOINT; "
@@ -6386,7 +6867,7 @@ def start_session(name: str, extra_flags: str = "", _skip_conv_id: bool = False)
                     break
             else:
                 shell_rc += f"cd {shlex.quote(work_dir)}; "
-            if provider != "codex" and _has_oauth:
+            if provider not in ("codex", "gemini") and _has_oauth:
                 shell_rc += "unset ANTHROPIC_API_KEY; "
             # Forward select env vars into the tmux session.
             _env_args = []
@@ -6396,7 +6877,14 @@ def start_session(name: str, extra_flags: str = "", _skip_conv_id: bool = False)
                 _api_key_val = os.environ.get("ANTHROPIC_API_KEY", "")
                 if _api_key_val:
                     _env_args += ["-e", f"ANTHROPIC_API_KEY={_api_key_val}"]
-            for _ekey in ["OPENAI_API_KEY"]:
+            for _ekey in [
+                "OPENAI_API_KEY",
+                "GEMINI_API_KEY",
+                "GOOGLE_API_KEY",
+                "GOOGLE_GENAI_USE_VERTEXAI",
+                "GOOGLE_CLOUD_PROJECT",
+                "GOOGLE_CLOUD_LOCATION",
+            ]:
                 _eVal = os.environ.get(_ekey, "")
                 if _eVal:
                     _env_args += ["-e", f"{_ekey}={_eVal}"]
@@ -6505,6 +6993,16 @@ def start_session(name: str, extra_flags: str = "", _skip_conv_id: bool = False)
                                capture_output=True, timeout=5)
                 _poll_shell_prompt(name, timeout=3.0)  # let profile source complete
     
+            # Ensure ANTHROPIC_API_KEY is unset when OAuth is available
+            if _has_oauth and provider not in ("codex", "gemini"):
+                subprocess.run(["tmux", "send-keys", "-t", tmux_target(name), "-l",
+                                "unset ANTHROPIC_API_KEY"],
+                               capture_output=True, timeout=5)
+                time.sleep(0.1)
+                subprocess.run(["tmux", "send-keys", "-t", tmux_target(name), "Enter"],
+                               capture_output=True, timeout=5)
+                _poll_shell_prompt(name, timeout=3.0)
+
             # Apply per-session status bar color (CC_COLOR)
             _sess_color = cfg.get("CC_COLOR", "").strip()
             if _sess_color:
@@ -6621,7 +7119,7 @@ def start_session(name: str, extra_flags: str = "", _skip_conv_id: bool = False)
                 pass
             subprocess.run(
                 ["tmux", "pipe-pane", "-t", tmux_name(name), "-o",
-                 f"cat >> {shlex.quote(str(lp))}"],
+                 _log_pipe_command(lp)],
                 capture_output=True, timeout=5,
             )
             # Migration: if we resumed via UUID and Claude is running, read session name
@@ -6635,6 +7133,8 @@ def start_session(name: str, extra_flags: str = "", _skip_conv_id: bool = False)
             meta.pop("start_error", None)
             meta["last_started"] = int(time.time())
             meta["start_count"] = meta.get("start_count", 0) + 1
+            pending_log_reload = meta.pop("pending_log_reload", None)
+            pending_log_reload_reason = meta.pop("pending_log_reload_reason", "")
             # For codex: capture the new session ID after a brief delay
             if provider == "codex" and not meta.get("codex_session_id"):
                 def _capture_codex_id(sname=name, wd=work_dir):
@@ -6647,6 +7147,8 @@ def start_session(name: str, extra_flags: str = "", _skip_conv_id: bool = False)
                         print(f"[start] {sname}: captured codex session {sid}")
                 threading.Thread(target=_capture_codex_id, daemon=True).start()
             _save_meta(name, meta)
+            if pending_log_reload:
+                _start_pending_log_reload_thread(name, pending_log_reload_reason)
             return True, "started"
         except subprocess.CalledProcessError as e:
             return False, e.stderr.decode(errors="replace")
@@ -6816,8 +7318,20 @@ def stop_session(name: str) -> tuple[bool, str]:
         return True, "stopped (hard-kill)"
 
 
+def _kill_tmux_session(name: str) -> None:
+    """Best-effort removal of the tmux session backing an archived amux session."""
+    try:
+        subprocess.run(
+            ["tmux", "kill-session", "-t", tmux_name(name)],
+            capture_output=True,
+            timeout=5,
+        )
+    except Exception:
+        pass
+
+
 def archive_session(name: str) -> tuple[bool, str]:
-    """Save full tmux scrollback to log, mark CC_ARCHIVED=1, and kill the tmux pane."""
+    """Save full tmux scrollback to log, mark CC_ARCHIVED=1, and kill tmux."""
     f = CC_SESSIONS / f"{name}.env"
     if not f.exists():
         return False, f"session '{name}' not found"
@@ -6837,6 +7351,7 @@ def archive_session(name: str) -> tuple[bool, str]:
         except Exception:
             pass
         stop_session(name)
+        _kill_tmux_session(name)
     cfg = parse_env_file(f)
     cfg["CC_ARCHIVED"] = "1"
     _write_env(f, cfg)
@@ -6845,6 +7360,8 @@ def archive_session(name: str) -> tuple[bool, str]:
 
 def wake_session(name: str) -> tuple[bool, str]:
     """Remove CC_ARCHIVED flag and start the session (resumes conversation via --resume)."""
+    if _is_session_blocked(name):
+        return False, "session is blocked; remove it from blocked-sessions.txt first"
     f = CC_SESSIONS / f"{name}.env"
     if not f.exists():
         return False, f"session '{name}' not found"
@@ -7226,7 +7743,7 @@ return output
     try:
         result = subprocess.run(
             ["osascript", "-e", script],
-            capture_output=True, text=True, timeout=120,
+            capture_output=True, text=True, timeout=30,
         )
         if result.returncode != 0:
             slog(f"[email] AppleScript error: {result.stderr[:300]}")
@@ -7250,7 +7767,7 @@ return output
         slog(f"[email] Mail.app: {len(messages)} candidates (lookback {lookback_days_frac:.1f}d)")
         return messages
     except subprocess.TimeoutExpired:
-        slog("[email] Mail.app AppleScript timed out (>120s)")
+        slog("[email] Mail.app AppleScript timed out (>30s)")
         return None  # None = timeout/failure; [] = success with no matches
     except Exception as e:
         slog(f"[email] mail fetch error: {e}")
@@ -7374,7 +7891,7 @@ def _email_sync() -> None:
         lookback_seconds = 7 * 86400  # first run: 7 days
     else:
         elapsed = now_ts - last_ts
-        lookback_seconds = elapsed + 300  # add 5 min buffer to avoid gaps
+        lookback_seconds = min(elapsed + 300, 2 * 86400)  # cap at 2 days to avoid timeout spiral
     slog(f"[email] syncing lookback={lookback_seconds//60}min")
     messages = _mail_fetch_messages(lookback_seconds)
     if messages is None:
@@ -8355,7 +8872,10 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
   .badge.yolo { background: rgba(210,153,34,0.2); color: var(--yellow); }
   .badge.auto-continue { background: rgba(98,160,234,0.2); color: #62a0ea; }
   .badge.model { background: rgba(57,210,192,0.2); color: var(--cyan); }
+  .badge.provider { cursor: pointer; }
+  .badge.claude { background: rgba(88,166,255,0.18); color: var(--accent); }
   .badge.codex { background: rgba(16,185,129,0.2); color: #10b981; }
+  .badge.gemini { background: rgba(168,85,247,0.2); color: #c084fc; }
 
   /* Expanded panel */
   .panel { display: none; margin-top: 12px; }
@@ -9245,6 +9765,7 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
   /* Peek search highlight */
   .peek-highlight { background: rgba(210,153,34,0.35); color: #fff; border-radius: 2px; }
   .peek-highlight.current { background: rgba(210,153,34,0.85); color: #000; }
+  .peek-prompt { display: block; border-left: 3px solid rgba(210,180,60,0.5); padding-left: 8px; margin-left: -11px; background: rgba(210,180,60,0.07); border-radius: 0 3px 3px 0; }
 
   /* Peek overlay — flush to bottom, cmd bar handles its own safe-area padding */
   #peek-overlay { padding-bottom: 0 !important; bottom: 0 !important; }
@@ -9377,8 +9898,9 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
   .commits-item:hover { background: rgba(139,148,158,0.06); }
   .commits-item.active { background: rgba(88,166,255,0.1); border-left: 3px solid var(--accent); }
   .commits-item-subject { font-size: 0.82rem; font-weight: 500; color: var(--text); line-height: 1.35; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  .commits-item-meta { display: flex; gap: 8px; margin-top: 4px; font-size: 0.7rem; color: var(--dim); }
+  .commits-item-meta { display: flex; gap: 8px; margin-top: 4px; font-size: 0.7rem; color: var(--dim); align-items: center; flex-wrap: wrap; }
   .commits-item-hash { font-family: monospace; font-size: 0.7rem; color: var(--accent); opacity: 0.8; }
+  .commits-sess-badge { font-size: 0.64rem; font-weight: 600; padding: 1px 7px; border-radius: 9px; white-space: nowrap; letter-spacing: 0.02em; }
   .commits-detail { flex: 1; display: flex; flex-direction: column; overflow: hidden; min-width: 0; }
   .commits-detail-empty { flex: 1; display: flex; align-items: center; justify-content: center; }
   .commits-back-btn { display: none; background: none; border: none; color: var(--accent); cursor: pointer; padding: 8px 14px; font-size: 0.82rem; text-align: left; border-bottom: 1px solid var(--border); }
@@ -10541,16 +11063,11 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
     flex: 1; overflow: auto; padding: 0; display: flex; flex-direction: column;
     background: var(--card); white-space: normal;
   }
-  .gp-note-body .ql-toolbar {
-    border: none; border-bottom: 1px solid var(--border); padding: 4px 6px;
-    background: var(--card); flex-shrink: 0;
-  }
-  .gp-note-body .ql-toolbar .ql-stroke { stroke: var(--dim); }
-  .gp-note-body .ql-toolbar .ql-fill { fill: var(--dim); }
-  .gp-note-body .ql-toolbar .ql-picker-label { color: var(--dim); }
-  .gp-note-body .ql-container {
-    border: none; flex: 1; overflow: auto; font-family: "Geist","Inter",sans-serif;
-    font-size: 0.82rem; color: var(--text);
+  .gp-note-body textarea {
+    flex: 1; border: none; outline: none; resize: none;
+    background: var(--card); color: var(--text);
+    font-family: 'SF Mono', 'Fira Code', 'Consolas', monospace;
+    font-size: 0.82rem; line-height: 1.6; padding: 8px 12px;
   }
   .gp-note-body .ql-editor { padding: 12px 14px; min-height: 100%; }
   .gp-note-body .ql-editor.ql-blank::before { color: var(--dim); }
@@ -10605,6 +11122,15 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
     padding: 10px 12px 6px; flex-shrink: 0;
   }
   .notes-sidebar-actions { display: flex; gap: 4px; align-items: center; }
+  .notes-source-indicator {
+    flex-shrink: 0; display: flex; align-items: center; gap: 6px;
+    padding: 7px 12px; border-top: 1px solid rgba(139,148,158,0.12);
+    font-size: 0.7rem; color: var(--dim); cursor: pointer;
+    overflow: hidden; white-space: nowrap;
+  }
+  .notes-source-indicator:hover { background: rgba(139,148,158,0.1); color: var(--text); }
+  .notes-source-indicator svg { flex-shrink: 0; opacity: 0.7; }
+  .notes-source-indicator #notes-source-name { overflow: hidden; text-overflow: ellipsis; }
   .notes-toggle-btn {
     background: transparent; border: none; color: var(--dim); cursor: pointer;
     padding: 4px; border-radius: 4px; display: flex; align-items: center; justify-content: center;
@@ -10722,37 +11248,16 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
   }
   .notes-delete-btn:hover { background: rgba(248,81,73,0.12); color: var(--red,#f85149); }
   .notes-delete-btn.confirming { background: var(--red,#f85149); color: #fff; border-radius: 4px; padding: 3px 8px; font-size: 0.75rem; font-weight: 600; }
-  /* Quill editor fills pane */
-  .notes-quill-wrap { flex: 1; display: flex; flex-direction: column; overflow: hidden; }
-  .notes-quill-wrap .ql-toolbar.ql-snow {
-    background: var(--bg); border: none; border-bottom: 1px solid var(--border); flex-shrink: 0;
-    padding: 4px 8px;
+  /* Markdown textarea editor fills pane */
+  .notes-editor-wrap { flex: 1; display: flex; flex-direction: column; overflow: hidden; }
+  .notes-editor-textarea {
+    flex: 1; width: 100%; border: none; outline: none; resize: none;
+    background: var(--bg); color: var(--text); font-family: 'SF Mono', 'Fira Code', 'Consolas', monospace;
+    font-size: 0.88rem; line-height: 1.7; padding: 12px 24px 80px;
+    max-width: 740px; margin: 0 auto; box-sizing: border-box;
+    tab-size: 2;
   }
-  .notes-quill-wrap .ql-container.ql-snow {
-    border: none; flex: 1; overflow-y: auto; background: var(--bg);
-  }
-  .notes-quill-wrap .ql-editor { color: var(--text); font-size: 0.92rem; line-height: 1.75; min-height: 200px; padding: 12px 24px 80px; max-width: 740px; margin: 0 auto; }
-  /* Render Quill content with markdown-like typography (Obsidian-style) */
-  .notes-quill-wrap .ql-editor h1 { font-size: 1.6rem; font-weight: 700; margin: 0.5em 0 0.3em; letter-spacing: -0.01em; }
-  .notes-quill-wrap .ql-editor h2 { font-size: 1.25rem; font-weight: 600; margin: 0.8em 0 0.3em; }
-  .notes-quill-wrap .ql-editor h3 { font-size: 1.05rem; font-weight: 600; margin: 0.7em 0 0.25em; }
-  .notes-quill-wrap .ql-editor blockquote { border-left: 3px solid var(--accent); padding-left: 12px; color: var(--dim); margin: 8px 0; }
-  .notes-quill-wrap .ql-editor pre { background: var(--card); border: 1px solid var(--border); border-radius: 6px; padding: 10px 12px; font-size: 0.85em; }
-  .notes-quill-wrap .ql-editor hr { border: none; border-top: 1px solid var(--border); margin: 16px 0; }
-  .ql-snow .ql-toolbar .ql-divider { width: 28px; }
-  .ql-snow .ql-toolbar .ql-divider svg { width: 18px; height: 18px; }
-  .notes-quill-wrap .ql-editor.ql-blank::before { color: var(--dim); font-style: normal; }
-  .notes-quill-wrap .ql-snow .ql-stroke { stroke: var(--dim); }
-  .notes-quill-wrap .ql-snow .ql-fill { fill: var(--dim); }
-  .notes-quill-wrap .ql-snow .ql-picker { color: var(--dim); }
-  .notes-quill-wrap .ql-snow .ql-picker-options { background: var(--card); border-color: var(--border); }
-  .notes-quill-wrap .ql-snow .ql-toolbar button:hover .ql-stroke,
-  .notes-quill-wrap .ql-snow .ql-toolbar button.ql-active .ql-stroke { stroke: var(--accent); }
-  .notes-quill-wrap .ql-snow .ql-toolbar button:hover .ql-fill,
-  .notes-quill-wrap .ql-snow .ql-toolbar button.ql-active .ql-fill { fill: var(--accent); }
-  .notes-quill-wrap .ql-snow .ql-picker-label { color: var(--dim); }
-  .notes-quill-wrap .ql-snow .ql-picker-label:hover,
-  .notes-quill-wrap .ql-snow .ql-picker-label.ql-active { color: var(--accent); }
+  .notes-editor-textarea::placeholder { color: var(--dim); }
   .notes-list-item.pinned { border-left: 2px solid var(--accent); }
   /* Pin button in editor header */
   .notes-pin-btn {
@@ -10762,6 +11267,44 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
   }
   .notes-pin-btn:hover { background: rgba(139,148,158,0.12); color: var(--text); }
   .notes-pin-btn.pinned { color: var(--accent); }
+  /* Pinned notes on home screen */
+  .pinned-notes-home { padding: 0 12px; display: flex; flex-direction: column; gap: 8px; }
+  .pinned-notes-home:empty { display: none; }
+  .pinned-note-card {
+    background: var(--card); border: 1px solid var(--border); border-radius: 8px;
+    padding: 10px 14px; cursor: pointer; position: relative;
+    transition: border-color 0.15s;
+  }
+  .pinned-note-card:hover { border-color: var(--accent); }
+  .pinned-note-header {
+    display: flex; align-items: center; gap: 8px; margin-bottom: 6px;
+  }
+  .pinned-note-header svg { color: var(--accent); flex-shrink: 0; }
+  .pinned-note-title {
+    font-weight: 600; font-size: 0.85rem; color: var(--text); flex: 1; min-width: 0;
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  }
+  .pinned-note-unpin {
+    background: none; border: none; color: var(--dim); cursor: pointer; padding: 4px;
+    border-radius: 4px; display: flex; align-items: center; opacity: 0; transition: opacity 0.15s;
+  }
+  .pinned-note-card:hover .pinned-note-unpin { opacity: 1; }
+  .pinned-note-unpin:hover { color: var(--text); background: rgba(139,148,158,0.12); }
+  .pinned-note-body {
+    font-size: 0.8rem; color: var(--dim); max-height: 120px; overflow: hidden;
+    line-height: 1.5; position: relative;
+  }
+  .pinned-note-body.md-content h1, .pinned-note-body.md-content h2, .pinned-note-body.md-content h3 { display: none; }
+  .pinned-note-body.md-content ul, .pinned-note-body.md-content ol { padding-left: 18px; margin: 2px 0; }
+  .pinned-note-body.md-content p { margin: 2px 0; }
+  .pinned-note-body::after {
+    content: ''; position: absolute; bottom: 0; left: 0; right: 0; height: 30px;
+    background: linear-gradient(transparent, var(--card));
+  }
+  @media (max-width: 600px) {
+    .pinned-notes-home { padding: 0 8px; }
+    .pinned-note-body { max-height: 80px; }
+  }
   .notes-empty-state {
     position: absolute; inset: 0; display: flex; flex-direction: column;
     align-items: center; justify-content: center;
@@ -10820,7 +11363,7 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
   .notes-preview mark.search-hit.current { background: rgba(250,204,21,0.7); outline: 2px solid rgba(250,204,21,0.9); }
   /* Mobile notes improvements — Bear/iA Writer inspired */
   @media (max-width: 600px) {
-    #notes-view { height: calc(100dvh - 122px); }
+    #notes-view { height: calc(100dvh - 122px - var(--chrome-tab-h, 0px)); }
     /* Hide mode tabs entirely on mobile — preview is tap-to-edit */
     .notes-mode-tabs { display: none !important; }
     .notes-editor-header { padding: 10px 12px; min-height: 48px; }
@@ -10832,27 +11375,9 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
     .notes-list-item .nli-title { font-size: 0.92rem; }
     .notes-list-item .nli-date { font-size: 0.74rem; }
     .notes-list { padding: 4px 0; -webkit-overflow-scrolling: touch; overscroll-behavior: contain; }
-    .notes-quill-wrap .ql-container.ql-snow { -webkit-overflow-scrolling: touch; overscroll-behavior: contain; }
+    .notes-editor-textarea { -webkit-overflow-scrolling: touch; overscroll-behavior: contain; font-size: 16px; padding: 12px 16px 96px; }
     .notes-preview { -webkit-overflow-scrolling: touch; overscroll-behavior: contain; }
-    /* Prevent double-tap zoom on action buttons */
-    .notes-list-item, .notes-delete-btn, .notes-pin-btn, .notes-new-btn, .notes-toggle-btn, .notes-expand-btn,
-    .notes-quill-wrap .ql-toolbar.ql-snow button { touch-action: manipulation; }
-    /* Sticky bottom toolbar — move Quill toolbar to bottom on mobile */
-    .notes-quill-wrap { flex-direction: column-reverse; }
-    .notes-quill-wrap .ql-toolbar.ql-snow {
-      position: sticky; bottom: 0; z-index: 5;
-      background: var(--bg); border-top: 1px solid var(--border); border-bottom: none;
-      padding: 6px 4px; overflow-x: auto; white-space: nowrap; flex-wrap: nowrap;
-      backdrop-filter: blur(8px); -webkit-backdrop-filter: blur(8px);
-    }
-    .notes-quill-wrap .ql-toolbar.ql-snow .ql-formats { display: inline-flex; margin-right: 8px; }
-    .notes-quill-wrap .ql-toolbar.ql-snow button { width: 36px; height: 36px; padding: 6px; }
-    .notes-quill-wrap .ql-toolbar.ql-snow .ql-picker { height: 36px; line-height: 36px; }
-    /* Hide less-used formatting on mobile to keep bar uncluttered */
-    .notes-quill-wrap .ql-toolbar.ql-snow .ql-strike,
-    .notes-quill-wrap .ql-toolbar.ql-snow .ql-underline,
-    .notes-quill-wrap .ql-toolbar.ql-snow .ql-clean { display: none; }
-    .notes-quill-wrap .ql-editor { font-size: 16px; min-height: 160px; padding: 12px 16px 96px; }
+    .notes-list-item, .notes-delete-btn, .notes-pin-btn, .notes-new-btn, .notes-toggle-btn, .notes-expand-btn { touch-action: manipulation; }
     .notes-preview { padding: 16px 16px 96px; font-size: 16px; }
     .notes-new-btn { width: 36px; height: 36px; font-size: 1.3rem; }
   }
@@ -11137,7 +11662,7 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
   .crm-log-field textarea { resize: vertical; min-height: 70px; }
   .crm-log-actions { display: flex; gap: 8px; justify-content: flex-end; }
   @media (max-width: 600px) {
-    #crm-view { height: calc(100dvh - 122px); position: relative; }
+    #crm-view { height: calc(100dvh - 122px - var(--chrome-tab-h, 0px)); position: relative; }
     .crm-sidebar {
       position: absolute; top: 0; left: 0; bottom: 0; z-index: 10;
       width: 100% !important; min-width: 0 !important; border-right: none;
@@ -11234,7 +11759,7 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
   .map-geocoder-gmaps-link { font-size: 0.7rem; color: var(--accent); text-decoration: none; display: inline-block; margin-top: 2px; }
   .map-geocoder-gmaps-link:hover { text-decoration: underline; }
   @media (max-width: 600px) {
-    #map-view { height: calc(100dvh - 122px); background: var(--bg); }
+    #map-view { height: calc(100dvh - 122px - var(--chrome-tab-h, 0px)); background: var(--bg); }
     .map-sidebar { position: absolute; top: 0; left: 0; right: 0; bottom: 0; z-index: 1005; width: 100% !important; min-width: 0 !important; box-shadow: none; overflow: hidden; }
     .map-sidebar.hidden { transform: translateX(-110%); }
     .map-open-btn { display: flex; }
@@ -11306,7 +11831,7 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
   .metrics-speedtest-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; }
   .metrics-speedtest-status { font-size: 0.78rem; color: var(--dim); }
   @media (max-width: 600px) {
-    #metrics-view { height: calc(100dvh - 122px); position: relative; }
+    #metrics-view { height: calc(100dvh - 122px - var(--chrome-tab-h, 0px)); position: relative; }
     .metrics-sidebar { position: absolute; top: 0; left: 0; bottom: 0; z-index: 10; width: 100% !important; min-width: 0 !important; border-right: none; }
     .metrics-sidebar.collapsed { width: 100% !important; opacity: 0; pointer-events: none; position: absolute; }
     .metrics-main { width: 100%; padding: 40px 12px 12px; }
@@ -11371,7 +11896,7 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
   .graph-side-links .chip { font-size: 0.7rem; padding: 3px 10px; border-radius: 10px; cursor: pointer; border: 1px solid var(--border); background: var(--bg); color: var(--fg); }
   .graph-side-links .chip:hover { background: var(--hover); }
   @media (max-width: 600px) {
-    #graph-view { height: calc(100dvh - 122px); position: relative; }
+    #graph-view { height: calc(100dvh - 122px - var(--chrome-tab-h, 0px)); position: relative; }
     .graph-sidebar {
       position: absolute; top: 0; left: 0; bottom: 0; z-index: 10;
       width: 100% !important; min-width: 0 !important; border-right: none;
@@ -11459,7 +11984,7 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
   #jrnl-map-pane { height: 100%; }
   .jrnl-map-container { width: 100%; height: 100%; }
   @media (max-width: 600px) {
-    #journal-view { height: calc(100dvh - 122px); position: relative; }
+    #journal-view { height: calc(100dvh - 122px - var(--chrome-tab-h, 0px)); position: relative; }
     .jrnl-sidebar {
       position: absolute; top: 0; left: 0; bottom: 0; z-index: 10;
       width: 100% !important; min-width: 0 !important; border-right: none;
@@ -11476,6 +12001,16 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
 </style>
 </head>
 <body>
+<div id="js-fallback" style="position:fixed;inset:0;display:flex;align-items:center;justify-content:center;flex-direction:column;gap:16px;z-index:99999;background:var(--bg,#0d1117);color:#8b949e;font-family:-apple-system,system-ui,sans-serif;">
+  <div style="font-size:1.1rem;">Loading amux...</div>
+  <div id="js-fallback-retry" style="display:none;text-align:center;">
+    <div style="margin-bottom:12px;color:#f87171;">Failed to load. Try reloading.</div>
+    <button onclick="location.reload()" style="padding:10px 24px;border-radius:8px;border:1px solid #30363d;background:#21262d;color:#e6edf3;font-size:0.9rem;cursor:pointer;">Reload</button>
+  </div>
+</div>
+<script>
+setTimeout(function(){var f=document.getElementById('js-fallback');if(f&&f.style.display!=='none'){document.getElementById('js-fallback-retry').style.display='';}},8000);
+</script>
 <div id="no-apikey-banner" style="display:none;background:#7c2d12;color:#fed7aa;padding:8px 16px;text-align:center;font-size:0.82rem;z-index:200;position:relative;">
   No Anthropic API key set — Claude sessions won't work. <a href="#" onclick="event.preventDefault();document.getElementById('no-apikey-banner').style.display='none';toggleSettings()" style="color:#fde68a;font-weight:600;text-decoration:underline;">Add key in Settings</a>
 </div>
@@ -11600,6 +12135,7 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
             <option value="opus">opus</option>
             <option value="haiku">haiku</option>
             <option value="claude-opus-4-8">claude-opus-4-8</option>
+            <option value="claude-opus-4-8[1m]">claude-opus-4-8 [1M]</option>
             <option value="claude-opus-4-7">claude-opus-4-7</option>
             <option value="claude-opus-4-7[1m]">claude-opus-4-7 [1M]</option>
             <option value="claude-opus-4-6">claude-opus-4-6</option>
@@ -11675,6 +12211,14 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
               onclick="sendPushoverTest()">Send test</button>
           </div>
           <div id="settings-pushover-status" style="font-size:0.7rem;color:var(--dim);margin-top:4px;"></div>
+        </div>
+        <div class="settings-sep"></div>
+        <div class="settings-section" id="settings-notes-section">
+          <div class="settings-section-label">Notes folder</div>
+          <div style="font-size:0.72rem;color:var(--dim);margin-bottom:6px;">Notes sync (read + write) with this folder — e.g. your Obsidian vault</div>
+          <div id="settings-notes-dir" style="font-family:monospace;font-size:0.74rem;background:var(--bg);border:1px solid var(--border);border-radius:6px;padding:6px 8px;word-break:break-all;color:var(--text);">…</div>
+          <div id="settings-notes-status" style="font-size:0.7rem;color:var(--dim);margin-top:4px;"></div>
+          <div style="font-size:0.66rem;color:var(--dim);margin-top:4px;">Change via <code>AMUX_NOTES_DIR</code> in <code>~/.amux/server.env</code></div>
         </div>
         <div class="settings-sep"></div>
         <div class="settings-section" id="settings-billing-section" style="display:none;">
@@ -11784,6 +12328,7 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
   </div>
   <div id="offline-ops" class="offline-queue-ops"></div>
 </div>
+<div id="pinned-notes-home" class="pinned-notes-home"></div>
 <div id="cards" class="cards"></div>
 <div id="archived-section"></div>
 </div>
@@ -11982,6 +12527,7 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
       <div class="notes-sidebar-actions">
         <button class="notes-new-btn" onclick="_notesNew()" title="New note"><svg xmlns="http://www.w3.org/2000/svg" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 5v14M5 12h14"/></svg></button>
         <button class="notes-new-btn" onclick="_notesNewFolder()" title="New folder"><svg xmlns="http://www.w3.org/2000/svg" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/><line x1="12" y1="11" x2="12" y2="17"/><line x1="9" y1="14" x2="15" y2="14"/></svg></button>
+        <button class="notes-new-btn" id="notes-collapse-all-btn" onclick="_notesCollapseAllFolders()" title="Collapse all folders"><svg xmlns="http://www.w3.org/2000/svg" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="4 9 8 5 12 9"/><polyline points="4 19 8 15 12 19"/><line x1="16" y1="7" x2="20" y2="7"/><line x1="16" y1="17" x2="20" y2="17"/></svg></button>
         <button class="notes-toggle-btn" onclick="_notesToggleSidebar()" title="Collapse sidebar"><svg xmlns="http://www.w3.org/2000/svg" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect width="18" height="18" x="3" y="3" rx="2"/><path d="M9 3v18"/><path d="m16 15-3-3 3-3"/></svg></button>
       </div>
     </div>
@@ -11996,6 +12542,10 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
         <span id="notes-trash-count" style="margin-left:auto;font-size:0.7rem;"></span>
       </div>
       <div class="notes-trash-body" id="notes-trash-body" style="display:none;"></div>
+    </div>
+    <div class="notes-source-indicator" id="notes-source-indicator" onclick="toggleSettings()" title="Notes sync folder — click to open Settings">
+      <svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 20h16a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.93a2 2 0 0 1-1.66-.9l-.82-1.2A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13c0 1.1.9 2 2 2Z"/></svg>
+      <span id="notes-source-name">…</span>
     </div>
   </div>
   <!-- Editor pane -->
@@ -12021,8 +12571,8 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
         <button onclick="_notesPreviewSearchClear()" style="background:none;border:none;cursor:pointer;color:var(--dim);font-size:0.85rem;padding:0 2px;" title="Close">&times;</button>
       </div>
     </div>
-    <div class="notes-quill-wrap" id="notes-quill-wrap" style="display:none;">
-      <div id="notes-quill"></div>
+    <div class="notes-editor-wrap" id="notes-editor-wrap" style="display:none;">
+      <textarea id="notes-editor" class="notes-editor-textarea" placeholder="Start writing markdown..." oninput="_notesSaveDebounce()"></textarea>
     </div>
     <div class="notes-preview" id="notes-preview"></div>
     <div class="notes-empty-state" id="notes-empty-state">
@@ -12667,6 +13217,7 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
       <div style="display:flex;gap:6px;">
         <button type="button" id="create-provider-claude" class="btn provider-btn selected" onclick="_selectProvider('claude')">Claude Code</button>
         <button type="button" id="create-provider-codex" class="btn provider-btn" onclick="_selectProvider('codex')">Codex</button>
+        <button type="button" id="create-provider-gemini" class="btn provider-btn" onclick="_selectProvider('gemini')">Gemini</button>
       </div>
     </div>
     <div class="field-group">
@@ -12956,8 +13507,8 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
         <button class="notes-mode-tab" id="peek-notes-tab-edit" onclick="_peekNotesSwitchMode('edit')">Edit</button>
         <button class="notes-mode-tab active" id="peek-notes-tab-preview" onclick="_peekNotesSwitchMode('preview')">Preview</button>
       </div>
-      <div class="notes-quill-wrap" id="peek-notes-quill-wrap" style="display:none;">
-        <div id="peek-notes-quill"></div>
+      <div class="notes-editor-wrap" id="peek-notes-editor-wrap" style="display:none;">
+        <textarea id="peek-notes-editor" class="notes-editor-textarea" placeholder="Start writing markdown..." oninput="_peekNotesSaveDebounce()"></textarea>
       </div>
       <div class="notes-preview" id="peek-notes-preview"></div>
       <div class="notes-empty-state" id="peek-notes-empty-state">
@@ -13014,6 +13565,7 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
       <option value="sonnet">sonnet</option>
       <option value="haiku">haiku</option>
       <option value="claude-opus-4-8">claude-opus-4-8</option>
+      <option value="claude-opus-4-8[1m]">claude-opus-4-8 [1M]</option>
       <option value="claude-opus-4-7">claude-opus-4-7</option>
       <option value="claude-opus-4-7[1m]">claude-opus-4-7 [1M]</option>
       <option value="claude-opus-4-6">claude-opus-4-6</option>
@@ -13851,6 +14403,8 @@ async function showSessionInfo(name) {
   const m = await r.json();
   const ts = t => t ? new Date(t * 1000).toLocaleString() : '—';
   const row = (label, val) => val ? `<div style="display:flex;gap:8px;padding:5px 0;border-bottom:1px solid var(--border);font-size:0.85rem;"><span style="color:var(--dim);min-width:110px;flex-shrink:0;">${label}</span><span style="word-break:break-all;">${val}</span></div>` : '';
+  const provider = sessionProvider(m);
+  const configuredModel = m.configured_model || flagValue(m.flags || '', '--model') || providerDefaultModel(provider);
   const html = `<div style="text-align:left;">
     <div style="font-size:1.05rem;font-weight:700;margin-bottom:12px;">${esc(name)}</div>
     ${row('Created', ts(m.created_at))}
@@ -13859,7 +14413,9 @@ async function showSessionInfo(name) {
     ${row('Start count', m.start_count !== undefined ? m.start_count : '—')}
     ${row('Env updated', ts(m.env_updated))}
     ${row('Directory', m.dir)}
-    ${row('Model / flags', m.flags || '(default sonnet)')}
+    ${row('Provider', providerLabel(provider))}
+    ${row('Model', configuredModel)}
+    ${row('Flags', m.flags || '(default)')}
     ${m.desc ? row('Description', m.desc) : ''}
     ${m.tags && m.tags.length ? row('Tags', m.tags.join(', ')) : ''}
     ${row('Memory size', m.mem_size ? m.mem_size + ' bytes' : '(empty)')}
@@ -14406,11 +14962,66 @@ function updatePeekStatus() {
   // Model badge
   const mb = document.getElementById('peek-model-badge');
   if (mb) {
-    const flagModel = (s.flags || '').match(/--model\s+(\S+)/);
-    const defaultModel = s.provider === 'codex' ? 'gpt-5.5' : 'sonnet';
-    const model = s.active_model || (flagModel ? flagModel[1] : '') || defaultModel;
-    mb.textContent = model;
+    mb.textContent = sessionConfiguredModel(s);
   }
+}
+
+function shellWords(s) {
+  const out = [];
+  const re = /"((?:\\.|[^"\\])*)"|'([^']*)'|(\S+)/g;
+  let m;
+  while ((m = re.exec(s || '')) !== null) {
+    out.push((m[1] || m[2] || m[3] || '').replace(/\\(["\\])/g, '$1'));
+  }
+  return out;
+}
+
+function flagValue(flags, flag) {
+  const tokens = shellWords(flags || '');
+  for (let i = 0; i < tokens.length; i++) {
+    const t = tokens[i];
+    if (t === flag && i + 1 < tokens.length) return tokens[i + 1];
+    if (t.startsWith(flag + '=')) return t.slice(flag.length + 1);
+  }
+  return '';
+}
+
+function providerLabel(provider) {
+  if (provider === 'codex') return 'Codex';
+  if (provider === 'gemini') return 'Gemini';
+  return 'Claude';
+}
+
+function sessionProvider(s) {
+  const p = ((s && s.provider) || 'claude').toLowerCase();
+  return (p === 'codex' || p === 'gemini') ? p : 'claude';
+}
+
+function providerDefaultModel(provider) {
+  if (provider === 'codex') return 'gpt-5.5';
+  if (provider === 'gemini') return 'auto';
+  return window._AMUX_DEFAULT_MODEL || 'sonnet';
+}
+
+function sessionConfiguredModel(s) {
+  const provider = sessionProvider(s);
+  return flagValue((s && s.flags) || '', '--model') || (s && s.active_model) || providerDefaultModel(provider);
+}
+
+function providerYoloFlag(provider) {
+  if (provider === 'codex') return '--dangerously-bypass-approvals-and-sandbox';
+  if (provider === 'gemini') return '--yolo';
+  return '--dangerously-skip-permissions';
+}
+
+function stripProviderYoloFlags(flags) {
+  return (flags || '')
+    .replace(/--dangerously-skip-permissions/g, '')
+    .replace(/--dangerously-bypass-approvals-and-sandbox/g, '')
+    .replace(/--yolo/g, '')
+    .replace(/--approval-mode(?:=|\s+)yolo/g, '')
+    .replace(/\s+/g, ' ')
+    .trim();
 }
 
 function render() {
@@ -14497,11 +15108,10 @@ function render() {
   function _renderSessionCard(s) {
     const isExp = expanded.has(s.name);
     const flags = s.flags || '';
-    const isYolo = flags.includes('--dangerously-skip-permissions') || flags.includes('--dangerously-bypass-approvals-and-sandbox') || !!s.auto_continue;
-    const modelMatch = flags.match(/--model\s+(\S+)/);
-    const flagModel = modelMatch ? modelMatch[1] : null;
-    const model = flagModel || s.active_model || null;
-    const shortModel = model ? model.replace(/^claude-/, '').replace(/-\d{8}$/, '') : null;
+    const isYolo = flags.includes('--dangerously-skip-permissions') || flags.includes('--dangerously-bypass-approvals-and-sandbox') || flags.includes('--yolo') || !!s.auto_continue;
+    const provider = sessionProvider(s);
+    const model = sessionConfiguredModel(s);
+    const pLabel = providerLabel(provider);
     return `
     <div class="card ${isExp ? 'expanded' : ''}" data-session="${esc(s.name)}" onclick="event.stopPropagation();toggle('${s.name}')" ${s.color ? `style="border-color:${s.color}"` : ''}>
       <div class="card-header" onclick="headerTap('${s.name}', event)" onmousedown="tileMouseDown(event,'${s.name}')">
@@ -14517,7 +15127,8 @@ function render() {
           <div class="card-menu-item" onclick="event.stopPropagation();openIconPicker('${s.name}')"><span class="mi">&#x1F3A8;</span> Set icon</div>
           <div class="card-menu-item" onclick="event.stopPropagation();openColorPicker('${s.name}')"><span class="mi" style="${s.color?'color:'+s.color:''}">&#x25A0;</span> Set color</div>
           <div class="card-menu-item" onclick="event.stopPropagation();editField('${s.name}','name','${esc(s.name)}')"><span class="mi">&#x270E;</span> Rename</div>
-          <div class="card-menu-item" onclick="event.stopPropagation();editField('${s.name}','model','${esc(model||"")}','${esc(s.provider||"claude")}')"><span class="mi">&#x2699;</span> Model${model ? ': '+esc(model) : ''}</div>
+          <div class="card-menu-item" onclick="event.stopPropagation();editField('${s.name}','provider','${esc(provider)}')"><span class="mi">&#x21C4;</span> Provider: ${pLabel}</div>
+          <div class="card-menu-item" onclick="event.stopPropagation();editField('${s.name}','model','${esc(model||"")}','${esc(provider)}')"><span class="mi">&#x2699;</span> Model${model ? ': '+esc(model) : ''}</div>
           <div class="card-menu-item" onclick="event.stopPropagation();toggleYolo('${s.name}')"><span class="mi">${isYolo?'&#x2611;':'&#x2610;'}</span> YOLO mode</div>
           <div class="card-menu-item" onclick="event.stopPropagation();editField('${s.name}','desc','${esc(s.desc||"")}')"><span class="mi">&#x1F4DD;</span> Description</div>
           <div class="card-menu-item" onclick="event.stopPropagation();editField('${s.name}','tags','${esc(s.tags.join(", "))}')"><span class="mi">&#x1F3F7;</span> Tags</div>
@@ -14559,10 +15170,10 @@ function render() {
           `<div class="card-log-hit" onclick="event.stopPropagation();openPeek('${s.name}',{query:'${sq}',hitIdx:${hi}})"><span class="log-hit-loc">${esc(s.name)}:${h.line}</span> <span class="log-hit-text">${esc(h.text.slice(0, 80))}</span></div>`
         ).join('') + (hits.length > 2 ? `<div class="card-log-hit" style="color:var(--dim);font-style:italic;" onclick="event.stopPropagation();openPeek('${s.name}',{query:'${sq}'})">+${hits.length - 2} more matches</div>` : '');
       })() : ''}
-      ${(isYolo || model || s.tags.length || s.provider === 'codex') ? `<div class="badges">
-        ${s.provider === 'codex' ? '<span class="badge codex">Codex</span>' : ''}
+      ${(isYolo || model || s.tags.length || provider) ? `<div class="badges">
+        <span class="badge provider ${provider}" onclick="event.stopPropagation();editField('${s.name}','provider','${esc(provider)}')" title="Change provider">${pLabel}</span>
         ${isYolo ? '<span class="badge yolo">YOLO</span>' : ''}
-        ${model ? `<span class="badge model">${esc(model)}</span>` : ''}
+        ${model ? `<span class="badge model" onclick="event.stopPropagation();editField('${s.name}','model','${esc(model)}','${esc(provider)}')" title="Change model">${esc(model)}</span>` : ''}
         ${s.tags.map(t => `<span class="tag" data-tag="${esc(t)}" onclick="event.stopPropagation();toggleTagFilter('${esc(t)}')">${esc(t)}</span>`).join('')}
       </div>` : ''}
       ${!s.running ? `<div style="padding:6px 0 2px;" onclick="event.stopPropagation()">
@@ -15286,16 +15897,27 @@ if (window._AMUX_DEFAULT_MODEL) {
 let editState = null;  // {session, field, current}
 function editField(session, field, current, provider) {
   closeAllMenus();
-  const titles = { name: 'Rename session', model: 'Change model', dir: 'Change directory', desc: 'Set description', tags: 'Edit tags', duplicate: 'Duplicate session', clone: 'Clone & continue' };
+  const titles = { name: 'Rename session', provider: 'Change provider', model: 'Change model', dir: 'Change directory', desc: 'Set description', tags: 'Edit tags', duplicate: 'Duplicate session', clone: 'Clone & continue' };
   const placeholders = { name: 'Session name', model: 'e.g. opus, sonnet, haiku', dir: window._cloudEmail ? '/root' : '/path/to/project', desc: 'Brief description...', tags: 'e.g. work, frontend, urgent', duplicate: 'New session name', clone: 'New session name' };
   document.getElementById('edit-title').textContent = titles[field] || 'Edit';
   const inp = document.getElementById('edit-input');
   const sel = document.getElementById('edit-select');
   const inpWrap = document.getElementById('edit-input-wrap');
-  if (field === 'model') {
+  if (field === 'provider') {
+    const providers = [
+      {v:'claude',l:'Claude Code'},
+      {v:'codex',l:'Codex'},
+      {v:'gemini',l:'Gemini'}
+    ];
+    sel.innerHTML = '';
+    providers.forEach(p => { const o = document.createElement('option'); o.value = p.v; o.textContent = p.l; sel.appendChild(o); });
+    inpWrap.style.display = 'none';
+    sel.style.display = 'block';
+    sel.value = (current || 'claude').toLowerCase();
+  } else if (field === 'model') {
     const claudeModels = [
       {v:'',l:'Default'},{v:'opus',l:'opus'},{v:'sonnet',l:'sonnet'},{v:'haiku',l:'haiku'},
-      {v:'claude-opus-4-8',l:'claude-opus-4-8'},
+      {v:'claude-opus-4-8',l:'claude-opus-4-8'},{v:'claude-opus-4-8[1m]',l:'claude-opus-4-8 [1M]'},
       {v:'claude-opus-4-7',l:'claude-opus-4-7'},{v:'claude-opus-4-7[1m]',l:'claude-opus-4-7 [1M]'},
       {v:'claude-opus-4-6',l:'claude-opus-4-6'},{v:'claude-opus-4-6[1m]',l:'claude-opus-4-6 [1M]'},
       {v:'claude-sonnet-4-6',l:'claude-sonnet-4-6'},{v:'claude-sonnet-4-6[1m]',l:'claude-sonnet-4-6 [1M]'},
@@ -15305,7 +15927,12 @@ function editField(session, field, current, provider) {
       {v:'',l:'Default'},{v:'gpt-5.5',l:'gpt-5.5'},{v:'o3',l:'o3'},{v:'o4-mini',l:'o4-mini'},
       {v:'gpt-4o',l:'gpt-4o'},{v:'gpt-4.1',l:'gpt-4.1'},{v:'gpt-4.1-mini',l:'gpt-4.1-mini'}
     ];
-    const models = (provider === 'codex') ? codexModels : claudeModels;
+    const geminiModels = [
+      {v:'',l:'Default'},{v:'auto',l:'auto'},{v:'gemini-2.5-pro',l:'gemini-2.5-pro'},
+      {v:'gemini-2.5-flash',l:'gemini-2.5-flash'},{v:'gemini-2.5-flash-lite',l:'gemini-2.5-flash-lite'},
+      {v:'gemini-3-pro-preview',l:'gemini-3-pro-preview'},{v:'gemini-3-flash-preview',l:'gemini-3-flash-preview'}
+    ];
+    const models = provider === 'codex' ? codexModels : (provider === 'gemini' ? geminiModels : claudeModels);
     sel.innerHTML = '';
     models.forEach(m => { const o = document.createElement('option'); o.value = m.v; o.textContent = m.l; sel.appendChild(o); });
     inpWrap.style.display = 'none';
@@ -15325,7 +15952,7 @@ function editField(session, field, current, provider) {
   }
   document.getElementById('edit-overlay').classList.add('active');
   editState = { session, field };
-  if (field !== 'model') setTimeout(() => { inp.focus({ preventScroll: true }); inp.select(); }, 100);
+  if (field !== 'model' && field !== 'provider') setTimeout(() => { inp.focus({ preventScroll: true }); inp.select(); }, 100);
 }
 function closeEdit() {
   document.getElementById('edit-overlay').classList.remove('active');
@@ -15337,7 +15964,7 @@ function closeEdit() {
 }
 async function submitEdit() {
   if (!editState) return;
-  const val = editState.field === 'model'
+  const val = (editState.field === 'model' || editState.field === 'provider')
     ? document.getElementById('edit-select').value.trim()
     : document.getElementById('edit-input').value.trim();
   if (!val && editState.field !== 'desc' && editState.field !== 'tags' && editState.field !== 'model') return;
@@ -15362,6 +15989,11 @@ async function submitEdit() {
     await apiCall(API + '/api/sessions/' + session + '/config', {
       method: 'PATCH', headers: {'Content-Type':'application/json'},
       body: JSON.stringify({ model: val })
+    });
+  } else if (field === 'provider') {
+    await apiCall(API + '/api/sessions/' + session + '/config', {
+      method: 'PATCH', headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({ provider: val })
     });
   } else if (field === 'dir') {
     await apiCall(API + '/api/sessions/' + session + '/config', {
@@ -15492,13 +16124,13 @@ async function toggleYolo(session) {
     if (s) {
       const claudeFlag = '--dangerously-skip-permissions';
       const codexFlag = '--dangerously-bypass-approvals-and-sandbox';
-      const wasYolo = (s.flags || '').includes(claudeFlag) || (s.flags || '').includes(codexFlag) || !!s.auto_continue;
+      const geminiFlag = '--yolo';
+      const wasYolo = (s.flags || '').includes(claudeFlag) || (s.flags || '').includes(codexFlag) || (s.flags || '').includes(geminiFlag) || (s.flags || '').includes('--approval-mode=yolo') || (s.flags || '').includes('--approval-mode yolo') || !!s.auto_continue;
       if (wasYolo) {
-        s.flags = (s.flags || '').replace(claudeFlag, '').replace(codexFlag, '').trim();
+        s.flags = stripProviderYoloFlags(s.flags || '');
         s.auto_continue = false;
       } else {
-        const addFlag = s.provider === 'codex' ? codexFlag : claudeFlag;
-        s.flags = ((s.flags || '') + ' ' + addFlag).trim();
+        s.flags = ((s.flags || '') + ' ' + providerYoloFlag(s.provider)).trim();
         s.auto_continue = true;
       }
       lastSessionsJSON = '';
@@ -15580,14 +16212,14 @@ async function shareSession(session) {
 async function deleteSession(session) {
   closeAllMenus();
   if (!await showConfirm('Delete session "' + session + '"?', 'Delete', true)) return;
-  await apiCall(API + '/api/sessions/' + session + '/delete', { method: 'POST' });
+  await apiCall(API + '/api/sessions/' + session + '/delete', { method: 'POST', headers: { 'X-Amux-UI-Token': (window._AMUX_UI_TOKEN || '') } });
   expanded.delete(session);
   await fetchSessions();
 }
 
 async function archiveSession(session) {
   closeAllMenus();
-  const r = await apiCall(API + '/api/sessions/' + session + '/archive', { method: 'POST' });
+  const r = await apiCall(API + '/api/sessions/' + session + '/archive', { method: 'POST', headers: { 'X-Amux-UI-Token': (window._AMUX_UI_TOKEN || '') } });
   if (r) showToast(session + ' archived');
   await fetchSessions();
 }
@@ -15797,14 +16429,7 @@ async function sendFromInput(name) {
   if (!text) {
     // Empty send = extract + submit the suggested prompt from the session
     inp.value = '';
-    try {
-      const r = await fetch(API + '/api/sessions/' + encodeURIComponent(name) + '/send', {
-        method: 'POST', headers: {'Content-Type':'application/json'},
-        body: JSON.stringify({text: ''})
-      });
-      const d = await r.json().catch(() => ({}));
-      if (d.message === 'no suggestion found') showToast('No suggestion to submit');
-    } catch(e) {}
+    _submitSuggestion(name, false);
     return;
   }
   const routed = _atRoute(text);
@@ -15959,6 +16584,17 @@ async function _commitsLoad() {
   }
 }
 
+// Deterministic color per session name — same session always gets the same hue
+function _sessionColor(name) {
+  let h = 0;
+  for (let i = 0; i < (name || '').length; i++) h = (h * 31 + name.charCodeAt(i)) % 360;
+  return h;
+}
+function _sessionBadgeStyle(name) {
+  const h = _sessionColor(name);
+  return `background:hsl(${h} 70% 22%);color:hsl(${h} 90% 80%);border:1px solid hsl(${h} 60% 42%);`;
+}
+
 function _commitsRenderList() {
   const list = document.getElementById('commits-list');
   if (!_commitsData.length) {
@@ -15978,9 +16614,12 @@ function _commitsRenderList() {
     const active = c.hash === _commitsActiveHash ? ' active' : '';
     const shortHash = c.hash.slice(0, 7);
     const time = c.date ? c.date.slice(11, 16) : '';
+    const sessBadge = c.amux_session
+      ? `<span class="commits-sess-badge" style="${_sessionBadgeStyle(c.amux_session)}" title="Committed by amux session: ${esc(c.amux_session)}">${esc(c.amux_session)}</span>`
+      : '';
     html += `<div class="commits-item${active}" data-hash="${c.hash}" onclick="_commitsSelect('${c.hash}')">`;
     html += `<div class="commits-item-subject">${esc(c.subject)}</div>`;
-    html += `<div class="commits-item-meta"><span class="commits-item-hash">${shortHash}</span><span>${esc(c.author)}</span><span>${time}</span></div>`;
+    html += `<div class="commits-item-meta">${sessBadge}<span class="commits-item-hash">${shortHash}</span><span>${esc(c.author)}</span><span>${time}</span></div>`;
     html += `</div>`;
   }
   list.innerHTML = html;
@@ -16512,12 +17151,12 @@ function _peekNewSchedule() {
 // ── Peek notes ──
 let _peekNotesAll = [];
 let _peekNotesActive = null;
-let _peekQuill = null;
 let _peekNotesSaveTimer = null;
 let _peekNotesLoading = false;
 let _peekNotesMode = 'preview';
 let _peekNotesSidebarOpen = true;
 let _peekNotesRawContent = '';
+function _peekNotesGetEditor() { return document.getElementById('peek-notes-editor'); }
 
 function _peekNotesFolder() {
   return '_sessions/' + peekSession;
@@ -16592,80 +17231,14 @@ function _peekNotesRenderList(notes) {
 function _peekNotesShowEmpty() {
   document.getElementById('peek-notes-empty-state').style.display = '';
   document.getElementById('peek-notes-mode-tabs').style.display = 'none';
-  document.getElementById('peek-notes-quill-wrap').style.display = 'none';
+  document.getElementById('peek-notes-editor-wrap').style.display = 'none';
   document.getElementById('peek-notes-preview').classList.remove('active');
   document.getElementById('peek-notes-preview').style.display = 'none';
   document.getElementById('peek-notes-title').value = '';
 }
 
 function _peekNotesInitQuill() {
-  if (_peekQuill) return;
-  // Reuse divider blot registered by main notes init (registers globally on Quill)
-  if (!_quillDividerRegistered && typeof Quill !== 'undefined') {
-    const BlockEmbed = Quill.import('blots/block/embed');
-    class DividerBlot extends BlockEmbed {
-      static create() { return super.create(); }
-      static value() { return true; }
-    }
-    DividerBlot.blotName = 'divider';
-    DividerBlot.tagName = 'hr';
-    Quill.register(DividerBlot);
-    _quillDividerRegistered = true;
-  }
-  _peekQuill = new Quill('#peek-notes-quill', {
-    theme: 'snow',
-    modules: {
-      toolbar: {
-        container: [
-          [{ header: [1, 2, 3, false] }],
-          ['bold', 'italic', 'underline', 'strike'],
-          ['blockquote', 'code-block'],
-          [{ list: 'ordered' }, { list: 'bullet' }, { list: 'check' }],
-          ['link'],
-          ['divider'],
-          ['clean']
-        ],
-        handlers: {
-          divider: function() {
-            const range = _peekQuill.getSelection(true);
-            _peekQuill.insertText(range.index, '\n', 'user');
-            _peekQuill.insertEmbed(range.index + 1, 'divider', true, 'user');
-            _peekQuill.insertText(range.index + 2, '\n', 'user');
-            _peekQuill.setSelection(range.index + 3, 0, 'silent');
-          }
-        }
-      }
-    },
-    placeholder: 'Write your note…'
-  });
-  const _pdivBtn = document.querySelector('#peek-notes-panel .ql-toolbar .ql-divider');
-  if (_pdivBtn && !_pdivBtn.innerHTML) {
-    _pdivBtn.innerHTML = '<svg viewBox="0 0 18 18"><line class="ql-stroke" x1="3" x2="15" y1="9" y2="9" stroke-width="2"></line></svg>';
-    _pdivBtn.title = 'Insert horizontal divider';
-  }
-  if (typeof QuillMarkdown !== 'undefined') {
-    try { new QuillMarkdown(_peekQuill); } catch(e) {}
-  }
-  _peekQuill.on('text-change', (delta, old, source) => {
-    if (source === 'api' || _peekNotesLoading) return;
-    // Sync H1 → title
-    const first = _peekQuill.root.firstElementChild;
-    if (first && first.tagName === 'H1') {
-      const h1 = first.textContent.trim();
-      const ti = document.getElementById('peek-notes-title');
-      if (ti && ti.value !== h1) {
-        ti.value = h1;
-        if (_peekNotesActive) {
-          _peekNotesActive.title = h1;
-          const activeEl = document.querySelector('#peek-notes-list .notes-list-item.active');
-          if (activeEl) { const s = activeEl.querySelector('.nli-title'); if (s) s.textContent = h1 || _peekNotesActive.path.replace(/\.md$/, ''); }
-          const entry = _peekNotesAll.find(n => n.path === _peekNotesActive.path);
-          if (entry) entry.name = h1 || entry.path.replace(/\.md$/, '');
-        }
-      }
-    }
-    _peekNotesSaveDebounce();
-  });
+  // no-op — textarea needs no init
 }
 
 async function _peekNotesOpen(path) {
@@ -16684,19 +17257,15 @@ async function _peekNotesOpen(path) {
     const data = await r.json();
     _peekNotesActive = { path: data.path };
     _peekNotesRawContent = data.content || '';
-    const h1html = _peekNotesRawContent.match(/<h1[^>]*>(.*?)<\/h1>/i);
     const h1md = _peekNotesRawContent.match(/^#\s+(.+)$/m);
-    const titleFromContent = h1html ? h1html[1].replace(/<[^>]+>/g, '') : (h1md ? h1md[1] : '');
+    const titleFromContent = h1md ? h1md[1] : '';
     const titleFromPath = path.replace(/\.md$/, '').split('/').pop();
     _peekNotesActive.title = titleFromContent || titleFromPath;
     document.getElementById('peek-notes-title').value = _peekNotesActive.title;
     const listEntry = _peekNotesAll.find(n => n.path === data.path);
     if (listEntry) listEntry.name = _peekNotesActive.title;
-    _peekNotesLoading = true;
-    const isHtml = /<[a-z][\s\S]*>/i.test(_peekNotesRawContent);
-    if (isHtml) _peekQuill.root.innerHTML = _peekNotesRawContent;
-    else _peekQuill.setText(_peekNotesRawContent || '');
-    setTimeout(() => { _peekNotesLoading = false; }, 0);
+    const editor = _peekNotesGetEditor();
+    if (editor) { _peekNotesLoading = true; editor.value = _peekNotesRawContent; setTimeout(() => { _peekNotesLoading = false; }, 0); }
     document.getElementById('peek-notes-empty-state').style.display = 'none';
     document.getElementById('peek-notes-mode-tabs').style.display = 'flex';
     _peekNotesSwitchMode('preview');
@@ -16726,7 +17295,7 @@ async function _peekNotesNew() {
   const urlPath = filename.replace(/\.md$/, '').split('/').map(encodeURIComponent).join('/');
   await apiCall(API + '/api/notes/' + urlPath, {
     method: 'POST', headers: {'Content-Type': 'application/json'},
-    body: JSON.stringify({ content: '<h1>' + displayName + '</h1>' })
+    body: JSON.stringify({ content: '# ' + displayName + '\n' })
   });
   _peekNotesAll.unshift({ path: filename, name: displayName, updated: Math.floor(Date.now() / 1000), pinned: false, size: 0 });
   _peekNotesRenderList(_peekNotesAll);
@@ -16743,8 +17312,9 @@ function _peekNotesSaveDebounce() {
 }
 
 async function _peekNotesSave() {
-  if (!_peekNotesActive || !_peekQuill) return;
-  const content = _peekQuill.root.innerHTML === '<p><br></p>' ? '' : _peekQuill.root.innerHTML;
+  const editor = _peekNotesGetEditor();
+  if (!_peekNotesActive || !editor) return;
+  const content = editor.value;
   _peekNotesRawContent = content;
   const pathKey = _peekNotesActive.path.replace(/\.md$/, '');
   const statusEl = document.getElementById('peek-notes-save-status');
@@ -16757,20 +17327,14 @@ async function _peekNotesSave() {
 }
 
 function _peekNotesTitleChange() {
-  if (!_peekNotesActive || !_peekQuill) return;
+  const editor = _peekNotesGetEditor();
+  if (!_peekNotesActive || !editor) return;
   const newTitle = document.getElementById('peek-notes-title').value;
   _peekNotesActive.title = newTitle;
-  const first = _peekQuill.root.firstElementChild;
-  const isH1 = first && first.tagName === 'H1';
-  const oldLen = isH1 ? first.textContent.length : 0;
-  if (isH1) {
-    if (oldLen > 0) _peekQuill.deleteText(0, oldLen, 'api');
-    if (newTitle) _peekQuill.insertText(0, newTitle, 'api');
-  } else {
-    _peekQuill.insertText(0, (newTitle || '') + '\n', 'api');
-    _peekQuill.formatLine(0, 1, 'header', 1, 'api');
-  }
-  // Update sidebar immediately
+  const lines = editor.value.split('\n');
+  if (lines[0] && lines[0].match(/^#\s/)) { lines[0] = '# ' + newTitle; }
+  else { lines.unshift('# ' + newTitle); }
+  editor.value = lines.join('\n');
   const activeEl = document.querySelector('#peek-notes-list .notes-list-item.active');
   if (activeEl) { const s = activeEl.querySelector('.nli-title'); if (s) s.textContent = newTitle || _peekNotesActive.path.replace(/\.md$/, ''); }
   const entry = _peekNotesAll.find(n => n.path === _peekNotesActive.path);
@@ -16806,25 +17370,20 @@ function _peekNotesSwitchMode(mode) {
   _peekNotesMode = mode;
   document.getElementById('peek-notes-tab-edit').classList.toggle('active', mode === 'edit');
   document.getElementById('peek-notes-tab-preview').classList.toggle('active', mode === 'preview');
-  const quillWrap = document.getElementById('peek-notes-quill-wrap');
+  const editorWrap = document.getElementById('peek-notes-editor-wrap');
   const preview = document.getElementById('peek-notes-preview');
   if (mode === 'preview') {
-    if (_peekQuill) {
-      const rawIsHtml = /<[a-z][\s\S]*>/i.test(_peekNotesRawContent);
-      if (rawIsHtml) {
-        preview.innerHTML = _peekQuill.root.innerHTML;
-      } else {
-        preview.innerHTML = renderMarkdown(_peekNotesRawContent) || '<span style="color:var(--dim);font-size:0.85rem;">Empty note</span>';
-      }
-      preview.classList.add('md-content');
-    }
+    const editor = _peekNotesGetEditor();
+    const content = editor ? editor.value : _peekNotesRawContent;
+    preview.innerHTML = renderMarkdown(content) || '<span style="color:var(--dim);font-size:0.85rem;">Empty note</span>';
+    preview.classList.add('md-content');
     preview.style.display = '';
     preview.classList.add('active');
-    quillWrap.style.display = 'none';
+    editorWrap.style.display = 'none';
   } else {
     preview.classList.remove('active');
     preview.style.display = 'none';
-    quillWrap.style.display = 'flex';
+    editorWrap.style.display = 'flex';
   }
 }
 
@@ -17047,7 +17606,7 @@ function openPeek(name, opts) {
   _idb.get('peek_' + name).then(cached => {
     if (peekSession !== name) return;  // session changed before cache resolved
     if (cached && (!lastPeekHTML || lastPeekHTML.includes('Loading...'))) {
-      lastPeekHTML = linkifyOutput(stripAnsi(cached.output));
+      lastPeekHTML = highlightPrompts(linkifyOutput(stripAnsi(cached.output)));
       applyPeekSearch();
       const ago = Math.floor((Date.now() - cached.time) / 60000);
       document.getElementById('peek-status').textContent = 'Cached ' + (ago < 1 ? 'just now' : ago + 'm ago');
@@ -17385,6 +17944,31 @@ function linkifyOutput(text) {
   return rewriteLocalhostUrls(html);
 }
 
+function highlightPrompts(html) {
+  const lines = html.split('\n');
+  let inPrompt = false;
+  const out = [];
+  for (let i = 0; i < lines.length; i++) {
+    const raw = lines[i];
+    const isPromptStart = raw.startsWith('❯');
+    const isContinuation = inPrompt && /^  \S/.test(raw);
+    if (isPromptStart) {
+      inPrompt = true;
+      out.push('<span class="peek-prompt">' + raw);
+    } else if (isContinuation) {
+      out.push(raw);
+    } else {
+      if (inPrompt) {
+        out[out.length - 1] += '</span>';
+        inPrompt = false;
+      }
+      out.push(raw);
+    }
+  }
+  if (inPrompt) out[out.length - 1] += '</span>';
+  return out.join('\n');
+}
+
 let peekSelecting = false;
 let _peekScrollLocked = false;
 
@@ -17424,7 +18008,7 @@ async function refreshPeek() {
     const output = data.output || '(no output)';
     const atBottom = _isScrolledToBottom(body);
     if (atBottom) _peekScrollLocked = false;
-    const newHTML = linkifyOutput(stripAnsi(output));
+    const newHTML = highlightPrompts(linkifyOutput(stripAnsi(output)));
     if (peekSelecting || (window.getSelection()?.toString().length > 0)) return;
     if (_sendingSnapshot && newHTML !== _sendingSnapshot) clearSendingIndicator();
     lastPeekHTML = newHTML;
@@ -17449,7 +18033,7 @@ async function refreshPeek() {
     if (!lastPeekHTML || lastPeekHTML.includes('Loading...')) {
       const cached = await _idb.get('peek_' + peekSession);
       if (cached) {
-        lastPeekHTML = linkifyOutput(stripAnsi(cached.output));
+        lastPeekHTML = highlightPrompts(linkifyOutput(stripAnsi(cached.output)));
         applyPeekSearch();
         const ago = Math.floor((Date.now() - cached.time) / 60000);
         statusEl.textContent = 'Cached ' + (ago < 1 ? 'just now' : ago + 'm ago');
@@ -17700,15 +18284,7 @@ async function sendPeekCmd() {
   const files = peekFiles.filter(f => f.path);
   if (!text && files.length === 0) {
     // Empty send = extract + submit the suggested prompt from the session
-    showSendingIndicator();
-    try {
-      const r = await fetch(API + '/api/sessions/' + encodeURIComponent(peekSession) + '/send', {
-        method: 'POST', headers: {'Content-Type':'application/json'},
-        body: JSON.stringify({text: ''})
-      });
-      const d = await r.json().catch(() => ({}));
-      if (d.message === 'no suggestion found') showToast('No suggestion to submit');
-    } catch(e) {}
+    _submitSuggestion(peekSession, true);
     return;
   }
   const sess = (sessions || []).find(s => s.name === peekSession);
@@ -17777,6 +18353,24 @@ async function peekQuickKeys(keys) {
   if (!peekSession) return;
   await doKeys(peekSession, keys);
   setTimeout(refreshPeek, 500);
+}
+async function _submitSuggestion(name, isPeek, fallbackKeys) {
+  showSendingIndicator();
+  try {
+    const r = await fetch(API + '/api/sessions/' + encodeURIComponent(name) + '/send', {
+      method: 'POST', headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({text: ''})
+    });
+    const d = await r.json().catch(() => ({}));
+    if (d.message === 'no suggestion found') {
+      if (fallbackKeys) { if (isPeek) peekQuickKeys(fallbackKeys); else doKeys(name, fallbackKeys); }
+      else showToast('No suggestion to submit');
+    } else if (d.ok) {
+      showToast('Sent suggestion');
+    }
+  } catch(e) {}
+  if (isPeek) setTimeout(refreshPeek, 500);
+  else if (_gridPanes && _gridPanes[name]) setTimeout(() => _updateGridPane(name), 500);
 }
 
 function _showSteerPrompt(text) {
@@ -18185,6 +18779,12 @@ function _chipAction(chip, sessionName, isPeek) {
     if (isPeek) peekQuickSend(chip.value);
     else doSend(sessionName, chip.value);
   } else if (chip.action === 'keys') {
+    // Enter → always try suggestion extraction first; fall back to raw Enter if none found
+    if (chip.value === 'Enter') {
+      const name = isPeek ? peekSession : sessionName;
+      _submitSuggestion(name, isPeek, 'Enter');
+      return;
+    }
     if (isPeek) peekQuickKeys(chip.value);
     else doKeys(sessionName, chip.value);
   } else if (chip.action === 'slash') {
@@ -18935,7 +19535,7 @@ function slashAcKeydown(e) {
   const el = document.getElementById('slash-ac-list');
   if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) { e.preventDefault(); sendPeekCmd(); return; }
   if (!el.classList.contains('open')) {
-    if (e.key === 'Enter' && !e.shiftKey && !matchMedia('(pointer: coarse)').matches) { e.preventDefault(); sendPeekCmd(); return; }
+    if (e.key === 'Enter' && !e.shiftKey && (!matchMedia('(pointer: coarse)').matches || !inp.value.trim())) { e.preventDefault(); sendPeekCmd(); return; }
     if (e.key === 'ArrowUp' && inp.selectionStart === 0) { e.preventDefault(); cmdHistoryUp(inp); return; }
     if (e.key === 'ArrowDown' && _cmdHistoryIdx !== -1) { e.preventDefault(); cmdHistoryDown(inp); return; }
     return;
@@ -19177,7 +19777,7 @@ function cardSlashAcKeydown(name, e) {
   const el = document.getElementById('card-ac-' + name);
   if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) { e.preventDefault(); sendFromInput(name); return; }
   if (!el || !el.classList.contains('open')) {
-    if (e.key === 'Enter' && !e.shiftKey && !matchMedia('(pointer: coarse)').matches) { e.preventDefault(); sendFromInput(name); return; }
+    if (e.key === 'Enter' && !e.shiftKey && (!matchMedia('(pointer: coarse)').matches || !(inp && inp.value.trim()))) { e.preventDefault(); sendFromInput(name); return; }
     if (e.key === 'ArrowUp' && inp && inp.selectionStart === 0) { e.preventDefault(); cmdHistoryUp(inp); return; }
     if (e.key === 'ArrowDown' && _cmdHistoryIdx !== -1) { e.preventDefault(); if (inp) cmdHistoryDown(inp); return; }
     return;
@@ -20686,7 +21286,8 @@ function _selectProvider(p) {
   _createProvider = p;
   document.getElementById('create-provider-claude').classList.toggle('selected', p === 'claude');
   document.getElementById('create-provider-codex').classList.toggle('selected', p === 'codex');
-  // Hide branch/template/session-name options for codex since it uses different mechanics
+  document.getElementById('create-provider-gemini').classList.toggle('selected', p === 'gemini');
+  // Hide branch/template/session-name options for non-Claude providers since they use different mechanics
   const isClaude = p === 'claude';
   document.getElementById('create-branch-enabled').closest('.field-group').style.display = isClaude ? '' : 'none';
   document.getElementById('create-worktree-field').style.display = isClaude && _createDirIsGit ? '' : 'none';
@@ -20696,6 +21297,7 @@ function openCreate() {
   _createProvider = 'claude';
   document.getElementById('create-provider-claude').classList.add('selected');
   document.getElementById('create-provider-codex').classList.remove('selected');
+  document.getElementById('create-provider-gemini').classList.remove('selected');
   document.getElementById('create-branch-enabled').closest('.field-group').style.display = '';
   document.getElementById('create-template-field').style.display = '';
   document.getElementById('create-name').value = '';
@@ -21320,30 +21922,8 @@ function _pwaCb(e) {
   const k = e.key.toLowerCase();
   if (k !== 'a' && k !== 'c' && k !== 'x' && k !== 'v') return false;
   const ae = document.activeElement;
-  // Quill editor: handle clipboard via Quill API (Chrome PWA native paste unreliable on contenteditable)
-  if (ae && ae.isContentEditable && ae.closest('#notes-quill') && typeof _quill !== 'undefined' && _quill) {
-    if (k === 'v') {
-      e.preventDefault();
-      navigator.clipboard.readText().then(text => {
-        if (!text) return;
-        const range = _quill.getSelection(true);
-        if (range) { _quill.deleteText(range.index, range.length); _quill.insertText(range.index, text, 'user'); _quill.setSelection(range.index + text.length); }
-      }).catch(() => {});
-      return true;
-    }
-    if (k === 'a') { e.preventDefault(); _quill.setSelection(0, _quill.getLength()); return true; }
-    if (k === 'c' || k === 'x') {
-      const range = _quill.getSelection();
-      if (range && range.length > 0) {
-        const text = _quill.getText(range.index, range.length);
-        e.preventDefault();
-        navigator.clipboard.writeText(text).catch(() => {});
-        if (k === 'x') { _quill.deleteText(range.index, range.length, 'user'); }
-        return true;
-      }
-    }
-    return false;
-  }
+  // Textarea (notes editor): let browser handle natively
+  if (ae && (ae.id === 'notes-editor' || ae.id === 'peek-notes-editor')) return false;
   // Other contentEditable elements: let browser handle natively
   if (ae && ae.isContentEditable) return false;
   const inp = (ae && (ae.tagName === 'INPUT' || ae.tagName === 'TEXTAREA')) ? ae : null;
@@ -22086,6 +22666,8 @@ function switchView(view) {
     _notesInitQuill(); _notesApplySidebarState(); _notesBindSwipeGestures();
     _notesDirty = false;
     _notesLoad(); // always refresh list on tab switch
+    _notesReloadActive(); // refresh open note content if it changed on disk (Obsidian)
+    _notesLoadSource(); // show which folder notes are syncing with
   }
   if (view === 'logs') { fetchLogs(); _startLogsTimer(); } else { _stopLogsTimer(); }
   if (view === 'board') {
@@ -22369,6 +22951,8 @@ let _mapFilterTags = new Set();
 let _mapSearchQ = '';
 let _mapMarkers = {};
 let _mapDropMode = false;
+let _mapMobileSidebarInited = false; // mobile: show the map (not the pin list) on first open
+let _mapServerLoaded = false; // true once we've synced from the server — guards against empty overwrites
 let _mapEditingPin = null;
 let _mapEditingTag = null;
 
@@ -22391,6 +22975,7 @@ function _mapLoad() {
     _mapTags = data.tags || [];
     _mapSettings = Object.assign(_mapSettings, data.settings || {});
     _mapGoogleKey = (data.settings || {}).googleMapsKey || '';
+    _mapServerLoaded = true; // safe to persist now that client mirrors server
     // Cache for offline
     try {
       localStorage.setItem('amux_map_pins', JSON.stringify(_mapPins));
@@ -22420,8 +23005,14 @@ function _mapSave() {
     localStorage.setItem('amux_map_tags', JSON.stringify(_mapTags));
     localStorage.setItem('amux_map_settings', JSON.stringify(_mapSettings));
   } catch(e) {}
+  // Don't push to the server until we've synced FROM it this session — prevents
+  // an empty/stale client (e.g. fetch not finished) from wiping saved pins when
+  // the map is merely panned or zoomed.
+  if (!_mapServerLoaded) return;
   var payload = { pins: _mapPins, tags: _mapTags, settings: _mapSettings };
-  apiCall(API + '/api/map', {
+  // ?replace=1 — the dashboard holds the full set (guarded by _mapServerLoaded),
+  // so it's authorized to replace the whole document, including deletions.
+  apiCall(API + '/api/map?replace=1', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(payload)
@@ -22453,6 +23044,13 @@ function _mapInit() {
     });
   } else {
     setTimeout(function() { _map.invalidateSize(); }, 50);
+  }
+  // On mobile the sidebar overlays the entire map; default to showing the MAP
+  // on first open this session (otherwise an empty pin list hides the map).
+  // Desktop keeps its persisted side-by-side preference.
+  if (window.innerWidth <= 600 && !_mapMobileSidebarInited) {
+    _mapMobileSidebarInited = true;
+    _mapSettings.sidebarOpen = false;
   }
   _mapApplySidebarState();
   _mapRenderTags();
@@ -24795,7 +25393,7 @@ async function _updateGridPane(name) {
     const data = await fetch(API + '/api/sessions/' + encodeURIComponent(name) + '/peek?lines=500').then(r => r.json());
     const atBottom = _isScrolledToBottom(body);
     const locked = body._scrollLocked;
-    body.innerHTML = linkifyOutput(stripAnsi(data.output || ''));
+    body.innerHTML = highlightPrompts(linkifyOutput(stripAnsi(data.output || '')));
     if (!locked && atBottom) {
       body.scrollTop = body.scrollHeight;
       _hideScrollLockBadge(body);
@@ -25106,7 +25704,7 @@ async function wsAddNewNotePane() {
   try {
     await fetch(API + '/api/notes/' + slug, {
       method: 'POST', headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({ content: '<h1>Untitled</h1><p><br></p>' })
+      body: JSON.stringify({ content: '# Untitled\n' })
     });
   } catch(e) {}
   wsAddNotePane(slug + '.md');
@@ -25128,14 +25726,13 @@ function wsAddNotePane(path, x, y, w, h) {
       '<button class="gp-close" onclick="wsRemoveNotePane(\'' + safePath + '\')">&#x2715;</button>' +
     '</div>' +
     '<div class="gp-note-body" id="' + sid + '-body">' +
-      '<div id="' + sid + '-editor"></div>' +
+      '<textarea id="' + sid + '-editor" class="notes-editor-textarea" style="width:100%;height:100%;border:none;outline:none;resize:none;background:var(--bg);color:var(--text);font-family:\'SF Mono\',\'Fira Code\',\'Consolas\',monospace;font-size:0.85rem;line-height:1.6;padding:8px 12px;" placeholder="Write your note…"></textarea>' +
     '</div>' +
     '<div class="gp-note-status" id="' + sid + '-status"></div>';
 
   const widget = _grid.addWidget({ id: nid, x, y, w: w || 4, h: h || 7, content });
-  _notePanes[nid] = { widget, quill: null, path, saveTimer: null };
+  _notePanes[nid] = { widget, path, saveTimer: null };
 
-  // Init Quill in the pane
   setTimeout(() => _initNotePaneQuill(nid), 50);
   _gridSaveLayout();
 }
@@ -25146,35 +25743,13 @@ function _initNotePaneQuill(nid) {
   const sid = _gpSafeId(nid);
   const editorEl = document.getElementById(sid + '-editor');
   if (!editorEl) return;
-
-  const q = new Quill('#' + sid + '-editor', {
-    theme: 'snow',
-    modules: {
-      toolbar: [
-        [{ header: [1, 2, 3, false] }],
-        ['bold', 'italic', 'underline', 'strike'],
-        ['blockquote', 'code-block'],
-        [{ list: 'ordered' }, { list: 'bullet' }, { list: 'check' }],
-        ['link'], ['clean']
-      ]
-    },
-    placeholder: 'Write your note\u2026'
-  });
-  pane.quill = q;
-
-  // Load content
   _loadNotePaneContent(nid);
-
-  // Auto-save on edit
-  q.on('text-change', (delta, old, source) => {
-    if (source === 'api') return;
-    // Update title from H1
-    const first = q.root.firstElementChild;
-    if (first && first.tagName === 'H1') {
+  editorEl.addEventListener('input', () => {
+    const h1m = editorEl.value.match(/^#\s+(.+)$/m);
+    if (h1m) {
       const titleEl = document.getElementById(sid + '-title');
-      if (titleEl) titleEl.textContent = first.textContent.trim() || 'Untitled';
+      if (titleEl) titleEl.textContent = h1m[1] || 'Untitled';
     }
-    // Debounced save
     if (pane.saveTimer) clearTimeout(pane.saveTimer);
     pane.saveTimer = setTimeout(() => _saveNotePaneContent(nid), 800);
   });
@@ -25182,18 +25757,18 @@ function _initNotePaneQuill(nid) {
 
 async function _loadNotePaneContent(nid) {
   const pane = _notePanes[nid];
-  if (!pane || !pane.quill) return;
+  if (!pane) return;
   const sid = _gpSafeId(nid);
   const statusEl = document.getElementById(sid + '-status');
+  const editorEl = document.getElementById(sid + '-editor');
+  if (!editorEl) return;
   const pathKey = pane.path.replace(/\.md$/, '').split('/').map(encodeURIComponent).join('/');
 
   let data;
   try {
     data = await fetch(API + '/api/notes/' + pathKey).then(r => r.json());
-    // Cache
     _idb.set('amux_note_' + pane.path, JSON.stringify(data));
   } catch(e) {
-    // Try IDB cache
     try {
       const cached = await _idb.get('amux_note_' + pane.path);
       if (cached) data = JSON.parse(cached);
@@ -25201,26 +25776,22 @@ async function _loadNotePaneContent(nid) {
   }
   if (!data) { if (statusEl) statusEl.textContent = 'Could not load note'; return; }
 
-  const isHtml = /<[a-z][\s\S]*>/i.test(data.content);
-  if (isHtml) {
-    pane.quill.root.innerHTML = data.content || '';
-  } else {
-    pane.quill.setText(data.content || '');
-  }
-  // Update title
-  const first = pane.quill.root.firstElementChild;
-  if (first && first.tagName === 'H1') {
+  editorEl.value = data.content || '';
+  const h1m = (data.content || '').match(/^#\s+(.+)$/m);
+  if (h1m) {
     const titleEl = document.getElementById(sid + '-title');
-    if (titleEl) titleEl.textContent = first.textContent.trim() || 'Untitled';
+    if (titleEl) titleEl.textContent = h1m[1] || 'Untitled';
   }
 }
 
 async function _saveNotePaneContent(nid) {
   const pane = _notePanes[nid];
-  if (!pane || !pane.quill) return;
+  if (!pane) return;
   const sid = _gpSafeId(nid);
   const statusEl = document.getElementById(sid + '-status');
-  const content = pane.quill.root.innerHTML === '<p><br></p>' ? '' : pane.quill.root.innerHTML;
+  const editorEl = document.getElementById(sid + '-editor');
+  if (!editorEl) return;
+  const content = editorEl.value;
   const pathKey = pane.path.replace(/\.md$/, '').split('/').map(encodeURIComponent).join('/');
 
   const result = await apiCall(API + '/api/notes/' + pathKey, {
@@ -25281,7 +25852,10 @@ async function sendGridCmd(name) {
   const inp = document.getElementById(sid + '-input');
   if (!inp) return;
   const text = inp.value.trim();
-  if (!text) return;
+  if (!text) {
+    _submitSuggestion(name, false, 'Enter');
+    return;
+  }
   cmdHistoryAdd(text);
   inp.value = '';
   autoGrow(inp);
@@ -25530,8 +26104,9 @@ function connectSSE() {
       } else if (msg.type === 'invalidate') {
         for (const key of (msg.keys || [])) {
           if (key === 'notes') {
-            if (activeView === 'notes') _notesLoad();
+            if (activeView === 'notes') { _notesLoad(); _notesReloadActive(); }
             else _notesDirty = true;
+            _pinnedNotesRefresh();
           } else if (key === 'crm') {
             if (activeView === 'crm') _crmLoad();
             else _crmDirty = true;
@@ -25624,6 +26199,8 @@ setInterval(() => {
 connectSSE();
 _notifUpdateBadge();
 loadBranding();
+// JS initialized — hide the no-JS fallback overlay
+(function(){var f=document.getElementById('js-fallback');if(f)f.style.display='none';})();
 
 // Initialize chrome tabs
 _chromeRender();
@@ -26226,6 +26803,8 @@ function toggleSettings() {
     }
     // Render connections
     _renderInstanceSwitcher();
+    // Populate the notes-folder row
+    _notesLoadSource();
   }
 }
 
@@ -28100,38 +28679,29 @@ async function _notesTrashDelete(file) {
 }
 let _notesSaveTimer = null;
 let _notesAllNotes = [];
-let _quill = null;
 let _notesSidebarOpen = localStorage.getItem('amux_notes_sidebar') !== 'closed';
-let _notesOpenAbort = null; // AbortController for in-flight note fetches
-let _notesLoadingContent = false; // suppress text-change saves while loading note content
-let _notesMode = 'preview'; // 'edit' | 'preview'
-let _notesRawContent = ''; // raw server content for the open note (for markdown preview)
+let _notesOpenAbort = null;
+let _notesLoadingContent = false;
+let _notesMode = 'preview';
+let _notesRawContent = '';
+
+function _notesGetEditor() { return document.getElementById('notes-editor'); }
 
 function _notesPreviewBindCheckboxes(container) {
-  // Make data-list=check items interactive in preview — clicking toggles Quill delta
-  container.querySelectorAll('li[data-list="checked"], li[data-list="unchecked"]').forEach(li => {
-    li.style.cursor = 'pointer';
-    li.onclick = (e) => {
-      e.preventDefault();
-      if (!_quill) return;
-      const checked = li.dataset.list === 'checked';
-      li.dataset.list = checked ? 'unchecked' : 'checked';
-      // Find this item's index in the Quill delta and toggle it
-      const text = li.textContent;
-      let idx = 0;
-      _quill.getContents().ops.forEach(op => {
-        if (typeof op.insert === 'string') {
-          if (op.attributes?.list === 'checked' || op.attributes?.list === 'unchecked') {
-            const lineText = op.insert.replace(/\n$/, '');
-            if (lineText === text) {
-              _quill.formatLine(idx, 1, 'list', checked ? 'unchecked' : 'checked', 'api');
-            }
-          }
-          idx += op.insert.length;
-        } else {
-          idx += 1;
+  container.querySelectorAll('input[type="checkbox"]').forEach(cb => {
+    cb.onclick = (e) => {
+      const editor = _notesGetEditor();
+      if (!editor || !_notesActive) return;
+      const lines = editor.value.split('\n');
+      const label = cb.parentElement?.textContent?.trim() || '';
+      for (let i = 0; i < lines.length; i++) {
+        const m = lines[i].match(/^(\s*[-*]\s*)\[([ xX])\]\s*(.*)/);
+        if (m && m[3].trim() === label.replace(/^\s*/, '').trim()) {
+          lines[i] = m[1] + '[' + (cb.checked ? 'x' : ' ') + '] ' + m[3];
+          break;
         }
-      });
+      }
+      editor.value = lines.join('\n');
       _notesSaveDebounce();
     };
   });
@@ -28149,9 +28719,9 @@ function _notesPreviewBindTapToEdit(container) {
   });
   container.addEventListener('dblclick', (e) => {
     if (e.target.closest('a')) return;
-    if (e.target.closest('li[data-list="checked"], li[data-list="unchecked"]')) return;
+    if (e.target.closest('input[type="checkbox"]')) return;
     _notesSwitchMode('edit');
-    setTimeout(() => { if (_quill) _quill.focus(); }, 30);
+    setTimeout(() => { const ed = _notesGetEditor(); if (ed) ed.focus(); }, 30);
   });
 }
 
@@ -28344,29 +28914,24 @@ function _notesSwitchMode(mode) {
   _notesMode = mode;
   document.getElementById('notes-tab-edit').classList.toggle('active', mode === 'edit');
   document.getElementById('notes-tab-preview').classList.toggle('active', mode === 'preview');
-  const quillWrap = document.getElementById('notes-quill-wrap');
+  const editorWrap = document.getElementById('notes-editor-wrap');
   const preview = document.getElementById('notes-preview');
   const searchBar = document.getElementById('notes-preview-search');
   if (mode === 'preview') {
-    if (_quill) {
-      const rawIsHtml = /<[a-z][\s\S]*>/i.test(_notesRawContent);
-      if (rawIsHtml) {
-        preview.innerHTML = _quill.root.innerHTML;
-      } else {
-        preview.innerHTML = renderMarkdown(_notesRawContent) || '<span style="color:var(--dim);font-size:0.85rem;">Empty note</span>';
-      }
-      preview.classList.add('md-content');
-      _notesPreviewBindCheckboxes(preview);
-      _notesPreviewBindTapToEdit(preview);
-    }
+    const editor = _notesGetEditor();
+    const content = editor ? editor.value : _notesRawContent;
+    preview.innerHTML = renderMarkdown(content) || '<span style="color:var(--dim);font-size:0.85rem;">Empty note</span>';
+    preview.classList.add('md-content');
+    _notesPreviewBindCheckboxes(preview);
+    _notesPreviewBindTapToEdit(preview);
     preview.classList.add('active');
-    quillWrap.style.display = 'none';
-    _previewSearchOrigHTML = preview.innerHTML;  // capture for search restore
+    editorWrap.style.display = 'none';
+    _previewSearchOrigHTML = preview.innerHTML;
     if (searchBar) searchBar.style.display = 'flex';
   } else {
     _notesPreviewSearchClear();
     preview.classList.remove('active');
-    quillWrap.style.display = 'flex';
+    editorWrap.style.display = 'flex';
     if (searchBar) searchBar.style.display = 'none';
   }
 }
@@ -28487,91 +29052,43 @@ function _notesApplySidebarState() {
   }
 }
 
-let _quillDividerRegistered = false;
+let _notesEditorReady = false;
 function _notesInitQuill() {
-  if (_quill) return;
-  // Register divider (horizontal rule) blot for Quill (once)
-  if (!_quillDividerRegistered && typeof Quill !== 'undefined') {
-    const BlockEmbed = Quill.import('blots/block/embed');
-    class DividerBlot extends BlockEmbed {
-      static create() { return super.create(); }
-      static value() { return true; }
+  if (_notesEditorReady) return;
+  const editor = _notesGetEditor();
+  if (!editor) return;
+  _notesEditorReady = true;
+  editor.addEventListener('keydown', (e) => {
+    if (e.key === 'Tab') {
+      e.preventDefault();
+      const start = editor.selectionStart;
+      const end = editor.selectionEnd;
+      editor.value = editor.value.substring(0, start) + '  ' + editor.value.substring(end);
+      editor.selectionStart = editor.selectionEnd = start + 2;
+      _notesSaveDebounce();
     }
-    DividerBlot.blotName = 'divider';
-    DividerBlot.tagName = 'hr';
-    Quill.register(DividerBlot);
-    _quillDividerRegistered = true;
-  }
-  _quill = new Quill('#notes-quill', {
-    theme: 'snow',
-    modules: {
-      toolbar: {
-        container: [
-          [{ header: [1, 2, 3, false] }],
-          ['bold', 'italic', 'underline', 'strike'],
-          ['blockquote', 'code-block'],
-          [{ list: 'ordered' }, { list: 'bullet' }, { list: 'check' }],
-          ['link'],
-          ['divider'],
-          ['clean']
-        ],
-        handlers: {
-          divider: function() {
-            const range = _quill.getSelection(true);
-            _quill.insertText(range.index, '\n', 'user');
-            _quill.insertEmbed(range.index + 1, 'divider', true, 'user');
-            _quill.insertText(range.index + 2, '\n', 'user');
-            _quill.setSelection(range.index + 3, 0, 'silent');
-          }
-        }
-      }
-    },
-    placeholder: 'Write your note…'
   });
-  // Quill doesn't render any visual content for custom-format buttons — inject the icon ourselves
-  const _divBtn = document.querySelector('.notes-quill-wrap .ql-toolbar .ql-divider');
-  if (_divBtn && !_divBtn.innerHTML) {
-    _divBtn.innerHTML = '<svg viewBox="0 0 18 18"><line class="ql-stroke" x1="3" x2="15" y1="9" y2="9" stroke-width="2"></line></svg>';
-    _divBtn.title = 'Insert horizontal divider';
-  }
-  // Enable inline markdown shortcuts (** → bold, # → heading, etc.)
-  if (typeof QuillMarkdown !== 'undefined') {
-    try { new QuillMarkdown(_quill); } catch(e) { console.warn('quilljs-markdown init failed:', e); }
-  }
-  _quill.on('text-change', (delta, old, source) => {
-    if (source === 'api' || _notesLoadingContent) return;
-    // Expand @today → full date + time
-    const text = _quill.getText();
-    const atIdx = text.indexOf('@today');
-    if (atIdx !== -1) {
-      const now = new Date();
-      const stamp = now.toLocaleDateString('en-US', { weekday: 'long', year: 'numeric', month: 'long', day: 'numeric' })
-        + ' ' + now.toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit', second: '2-digit' });
-      _quill.deleteText(atIdx, 6, 'api');
-      _quill.insertText(atIdx, stamp, 'api');
-      _quill.setSelection(atIdx + stamp.length, 0, 'api');
+}
+
+let _notesSourceInfo = null;
+async function _notesLoadSource() {
+  try {
+    const r = await fetch(API + '/api/notes-source');
+    const s = await r.json();
+    _notesSourceInfo = s;
+    const nameEl = document.getElementById('notes-source-name');
+    const ind = document.getElementById('notes-source-indicator');
+    if (nameEl) nameEl.textContent = s.name || s.dir;
+    if (ind) {
+      ind.title = (s.exists ? 'Notes sync folder: ' : 'Folder NOT found: ') + s.dir + ' — click to open Settings';
+      ind.style.color = s.exists ? '' : 'var(--danger, #f85149)';
     }
-    // Sync H1 → title input when user edits the heading in Quill directly
-    const first = _quill.root.firstElementChild;
-    if (first && first.tagName === 'H1') {
-      const h1Text = first.textContent.trim();
-      const titleEl = document.getElementById('notes-title');
-      if (titleEl && titleEl.value !== h1Text) {
-        titleEl.value = h1Text;
-        if (_notesActive) {
-          _notesActive.title = h1Text;
-          const activeEl = document.querySelector('#notes-list .notes-list-item.active');
-          if (activeEl) {
-            const s = activeEl.querySelector('.nli-title');
-            if (s) s.textContent = h1Text || _notesActive.path.replace(/\.md$/, '');
-          }
-          const entry = _notesAllNotes.find(n => n.path === _notesActive.path);
-          if (entry) entry.name = h1Text || entry.path.replace(/\.md$/, '');
-        }
-      }
-    }
-    _notesSaveDebounce();
-  });
+    // Mirror into Settings → Notes section if present
+    const setEl = document.getElementById('settings-notes-dir');
+    if (setEl) setEl.textContent = s.dir;
+    const setStatus = document.getElementById('settings-notes-status');
+    if (setStatus) setStatus.textContent = s.exists ? (s.custom ? 'Custom folder (AMUX_NOTES_DIR)' : 'Default folder') : 'Folder not found';
+  } catch(e) {}
 }
 
 async function _notesLoad() {
@@ -28644,6 +29161,31 @@ function _notesFolderSetOpen(name, open) {
   state[name] = open;
   localStorage.setItem('amux_notes_folders', JSON.stringify(state));
 }
+// Collect every folder path (including nested) from the current note set
+function _notesAllFolderPaths() {
+  const set = new Set();
+  for (const n of (_notesCurrentNotes || _notesAllNotes || [])) {
+    const parts = (n.path || '').split('/');
+    let pre = '';
+    for (let i = 0; i < parts.length - 1; i++) {
+      pre = pre ? pre + '/' + parts[i] : parts[i];
+      set.add(pre);
+    }
+  }
+  return [...set];
+}
+// Toggle: collapse all folders; if everything is already collapsed, expand all.
+function _notesCollapseAllFolders() {
+  const all = _notesAllFolderPaths();
+  if (!all.length) return;
+  const anyOpen = all.some(f => _notesFolderOpen(f));
+  const state = JSON.parse(localStorage.getItem('amux_notes_folders') || '{}');
+  for (const f of all) state[f] = anyOpen ? false : true;
+  localStorage.setItem('amux_notes_folders', JSON.stringify(state));
+  const btn = document.getElementById('notes-collapse-all-btn');
+  if (btn) btn.title = anyOpen ? 'Expand all folders' : 'Collapse all folders';
+  _notesRenderList(_notesCurrentNotes);
+}
 function _notesNewFolder() {
   _notesFolderCreating = true;
   _notesRenderList(_notesCurrentNotes);
@@ -28705,10 +29247,10 @@ function _notesDragEnd(e) {
 }
 function _notesDragOverFolder(e, el) {
   if (!_notesDraggingPath) return;
-  const folder = el.dataset.folder;
-  // Don't highlight if note is already in this folder
-  const parts = _notesDraggingPath.split('/');
-  if (parts.length > 1 && parts[0] === folder) return;
+  const folder = el.dataset.folder;  // full path, e.g. "Self/Therapy"
+  // Don't highlight if the note already lives directly in this folder
+  const parent = _notesDraggingPath.split('/').slice(0, -1).join('/');
+  if (parent === folder) return;
   e.preventDefault(); e.dataTransfer.dropEffect = 'move';
   el.classList.add('notes-drop-target');
 }
@@ -28724,10 +29266,11 @@ async function _notesDropOnFolder(e, el) {
   e.preventDefault();
   el.classList.remove('notes-drop-target');
   const path = e.dataTransfer.getData('text/plain') || _notesDraggingPath;
-  const folder = el.dataset.folder;
+  const folder = el.dataset.folder;  // full path, e.g. "Self/Therapy"
   if (!path || !folder) return;
   const parts = path.split('/');
-  if (parts.length > 1 && parts[0] === folder) return; // already there
+  const parent = parts.slice(0, -1).join('/');
+  if (parent === folder) return; // already there
   const filename = parts[parts.length - 1];
   const newPath = folder + '/' + filename;
   await _notesMoveNote(path, newPath);
@@ -28761,22 +29304,30 @@ async function _notesMoveNote(oldPath, newPath) {
   if (entry) entry.path = newPath;
   if (_notesActive?.path === oldPath) _notesActive.path = newPath;
   localStorage.setItem('amux_last_note', newPath);
-  // Open the new folder if needed
-  const newFolder = newPath.includes('/') ? newPath.split('/')[0] : null;
-  if (newFolder) _notesFolderSetOpen(newFolder, true);
+  // Open the destination folder (and its ancestors) so the moved note shows
+  if (newPath.includes('/')) {
+    const parts = newPath.split('/');
+    let pre = '';
+    for (let i = 0; i < parts.length - 1; i++) {
+      pre = pre ? pre + '/' + parts[i] : parts[i];
+      _notesFolderSetOpen(pre, true);
+    }
+  }
   _notesRenderList(_notesCurrentNotes.map(n => n.path === oldPath ? {...n, path: newPath} : n));
   _notesAllNotes = _notesCurrentNotes; // keep in sync
 }
-function _notesItemHtml(n) {
+function _notesItemHtml(n, depth) {
   const active = _notesActive && _notesActive.path === n.path ? ' active' : '';
   const pinned = n.pinned ? ' pinned' : '';
   const dt = n.updated ? new Date(n.updated * 1000).toLocaleDateString() : '';
   const stem = n.path.replace(/\.md$/, '').split('/').pop();
   const rawName = n.name || stem;
   const displayName = /^untitled(-\d+)?$/.test(rawName) ? 'Untitled' : rawName;
+  // Indent to match nesting depth (depth 0 = root, uses default CSS padding)
+  const indent = depth ? `padding-left:${12 + depth * 14}px;` : '';
   return `<div class="notes-list-item${active}${pinned}" data-path="${esc(n.path)}" draggable="true"
     ondragstart="_notesDragStart(event,this)" ondragend="_notesDragEnd(event)"
-    onclick="_notesOpen(this.dataset.path)" style="display:flex;align-items:center;gap:4px;">
+    onclick="_notesOpen(this.dataset.path)" style="display:flex;align-items:center;gap:4px;${indent}">
     <span class="nli-drag"><svg width="8" height="12" viewBox="0 0 8 12" fill="currentColor"><circle cx="2" cy="2" r="1.2"/><circle cx="6" cy="2" r="1.2"/><circle cx="2" cy="6" r="1.2"/><circle cx="6" cy="6" r="1.2"/><circle cx="2" cy="10" r="1.2"/><circle cx="6" cy="10" r="1.2"/></svg></span>
     <div style="flex:1;min-width:0;">
       <div class="nli-title">${esc(displayName)}</div>
@@ -28787,36 +29338,60 @@ function _notesItemHtml(n) {
 function _notesRenderList(notes) {
   _notesCurrentNotes = notes;
   const el = document.getElementById('notes-list');
-  // Group by first path component
-  const folders = {}, root = [];
+  // Build a recursive tree so nested folders (e.g. Self/Therapy/Notes) render
+  // as a real hierarchy. Each node: { dirs: {name:node}, files: [note] }.
+  const root = { dirs: {}, files: [] };
   for (const n of notes) {
     const parts = n.path.split('/');
-    if (parts.length > 1) { (folders[parts[0]] = folders[parts[0]] || []).push(n); }
-    else root.push(n);
+    let node = root;
+    for (let i = 0; i < parts.length - 1; i++) {
+      node.dirs[parts[i]] = node.dirs[parts[i]] || { dirs: {}, files: [] };
+      node = node.dirs[parts[i]];
+    }
+    node.files.push(n);
   }
   let html = '';
   if (_notesFolderCreating) {
     html += `<div class="notes-folder-new-wrap"><input id="notes-folder-input" class="notes-folder-input" type="text" placeholder="Folder name…" onkeydown="_notesFolderInputKey(event)" onblur="setTimeout(_notesFolderCancel,150)" autocomplete="off"></div>`;
   }
-  for (const [folder, items] of Object.entries(folders).sort()) {
-    const open = _notesFolderOpen(folder);
-    html += `<div class="notes-folder-section">
-      <div class="notes-folder-hdr" data-folder="${esc(folder)}" onclick="_notesFolderToggle('${esc(folder)}')"
-        ondragover="_notesDragOverFolder(event,this)" ondragleave="_notesDragLeave(event,this)" ondrop="_notesDropOnFolder(event,this)">
-        <svg class="notes-folder-chevron${open?' open':''}" width="10" height="10" viewBox="0 0 10 10" fill="none"><path d="M3 2l4 3-4 3" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg>
-        <svg width="12" height="12" viewBox="0 0 12 12" fill="none"><path d="M1 3h3.5l1.5 1.5H11v5.5H1V3Z" stroke="currentColor" stroke-width="1.2" stroke-linejoin="round"/></svg>
-        <span class="notes-folder-name">${esc(folder)}</span>
-        <span class="notes-folder-count">${items.length}</span>
-        <button class="notes-folder-add" onclick="event.stopPropagation();_notesNew('${esc(folder)}')" title="New note in ${esc(folder)}"><svg width="10" height="10" viewBox="0 0 10 10" fill="none"><path d="M5 1v8M1 5h8" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></svg></button>
-      </div>
-      ${open ? `<div class="notes-folder-items">${items.map(_notesItemHtml).join('')}</div>` : ''}
-    </div>`;
-  }
+  html += _notesRenderFolders(root.dirs, '', 0);
   // Root drop zone (only visible while dragging a note that's inside a folder)
   html += `<div class="notes-root-drop" id="notes-root-drop"
     ondragover="_notesDragOverRoot(event,this)" ondragleave="_notesDragLeave(event,this)" ondrop="_notesDropOnRoot(event,this)"></div>`;
-  html += root.map(_notesItemHtml).join('');
+  html += root.files.map(n => _notesItemHtml(n, 0)).join('');
   el.innerHTML = html || (!_notesFolderCreating ? '<div class="notes-list-empty">No notes yet</div>' : '');
+}
+
+// Count all notes within a tree node (including nested folders)
+function _notesCountFiles(node) {
+  let c = node.files.length;
+  for (const k in node.dirs) c += _notesCountFiles(node.dirs[k]);
+  return c;
+}
+
+// Recursively render folder sections. Folder open-state is keyed by FULL path
+// (e.g. "Self/Therapy") so nested folders collapse independently.
+function _notesRenderFolders(dirs, prefix, depth) {
+  let html = '';
+  for (const name of Object.keys(dirs).sort((a,b)=>a.localeCompare(b))) {
+    const node = dirs[name];
+    const fullPath = prefix ? prefix + '/' + name : name;
+    const open = _notesFolderOpen(fullPath);
+    const count = _notesCountFiles(node);
+    const pad = 10 + depth * 14;
+    html += `<div class="notes-folder-section">
+      <div class="notes-folder-hdr" data-folder="${esc(fullPath)}" style="padding-left:${pad}px;" onclick="_notesFolderToggle('${esc(fullPath)}')"
+        ondragover="_notesDragOverFolder(event,this)" ondragleave="_notesDragLeave(event,this)" ondrop="_notesDropOnFolder(event,this)">
+        <svg class="notes-folder-chevron${open?' open':''}" width="10" height="10" viewBox="0 0 10 10" fill="none"><path d="M3 2l4 3-4 3" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg>
+        <svg width="12" height="12" viewBox="0 0 12 12" fill="none"><path d="M1 3h3.5l1.5 1.5H11v5.5H1V3Z" stroke="currentColor" stroke-width="1.2" stroke-linejoin="round"/></svg>
+        <span class="notes-folder-name">${esc(name)}</span>
+        <span class="notes-folder-count">${count}</span>
+        <button class="notes-folder-add" onclick="event.stopPropagation();_notesNew('${esc(fullPath)}')" title="New note in ${esc(name)}"><svg width="10" height="10" viewBox="0 0 10 10" fill="none"><path d="M5 1v8M1 5h8" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></svg></button>
+      </div>
+      ${open ? `<div class="notes-folder-items">${_notesRenderFolders(node.dirs, fullPath, depth+1)}${node.files.map(n => _notesItemHtml(n, depth+1)).join('')}</div>` : ''}
+    </div>`;
+  }
+  return html;
 }
 
 function _notesSidebarUpdateActive(path) {
@@ -28843,27 +29418,23 @@ function _notesSearchFilter(q) {
 }
 
 function _notesRenderContent(data) {
-  // Populate UI from note data (shared by cache + network paths)
   _notesActive = { path: data.path };
   _notesRawContent = data.content || '';
   localStorage.setItem('amux_last_note', data.path);
-  const h1html = data.content.match(/<h1[^>]*>(.*?)<\/h1>/i);
   const h1md = data.content.match(/^#\s+(.+)$/m);
-  const titleFromContent = h1html ? h1html[1].replace(/<[^>]+>/g, '') : (h1md ? h1md[1] : '');
+  const titleFromContent = h1md ? h1md[1] : '';
   const titleFromPath = data.path.replace(/\.md$/, '').split('/').pop();
   _notesActive.title = titleFromContent || titleFromPath;
   document.getElementById('notes-title').value = _notesActive.title;
   const listEntry = _notesAllNotes.find(n => n.path === data.path);
   if (listEntry) listEntry.name = _notesActive.title;
-  if (!_quill) _notesInitQuill();
-  const isHtml = /<[a-z][\s\S]*>/i.test(data.content);
-  _notesLoadingContent = true;
-  if (isHtml) {
-    _quill.root.innerHTML = data.content;
-  } else {
-    _quill.setText(data.content || '');
+  _notesInitQuill();
+  const editor = _notesGetEditor();
+  if (editor) {
+    _notesLoadingContent = true;
+    editor.value = data.content || '';
+    setTimeout(() => { _notesLoadingContent = false; }, 0);
   }
-  setTimeout(() => { _notesLoadingContent = false; }, 0);
   document.getElementById('notes-empty-state').style.display = 'none';
   document.getElementById('notes-mode-tabs').style.display = 'flex';
   _notesSwitchMode('preview');
@@ -28939,18 +29510,14 @@ async function _notesOpen(path) {
     return; // cache already displayed, silently fail revalidation
   }
 
-  // Only overwrite editor if content actually changed AND user isn't editing right now
-  // (avoid clobbering in-progress typing during revalidation)
-  if (rendered && _quill) {
-    const localHtml = _quill.root.innerHTML === '<p><br></p>' ? '' : _quill.root.innerHTML;
+  if (rendered) {
+    const editor = _notesGetEditor();
     const serverContent = data.content || '';
-    if (localHtml === serverContent) {
-      // No change — just update metadata
+    if (editor && editor.value === serverContent) {
       _notesActive.path = data.path;
       return;
     }
-    // If Quill has focus, user is editing — skip server overwrite and let debounced save win
-    if (_quill.hasFocus()) return;
+    if (editor && document.activeElement === editor) return;
   }
 
   _notesRenderContent(data);
@@ -28958,6 +29525,45 @@ async function _notesOpen(path) {
     _notesSidebarOpen = false;
     _notesApplySidebarState();
   }
+}
+
+// Reload the currently-open note's content from disk (e.g. after an external
+// edit in Obsidian). Unlike _notesOpen, this refreshes the SAME open note.
+// Guarded so it never clobbers unsaved local edits or in-progress typing.
+async function _notesReloadActive() {
+  if (!_notesActive) return;
+  if (_notesSaveTimer) return;                                  // pending local save
+  const editor = _notesGetEditor();
+  if (editor && document.activeElement === editor) return;      // user is typing in body
+  const titleInp = document.getElementById('notes-title');
+  if (titleInp && document.activeElement === titleInp) return;  // editing the title
+  const path = _notesActive.path;
+  let data;
+  try {
+    const r = await fetch(API + '/api/notes/' + path.replace(/\.md$/, '').split('/').map(encodeURIComponent).join('/'));
+    if (!r.ok) return;
+    data = await r.json();
+  } catch(e) { return; }
+  if (!_notesActive || _notesActive.path !== path) return;      // switched away mid-fetch
+  const serverContent = data.content || '';
+  if (editor && editor.value === serverContent) return;         // unchanged — nothing to do
+  _idb.set('amux_note_' + path, JSON.stringify(data));
+  _notesRawContent = serverContent;
+  if (editor) {
+    _notesLoadingContent = true;
+    editor.value = serverContent;
+    setTimeout(() => { _notesLoadingContent = false; }, 0);
+  }
+  const h1md = serverContent.match(/^#\s+(.+)$/m);
+  if (h1md) {
+    _notesActive.title = h1md[1];
+    if (titleInp) titleInp.value = _notesActive.title;
+    const listEntry = _notesAllNotes.find(n => n.path === path);
+    if (listEntry) { listEntry.name = _notesActive.title; _notesRenderList(_notesAllNotes); }
+  }
+  if (_notesMode === 'preview') _notesSwitchMode('preview');    // re-render preview from new content
+  const st = document.getElementById('notes-save-status');
+  if (st) { st.textContent = 'Updated from disk'; setTimeout(() => { if (st.textContent === 'Updated from disk') st.textContent = ''; }, 2500); }
 }
 
 async function _notesNew(folder) {
@@ -28977,7 +29583,7 @@ async function _notesNew(folder) {
   const urlPath = filename.replace(/\.md$/, '').split('/').map(encodeURIComponent).join('/');
   await apiCall(API + '/api/notes/' + urlPath, {
     method: 'POST', headers: {'Content-Type': 'application/json'},
-    body: JSON.stringify({ content: `<h1>${displayName}</h1>` })
+    body: JSON.stringify({ content: '# ' + displayName + '\n' })
   });
   // Insert at top of list without re-fetching
   _notesAllNotes.unshift({ path: filename, name: displayName, updated: Math.floor(Date.now() / 1000), pinned: false, size: 0 });
@@ -28989,22 +29595,17 @@ async function _notesNew(folder) {
 }
 
 function _notesTitleChange() {
-  if (!_notesActive || !_quill) return;
+  const editor = _notesGetEditor();
+  if (!_notesActive || !editor) return;
   const newTitle = document.getElementById('notes-title').value;
   _notesActive.title = newTitle;
-  // Sync via Quill API (not direct DOM — Quill's delta would reconcile back and override)
-  // Read DOM only to detect; modify only via Quill API with source='api'
-  const firstElem = _quill.root.firstElementChild;
-  const isH1 = firstElem && firstElem.tagName === 'H1';
-  const oldH1Len = isH1 ? firstElem.textContent.length : 0;
-  if (isH1) {
-    if (oldH1Len > 0) _quill.deleteText(0, oldH1Len, 'api');
-    if (newTitle) _quill.insertText(0, newTitle, 'api');
+  const lines = editor.value.split('\n');
+  if (lines[0] && lines[0].match(/^#\s/)) {
+    lines[0] = '# ' + newTitle;
   } else {
-    _quill.insertText(0, (newTitle || '') + '\n', 'api');
-    _quill.formatLine(0, 1, 'header', 1, 'api');
+    lines.unshift('# ' + newTitle);
   }
-  // Update sidebar immediately
+  editor.value = lines.join('\n');
   const activeEl = document.querySelector('#notes-list .notes-list-item.active');
   if (activeEl) {
     const titleEl = activeEl.querySelector('.nli-title');
@@ -29021,8 +29622,9 @@ function _notesSaveDebounce() {
 }
 
 async function _notesSave() {
-  if (!_notesActive || !_quill) return;
-  const content = _quill.root.innerHTML === '<p><br></p>' ? '' : _quill.root.innerHTML;
+  const editor = _notesGetEditor();
+  if (!_notesActive || !editor) return;
+  const content = editor.value;
   _notesRawContent = content;
   const pathKey = _notesActive.path.replace(/\.md$/, '');
   const statusEl = document.getElementById('notes-save-status');
@@ -29097,11 +29699,12 @@ async function _notesDelete() {
 
 function _notesShowEmpty() {
   document.getElementById('notes-empty-state').style.display = 'flex';
-  document.getElementById('notes-quill-wrap').style.display = 'none';
+  document.getElementById('notes-editor-wrap').style.display = 'none';
   document.getElementById('notes-mode-tabs').style.display = 'none';
   document.getElementById('notes-preview').classList.remove('active');
   document.getElementById('notes-title').value = '';
-  if (_quill) _quill.setText('');
+  const editor = _notesGetEditor();
+  if (editor) editor.value = '';
   _notesMode = 'edit';
   // On mobile, show sidebar when no note is open
   if (window.innerWidth <= 600 && !_notesSidebarOpen) {
@@ -29132,6 +29735,55 @@ async function _notesTogglePin(path) {
   _notesAllNotes.sort((a, b) => (b.pinned ? 1 : 0) - (a.pinned ? 1 : 0) || b.updated - a.updated);
   _notesRenderList(_notesAllNotes);
   _notesUpdatePinBtn();
+  _pinnedNotesRefresh();
+}
+
+// ── Pinned notes on home screen ──────────────────────────────────────────────
+let _pinnedNotesCache = [];
+async function _pinnedNotesRefresh() {
+  const container = document.getElementById('pinned-notes-home');
+  if (!container) return;
+  try {
+    const r = await fetch(API + '/api/notes');
+    const all = await r.json();
+    const pinned = all.filter(n => n.pinned);
+    if (!pinned.length) { container.innerHTML = ''; _pinnedNotesCache = []; return; }
+    const contents = await Promise.all(pinned.map(async n => {
+      try {
+        const cr = await fetch(API + '/api/notes/' + n.path.replace(/\.md$/, '').split('/').map(encodeURIComponent).join('/'));
+        const d = await cr.json();
+        return { ...n, content: d.content || '' };
+      } catch { return { ...n, content: '' }; }
+    }));
+    _pinnedNotesCache = contents;
+    _pinnedNotesRender();
+  } catch(e) { console.error('pinned notes:', e); }
+}
+function _pinnedNotesRender() {
+  const container = document.getElementById('pinned-notes-home');
+  if (!container) return;
+  if (!_pinnedNotesCache.length) { container.innerHTML = ''; return; }
+  container.innerHTML = _pinnedNotesCache.map(n => {
+    const isHtml = /<[a-z][\s\S]*>/i.test(n.content);
+    const body = isHtml ? n.content : renderMarkdown(n.content);
+    return `<div class="pinned-note-card" onclick="_pinnedNoteOpen('${esc(n.path)}')" data-path="${esc(n.path)}">
+      <div class="pinned-note-header">
+        <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="17" x2="12" y2="22"/><path d="M5 17h14v-1.76a2 2 0 0 0-1.11-1.79l-1.78-.9A2 2 0 0 1 15 10.76V6h1a2 2 0 0 0 0-4H8a2 2 0 0 0 0 4h1v4.76a2 2 0 0 1-1.11 1.79l-1.78.9A2 2 0 0 0 5 15.24Z"/></svg>
+        <span class="pinned-note-title">${esc(n.name)}</span>
+        <button class="pinned-note-unpin" onclick="event.stopPropagation();_pinnedNoteUnpin('${esc(n.path)}')" title="Unpin from home">
+          <svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+        </button>
+      </div>
+      <div class="pinned-note-body md-content">${body}</div>
+    </div>`;
+  }).join('');
+}
+function _pinnedNoteOpen(path) {
+  switchView('notes');
+  setTimeout(() => _notesOpen(path), 100);
+}
+async function _pinnedNoteUnpin(path) {
+  await _notesTogglePin(path);
 }
 
 // ── CRM / People ──────────────────────────────────────────────────────────────
@@ -31057,6 +31709,7 @@ async function _jrnlSaveConfig() {
   document.getElementById('jrnl-config-overlay')?.remove();
   _jrnlRenderEditor();
 }
+window.addEventListener('load', _pinnedNotesRefresh);
 </script>
 
 <script src="https://cdn.jsdelivr.net/npm/papaparse@5.4.1/papaparse.min.js"></script>
@@ -31170,7 +31823,7 @@ PWA_MANIFEST = json.dumps({
 
 # Robust service worker: cache-first with localStorage fallback for multi-day offline
 SERVICE_WORKER = r"""
-const CACHE = 'amux-v0.6.6';
+const CACHE = 'amux-v0.6.7';
 const SHELL_URLS = ['/', '/manifest.json', '/icon.svg', '/icon.png', '/icon-192.png', '/icon-512.png'];
 
 // Install: pre-cache entire app shell
@@ -31765,6 +32418,7 @@ class CCHandler(BaseHTTPRequestHandler):
                 f'window._AMUX_POSTHOG_HOST={_json.dumps(os.environ.get("POSTHOG_HOST","https://us.i.posthog.com"))};'
                 f'window._AMUX_USER_EMAIL={_json.dumps(_user_email)};'
                 f'window._AMUX_USER_ID={_json.dumps(_user_id)};'
+                f'window._AMUX_UI_TOKEN={_json.dumps(_UI_TOKEN)};'
                 f'window._AMUX_DEFAULT_MODEL={_json.dumps(_get_default_model())};</script></head>',
                 1,
             )
@@ -31924,7 +32578,14 @@ class CCHandler(BaseHTTPRequestHandler):
 
             if method == "GET" and action == "peek":
                 lines = int(qs.get("lines", ["200"])[0])
-                output = tmux_capture(session_name, lines)
+                now = time.monotonic()
+                cached = _peek_cache.get(session_name)
+                if cached and cached[1] >= lines and (now - cached[0]) < _PEEK_CACHE_TTL:
+                    output = cached[2]
+                else:
+                    output = tmux_capture(session_name, lines)
+                    if output:
+                        _peek_cache[session_name] = (now, lines, output)
                 if not output:
                     output = load_session_log(session_name, tail_bytes=65_536) or "(no output)"
                 return self._json({"name": session_name, "output": output})
@@ -32280,8 +32941,57 @@ class CCHandler(BaseHTTPRequestHandler):
                 return self._json(data)
             if method == "POST":
                 body = self._read_body()
+                old = {}
+                if CC_MAP.exists():
+                    try: old = json.loads(CC_MAP.read_text())
+                    except Exception: old = {}
+                old_n = len(old.get("pins", []))
+                new_n = len(body.get("pins", []))
+                replace = qs.get("replace", ["0"])[0] in ("1", "true", "yes")
+                # Guard: POST /api/map replaces the WHOLE map document. Refuse a
+                # write that drops existing pins unless ?replace=1 is passed (the
+                # dashboard passes it — it always holds the full authoritative
+                # set). This stops a naive partial POST (e.g. a session adding
+                # one pin) from wiping everything. To ADD a pin, use the
+                # additive POST /api/map/pins endpoint below.
+                if old_n > 0 and new_n < old_n and not replace:
+                    return self._json({
+                        "error": (f"refusing to drop pins {old_n}->{new_n}: POST /api/map replaces the "
+                                  f"whole map. To ADD a pin use POST /api/map/pins; to intentionally "
+                                  f"replace everything pass ?replace=1"),
+                        "existing_pins": old_n, "submitted_pins": new_n,
+                    }, 409)
+                # Safety net: snapshot before any shrink so a wipe is recoverable.
+                if old_n > 0 and new_n < old_n:
+                    try:
+                        ts = time.strftime("%Y%m%d-%H%M%S")
+                        CC_MAP.with_name(f"map.json.autobak-{ts}").write_text(json.dumps(old))
+                        slog(f"[map] pins {old_n}->{new_n}; snapshot saved before overwrite")
+                    except Exception:
+                        pass
                 CC_MAP.write_text(json.dumps(body))
                 return self._json({"ok": True})
+
+        # Additive pin endpoint — append a pin without touching existing ones.
+        # The SAFE way for sessions/agents to add a map pin.
+        if path == "/api/map/pins" and method == "POST":
+            body = self._read_body()
+            data = {"pins": [], "tags": [], "settings": {}}
+            if CC_MAP.exists():
+                try: data = json.loads(CC_MAP.read_text())
+                except Exception: pass
+            data.setdefault("pins", [])
+            pin = body.get("pin") if isinstance(body.get("pin"), dict) else body
+            if pin.get("lat") is None or pin.get("lng") is None:
+                return self._json({"error": "pin requires lat and lng"}, 400)
+            if not pin.get("id"):
+                pin["id"] = "pin_" + str(int(time.time() * 1000))
+            pin.setdefault("name", pin.get("title", "") or "Pin")
+            pin.setdefault("tags", [])
+            pin.setdefault("desc", "")
+            data["pins"].append(pin)
+            CC_MAP.write_text(json.dumps(data))
+            return self._json({"ok": True, "pin": pin, "total_pins": len(data["pins"])})
 
         # Map place search proxy (/api/map/search)
         if path == "/api/map/search" and method == "GET":
@@ -32404,8 +33114,21 @@ class CCHandler(BaseHTTPRequestHandler):
             notes.sort(key=lambda n: (0 if n["pinned"] else 1, -n["updated"]))
             return self._json(notes)
 
+        if method == "GET" and path == "/api/notes-source":
+            # Where notes are read/written from — drives the notes-tab source
+            # indicator. Set via AMUX_NOTES_DIR in ~/.amux/server.env.
+            d = str(CC_NOTES)
+            custom = bool(os.environ.get("AMUX_NOTES_DIR"))
+            return self._json({
+                "dir": d,
+                "name": CC_NOTES.name or d,
+                "exists": CC_NOTES.is_dir(),
+                "custom": custom,
+                "env_var": "AMUX_NOTES_DIR",
+            })
+
         if method == "GET" and path == "/api/notes/trash":
-            trash_dir = CC_NOTES / ".trash"
+            trash_dir = CC_NOTES_TRASH
             items = []
             if trash_dir.exists():
                 for f in sorted(trash_dir.glob("*.md"), key=lambda p: -p.stat().st_mtime):
@@ -32414,7 +33137,7 @@ class CCHandler(BaseHTTPRequestHandler):
 
         if method == "POST" and path.startswith("/api/notes/trash/") and path.endswith("/restore"):
             fname = path[len("/api/notes/trash/"):-len("/restore")]
-            src = _safe_note_path(fname, CC_NOTES / ".trash")
+            src = _safe_note_path(fname, CC_NOTES_TRASH)
             if not src:
                 return self._json({"error": "invalid"}, 400)
             if not src.exists():
@@ -32430,7 +33153,7 @@ class CCHandler(BaseHTTPRequestHandler):
 
         if method == "DELETE" and path.startswith("/api/notes/trash/"):
             fname = path[len("/api/notes/trash/"):]
-            f = _safe_note_path(fname, CC_NOTES / ".trash")
+            f = _safe_note_path(fname, CC_NOTES_TRASH)
             if not f:
                 return self._json({"error": "invalid"}, 400)
             if f.exists(): f.unlink()
@@ -32478,7 +33201,7 @@ class CCHandler(BaseHTTPRequestHandler):
                 return self._json({"ok": True, "path": new_rel})
             if method == "DELETE":
                 if note_path.exists():
-                    trash_dir = CC_NOTES / ".trash"
+                    trash_dir = CC_NOTES_TRASH
                     trash_dir.mkdir(parents=True, exist_ok=True)
                     dest = trash_dir / note_path.name
                     if dest.exists():
@@ -34186,23 +34909,29 @@ class CCHandler(BaseHTTPRequestHandler):
                 return self._json({"error": "missing text"}, 400)
             if len(text) > 2000:
                 text = text[:2000]
+            prompt = (f"Briefly explain what this means or refers to in 2-4 sentences. "
+                      f"Be concise and direct. If it's a technical term, code, error, "
+                      f"or concept, explain it. If it's a name, identify it.\n\n{text}")
+            # Use the same auth as the active Claude Code session: when on a Plan
+            # (OAuth) use the claude CLI; otherwise use the API key via the SDK.
             api_key = os.environ.get("ANTHROPIC_API_KEY", "")
-            if not api_key:
-                return self._json({"error": "no API key configured"}, 400)
-            try:
-                import anthropic as _anthropic
-                client = _anthropic.Anthropic(api_key=api_key)
-                msg = client.messages.create(
-                    model="claude-haiku-4-5-20251001",
-                    max_tokens=400,
-                    messages=[{"role": "user", "content":
-                        f"Briefly explain what this means or refers to in 2-4 sentences. "
-                        f"Be concise and direct. If it's a technical term, code, error, "
-                        f"or concept, explain it. If it's a name, identify it.\n\n{text}"}],
-                )
-                return self._json({"text": msg.content[0].text.strip()})
-            except Exception as e:
-                return self._json({"error": str(e)}, 500)
+            if api_key and not _on_claude_plan():
+                try:
+                    import anthropic as _anthropic
+                    client = _anthropic.Anthropic(api_key=api_key)
+                    msg = client.messages.create(
+                        model="claude-haiku-4-5-20251001",
+                        max_tokens=400,
+                        messages=[{"role": "user", "content": prompt}],
+                    )
+                    return self._json({"text": msg.content[0].text.strip()})
+                except Exception as e:
+                    return self._json({"error": str(e)}, 500)
+            # Plan / no key → fall back to the claude CLI (uses OAuth subscription)
+            out, err = _claude_oneshot(prompt, model="haiku", timeout=35)
+            if err:
+                return self._json({"error": err}, 500)
+            return self._json({"text": out})
 
         if method == "POST" and path == "/api/suggest-branch":
             body = self._read_body()
@@ -34262,6 +34991,10 @@ class CCHandler(BaseHTTPRequestHandler):
             if not name:
                 return self._json({"error": "missing name"}, 400)
             name = re.sub(r'[^a-zA-Z0-9_-]', '-', name)
+            if _is_session_blocked(name):
+                return self._json({
+                    "error": f"session '{name}' is blocked; remove it from blocked-sessions.txt first"
+                }, 403)
             env_file = CC_SESSIONS / f"{name}.env"
             if env_file.exists():
                 return self._json({"error": f"session '{name}' already exists"}, 409)
@@ -34312,7 +35045,7 @@ class CCHandler(BaseHTTPRequestHandler):
                 cfg["CC_CREATOR"] = creator
             cfg["CC_FLAGS"] = ""
             provider = body.get("provider", "").strip().lower()
-            if provider and provider in ("claude", "codex"):
+            if provider and provider in _SESSION_PROVIDERS:
                 cfg["CC_PROVIDER"] = provider
             mcp = body.get("mcp", "").strip().lower()
             if mcp and mcp == "chrome":
@@ -36244,10 +36977,18 @@ p{{color:#888;margin:12px 0 28px;font-size:0.9rem;line-height:1.5}}
         if method == "GET":
             if action == "peek":
                 lines = int(qs.get("lines", ["80"])[0])
-                output = tmux_capture(name, lines)
+                now = time.monotonic()
+                cached = _peek_cache.get(name)
+                if cached and cached[1] >= lines and (now - cached[0]) < _PEEK_CACHE_TTL:
+                    output = cached[2]
+                else:
+                    output = tmux_capture(name, lines)
+                    if output:
+                        _peek_cache[name] = (now, lines, output)
                 if output:
-                    # Also save snapshot while we have it
-                    threading.Thread(target=save_session_log, args=(name, output), daemon=True).start()
+                    last_save = _last_log_save.get(name, 0)
+                    if now - last_save >= _LOG_SAVE_INTERVAL:
+                        threading.Thread(target=save_session_log, args=(name, output), daemon=True).start()
                     return self._json({"name": name, "output": output})
                 # Not running or empty — serve saved log (tail only to limit memory)
                 saved = load_session_log(name, tail_bytes=65_536)
@@ -36262,6 +37003,10 @@ p{{color:#888;margin:12px 0 28px;font-size:0.9rem;line-height:1.5}}
                 meta = _load_meta(name)
                 # Merge static env fields for a complete picture
                 meta.setdefault("creator", cfg.get("CC_CREATOR", ""))
+                provider = cfg.get("CC_PROVIDER", "claude").strip().lower() or "claude"
+                if provider not in _SESSION_PROVIDERS:
+                    provider = "claude"
+                flags = cfg.get("CC_FLAGS", "")
                 env_mtime = int(env_file.stat().st_mtime)
                 mem_file = _session_mem_file(name)
                 mem_size = mem_file.stat().st_size if mem_file.exists() else 0
@@ -36269,7 +37014,9 @@ p{{color:#888;margin:12px 0 28px;font-size:0.9rem;line-height:1.5}}
                     **meta,
                     "name": name,
                     "dir": cfg.get("CC_DIR", ""),
-                    "flags": cfg.get("CC_FLAGS", ""),
+                    "provider": provider,
+                    "flags": flags,
+                    "configured_model": _extract_model_from_flags(flags) or _default_model_for_provider(provider),
                     "desc": cfg.get("CC_DESC", ""),
                     "tags": [t.strip() for t in cfg.get("CC_TAGS", "").split(",") if t.strip()],
                     "env_updated": env_mtime,
@@ -36324,6 +37071,9 @@ p{{color:#888;margin:12px 0 28px;font-size:0.9rem;line-height:1.5}}
                 return self._json(stats)
             if action == "git":
                 wd = _session_work_dir(name)
+                # Ensure the commit-stamping hook is present (covers sessions
+                # already running before this feature / before a restart).
+                _install_amux_commit_hook(wd)
                 if action_subid == "commits":
                     count = int(qs.get("count", ["30"])[0])
                     # Return commit log with hash, author, date, subject, body
@@ -36340,10 +37090,17 @@ p{{color:#888;margin:12px 0 28px;font-size:0.9rem;line-height:1.5}}
                                 continue
                             parts = entry.split("\x00", 4)
                             if len(parts) >= 4:
+                                body_txt = parts[4].strip() if len(parts) > 4 else ""
+                                # Extract the amux session trailer (if present)
+                                amux_sess = ""
+                                m_sess = re.search(r"^Amux-Session:\s*(.+)$", body_txt, re.MULTILINE)
+                                if m_sess:
+                                    amux_sess = m_sess.group(1).strip()
+                                    body_txt = re.sub(r"^Amux-Session:.*$", "", body_txt, flags=re.MULTILINE).strip()
                                 commits.append({
                                     "hash": parts[0], "author": parts[1],
                                     "date": parts[2], "subject": parts[3],
-                                    "body": parts[4].strip() if len(parts) > 4 else "",
+                                    "body": body_txt, "amux_session": amux_sess,
                                 })
                     return self._json({"commits": commits})
                 if action_subid == "commit-detail":
@@ -36666,6 +37423,13 @@ p{{color:#888;margin:12px 0 28px;font-size:0.9rem;line-height:1.5}}
                                        capture_output=True, timeout=5)
                 return self._json({"ok": True, "message": f"cloned as {new_name} (method: {method_used})", "started": ok})
             if action == "archive":
+                if not _session_destructive_allowed(self.headers):
+                    slog(f"[guard] archive {name} blocked — not a dashboard action, from {self.client_address[0]}")
+                    return self._json({"error": "archiving a session must be initiated by a human in the dashboard; sessions/agents cannot archive sessions (set AMUX_ALLOW_AGENT_SESSION_DELETE=1 to allow automation)"}, 403)
+                cfg_arc = parse_env_file(env_file) if env_file.exists() else {}
+                if cfg_arc.get("CC_PINNED") == "1" and not _is_session_blocked(name):
+                    slog(f"[archive-blocked] {name}: pinned session, rejecting archive from {self.client_address[0]}")
+                    return self._json({"error": "cannot archive pinned session — unpin first"}, 403)
                 ok, msg = archive_session(name)
                 return self._json({"ok": ok, "message": msg}, 200 if ok else 500)
             if action == "wake":
@@ -36693,9 +37457,16 @@ p{{color:#888;margin:12px 0 28px;font-size:0.9rem;line-height:1.5}}
                             dest.write_text(claude_file.read_text())
                 return self._json({"ok": True})
             if action == "delete":
+                if not _session_destructive_allowed(self.headers):
+                    slog(f"[guard] delete {name} blocked — not a dashboard action, from {self.client_address[0]}")
+                    return self._json({"error": "deleting a session must be initiated by a human in the dashboard; sessions/agents cannot delete sessions (set AMUX_ALLOW_AGENT_SESSION_DELETE=1 in ~/.amux/server.env to allow automation)"}, 403)
+                cfg_del = parse_env_file(env_file) if env_file.exists() else {}
+                if cfg_del.get("CC_PINNED") == "1" and not _is_session_blocked(name):
+                    slog(f"[delete-blocked] {name}: pinned session, rejecting delete from {self.client_address[0]}")
+                    return self._json({"error": "cannot delete pinned session — unpin first"}, 403)
+                slog(f"[delete] {name}: delete request from {self.client_address[0]}")
                 if is_running(name):
                     stop_session(name)
-                cfg_del = parse_env_file(env_file) if env_file.exists() else {}
                 # Clean up worktree if this session used one
                 if cfg_del.get("CC_WORKTREE") == "1":
                     wt_repo = cfg_del.get("CC_WORKTREE_REPO", "")
@@ -36776,6 +37547,65 @@ p{{color:#888;margin:12px 0 28px;font-size:0.9rem;line-height:1.5}}
                         pass
                     return self._json({"ok": True, "message": f"renamed to {new_name}"})
 
+                # Change provider
+                if "provider" in body:
+                    if not isinstance(body["provider"], str):
+                        return self._json({"error": "provider must be a string"}, 400)
+                    provider_val = body["provider"].strip().lower()
+                    if provider_val not in _SESSION_PROVIDERS:
+                        return self._json({"error": "provider must be 'claude', 'codex', or 'gemini'"}, 400)
+                    old_provider = cfg.get("CC_PROVIDER", "claude").strip().lower() or "claude"
+                    if old_provider not in _SESSION_PROVIDERS:
+                        old_provider = "claude"
+                    if provider_val == old_provider:
+                        return self._json({"ok": True, "message": f"provider already set to {provider_val}"})
+
+                    current_flags = cfg.get("CC_FLAGS", "")
+                    try:
+                        flags_no_model = _strip_model_from_flags(current_flags)
+                    except ValueError as e:
+                        return self._json({
+                            "error": f"existing CC_FLAGS for session '{name}' is malformed ({e}); fix the .env file manually before updating the provider"
+                        }, 400)
+                    was_yolo = _is_yolo_enabled(current_flags, cfg)
+                    flags_no_yolo = _strip_provider_yolo_flags(flags_no_model)
+                    default_model = _default_model_for_provider(provider_val)
+                    flags = (
+                        f"--model {default_model} {flags_no_yolo}".strip()
+                        if flags_no_yolo
+                        else f"--model {default_model}"
+                    )
+                    if was_yolo:
+                        flags = f"{flags} {_provider_yolo_flag(provider_val)}".strip()
+                        cfg["CC_AUTO_CONTINUE"] = "1"
+                    cfg["CC_PROVIDER"] = provider_val
+                    cfg["CC_FLAGS"] = flags
+
+                    was_running = is_running(name)
+                    if _capture_log_tail_for_reload(name, "provider swap"):
+                        _mark_pending_log_reload(name, "provider swap")
+                    _write_env(env_file, cfg)
+
+                    restarted = False
+                    if was_running:
+                        try:
+                            if old_provider == "claude":
+                                work_dir_pre = str(Path(cfg.get("CC_DIR", str(Path.home()))).expanduser().resolve())
+                                conv_id = _live_conv_id(name, work_dir_pre)
+                                if conv_id:
+                                    meta_pre = _load_meta(name)
+                                    if meta_pre.get("cc_conversation_id") != conv_id:
+                                        meta_pre["cc_conversation_id"] = conv_id
+                                        _save_meta(name, meta_pre)
+                            _stop_session_for_restart(name, old_provider)
+                            ok_r, _ = start_session(name)
+                            restarted = bool(ok_r)
+                        except Exception:
+                            pass
+                    provider_label = _provider_label(provider_val)
+                    suffix = " (session restarted; log reload queued)" if restarted else ""
+                    return self._json({"ok": True, "message": f"provider set to {provider_label}{suffix}"})
+
                 # Change model
                 if "model" in body:
                     ok, model_val, err = _validate_model_name(body["model"])
@@ -36801,6 +37631,12 @@ p{{color:#888;margin:12px 0 28px;font-size:0.9rem;line-height:1.5}}
                     else:
                         flags = flags_no_model
                     cfg["CC_FLAGS"] = flags
+                    current_provider = cfg.get("CC_PROVIDER", "claude").strip().lower() or "claude"
+                    if current_provider not in _SESSION_PROVIDERS:
+                        current_provider = "claude"
+                    was_running = is_running(name)
+                    if _capture_log_tail_for_reload(name, "model swap"):
+                        _mark_pending_log_reload(name, "model swap")
                     _write_env(env_file, cfg)
                     # Auto-restart the session so the new --model takes effect.
                     # In-place /model switching via tmux send-keys is unreliable
@@ -36808,7 +37644,7 @@ p{{color:#888;margin:12px 0 28px;font-size:0.9rem;line-height:1.5}}
                     # busy). Restart kills in-flight work but preserves the
                     # conversation — next start uses --resume <conv-id>.
                     restarted = False
-                    if is_running(name):
+                    if was_running:
                         try:
                             # Capture the LIVE conversation id BEFORE killing
                             # the tmux session. The stored meta value can be
@@ -36817,43 +37653,61 @@ p{{color:#888;margin:12px 0 28px;font-size:0.9rem;line-height:1.5}}
                             # process's argv/open-fds + the work_dir's most-
                             # recent jsonl are authoritative for what
                             # conversation is actually being used.
-                            work_dir_pre = str(Path(cfg.get("CC_DIR", str(Path.home()))).expanduser().resolve())
-                            conv_id = _live_conv_id(name, work_dir_pre)
-                            if conv_id:
-                                meta_pre = _load_meta(name)
-                                if meta_pre.get("cc_conversation_id") != conv_id:
-                                    meta_pre["cc_conversation_id"] = conv_id
-                                    _save_meta(name, meta_pre)
-                            stop_session(name)
+                            if current_provider == "claude":
+                                work_dir_pre = str(Path(cfg.get("CC_DIR", str(Path.home()))).expanduser().resolve())
+                                conv_id = _live_conv_id(name, work_dir_pre)
+                                if conv_id:
+                                    meta_pre = _load_meta(name)
+                                    if meta_pre.get("cc_conversation_id") != conv_id:
+                                        meta_pre["cc_conversation_id"] = conv_id
+                                        _save_meta(name, meta_pre)
+                            _stop_session_for_restart(name, current_provider)
                             ok_r, _ = start_session(name)
                             restarted = bool(ok_r)
                         except Exception:
                             pass
-                    suffix = " (session restarted)" if restarted else ""
+                    suffix = " (session restarted; log reload queued)" if restarted else ""
                     return self._json({"ok": True, "message": f"model set to {model_val}{suffix}"})
 
                 # Toggle YOLO (permissions skip + auto-continue combined)
                 if body.get("toggle_yolo") or body.get("toggle_auto_continue"):
-                    provider = cfg.get("CC_PROVIDER", "claude")
+                    provider = cfg.get("CC_PROVIDER", "claude").strip().lower() or "claude"
+                    if provider not in _SESSION_PROVIDERS:
+                        provider = "claude"
                     flags = cfg.get("CC_FLAGS", "")
-                    is_yolo = (
-                        "--dangerously-skip-permissions" in flags
-                        or "--dangerously-bypass-approvals-and-sandbox" in flags
-                        or cfg.get("CC_AUTO_CONTINUE") in ("1", "true", "yes")
-                    )
+                    is_yolo = _is_yolo_enabled(flags, cfg)
                     if is_yolo:
-                        flags = flags.replace("--dangerously-skip-permissions", "").strip()
-                        flags = flags.replace("--dangerously-bypass-approvals-and-sandbox", "").strip()
+                        flags = _strip_provider_yolo_flags(flags)
                         cfg["CC_AUTO_CONTINUE"] = "0"
+                        enabled = False
                     else:
-                        if provider == "codex":
-                            flags = f"{flags} --dangerously-bypass-approvals-and-sandbox".strip()
-                        else:
-                            flags = f"{flags} --dangerously-skip-permissions".strip()
+                        flags = f"{flags} {_provider_yolo_flag(provider)}".strip()
                         cfg["CC_AUTO_CONTINUE"] = "1"
+                        enabled = True
                     cfg["CC_FLAGS"] = flags
+                    was_running = is_running(name)
+                    if was_running and _capture_log_tail_for_reload(name, "YOLO mode change"):
+                        _mark_pending_log_reload(name, "YOLO mode change")
                     _write_env(env_file, cfg)
-                    return self._json({"ok": True, "message": "yolo toggled"})
+                    restarted = False
+                    if was_running:
+                        try:
+                            if provider == "claude":
+                                work_dir_pre = str(Path(cfg.get("CC_DIR", str(Path.home()))).expanduser().resolve())
+                                conv_id = _live_conv_id(name, work_dir_pre)
+                                if conv_id:
+                                    meta_pre = _load_meta(name)
+                                    if meta_pre.get("cc_conversation_id") != conv_id:
+                                        meta_pre["cc_conversation_id"] = conv_id
+                                        _save_meta(name, meta_pre)
+                            _stop_session_for_restart(name, provider)
+                            ok_r, _ = start_session(name)
+                            restarted = bool(ok_r)
+                        except Exception:
+                            pass
+                    state = "enabled" if enabled else "disabled"
+                    suffix = " (session restarted; log reload queued)" if restarted else ""
+                    return self._json({"ok": True, "message": f"yolo {state}{suffix}"})
 
                 # Change directory
                 if "dir" in body:
@@ -37171,6 +38025,8 @@ def _auto_archive_idle():
     archived = []
     for env_file in sorted(CC_SESSIONS.glob("*.env")):
         name = env_file.stem
+        if _is_session_blocked(name):
+            continue
         if name in protected:
             continue
         cfg = parse_env_file(env_file)
@@ -37198,14 +38054,24 @@ def _auto_archive_idle():
 
 
 def _enforce_archived_stopped():
-    """Stop any archived sessions that still have running tmux processes."""
+    """Stop and remove any tmux processes for archived sessions."""
     stopped = []
     for env_file in sorted(CC_SESSIONS.glob("*.env")):
         name = env_file.stem
         cfg = parse_env_file(env_file)
+        if _is_session_blocked(name):
+            if is_running(name):
+                try:
+                    stop_session(name)
+                    _kill_tmux_session(name)
+                    stopped.append(f"{name} (blocked)")
+                except Exception:
+                    pass
+            continue
         if cfg.get("CC_ARCHIVED") == "1" and is_running(name):
             try:
                 stop_session(name)
+                _kill_tmux_session(name)
                 stopped.append(name)
             except Exception:
                 pass
@@ -37448,6 +38314,33 @@ def _watch_server_env():
                     pass
         except Exception as e:
             slog(f"[env-reload] error: {e}")
+
+
+def _watch_notes_dir():
+    """Poll CC_NOTES for filesystem changes (Obsidian edits, new files, deletions).
+
+    Bumps _notes_version so SSE pushes an invalidation to all clients.
+    """
+    global _notes_version
+    prev_snapshot: dict[str, float] = {}
+    while True:
+        time.sleep(4)
+        try:
+            if not CC_NOTES.is_dir():
+                continue
+            snapshot = {}
+            for f in CC_NOTES.rglob("*.md"):
+                if ".trash" in f.parts:
+                    continue
+                try:
+                    snapshot[str(f)] = f.stat().st_mtime
+                except OSError:
+                    pass
+            if prev_snapshot and snapshot != prev_snapshot:
+                _notes_version += 1
+            prev_snapshot = snapshot
+        except Exception:
+            pass
 
 
 def _validate_api_key() -> tuple[bool, str]:
@@ -37875,7 +38768,7 @@ def main():
 
     # Register all recurring jobs with the unified scheduler
     schedule_job(_yolo_loop,             interval=3,                    name="yolo",        initial_delay=3)
-    schedule_job(_rate_limit_loop,       interval=3,                    name="rate_limit",  initial_delay=4)
+    schedule_job(_rate_limit_loop,       interval=15,                   name="rate_limit",  initial_delay=4)
     schedule_job(_snapshot_loop,         interval=60,                   name="snapshot",    initial_delay=0)
     schedule_job(_reap_stale_browsers,  interval=120,                  name="browser_reap", initial_delay=60)
     schedule_job(_kill_stale_ray,        interval=600,                  name="ray_reap",     initial_delay=120)
@@ -37903,6 +38796,10 @@ def main():
     watcher.start()
     # Watch server.env for key changes (catches gateway pushes, manual edits)
     threading.Thread(target=_watch_server_env, daemon=True).start()
+    # Watch notes directory for external edits (Obsidian, other editors)
+    threading.Thread(target=_watch_notes_dir, daemon=True).start()
+    # Install the commit-stamping hook into all existing session repos
+    threading.Thread(target=_install_hooks_all_sessions, daemon=True).start()
 
     # Initial snapshot immediately, then unified scheduler takes over
     threading.Thread(target=_snapshot_all_sessions, daemon=True).start()

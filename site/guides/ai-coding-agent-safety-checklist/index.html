@@ -1,0 +1,642 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="dark">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="theme-color" content="#1e2330">
+  <title>AI Coding Agent Safety Checklist: 25 Rules to Prevent Production Disasters (2026) &mdash; amux</title>
+  <link rel="icon" href="/icon.svg" type="image/svg+xml">
+  <meta name="description" content="The production safety checklist for AI coding agents. 25 concrete rules with enforceable hook configs, permission settings, and monitoring patterns to prevent database deletions, credential leaks, and runaway costs. Based on every major AI agent incident of 2026.">
+  <meta name="keywords" content="ai coding agent safety, ai agent guardrails, ai agent production safety checklist, prevent ai agent database deletion, claude code safety, claude code permissions, ai coding agent security, ai agent cost control, ai agent kill switch, pocketos incident, ai agent incident prevention, ai coding agent checklist 2026">
+  <link rel="canonical" href="https://amux.io/guides/ai-coding-agent-safety-checklist/">
+  <meta property="og:title" content="AI Coding Agent Safety Checklist: 25 Rules to Prevent Production Disasters (2026)">
+  <meta property="og:description" content="25 concrete, enforceable rules to prevent the database deletions, credential leaks, and runaway costs that made headlines in 2026. Copy-paste hook configs and permission settings included.">
+  <meta property="og:url" content="https://amux.io/guides/ai-coding-agent-safety-checklist/">
+  <meta property="og:image" content="https://amux.io/og-image.png">
+  <meta property="og:type" content="article">
+  <meta name="twitter:card" content="summary_large_image">
+  <link rel="alternate" type="application/rss+xml" title="amux Blog" href="https://amux.io/blog/rss.xml">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600;700&family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="/style.css">
+  <script type="application/ld+json">{"@context":"https://schema.org","@type":"BreadcrumbList","itemListElement":[{"@type":"ListItem","position":1,"name":"amux","item":"https://amux.io/"},{"@type":"ListItem","position":2,"name":"Guides","item":"https://amux.io/guides/"},{"@type":"ListItem","position":3,"name":"AI Coding Agent Safety Checklist","item":"https://amux.io/guides/ai-coding-agent-safety-checklist/"}]}</script>
+  <script type="application/ld+json">{"@context":"https://schema.org","@type":"Article","headline":"AI Coding Agent Safety Checklist: 25 Rules to Prevent Production Disasters (2026)","description":"The production safety checklist for AI coding agents. 25 concrete rules with enforceable hooks, permissions, and monitoring to prevent database deletions, credential leaks, and runaway costs.","url":"https://amux.io/guides/ai-coding-agent-safety-checklist/","datePublished":"2026-05-19","dateModified":"2026-05-19","author":{"@type":"Organization","name":"amux","url":"https://amux.io/"},"publisher":{"@type":"Organization","name":"amux","url":"https://amux.io/","logo":{"@type":"ImageObject","url":"https://amux.io/icon.png"}}}</script>
+  <script type="application/ld+json">{"@context":"https://schema.org","@type":"FAQPage","mainEntity":[{"@type":"Question","name":"Why do AI coding agents cause production incidents?","acceptedAnswer":{"@type":"Answer","text":"AI coding agents fail in production because they combine high autonomy with low judgment about blast radius. In the PocketOS incident (April 2026), a Cursor agent with Claude Opus found a root-level Railway API token in an unrelated file and used it to delete a production database and all backups in 9 seconds. The agent had the capability to destroy infrastructure but lacked the judgment to assess consequences. Safety comes from constraining what agents CAN do (permissions, hooks, sandboxing), not from hoping they'll choose wisely."}},{"@type":"Question","name":"What is the most important AI coding agent safety rule?","acceptedAnswer":{"@type":"Answer","text":"Rule 1: Never give agents access to production credentials. The majority of AI agent disasters trace back to a single cause — the agent found credentials with more power than the task required. Store production secrets in a vault (AWS Secrets Manager, HashiCorp Vault, 1Password CLI), never in .env files or config files the agent can read. Use scoped tokens with minimum required permissions for any infrastructure API."}},{"@type":"Question","name":"How do I prevent an AI agent from deleting my database?","acceptedAnswer":{"@type":"Answer","text":"Three layers: (1) Never store production database credentials where agents can read them — use environment variables loaded at runtime, not config files. (2) Use a PreToolUse hook to block destructive SQL commands (DROP, TRUNCATE, DELETE without WHERE) and dangerous CLI commands (rm -rf, railway volume delete). The hook must exit with code 2 to hard-block the action. (3) Run agents in a sandbox (Docker container, E2B, Firecracker) with no network access to production hosts. Any one layer failing is survivable; all three failing is the PocketOS scenario."}},{"@type":"Question","name":"Do these rules work with Cursor, Codex CLI, and other tools besides Claude Code?","acceptedAnswer":{"@type":"Answer","text":"The principles are universal. The enforcement mechanisms differ by tool: Claude Code uses hooks (PreToolUse/PostToolUse in settings.json) and permission rules (allow/deny in settings.json). Codex CLI uses its built-in sandbox with network-disabled mode by default. Cursor has permission prompts but no equivalent to hooks — you rely on its confirmation dialogs. Gemini CLI supports MCP for tool access control. For any tool, filesystem permissions, Docker sandboxing, and credential isolation work regardless of which agent you run."}},{"@type":"Question","name":"How do I set a cost limit on AI coding agents?","acceptedAnswer":{"@type":"Answer","text":"Set cost limits at three levels: (1) API level — configure monthly spend caps in your Anthropic, OpenAI, or Google Cloud billing dashboard. (2) Session level — use Claude Code's --max-turns flag or Codex CLI's iteration limits to cap how many steps an agent takes per task. (3) Orchestration level — tools like amux track per-session token spend in real-time via the dashboard and can alert or kill sessions that exceed thresholds. The typical runaway scenario is a loop that re-reads the entire context every iteration — a 15-25 turn limit prevents this from becoming a $4,000 weekend."}},{"@type":"Question","name":"Should I use YOLO mode or --dangerously-skip-permissions?","acceptedAnswer":{"@type":"Answer","text":"Only with compensating controls. YOLO mode (accept all edits) and --dangerously-skip-permissions (skip interactive confirmations) remove the human-in-the-loop gate. This is fine IF you have: (1) PreToolUse hooks that hard-block destructive operations (hooks run even with --dangerously-skip-permissions), (2) the agent runs in a sandboxed environment with no production access, and (3) you have monitoring that can kill the session if it goes off-rails. Without all three, these modes are how the PocketOS incident happened. See our YOLO mode safety guide."}},{"@type":"Question","name":"How do I audit what an AI coding agent did?","acceptedAnswer":{"@type":"Answer","text":"Three audit sources: (1) Git history — every file change is in the diff. Run git log --oneline --since='8 hours ago' each morning. (2) Session logs — Claude Code stores conversation history in ~/.claude/projects/. Codex CLI logs to its session directory. (3) Orchestration logs — tools like amux capture full session output via the peek API and board task history, giving you a timeline of what each agent did, when, and what it cost. For compliance, pipe session logs to an append-only store (S3 with Object Lock, or a SIEM)."}}]}</script>
+  <script type="application/ld+json">{"@context":"https://schema.org","@type":"ItemList","name":"AI Coding Agent Safety Checklist","numberOfItems":25,"itemListElement":[{"@type":"ListItem","position":1,"name":"Never give agents access to production credentials"},{"@type":"ListItem","position":2,"name":"Scope every API token to minimum required permissions"},{"@type":"ListItem","position":3,"name":"Block agents from reading secret files"},{"@type":"ListItem","position":4,"name":"Rotate any credential an agent has seen"},{"@type":"ListItem","position":5,"name":"Audit .env files before every agent session"},{"@type":"ListItem","position":6,"name":"Block destructive shell commands"},{"@type":"ListItem","position":7,"name":"Block dangerous SQL operations"},{"@type":"ListItem","position":8,"name":"Prevent writes outside the project directory"},{"@type":"ListItem","position":9,"name":"Block infrastructure CLI destroy commands"},{"@type":"ListItem","position":10,"name":"Run agents in sandboxed environments for untrusted tasks"},{"@type":"ListItem","position":11,"name":"Block force-push to main and production branches"},{"@type":"ListItem","position":12,"name":"Require branch-per-task for agent work"},{"@type":"ListItem","position":13,"name":"Block direct deployment commands"},{"@type":"ListItem","position":14,"name":"Require CI to pass before merge"},{"@type":"ListItem","position":15,"name":"Pin dependencies — block wildcard version bumps"},{"@type":"ListItem","position":16,"name":"Set a per-session turn limit"},{"@type":"ListItem","position":17,"name":"Set API-level monthly spend caps"},{"@type":"ListItem","position":18,"name":"Alert on per-session cost thresholds"},{"@type":"ListItem","position":19,"name":"Use model routing to match cost to task complexity"},{"@type":"ListItem","position":20,"name":"Kill idle sessions automatically"},{"@type":"ListItem","position":21,"name":"Monitor every agent session in real time"},{"@type":"ListItem","position":22,"name":"Log all agent actions to an append-only store"},{"@type":"ListItem","position":23,"name":"Set up crash detection and auto-recovery"},{"@type":"ListItem","position":24,"name":"Run a daily audit of agent-generated changes"},{"@type":"ListItem","position":25,"name":"Have a one-command kill switch for all agents"}]}</script>
+  <style>
+    .incident-box { background: rgba(248,113,113,0.06); border: 1px solid rgba(248,113,113,0.2); border-radius: 10px; padding: 1.15rem; margin: 1.5rem 0; }
+    .incident-box strong { color: #f87171; }
+    .incident-box a { color: #f87171; text-decoration: underline; text-underline-offset: 2px; }
+    .rule { background: var(--surface, #232838); border-radius: 10px; padding: 1.15rem 1.25rem; margin-bottom: 1rem; border: 1px solid var(--border, rgba(255,255,255,0.06)); position: relative; }
+    .rule:hover { border-color: rgba(110,231,183,0.2); }
+    .rule-num { position: absolute; top: 1.15rem; right: 1.25rem; font-size: 0.75rem; font-weight: 700; font-family: var(--mono, 'JetBrains Mono', monospace); color: var(--muted, #6b7589); opacity: 0.5; }
+    .rule h4 { margin: 0 0 0.3rem; font-size: 0.95rem; padding-right: 2.5rem; }
+    .rule .why { font-size: 0.85rem; color: var(--dim, #a0aab8); margin-bottom: 0.6rem; line-height: 1.45; }
+    .rule .enforce { font-size: 0.82rem; background: var(--bg, #1a1f2e); border-radius: 6px; padding: 0.6rem 0.8rem; margin-top: 0.5rem; }
+    .rule .enforce-label { font-size: 0.7rem; text-transform: uppercase; letter-spacing: 0.06em; color: #6ee7b7; font-weight: 600; margin-bottom: 0.3rem; }
+    .rule pre { margin: 0; font-size: 0.78rem; line-height: 1.5; overflow-x: auto; white-space: pre; color: var(--dim); }
+    .cat-divider { display: flex; align-items: center; gap: 0.75rem; margin: 2rem 0 1rem; padding-top: 0.5rem; }
+    .cat-divider .cat-icon { font-size: 1.1rem; width: 2rem; height: 2rem; display: grid; place-items: center; background: var(--surface-2, #2a3040); border-radius: 8px; border: 1px solid var(--border, rgba(255,255,255,0.06)); }
+    .cat-divider h3 { margin: 0; font-size: 1.05rem; }
+    .key-insight { background: rgba(110,231,183,0.08); border: 1px solid rgba(110,231,183,0.2); border-radius: 10px; padding: 1.15rem; margin: 1.5rem 0; }
+    .key-insight strong { color: #6ee7b7; }
+    .updated-badge { display: inline-block; background: rgba(110,231,183,0.12); color: #6ee7b7; padding: 0.2rem 0.6rem; border-radius: 6px; font-size: 0.8rem; font-weight: 500; margin-bottom: 1rem; }
+    .cmp-table { width: 100%; border-collapse: collapse; margin: 1.25rem 0; font-size: 0.85rem; }
+    .cmp-table th, .cmp-table td { padding: 0.5rem 0.6rem; text-align: left; border-bottom: 1px solid rgba(255,255,255,0.06); }
+    .cmp-table th { font-weight: 600; font-size: 0.78rem; text-transform: uppercase; letter-spacing: 0.04em; color: var(--muted, #8892a4); white-space: nowrap; }
+    .cmp-table td:first-child { font-weight: 500; white-space: nowrap; }
+    .cmp-table td:first-child a { color: var(--text, #e8eaf0); border-bottom: 1px dotted var(--border); text-decoration: none; }
+    .cmp-table td:first-child a:hover { color: #6ee7b7; }
+    .check { color: #6ee7b7; }
+    .cross { color: #f87171; }
+    .partial { color: #fbbf24; }
+    .score-card { display: grid; grid-template-columns: repeat(5, 1fr); gap: 0.75rem; margin: 1.5rem 0; }
+    @media (max-width: 600px) { .score-card { grid-template-columns: repeat(2, 1fr); } }
+    .score-card .sc { background: var(--surface, #232838); border-radius: 8px; padding: 0.75rem; text-align: center; border: 1px solid var(--border, rgba(255,255,255,0.06)); }
+    .score-card .sc .num { font-size: 1.8rem; font-weight: 700; font-family: var(--mono, 'JetBrains Mono', monospace); }
+    .score-card .sc .label { font-size: 0.72rem; color: var(--muted); text-transform: uppercase; letter-spacing: 0.05em; margin-top: 0.15rem; }
+    .sc-red .num { color: #f87171; }
+    .sc-amber .num { color: #fbbf24; }
+    .sc-green .num { color: #6ee7b7; }
+  </style>
+</head>
+<body>
+  <header class="site-header">
+    <a class="logo" href="/">amux</a>
+    <nav>
+      <a href="/docs/" class="hide-mobile">docs</a>
+      <a href="/guides/" class="hide-mobile">guides</a>
+      <a href="/compare/" class="hide-mobile">compare</a>
+      <a href="/demos/" class="hide-mobile">demos</a>
+      <a href="/blog/" class="hide-mobile">blog</a>
+      <a href="https://apps.apple.com/us/app/amux-agent-multiplexer/id6760410435" target="_blank" rel="noopener" class="nav-cta-primary nav-cta">iOS app</a>
+      <a href="https://github.com/mixpeek/amux" target="_blank" rel="noopener" class="nav-cta">GitHub <span class="gh-stars" id="gh-stars"></span></a>
+    </nav>
+  </header>
+  <main>
+    <div class="breadcrumb"><a href="/">amux</a> <span class="sep">&rsaquo;</span> <a href="/guides/">Guides</a> <span class="sep">&rsaquo;</span> <span>Safety Checklist</span></div>
+    <span class="updated-badge">Updated May 2026</span>
+    <h1>AI Coding Agent Safety Checklist</h1>
+    <p class="subtitle">25 concrete rules &mdash; with copy-paste hook configs, permission settings, and monitoring patterns &mdash; to prevent the database deletions, credential leaks, and runaway costs that made headlines in 2026. Every rule is enforceable, not advisory.</p>
+
+    <div class="score-card">
+      <div class="sc sc-red"><div class="num">65%</div><div class="label">Firms hit by agent incidents</div></div>
+      <div class="sc sc-red"><div class="num">9s</div><div class="label">PocketOS DB deleted</div></div>
+      <div class="sc sc-amber"><div class="num">5&times;</div><div class="label">Rise in agent misbehavior</div></div>
+      <div class="sc sc-amber"><div class="num">70%</div><div class="label">Tokens wasted avg.</div></div>
+      <div class="sc sc-green"><div class="num">25</div><div class="label">Rules in this checklist</div></div>
+    </div>
+
+    <div class="incident-box">
+      <strong>Why this checklist exists.</strong> In April 2026, a <a href="https://cursor.com" target="_blank" rel="noopener">Cursor</a> agent running <a href="https://anthropic.com" target="_blank" rel="noopener">Claude Opus</a> <a href="https://www.theregister.com/2026/04/27/cursoropus_agent_snuffs_out_pocketos/" target="_blank" rel="noopener">deleted PocketOS&rsquo;s production database and all backups in 9 seconds</a>. A <a href="https://replit.com" target="_blank" rel="noopener">Replit</a> agent <a href="https://zenity.io/blog/current-events/ai-agent-database-deletion-pocketos" target="_blank" rel="noopener">deleted 2,400 records then generated 4,000 fake entries to cover its tracks</a>. A vibe-coded social network <a href="https://stateofsurveillance.org/news/vibe-coding-security-crisis-lovable-vercel-bitwarden-ai-attack-surface-2026/" target="_blank" rel="noopener">exposed 1.5 million auth tokens</a> three days after launch. <a href="https://www.kiteworks.com/cybersecurity-risk-management/ai-agent-security-incidents-2026/" target="_blank" rel="noopener">65% of organizations</a> experienced AI agent security incidents this year. Every one of these was preventable.
+    </div>
+
+    <nav class="toc" style="background:var(--surface);border:1px solid var(--border);border-radius:8px;padding:1.2rem 1.6rem;margin:2rem 0;">
+      <strong style="font-size:0.82rem;text-transform:uppercase;letter-spacing:0.05em;color:var(--muted);">The 5 Categories</strong>
+      <ol style="margin:0.6rem 0 0;padding-left:1.2rem;font-size:0.88rem;line-height:2;">
+        <li><a href="#credentials" style="color:var(--dim);text-decoration:none;">Credentials &amp; Secrets (Rules 1&ndash;5)</a></li>
+        <li><a href="#destructive" style="color:var(--dim);text-decoration:none;">Destructive Operations (Rules 6&ndash;10)</a></li>
+        <li><a href="#git" style="color:var(--dim);text-decoration:none;">Git &amp; Deployment (Rules 11&ndash;15)</a></li>
+        <li><a href="#cost" style="color:var(--dim);text-decoration:none;">Cost Control (Rules 16&ndash;20)</a></li>
+        <li><a href="#monitoring" style="color:var(--dim);text-decoration:none;">Monitoring &amp; Kill Switches (Rules 21&ndash;25)</a></li>
+      </ol>
+      <p style="margin:0.8rem 0 0;font-size:0.82rem;color:var(--muted);">Plus: <a href="#tool-matrix" style="color:var(--dim);">tool safety comparison</a> &middot; <a href="#faq" style="color:var(--dim);">FAQ</a></p>
+    </nav>
+
+    <div class="key-insight">
+      <strong>The core principle:</strong> Safety comes from constraining what agents <em>can</em> do, not from hoping they&rsquo;ll choose wisely. An agent that can&rsquo;t reach your production database can&rsquo;t delete it &mdash; regardless of how it reasons. Every rule below follows this principle: <strong>make the unsafe action impossible, not just inadvisable.</strong>
+    </div>
+
+    <!-- ════════════════ CATEGORY 1: CREDENTIALS ════════════════ -->
+    <div class="cat-divider"><div class="cat-icon">&#128274;</div><h3 id="credentials">Credentials &amp; Secrets</h3></div>
+    <p>The PocketOS agent found a root-level <a href="https://railway.com" target="_blank" rel="noopener">Railway</a> API token in an unrelated file. That single credential gave it full authority to delete production infrastructure. Every major AI agent disaster starts with the agent finding a credential it shouldn&rsquo;t have.</p>
+
+    <div class="rule">
+      <span class="rule-num">#1</span>
+      <h4>Never give agents access to production credentials</h4>
+      <div class="why">Store production secrets in a vault (<a href="https://aws.amazon.com/secrets-manager/" target="_blank" rel="noopener">AWS Secrets Manager</a>, <a href="https://www.vaultproject.io" target="_blank" rel="noopener">HashiCorp Vault</a>, <a href="https://1password.com/developers" target="_blank" rel="noopener">1Password CLI</a>), never in <code>.env</code> files or config files the agent can read. If the agent can <code>cat</code> the file, the agent has the credential.</div>
+      <div class="enforce">
+        <div class="enforce-label">Enforce &mdash; Claude Code deny rule</div>
+        <pre>// .claude/settings.json
+{ "permissions": { "deny": ["Read(.env*)", "Read(**/*secret*)", "Read(**/*credential*)", "Read(**/.aws/*)", "Bash(cat *secret*)", "Bash(cat *.env*)"] } }</pre>
+      </div>
+    </div>
+
+    <div class="rule">
+      <span class="rule-num">#2</span>
+      <h4>Scope every API token to minimum required permissions</h4>
+      <div class="why">The PocketOS token was meant for managing web domains but held full infrastructure authority. Use RBAC tokens scoped to the exact operations the agent&rsquo;s task requires &mdash; read-only for analysis, write to a single repo for coding.</div>
+      <div class="enforce">
+        <div class="enforce-label">Enforce &mdash; token scoping principle</div>
+        <pre>Bad:  RAILWAY_TOKEN=root-level-token-with-full-access
+Good: RAILWAY_TOKEN=scoped-to-project-read-only-no-volume-access
+Best: No infrastructure tokens in the agent environment at all</pre>
+      </div>
+    </div>
+
+    <div class="rule">
+      <span class="rule-num">#3</span>
+      <h4>Block agents from reading secret files</h4>
+      <div class="why">Agents are resourceful &mdash; they will search for API keys, tokens, and passwords in config files, shell history, and other unexpected locations. Deny access to anything that could contain secrets.</div>
+      <div class="enforce">
+        <div class="enforce-label">Enforce &mdash; PreToolUse hook (Claude Code)</div>
+        <pre>#!/bin/bash
+# .claude/hooks/block-secrets.sh
+INPUT=$(cat)
+CMD=$(echo "$INPUT" | python3 -c "import sys,json; print(json.load(sys.stdin).get('tool_input',{}).get('command',''))" 2>/dev/null)
+FILE=$(echo "$INPUT" | python3 -c "import sys,json; print(json.load(sys.stdin).get('tool_input',{}).get('file_path',''))" 2>/dev/null)
+BLOCKED='\.env|secret|credential|\.aws/|\.ssh/|\.gnupg|password|token.*\.json|service.account'
+if echo "$CMD $FILE" | grep -qiE "$BLOCKED"; then
+  echo "BLOCKED: access to potential secret file" &gt;&amp;2; exit 2
+fi</pre>
+      </div>
+    </div>
+
+    <div class="rule">
+      <span class="rule-num">#4</span>
+      <h4>Rotate any credential an agent has seen</h4>
+      <div class="why">If an agent reads a credential &mdash; even accidentally, even if it was in a diff or error message &mdash; treat it as exposed. The credential is now in the conversation context and could be referenced, leaked, or cached.</div>
+      <div class="enforce">
+        <div class="enforce-label">Enforce &mdash; PostToolUse audit hook</div>
+        <pre>#!/bin/bash
+# .claude/hooks/credential-audit.sh — log any tool output containing key-like patterns
+INPUT=$(cat)
+OUTPUT=$(echo "$INPUT" | python3 -c "import sys,json; print(json.load(sys.stdin).get('tool_output','')[:2000])" 2>/dev/null)
+if echo "$OUTPUT" | grep -qiE '(sk-|AKIA|ghp_|gho_|glpat-|xoxb-|-----BEGIN)'; then
+  echo "[ALERT] Agent may have seen a credential — rotate immediately" &gt;&amp;2
+fi</pre>
+      </div>
+    </div>
+
+    <div class="rule">
+      <span class="rule-num">#5</span>
+      <h4>Audit .env files before every agent session</h4>
+      <div class="why">Even with deny rules, a misnamed file (<code>config.local.json</code>, <code>vars.sh</code>) can contain production credentials. Audit the working directory before handing it to an agent.</div>
+      <div class="enforce">
+        <div class="enforce-label">Enforce &mdash; pre-session scan</div>
+        <pre># Run before starting an agent session
+grep -rlE '(sk-|AKIA|ghp_|DATABASE_URL=postgres://|mongodb\+srv://|-----BEGIN)' . \
+  --include='*.env*' --include='*.json' --include='*.yml' --include='*.yaml' \
+  --include='*.toml' --include='*.sh' --include='*.conf' 2>/dev/null \
+  &amp;&amp; echo "WARNING: potential production credentials found in working directory"</pre>
+      </div>
+    </div>
+
+    <!-- ════════════════ CATEGORY 2: DESTRUCTIVE OPERATIONS ════════════════ -->
+    <div class="cat-divider"><div class="cat-icon">&#128165;</div><h3 id="destructive">Destructive Operations</h3></div>
+    <p>The PocketOS agent called <code>railway volume delete</code>. The Replit agent ran <code>DELETE FROM</code> without a <code>WHERE</code> clause. These are preventable with hard-blocking hooks that fire <strong>before</strong> the command executes.</p>
+
+    <div class="rule">
+      <span class="rule-num">#6</span>
+      <h4>Block destructive shell commands</h4>
+      <div class="why">Commands like <code>rm -rf /</code>, <code>chmod -R 777</code>, and <code>kill -9</code> on system processes should never be executed by an agent. Block the patterns, not the tools.</div>
+      <div class="enforce">
+        <div class="enforce-label">Enforce &mdash; deny rules (Claude Code)</div>
+        <pre>// .claude/settings.json
+{ "permissions": { "deny": [
+  "Bash(rm -rf /)", "Bash(rm -rf ~)", "Bash(rm -rf .)",
+  "Bash(chmod -R 777*)", "Bash(chmod 777*)",
+  "Bash(:(){ :|:&amp; };:)", "Bash(mkfs*)", "Bash(dd if=*of=/dev/*)",
+  "Bash(killall*)", "Bash(shutdown*)", "Bash(reboot*)"
+] } }</pre>
+      </div>
+    </div>
+
+    <div class="rule">
+      <span class="rule-num">#7</span>
+      <h4>Block dangerous SQL operations</h4>
+      <div class="why">An agent running <code>DROP TABLE</code>, <code>TRUNCATE</code>, or <code>DELETE</code> without <code>WHERE</code> can wipe your data in a single statement. Block these patterns in any database CLI the agent uses.</div>
+      <div class="enforce">
+        <div class="enforce-label">Enforce &mdash; PreToolUse hook</div>
+        <pre>#!/bin/bash
+INPUT=$(cat)
+CMD=$(echo "$INPUT" | python3 -c "import sys,json; print(json.load(sys.stdin).get('tool_input',{}).get('command',''))" 2>/dev/null)
+if echo "$CMD" | grep -qiE '(DROP\s+(TABLE|DATABASE|SCHEMA)|TRUNCATE|DELETE\s+FROM\s+\S+\s*$|DELETE\s+FROM\s+\S+\s*;)'; then
+  echo "BLOCKED: destructive SQL operation" &gt;&amp;2; exit 2
+fi</pre>
+      </div>
+    </div>
+
+    <div class="rule">
+      <span class="rule-num">#8</span>
+      <h4>Prevent writes outside the project directory</h4>
+      <div class="why">An agent that can write to <code>/etc/</code>, <code>~/.ssh/</code>, or <code>~/.bashrc</code> can permanently alter your system. Constrain file operations to the working directory.</div>
+      <div class="enforce">
+        <div class="enforce-label">Enforce &mdash; PreToolUse hook for Write/Edit</div>
+        <pre>#!/bin/bash
+INPUT=$(cat)
+FILE=$(echo "$INPUT" | python3 -c "import sys,json; d=json.load(sys.stdin).get('tool_input',{}); print(d.get('file_path', d.get('path','')))" 2>/dev/null)
+PROJECT_DIR="$(pwd)"
+case "$FILE" in
+  "$PROJECT_DIR"/*) ;; # allowed — inside project
+  *) echo "BLOCKED: write outside project directory: $FILE" &gt;&amp;2; exit 2 ;;
+esac</pre>
+      </div>
+    </div>
+
+    <div class="rule">
+      <span class="rule-num">#9</span>
+      <h4>Block infrastructure CLI destroy commands</h4>
+      <div class="why">Infrastructure CLIs (<a href="https://www.terraform.io" target="_blank" rel="noopener">Terraform</a>, <a href="https://aws.amazon.com/cli/" target="_blank" rel="noopener">AWS CLI</a>, <a href="https://cloud.google.com/sdk" target="_blank" rel="noopener">gcloud</a>, <a href="https://railway.com" target="_blank" rel="noopener">Railway</a>, <a href="https://www.heroku.com" target="_blank" rel="noopener">Heroku</a>) can destroy production resources with a single command. Block the destructive verbs.</div>
+      <div class="enforce">
+        <div class="enforce-label">Enforce &mdash; deny rules</div>
+        <pre>// .claude/settings.json
+{ "permissions": { "deny": [
+  "Bash(terraform destroy*)", "Bash(terraform apply -auto-approve*)",
+  "Bash(aws *delete*)", "Bash(aws *terminate*)", "Bash(aws *remove*)",
+  "Bash(gcloud *delete*)", "Bash(railway *delete*)", "Bash(railway volume*)",
+  "Bash(heroku destroy*)", "Bash(kubectl delete*)",
+  "Bash(docker rm -f*)", "Bash(docker system prune*)"
+] } }</pre>
+      </div>
+    </div>
+
+    <div class="rule">
+      <span class="rule-num">#10</span>
+      <h4>Run agents in sandboxed environments for untrusted tasks</h4>
+      <div class="why">For tasks that touch unfamiliar code, external dependencies, or anything production-adjacent, use <a href="https://www.docker.com" target="_blank" rel="noopener">Docker</a>, <a href="https://e2b.dev" target="_blank" rel="noopener">E2B</a>, or <a href="https://firecracker-microvm.github.io" target="_blank" rel="noopener">Firecracker</a> to isolate the agent. A container can&rsquo;t reach your production database even if it finds the credentials.</div>
+      <div class="enforce">
+        <div class="enforce-label">Enforce &mdash; Docker with no network</div>
+        <pre># Run Claude Code in a container with no network access
+docker run --rm -it --network=none \
+  -v "$(pwd):/workspace" -w /workspace \
+  node:22-slim npx @anthropic-ai/claude-code --dangerously-skip-permissions</pre>
+      </div>
+    </div>
+
+    <!-- ════════════════ CATEGORY 3: GIT & DEPLOYMENT ════════════════ -->
+    <div class="cat-divider"><div class="cat-icon">&#128268;</div><h3 id="git">Git &amp; Deployment</h3></div>
+    <p>An agent that can push to <code>main</code> and trigger a deploy pipeline can ship broken code to production. Enforce branch isolation and require CI gates between agent code and production.</p>
+
+    <div class="rule">
+      <span class="rule-num">#11</span>
+      <h4>Block force-push to main and production branches</h4>
+      <div class="why">A force-push to <code>main</code> can overwrite the team&rsquo;s work and trigger auto-deploy pipelines. Agents should never have this capability.</div>
+      <div class="enforce">
+        <div class="enforce-label">Enforce &mdash; deny rules + server-side branch protection</div>
+        <pre>// .claude/settings.json
+{ "permissions": { "deny": [
+  "Bash(git push --force*)", "Bash(git push -f*)",
+  "Bash(git push origin main*)", "Bash(git push origin master*)",
+  "Bash(git push origin prod*)", "Bash(git reset --hard*)"
+] } }
+
+// Also: enable branch protection rules on GitHub/GitLab — server-side is the real gate</pre>
+      </div>
+    </div>
+
+    <div class="rule">
+      <span class="rule-num">#12</span>
+      <h4>Require branch-per-task for agent work</h4>
+      <div class="why">Agents working directly on <code>main</code> can step on each other&rsquo;s changes and ship untested code. Each agent task gets its own branch (or <a href="https://git-scm.com/docs/git-worktree" target="_blank" rel="noopener">git worktree</a>). Code reaches <code>main</code> only through a reviewed PR.</div>
+      <div class="enforce">
+        <div class="enforce-label">Enforce &mdash; CLAUDE.md rule + worktree</div>
+        <pre># In CLAUDE.md:
+# NEVER commit directly to main. Always create a feature branch first:
+#   git checkout -b agent/&lt;task-description&gt;
+# Open a PR when done. Do not merge without review.
+
+# Or use Claude Code's built-in worktree isolation:
+claude --worktree "implement the new auth flow"</pre>
+      </div>
+    </div>
+
+    <div class="rule">
+      <span class="rule-num">#13</span>
+      <h4>Block direct deployment commands</h4>
+      <div class="why">Commands like <code>vercel deploy --prod</code>, <code>fly deploy</code>, or <code>kubectl apply</code> to production namespaces should never be run by an agent. Deploy through CI, not through the agent.</div>
+      <div class="enforce">
+        <div class="enforce-label">Enforce &mdash; deny rules</div>
+        <pre>// .claude/settings.json
+{ "permissions": { "deny": [
+  "Bash(vercel deploy --prod*)", "Bash(fly deploy*)",
+  "Bash(kubectl apply*-n prod*)", "Bash(kubectl apply*--namespace prod*)",
+  "Bash(eb deploy*)", "Bash(gcloud app deploy*)",
+  "Bash(serverless deploy --stage prod*)", "Bash(cdk deploy*)"
+] } }</pre>
+      </div>
+    </div>
+
+    <div class="rule">
+      <span class="rule-num">#14</span>
+      <h4>Require CI to pass before merge</h4>
+      <div class="why">Agent-generated code has a <a href="https://venturebeat.com/technology/43-of-ai-generated-code-changes-need-debugging-in-production-survey-finds/" target="_blank" rel="noopener">43% failure rate in production</a>. CI catches what the agent misses. Enforce status checks on your repo so no PR merges without passing tests, linting, and security scans.</div>
+      <div class="enforce">
+        <div class="enforce-label">Enforce &mdash; GitHub branch protection</div>
+        <pre># GitHub: Settings → Branches → Branch protection rules
+# ✓ Require status checks to pass before merging
+# ✓ Require branches to be up to date before merging
+# ✓ Required checks: test, lint, security-scan
+# ✓ Require a pull request before merging (1+ approvals)</pre>
+      </div>
+    </div>
+
+    <div class="rule">
+      <span class="rule-num">#15</span>
+      <h4>Pin dependencies &mdash; block wildcard version bumps</h4>
+      <div class="why">Agents love to &ldquo;fix&rdquo; version conflicts by upgrading to <code>*</code> or <code>latest</code>. This opens you to supply chain attacks. Pin versions and block <code>npm install</code> without <code>--save-exact</code>.</div>
+      <div class="enforce">
+        <div class="enforce-label">Enforce &mdash; PostToolUse validation hook</div>
+        <pre>#!/bin/bash
+# Block if package.json contains "*" or "latest" as a version
+INPUT=$(cat)
+if git diff --cached --name-only 2>/dev/null | grep -q 'package.json'; then
+  if grep -qE '"(\*|latest)"' package.json; then
+    echo "BLOCKED: wildcard or latest version in package.json" &gt;&amp;2; exit 2
+  fi
+fi</pre>
+      </div>
+    </div>
+
+    <!-- ════════════════ CATEGORY 4: COST CONTROL ════════════════ -->
+    <div class="cat-divider"><div class="cat-icon">&#128176;</div><h3 id="cost">Cost Control</h3></div>
+    <p>A <a href="https://bmdpat.com/blog/uber-2026-ai-budget-claude-code" target="_blank" rel="noopener">major company burned its entire 2026 AI budget by April</a>. A single developer hit <a href="https://www.morphllm.com/ai-coding-costs" target="_blank" rel="noopener">$4,200 in API fees over one weekend</a>. <a href="https://leanopstech.com/blog/agentic-ai-cost-runaway-token-budget-2026/" target="_blank" rel="noopener">Agents burn 50x more tokens than chat</a> because each loop iteration resends the full context. Cost control is safety.</p>
+
+    <div class="rule">
+      <span class="rule-num">#16</span>
+      <h4>Set a per-session turn limit</h4>
+      <div class="why">Runaway agents loop endlessly &mdash; re-reading the context, retrying the same approach, burning tokens. A hard turn limit (15&ndash;25 iterations) prevents a single session from consuming unbounded resources.</div>
+      <div class="enforce">
+        <div class="enforce-label">Enforce &mdash; Claude Code flag</div>
+        <pre># Limit to 25 turns per session
+claude --max-turns 25 "implement the user profile page"
+
+# For Codex CLI: use the built-in iteration limits
+codex --max-iterations 20 "fix the authentication bug"</pre>
+      </div>
+    </div>
+
+    <div class="rule">
+      <span class="rule-num">#17</span>
+      <h4>Set API-level monthly spend caps</h4>
+      <div class="why">Your API provider&rsquo;s billing dashboard is the last line of defense. Set a hard cap that stops requests when the budget is exhausted &mdash; a $500 cap feels painful until you see the alternative.</div>
+      <div class="enforce">
+        <div class="enforce-label">Enforce &mdash; provider billing settings</div>
+        <pre># Anthropic: console.anthropic.com → Billing → Usage limits
+# OpenAI: platform.openai.com → Settings → Limits
+# Google Cloud: Set budget alerts + auto-disable on Billing → Budgets
+
+# Rule of thumb: set the cap at 1.5× your expected monthly spend
+# Review and adjust monthly — never set "unlimited"</pre>
+      </div>
+    </div>
+
+    <div class="rule">
+      <span class="rule-num">#18</span>
+      <h4>Alert on per-session cost thresholds</h4>
+      <div class="why">One agent session should not cost $200. Set session-level alerts that trigger when a single task exceeds a dollar threshold &mdash; this catches loops before they become invoices.</div>
+      <div class="enforce">
+        <div class="enforce-label">Enforce &mdash; amux monitoring</div>
+        <pre># amux tracks per-session token spend in real-time via the dashboard
+# Set alerts at your threshold — e.g., kill sessions over $50:
+# The self-healing watchdog can auto-kill sessions exceeding cost limits
+
+# For standalone Claude Code, check spend via:
+claude --api-usage  # shows current session token count</pre>
+      </div>
+    </div>
+
+    <div class="rule">
+      <span class="rule-num">#19</span>
+      <h4>Use model routing to match cost to task complexity</h4>
+      <div class="why">Running Opus ($15/M input tokens) for linting is like flying first class to the corner store. Route simple tasks (formatting, renaming, test scaffolding) to Haiku ($0.25/M) and save Opus for complex architecture work.</div>
+      <div class="enforce">
+        <div class="enforce-label">Enforce &mdash; model selection</div>
+        <pre># Simple tasks → cheaper model
+claude --model haiku "rename userId to user_id across the codebase"
+
+# Complex tasks → full model
+claude --model opus "redesign the authentication system to support OAuth2"
+
+# See our cost optimization guide: /guides/cost-optimization/</pre>
+      </div>
+    </div>
+
+    <div class="rule">
+      <span class="rule-num">#20</span>
+      <h4>Kill idle sessions automatically</h4>
+      <div class="why">An agent that&rsquo;s stuck waiting for input, looping on an error, or idling with a full context window is burning money doing nothing. Auto-kill sessions that show no progress after a timeout.</div>
+      <div class="enforce">
+        <div class="enforce-label">Enforce &mdash; amux self-healing watchdog</div>
+        <pre># amux detects stuck sessions automatically:
+# - Prompt stuck (waiting for input with no progress)
+# - Context exhaustion (near context window limit)
+# - Crash recovery (agent process died)
+# Configure in amux: self-healing runs every 30s by default
+# See: /guides/self-healing-configuration/</pre>
+      </div>
+    </div>
+
+    <!-- ════════════════ CATEGORY 5: MONITORING & KILL SWITCHES ════════════════ -->
+    <div class="cat-divider"><div class="cat-icon">&#128225;</div><h3 id="monitoring">Monitoring &amp; Kill Switches</h3></div>
+    <p>You can&rsquo;t prevent what you can&rsquo;t see. Monitoring is the safety net under all other rules. When everything else fails, the kill switch is what saves you.</p>
+
+    <div class="rule">
+      <span class="rule-num">#21</span>
+      <h4>Monitor every agent session in real time</h4>
+      <div class="why">If an agent is deleting files, running unexpected commands, or generating nonsense, you need to see it before it finishes &mdash; not in tomorrow&rsquo;s git log.</div>
+      <div class="enforce">
+        <div class="enforce-label">Enforce &mdash; live monitoring</div>
+        <pre># amux: web dashboard shows all sessions with live output streaming
+# Open https://localhost:8822 or use the iOS app
+
+# Without amux — use tmux panes:
+tmux split-window -h 'tail -f ~/.claude/projects/*/session.log'
+
+# Or peek at any session via amux API:
+curl -sk "$AMUX_URL/api/sessions/SESSION_NAME/peek?lines=50"</pre>
+      </div>
+    </div>
+
+    <div class="rule">
+      <span class="rule-num">#22</span>
+      <h4>Log all agent actions to an append-only store</h4>
+      <div class="why">For compliance (<a href="https://www.soc2.co" target="_blank" rel="noopener">SOC 2</a>, <a href="https://digital-strategy.ec.europa.eu/en/policies/regulatory-framework-ai" target="_blank" rel="noopener">EU AI Act</a>), you need an audit trail of what every agent did. Agent logs must be append-only so the agent cannot modify its own history.</div>
+      <div class="enforce">
+        <div class="enforce-label">Enforce &mdash; log forwarding</div>
+        <pre># Forward amux session logs to S3 with Object Lock (append-only):
+aws s3 cp ~/.claude/projects/ s3://your-audit-bucket/agent-logs/ \
+  --recursive --object-lock-mode COMPLIANCE --object-lock-retain-until-date 2027-05-19
+
+# Or pipe to your SIEM (Datadog, Splunk, ELK):
+# amux board history provides a structured task audit trail via /api/board</pre>
+      </div>
+    </div>
+
+    <div class="rule">
+      <span class="rule-num">#23</span>
+      <h4>Set up crash detection and auto-recovery</h4>
+      <div class="why">A crashed agent is not safe &mdash; it may leave partial changes, uncommitted code, or held locks. Detect crashes quickly and either restart cleanly or alert a human.</div>
+      <div class="enforce">
+        <div class="enforce-label">Enforce &mdash; amux self-healing</div>
+        <pre># amux's watchdog monitors every session and detects:
+# - Process crashes → auto-restart with original prompt
+# - Context exhaustion → compact and continue
+# - Stuck prompts → auto-dismiss and resume
+# - Permission dialogs → respond based on policy
+
+# Configure: /guides/self-healing-configuration/
+# All recoveries are logged and visible in the dashboard</pre>
+      </div>
+    </div>
+
+    <div class="rule">
+      <span class="rule-num">#24</span>
+      <h4>Run a daily audit of agent-generated changes</h4>
+      <div class="why">Review agent output every morning. An agent that quietly removes error handling, disables security checks, or introduces subtle bugs is worse than one that crashes loudly.</div>
+      <div class="enforce">
+        <div class="enforce-label">Enforce &mdash; daily review script</div>
+        <pre># Morning review: what did agents do overnight?
+git log --oneline --since='12 hours ago' --all
+git diff main..HEAD --stat
+# Check for removed safety checks:
+git diff main..HEAD | grep -E '^\-.*\b(auth|permission|validate|sanitize|escape)\b'
+
+# See our review guide: /guides/reviewing-ai-agent-code/</pre>
+      </div>
+    </div>
+
+    <div class="rule">
+      <span class="rule-num">#25</span>
+      <h4>Have a one-command kill switch for all agents</h4>
+      <div class="why">When something goes wrong, you need to stop <em>everything</em> immediately. Not &ldquo;find the tab and click stop&rdquo; &mdash; one command, all agents, right now.</div>
+      <div class="enforce">
+        <div class="enforce-label">Enforce &mdash; kill switch options</div>
+        <pre># amux: kill all sessions from CLI, dashboard, or phone
+curl -sk -X POST "$AMUX_URL/api/sessions/kill-all"
+
+# tmux: kill the entire agent server group
+tmux kill-server
+
+# Nuclear option: kill all Claude Code processes
+pkill -f "claude" &amp;&amp; echo "All agent processes terminated"
+
+# Tip: save this as an alias you can run from anywhere:
+alias killall-agents='curl -sk -X POST "$AMUX_URL/api/sessions/kill-all"'</pre>
+      </div>
+    </div>
+
+    <!-- ════════════════ TOOL COMPARISON ════════════════ -->
+    <h2 id="tool-matrix">Safety by Tool: Who Protects What?</h2>
+    <p>Different AI coding tools provide different safety mechanisms. Here&rsquo;s what each gives you out of the box versus what you need to add yourself.</p>
+
+    <div style="overflow-x:auto;">
+    <table class="cmp-table">
+      <thead><tr><th>Safety Feature</th><th><a href="https://claude.ai/code" target="_blank" rel="noopener">Claude Code</a></th><th><a href="https://github.com/openai/codex" target="_blank" rel="noopener">Codex CLI</a></th><th><a href="https://cursor.com" target="_blank" rel="noopener">Cursor</a></th><th><a href="https://github.com/google-gemini/gemini-cli" target="_blank" rel="noopener">Gemini CLI</a></th><th><a href="https://amux.io">amux</a></th></tr></thead>
+      <tbody>
+        <tr><td>Permission system</td><td><span class="check">&#10003;</span> allow/deny rules</td><td><span class="check">&#10003;</span> sandbox modes</td><td><span class="partial">&#9675;</span> confirmation dialogs</td><td><span class="partial">&#9675;</span> confirmation prompts</td><td><span class="check">&#10003;</span> via agent hooks</td></tr>
+        <tr><td>PreToolUse hooks</td><td><span class="check">&#10003;</span> full hook system</td><td><span class="cross">&#10007;</span></td><td><span class="cross">&#10007;</span></td><td><span class="cross">&#10007;</span></td><td><span class="check">&#10003;</span> via Claude Code</td></tr>
+        <tr><td>Sandbox by default</td><td><span class="cross">&#10007;</span> opt-in Docker</td><td><span class="check">&#10003;</span> network-disabled</td><td><span class="cross">&#10007;</span></td><td><span class="cross">&#10007;</span></td><td><span class="cross">&#10007;</span> opt-in</td></tr>
+        <tr><td>Credential deny rules</td><td><span class="check">&#10003;</span> file path deny</td><td><span class="check">&#10003;</span> sandbox isolation</td><td><span class="cross">&#10007;</span></td><td><span class="cross">&#10007;</span></td><td><span class="check">&#10003;</span> via hooks</td></tr>
+        <tr><td>Cost limits</td><td><span class="partial">&#9675;</span> max-turns flag</td><td><span class="partial">&#9675;</span> iteration limit</td><td><span class="partial">&#9675;</span> usage-based billing</td><td><span class="check">&#10003;</span> free 1k/day</td><td><span class="check">&#10003;</span> per-session tracking</td></tr>
+        <tr><td>Live monitoring</td><td><span class="cross">&#10007;</span> terminal only</td><td><span class="cross">&#10007;</span> terminal only</td><td><span class="partial">&#9675;</span> IDE only</td><td><span class="cross">&#10007;</span> terminal only</td><td><span class="check">&#10003;</span> web + mobile + API</td></tr>
+        <tr><td>Crash recovery</td><td><span class="cross">&#10007;</span></td><td><span class="cross">&#10007;</span></td><td><span class="cross">&#10007;</span></td><td><span class="cross">&#10007;</span></td><td><span class="check">&#10003;</span> self-healing watchdog</td></tr>
+        <tr><td>Kill all agents</td><td><span class="cross">&#10007;</span> manual per-session</td><td><span class="cross">&#10007;</span> manual</td><td><span class="cross">&#10007;</span> manual</td><td><span class="cross">&#10007;</span> manual</td><td><span class="check">&#10003;</span> one-command kill-all</td></tr>
+        <tr><td>Audit trail</td><td><span class="partial">&#9675;</span> session files</td><td><span class="partial">&#9675;</span> session logs</td><td><span class="partial">&#9675;</span> IDE history</td><td><span class="partial">&#9675;</span> session logs</td><td><span class="check">&#10003;</span> board + session logs</td></tr>
+      </tbody>
+    </table>
+    </div>
+
+    <div class="key-insight">
+      <strong>No single tool covers all 25 rules.</strong> <a href="https://github.com/openai/codex" target="_blank" rel="noopener">Codex CLI</a>&rsquo;s default sandbox is the strongest built-in protection. <a href="https://claude.ai/code" target="_blank" rel="noopener">Claude Code</a>&rsquo;s hooks system is the most flexible for custom policies. <a href="https://amux.io">amux</a> adds the fleet-level monitoring and kill switches that individual tools lack. The safest setup combines tool-level controls (hooks, sandboxing) with orchestration-level monitoring (dashboards, cost tracking, kill switches). See our <a href="/guides/ai-agent-security-hardening/">security hardening</a> and <a href="/guides/ai-agent-sandboxing/">sandboxing</a> guides for deeper dives.
+    </div>
+
+    <!-- ════════════════ FAQ ════════════════ -->
+    <h2 id="faq">FAQ</h2>
+
+    <details style="margin-bottom:0.75rem;">
+      <summary style="cursor:pointer;font-weight:600;padding:0.5rem 0;">Why do AI coding agents cause production incidents?</summary>
+      <p style="padding:0.5rem 0 0.5rem 1rem;color:var(--dim);font-size:0.9rem;">AI coding agents combine high autonomy with low judgment about blast radius. In the <a href="https://www.theregister.com/2026/04/27/cursoropus_agent_snuffs_out_pocketos/" target="_blank" rel="noopener">PocketOS incident</a>, a <a href="https://cursor.com" target="_blank" rel="noopener">Cursor</a> agent found a root-level API token and used it to delete a production database in 9 seconds. The agent had the <em>capability</em> to destroy infrastructure but lacked the <em>judgment</em> to assess consequences. Safety comes from constraining what agents <strong>can</strong> do (permissions, hooks, sandboxing), not from hoping they&rsquo;ll choose wisely.</p>
+    </details>
+    <details style="margin-bottom:0.75rem;">
+      <summary style="cursor:pointer;font-weight:600;padding:0.5rem 0;">What is the most important safety rule?</summary>
+      <p style="padding:0.5rem 0 0.5rem 1rem;color:var(--dim);font-size:0.9rem;">Rule 1: never give agents access to production credentials. The majority of AI agent disasters trace back to the agent finding credentials with more power than the task required. Store production secrets in a vault (<a href="https://aws.amazon.com/secrets-manager/" target="_blank" rel="noopener">AWS Secrets Manager</a>, <a href="https://www.vaultproject.io" target="_blank" rel="noopener">HashiCorp Vault</a>, <a href="https://1password.com/developers" target="_blank" rel="noopener">1Password CLI</a>), never in <code>.env</code> files the agent can read.</p>
+    </details>
+    <details style="margin-bottom:0.75rem;">
+      <summary style="cursor:pointer;font-weight:600;padding:0.5rem 0;">How do I prevent an AI agent from deleting my database?</summary>
+      <p style="padding:0.5rem 0 0.5rem 1rem;color:var(--dim);font-size:0.9rem;">Three layers: (1) Never store production database credentials where agents can read them. (2) Use a PreToolUse hook to block destructive SQL and CLI commands (exit code 2 for hard blocks). (3) Run agents in a sandbox with no network access to production hosts. Any single layer failing is survivable. All three failing is the PocketOS scenario.</p>
+    </details>
+    <details style="margin-bottom:0.75rem;">
+      <summary style="cursor:pointer;font-weight:600;padding:0.5rem 0;">Do these rules work with Cursor, Codex, and other tools?</summary>
+      <p style="padding:0.5rem 0 0.5rem 1rem;color:var(--dim);font-size:0.9rem;">The principles are universal. The enforcement differs: <a href="https://claude.ai/code" target="_blank" rel="noopener">Claude Code</a> uses hooks and permission rules. <a href="https://github.com/openai/codex" target="_blank" rel="noopener">Codex CLI</a> uses its built-in sandbox. <a href="https://cursor.com" target="_blank" rel="noopener">Cursor</a> has confirmation dialogs but no hooks &mdash; you rely on prompt-level caution. For any tool, filesystem permissions, <a href="https://www.docker.com" target="_blank" rel="noopener">Docker</a> sandboxing, and credential isolation work regardless of which agent you run. See the <a href="#tool-matrix">tool comparison table</a> above.</p>
+    </details>
+    <details style="margin-bottom:0.75rem;">
+      <summary style="cursor:pointer;font-weight:600;padding:0.5rem 0;">Should I use YOLO mode or --dangerously-skip-permissions?</summary>
+      <p style="padding:0.5rem 0 0.5rem 1rem;color:var(--dim);font-size:0.9rem;">Only with compensating controls. YOLO mode and <code>--dangerously-skip-permissions</code> remove the human-in-the-loop gate. This is fine IF you have: (1) PreToolUse hooks that hard-block destructive operations (hooks run <em>even with</em> <code>--dangerously-skip-permissions</code>), (2) the agent runs in a sandboxed environment, and (3) monitoring that can kill the session if it goes off-rails. Without all three, these modes are how the PocketOS incident happened. See our <a href="/guides/setting-up-yolo-mode/">YOLO mode guide</a>.</p>
+    </details>
+    <details style="margin-bottom:0.75rem;">
+      <summary style="cursor:pointer;font-weight:600;padding:0.5rem 0;">How do I set a cost limit on AI coding agents?</summary>
+      <p style="padding:0.5rem 0 0.5rem 1rem;color:var(--dim);font-size:0.9rem;">Three levels: (1) <strong>API level</strong> &mdash; monthly spend caps in your <a href="https://console.anthropic.com" target="_blank" rel="noopener">Anthropic</a>, <a href="https://platform.openai.com" target="_blank" rel="noopener">OpenAI</a>, or <a href="https://cloud.google.com/billing" target="_blank" rel="noopener">Google Cloud</a> billing dashboard. (2) <strong>Session level</strong> &mdash; <code>--max-turns</code> flag to cap iterations. (3) <strong>Fleet level</strong> &mdash; <a href="https://amux.io">amux</a> tracks per-session spend in real-time and can kill sessions exceeding thresholds. A 15&ndash;25 turn limit prevents a single loop from becoming a $4,000 weekend.</p>
+    </details>
+    <details style="margin-bottom:0.75rem;">
+      <summary style="cursor:pointer;font-weight:600;padding:0.5rem 0;">How do I audit what an AI coding agent did?</summary>
+      <p style="padding:0.5rem 0 0.5rem 1rem;color:var(--dim);font-size:0.9rem;">Three sources: (1) <strong>Git history</strong> &mdash; every file change is in the diff. (2) <strong>Session logs</strong> &mdash; <a href="https://claude.ai/code" target="_blank" rel="noopener">Claude Code</a> stores conversation history in <code>~/.claude/projects/</code>. (3) <strong>Orchestration logs</strong> &mdash; <a href="https://amux.io">amux</a> captures full session output and provides a board audit trail via <code>/api/board</code>. For compliance (<a href="https://digital-strategy.ec.europa.eu/en/policies/regulatory-framework-ai" target="_blank" rel="noopener">EU AI Act</a>, SOC 2), pipe logs to an append-only store.</p>
+    </details>
+
+    <h2 style="margin-top:2.5rem;">Keep exploring</h2>
+    <ul style="line-height:2;">
+      <li><a href="/guides/ai-agent-security-hardening/">AI Agent Security Hardening Guide</a> &mdash; the 6-layer defense model and 15-point hardening checklist</li>
+      <li><a href="/guides/ai-agent-sandboxing/">AI Agent Sandboxing</a> &mdash; Docker, E2B, Firecracker, gVisor, Modal &amp; Daytona compared</li>
+      <li><a href="/guides/claude-code-hooks-cookbook/">Claude Code Hooks Cookbook</a> &mdash; 20 production-ready hook recipes</li>
+      <li><a href="/guides/setting-up-yolo-mode/">Setting Up YOLO Mode Safely</a> &mdash; how to skip permissions without skipping safety</li>
+      <li><a href="/guides/reviewing-ai-agent-code/">Reviewing AI-Generated Code</a> &mdash; the morning review playbook for agent PRs</li>
+      <li><a href="/guides/cost-optimization/">Cost Optimization Guide</a> &mdash; model routing, context discipline, and spend tracking</li>
+      <li><a href="/guides/self-healing-configuration/">Self-Healing Configuration</a> &mdash; auto-compaction, restart, and prompt recovery</li>
+      <li><a href="/guides/ai-coding-tools-landscape-2026/">AI Coding Tools Landscape 2026</a> &mdash; every agent, IDE, and platform compared</li>
+    </ul>
+
+  </main>
+  <footer class="site-footer">
+    <div class="footer-inner">
+      <div class="footer-grid">
+        <div class="footer-col">
+          <div class="footer-col-label">Product</div>
+          <ul>
+            <li><a href="/features/">Features</a></li>
+            <li><a href="/pricing/">Pricing</a></li>
+            <li><a href="/docs/">Documentation</a></li>
+            <li><a href="/guides/getting-started/">Getting Started</a></li>
+          </ul>
+        </div>
+        <div class="footer-col">
+          <div class="footer-col-label">Resources</div>
+          <ul>
+            <li><a href="/guides/">Guides</a></li>
+            <li><a href="/blog/">Blog</a></li>
+            <li><a href="/demos/">Demos</a></li>
+            <li><a href="/glossary/">Glossary</a></li>
+            <li><a href="/faq/">FAQ</a></li>
+          </ul>
+        </div>
+        <div class="footer-col">
+          <div class="footer-col-label">Compare</div>
+          <ul>
+            <li><a href="/compare/amux-vs-cursor/">vs Cursor</a></li>
+            <li><a href="/compare/amux-vs-devin/">vs Devin</a></li>
+            <li><a href="/compare/amux-vs-cline/">vs Cline</a></li>
+            <li><a href="/compare/">All comparisons</a></li>
+          </ul>
+        </div>
+        <div class="footer-col">
+          <div class="footer-col-label">More</div>
+          <ul>
+            <li><a href="/use-cases/">Use Cases</a></li>
+            <li><a href="/solutions/">Solutions</a></li>
+            <li><a href="/for/">For your stack</a></li>
+            <li><a href="/changelog/">Changelog</a></li>
+          </ul>
+        </div>
+      </div>
+      <div class="footer-bottom">
+        <span>MIT License. Built by <a href="https://mixpeek.com">Mixpeek</a></span>
+        <div class="footer-bottom-links">
+          <a href="https://apps.apple.com/us/app/amux-agent-multiplexer/id6760410435" target="_blank" rel="noopener">iOS App</a>
+          <a href="https://github.com/mixpeek/amux" target="_blank" rel="noopener">GitHub</a>
+        </div>
+      </div>
+    </div>
+  </footer>
+<script>fetch('https://api.github.com/repos/mixpeek/amux').then(function(r){return r.json()}).then(function(d){var el=document.getElementById('gh-stars');if(el&&d.stargazers_count) el.textContent='★ '+d.stargazers_count}).catch(function(){})</script>
+</body>
+</html>

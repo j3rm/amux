@@ -1,0 +1,631 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="dark">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="theme-color" content="#1e2330">
+  <title>The AI Coding Tools Landscape (2026): Every Agent, IDE, and Platform Compared &mdash; amux</title>
+  <link rel="icon" href="/icon.svg" type="image/svg+xml">
+  <meta name="description" content="The complete map of every AI coding tool in 2026 — IDE agents, terminal agents, cloud agents, orchestration platforms, SDKs, and open standards. Side-by-side comparison tables, pricing, and a decision guide for choosing the right stack.">
+  <meta name="keywords" content="ai coding tools 2026, ai coding agent comparison, best ai coding tools, ai coding landscape, cursor vs claude code vs copilot, ai agent IDE, terminal ai coding agent, cloud coding agent, ai agent orchestration, ai coding SDK, ai coding framework, AGENTS.md, MCP servers, ai coding tool list, every ai coding tool">
+  <link rel="canonical" href="https://amux.io/guides/ai-coding-tools-landscape-2026/">
+  <meta property="og:title" content="The AI Coding Tools Landscape (2026): Every Agent, IDE, and Platform Compared">
+  <meta property="og:description" content="The complete map of every AI coding tool in 2026. IDE agents, terminal agents, cloud agents, orchestration platforms, SDKs, and open standards — all compared in one place.">
+  <meta property="og:url" content="https://amux.io/guides/ai-coding-tools-landscape-2026/">
+  <meta property="og:image" content="https://amux.io/og-image.png">
+  <meta property="og:type" content="article">
+  <meta name="twitter:card" content="summary_large_image">
+  <link rel="alternate" type="application/rss+xml" title="amux Blog" href="https://amux.io/blog/rss.xml">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600;700&family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="/style.css">
+  <script type="application/ld+json">{"@context":"https://schema.org","@type":"BreadcrumbList","itemListElement":[{"@type":"ListItem","position":1,"name":"amux","item":"https://amux.io/"},{"@type":"ListItem","position":2,"name":"Guides","item":"https://amux.io/guides/"},{"@type":"ListItem","position":3,"name":"AI Coding Tools Landscape 2026","item":"https://amux.io/guides/ai-coding-tools-landscape-2026/"}]}</script>
+  <script type="application/ld+json">{"@context":"https://schema.org","@type":"Article","headline":"The AI Coding Tools Landscape (2026): Every Agent, IDE, and Platform Compared","description":"The complete map of every AI coding tool in 2026. IDE agents, terminal agents, cloud agents, orchestration platforms, SDKs, and open standards compared.","url":"https://amux.io/guides/ai-coding-tools-landscape-2026/","datePublished":"2026-05-18","dateModified":"2026-05-18","author":{"@type":"Organization","name":"amux","url":"https://amux.io/"},"publisher":{"@type":"Organization","name":"amux","url":"https://amux.io/","logo":{"@type":"ImageObject","url":"https://amux.io/icon.png"}}}</script>
+  <script type="application/ld+json">{"@context":"https://schema.org","@type":"FAQPage","mainEntity":[{"@type":"Question","name":"What is the best AI coding tool in 2026?","acceptedAnswer":{"@type":"Answer","text":"There is no single best tool — the right choice depends on your workflow. For inline code completion and chat, Cursor and GitHub Copilot lead. For autonomous terminal-based coding, Claude Code and Codex CLI are the top choices. For fully autonomous cloud agents, Devin and OpenAI Codex are the most capable. For running multiple agents in parallel, amux, Claude Squad, and Claude Code's built-in Agent Teams provide orchestration. Most productive developers use 2-3 tools together."}},{"@type":"Question","name":"How many AI coding tools exist in 2026?","acceptedAnswer":{"@type":"Answer","text":"As of May 2026, there are 30+ actively maintained AI coding tools across five categories: IDE-integrated agents (Cursor, Copilot, Windsurf, Continue, Amp, Augment Code), terminal/CLI agents (Claude Code, Aider, Codex CLI, Gemini CLI, Goose, Cline), cloud/background agents (Devin, OpenAI Codex, OpenHands, Replit Agent, Bolt, Lovable), orchestration platforms (amux, Claude Squad, Claude Code Agent Teams), and agent SDKs/frameworks (Claude Agent SDK, OpenAI Agents SDK, Google ADK, LangGraph, CrewAI)."}},{"@type":"Question","name":"What is the cheapest AI coding tool?","acceptedAnswer":{"@type":"Answer","text":"Several powerful AI coding tools are completely free: Aider (open-source, bring your own API key), Continue (open-source IDE extension), Goose (open-source by Block/AAIF), Gemini CLI (free with Google account — 1,000 requests/day on Gemini 2.5 Pro), Kilo Code (open-source), and amux (open-source orchestration). GitHub Copilot has a free tier with 2,000 completions/month. Claude Code's free tier provides limited usage on the Anthropic API."}},{"@type":"Question","name":"Should I use an IDE agent or a terminal agent?","acceptedAnswer":{"@type":"Answer","text":"Use IDE agents (Cursor, Copilot, Windsurf) for real-time code completion, inline chat, and interactive editing where you want tight feedback loops. Use terminal agents (Claude Code, Codex CLI, Aider) for autonomous multi-file tasks, background coding, and workflows where the agent needs to run commands, tests, and iterate without supervision. Many developers use both: an IDE agent for interactive work and a terminal agent for larger autonomous tasks."}},{"@type":"Question","name":"What is the difference between a coding agent and a coding assistant?","acceptedAnswer":{"@type":"Answer","text":"A coding assistant provides suggestions that a human reviews and accepts (autocomplete, inline chat). A coding agent autonomously executes multi-step tasks — reading files, writing code, running tests, fixing errors, and iterating until the task is done. Assistants augment human coding; agents replace it for specific tasks. In 2026, most tools offer both modes: Cursor has both autocomplete (assistant) and agent mode, Claude Code operates primarily as an agent, and GitHub Copilot now has Copilot Coding Agent for autonomous work."}},{"@type":"Question","name":"What are AGENTS.md and MCP?","acceptedAnswer":{"@type":"Answer","text":"AGENTS.md is an open standard (now under the Linux Foundation's Agentic AI Foundation) for giving AI coding agents project-specific context — build steps, test commands, coding conventions, and architectural rules. Think of it as a README for AI agents. MCP (Model Context Protocol) is Anthropic's open standard for connecting AI agents to external tools and data sources via a standardized API. Together, AGENTS.md tells agents what to do and MCP gives them the tools to do it. Both are supported by most major AI coding tools in 2026."}},{"@type":"Question","name":"Can I run multiple AI coding agents at the same time?","acceptedAnswer":{"@type":"Answer","text":"Yes. Running parallel agents is one of the biggest productivity multipliers in 2026. You need three things: workspace isolation (git worktrees or separate branches so agents don't conflict), task coordination (a shared board or spec that divides work), and monitoring (visibility into what each agent is doing). Tools like amux, Claude Squad, and Claude Code's Agent Teams provide this orchestration layer. Without orchestration, you can still run multiple terminal agents in separate tmux panes, but you lose coordination and monitoring."}}]}</script>
+  <script type="application/ld+json">{"@context":"https://schema.org","@type":"ItemList","name":"AI Coding Tools 2026","itemListElement":[{"@type":"ListItem","position":1,"name":"IDE-Integrated Agents","url":"https://amux.io/guides/ai-coding-tools-landscape-2026/#ide"},{"@type":"ListItem","position":2,"name":"Terminal & CLI Agents","url":"https://amux.io/guides/ai-coding-tools-landscape-2026/#terminal"},{"@type":"ListItem","position":3,"name":"Cloud & Background Agents","url":"https://amux.io/guides/ai-coding-tools-landscape-2026/#cloud"},{"@type":"ListItem","position":4,"name":"Agent Orchestration Platforms","url":"https://amux.io/guides/ai-coding-tools-landscape-2026/#orchestration"},{"@type":"ListItem","position":5,"name":"Agent SDKs & Frameworks","url":"https://amux.io/guides/ai-coding-tools-landscape-2026/#sdks"},{"@type":"ListItem","position":6,"name":"Open Standards & Protocols","url":"https://amux.io/guides/ai-coding-tools-landscape-2026/#standards"}]}</script>
+  <style>
+    .landscape-stat { display: inline-block; background: rgba(110,231,183,0.10); border: 1px solid rgba(110,231,183,0.25); border-radius: 8px; padding: 0.15rem 0.6rem; font-size: 0.82rem; font-weight: 600; color: #6ee7b7; margin-right: 0.4rem; margin-bottom: 0.3rem; }
+    .cat-header { display: flex; align-items: center; gap: 0.75rem; margin-top: 2.5rem; margin-bottom: 0.5rem; }
+    .cat-header .cat-icon { font-size: 1.5rem; width: 2.2rem; height: 2.2rem; display: grid; place-items: center; background: var(--surface-2, #2a3040); border-radius: 8px; border: 1px solid var(--border, rgba(255,255,255,0.06)); }
+    .tool-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 1rem; margin: 1.25rem 0 1.75rem; }
+    @media (max-width: 600px) { .tool-grid { grid-template-columns: 1fr; } }
+    .tool-card { background: var(--surface, #232838); border-radius: 10px; padding: 1.15rem 1.25rem; border: 1px solid var(--border, rgba(255,255,255,0.06)); transition: border-color 0.2s; }
+    .tool-card:hover { border-color: rgba(110,231,183,0.25); }
+    .tool-card h4 { margin: 0 0 0.15rem; font-size: 1rem; }
+    .tool-card h4 a { color: var(--text, #e8eaf0); text-decoration: none; border-bottom: 1px solid var(--border, rgba(255,255,255,0.12)); }
+    .tool-card h4 a:hover { color: #6ee7b7; border-color: #6ee7b7; }
+    .tool-card .maker { font-size: 0.8rem; color: var(--muted, #8892a4); margin-bottom: 0.5rem; }
+    .tool-card .maker a { color: var(--dim, #a0aab8); }
+    .tool-card .tool-desc { font-size: 0.88rem; color: var(--dim, #b0b8c8); margin-bottom: 0.6rem; line-height: 1.45; }
+    .tool-card .tool-meta { display: flex; flex-wrap: wrap; gap: 0.35rem; }
+    .tool-card .tag { font-size: 0.72rem; padding: 0.12rem 0.45rem; border-radius: 4px; font-weight: 500; }
+    .tag-free { background: rgba(110,231,183,0.12); color: #6ee7b7; }
+    .tag-freemium { background: rgba(147,197,253,0.12); color: #93c5fd; }
+    .tag-paid { background: rgba(251,191,36,0.12); color: #fbbf24; }
+    .tag-oss { background: rgba(110,231,183,0.08); color: #6ee7b7; border: 1px solid rgba(110,231,183,0.2); }
+    .tag-enterprise { background: rgba(248,113,113,0.10); color: #f87171; }
+    .cmp-table { width: 100%; border-collapse: collapse; margin: 1.25rem 0; font-size: 0.85rem; }
+    .cmp-table th, .cmp-table td { padding: 0.5rem 0.6rem; text-align: left; border-bottom: 1px solid rgba(255,255,255,0.06); }
+    .cmp-table th { font-weight: 600; font-size: 0.78rem; text-transform: uppercase; letter-spacing: 0.04em; color: var(--muted, #8892a4); white-space: nowrap; }
+    .cmp-table td:first-child { font-weight: 500; white-space: nowrap; }
+    .cmp-table td:first-child a { color: var(--text, #e8eaf0); border-bottom: 1px dotted var(--border); }
+    .cmp-table td:first-child a:hover { color: #6ee7b7; }
+    .decision-box { background: var(--surface, #232838); border-radius: 12px; padding: 1.25rem; margin-bottom: 1rem; border: 1px solid var(--border, rgba(255,255,255,0.06)); }
+    .decision-box h4 { margin-top: 0; font-size: 0.95rem; }
+    .decision-box .rec { color: #6ee7b7; font-weight: 600; }
+    .key-insight { background: rgba(110,231,183,0.08); border: 1px solid rgba(110,231,183,0.2); border-radius: 10px; padding: 1.15rem; margin: 1.5rem 0; }
+    .key-insight strong { color: #6ee7b7; }
+    .updated-badge { display: inline-block; background: rgba(110,231,183,0.12); color: #6ee7b7; padding: 0.2rem 0.6rem; border-radius: 6px; font-size: 0.8rem; font-weight: 500; margin-bottom: 1rem; }
+    .amux-cta { display: flex; align-items: flex-start; gap: 1rem; background: linear-gradient(135deg, rgba(110,231,183,0.06), rgba(110,231,183,0.02)); border: 1px solid rgba(110,231,183,0.2); border-radius: 12px; padding: 1.25rem; margin: 2rem 0; }
+    .amux-cta .cta-text { flex: 1; }
+    .amux-cta .cta-text h4 { margin: 0 0 0.35rem; font-size: 1rem; color: #6ee7b7; }
+    .amux-cta .cta-text p { font-size: 0.88rem; color: var(--dim); margin: 0; }
+    .amux-cta .cta-links { display: flex; gap: 0.6rem; margin-top: 0.75rem; }
+    .amux-cta .cta-links a { font-size: 0.82rem; padding: 0.35rem 0.8rem; border-radius: 6px; font-weight: 500; text-decoration: none; }
+    .amux-cta .cta-links .cta-primary { background: #6ee7b7; color: #1a1f2e; }
+    .amux-cta .cta-links .cta-secondary { border: 1px solid rgba(110,231,183,0.3); color: #6ee7b7; }
+    .std-card { background: var(--surface, #232838); border-radius: 10px; padding: 1.15rem; margin-bottom: 1rem; border: 1px solid var(--border, rgba(255,255,255,0.06)); }
+    .std-card h4 { margin-top: 0; }
+    .std-card h4 a { color: var(--text); border-bottom: 1px solid var(--border); text-decoration: none; }
+    .std-card h4 a:hover { color: #6ee7b7; }
+    .std-card .steward { font-size: 0.8rem; color: var(--muted); }
+  </style>
+</head>
+<body>
+  <header class="site-header">
+    <a class="logo" href="/">amux</a>
+    <nav>
+      <a href="/docs/" class="hide-mobile">docs</a>
+      <a href="/guides/" class="hide-mobile">guides</a>
+      <a href="/compare/" class="hide-mobile">compare</a>
+      <a href="/demos/" class="hide-mobile">demos</a>
+      <a href="/blog/" class="hide-mobile">blog</a>
+      <a href="https://apps.apple.com/us/app/amux-agent-multiplexer/id6760410435" target="_blank" rel="noopener" class="nav-cta-primary nav-cta">iOS app</a>
+      <a href="https://github.com/mixpeek/amux" target="_blank" rel="noopener" class="nav-cta">GitHub <span class="gh-stars" id="gh-stars"></span></a>
+    </nav>
+  </header>
+  <main>
+    <div class="breadcrumb"><a href="/">amux</a> <span class="sep">&rsaquo;</span> <a href="/guides/">Guides</a> <span class="sep">&rsaquo;</span> <span>AI Coding Tools Landscape 2026</span></div>
+    <span class="updated-badge">Updated May 2026</span>
+    <h1>The AI Coding Tools Landscape (2026)</h1>
+    <p class="subtitle">There are now 30+ AI coding tools across five categories &mdash; IDE agents, terminal agents, cloud agents, orchestration platforms, and SDKs. This is the complete map. Every tool, compared by category, with pricing and recommendations for choosing the right stack.</p>
+
+    <nav class="toc" style="background:var(--surface);border:1px solid var(--border);border-radius:8px;padding:1.2rem 1.6rem;margin:2rem 0;">
+      <strong style="font-size:0.82rem;text-transform:uppercase;letter-spacing:0.05em;color:var(--muted);">Contents</strong>
+      <ol style="margin:0.6rem 0 0;padding-left:1.2rem;font-size:0.88rem;line-height:2;">
+        <li><a href="#overview" style="color:var(--dim);text-decoration:none;">How the Landscape Is Organized</a></li>
+        <li><a href="#ide" style="color:var(--dim);text-decoration:none;">IDE-Integrated Agents</a></li>
+        <li><a href="#terminal" style="color:var(--dim);text-decoration:none;">Terminal &amp; CLI Agents</a></li>
+        <li><a href="#cloud" style="color:var(--dim);text-decoration:none;">Cloud &amp; Background Agents</a></li>
+        <li><a href="#orchestration" style="color:var(--dim);text-decoration:none;">Agent Orchestration Platforms</a></li>
+        <li><a href="#sdks" style="color:var(--dim);text-decoration:none;">Agent SDKs &amp; Frameworks</a></li>
+        <li><a href="#standards" style="color:var(--dim);text-decoration:none;">Open Standards &amp; Protocols</a></li>
+        <li><a href="#matrix" style="color:var(--dim);text-decoration:none;">The Master Comparison Matrix</a></li>
+        <li><a href="#choose" style="color:var(--dim);text-decoration:none;">Which Tools Should You Use?</a></li>
+        <li><a href="#faq" style="color:var(--dim);text-decoration:none;">FAQ</a></li>
+      </ol>
+    </nav>
+
+    <!-- ════════════════════ OVERVIEW ════════════════════ -->
+    <h2 id="overview">How the Landscape Is Organized</h2>
+    <p>AI coding tools in 2026 fall into five categories based on where they run and what they do:</p>
+    <ul>
+      <li><strong>IDE-integrated agents</strong> &mdash; live inside your editor. Autocomplete, inline chat, and agent mode for multi-file edits.</li>
+      <li><strong>Terminal &amp; CLI agents</strong> &mdash; run in your terminal. Autonomous, multi-step task execution with full shell access.</li>
+      <li><strong>Cloud &amp; background agents</strong> &mdash; run on remote infrastructure. Fully autonomous &mdash; assign a task, come back to a pull request.</li>
+      <li><strong>Orchestration platforms</strong> &mdash; coordinate multiple agents running in parallel on the same codebase.</li>
+      <li><strong>SDKs &amp; frameworks</strong> &mdash; libraries for building your own agents and custom AI workflows.</li>
+    </ul>
+    <p>Most productive teams use tools from <strong>2&ndash;3 categories together</strong>: an IDE agent for interactive work, a terminal or cloud agent for autonomous tasks, and an orchestration layer when running multiple agents in parallel.</p>
+
+    <div class="key-insight">
+      <strong>The 2026 shift:</strong> The boundary between &ldquo;assistant&rdquo; and &ldquo;agent&rdquo; has dissolved. Every major IDE tool now has an agent mode. Every terminal tool now has an IDE extension. The real differentiator is no longer features &mdash; it&rsquo;s <a href="/guides/harness-engineering/">the harness</a>: how much autonomy you give the tool and how you structure the work around it.
+    </div>
+
+    <!-- ════════════════════ IDE AGENTS ════════════════════ -->
+    <div class="cat-header"><div class="cat-icon">&lt;/&gt;</div><h2 id="ide" style="margin:0;">IDE-Integrated Agents</h2></div>
+    <p>These tools live inside your code editor. They provide autocomplete, inline chat, and &mdash; increasingly &mdash; autonomous agent modes that can make multi-file changes, run commands, and iterate on errors.</p>
+
+    <div class="tool-grid">
+      <div class="tool-card">
+        <h4><a href="https://cursor.com" target="_blank" rel="noopener">Cursor</a></h4>
+        <div class="maker">by <a href="https://anysphere.inc" target="_blank" rel="noopener">Anysphere</a></div>
+        <div class="tool-desc">Fork of VS Code with native AI integration. Tab completion, inline chat, Composer for multi-file edits, and background agent mode. Acquired <a href="https://supermaven.com" target="_blank" rel="noopener">Supermaven</a> for fastest-in-class completions.</div>
+        <div class="tool-meta"><span class="tag tag-freemium">Freemium</span> <span class="tag tag-paid">$20/mo Pro</span></div>
+      </div>
+      <div class="tool-card">
+        <h4><a href="https://github.com/features/copilot" target="_blank" rel="noopener">GitHub Copilot</a></h4>
+        <div class="maker">by <a href="https://github.com" target="_blank" rel="noopener">GitHub</a> / <a href="https://microsoft.com" target="_blank" rel="noopener">Microsoft</a></div>
+        <div class="tool-desc">The original AI coding assistant. Inline completions, chat, and the new Copilot Coding Agent for autonomous PR-based work. Deepest GitHub integration of any tool. Works in VS Code, JetBrains, Neovim, and Xcode.</div>
+        <div class="tool-meta"><span class="tag tag-freemium">Free tier</span> <span class="tag tag-paid">$10/mo Pro</span></div>
+      </div>
+      <div class="tool-card">
+        <h4><a href="https://windsurf.com" target="_blank" rel="noopener">Windsurf</a></h4>
+        <div class="maker">by <a href="https://codeium.com" target="_blank" rel="noopener">Codeium</a></div>
+        <div class="tool-desc">VS Code fork with &ldquo;Cascade&rdquo; multi-step agent and Flows for orchestrated edits. Strong free tier. <a href="/compare/amux-vs-windsurf/">Compared to amux &rsaquo;</a></div>
+        <div class="tool-meta"><span class="tag tag-freemium">Free tier</span> <span class="tag tag-paid">$15/mo Pro</span></div>
+      </div>
+      <div class="tool-card">
+        <h4><a href="https://www.continue.dev" target="_blank" rel="noopener">Continue</a></h4>
+        <div class="maker">Open source &middot; <a href="https://github.com/continuedev/continue" target="_blank" rel="noopener">GitHub</a></div>
+        <div class="tool-desc">Open-source IDE extension (VS Code, JetBrains, Neovim) that connects to any model &mdash; cloud or local. Autocomplete, chat, agent, and CI-integrated code review. 20k+ GitHub stars. The open-source Copilot alternative.</div>
+        <div class="tool-meta"><span class="tag tag-free">Free</span> <span class="tag tag-oss">Open source</span></div>
+      </div>
+      <div class="tool-card">
+        <h4><a href="https://ampcode.com" target="_blank" rel="noopener">Amp</a></h4>
+        <div class="maker">by <a href="https://sourcegraph.com" target="_blank" rel="noopener">Sourcegraph</a></div>
+        <div class="tool-desc">Formerly Cody. Code-graph-aware agent that understands your entire codebase via Sourcegraph&rsquo;s indexing. IDE extension, CLI, and shareable team threads. Enterprise-focused with deep repository search.</div>
+        <div class="tool-meta"><span class="tag tag-enterprise">Enterprise</span> <span class="tag tag-paid">Contact sales</span></div>
+      </div>
+      <div class="tool-card">
+        <h4><a href="https://www.augmentcode.com" target="_blank" rel="noopener">Augment Code</a></h4>
+        <div class="maker">by <a href="https://www.augmentcode.com" target="_blank" rel="noopener">Augment</a></div>
+        <div class="tool-desc">Context Engine maintains a live understanding of your codebase, dependencies, and history. IDE extension, Auggie CLI, and Intent desktop workspace for multi-agent orchestration with Coordinator + specialist agents.</div>
+        <div class="tool-meta"><span class="tag tag-freemium">$20/mo Indie</span> <span class="tag tag-paid">$60/mo Std</span></div>
+      </div>
+      <div class="tool-card">
+        <h4><a href="https://kilo.ai" target="_blank" rel="noopener">Kilo Code</a></h4>
+        <div class="maker">by <a href="https://github.com/Kilo-Org" target="_blank" rel="noopener">Kilo Org</a></div>
+        <div class="tool-desc">Open-source VS Code extension forked from Roo Code (itself a Cline fork). Multi-mode (Architect, Coder, Debugger), supports 500+ models. 3M+ users. The community-driven agent.</div>
+        <div class="tool-meta"><span class="tag tag-free">Free</span> <span class="tag tag-oss">Open source</span></div>
+      </div>
+      <div class="tool-card">
+        <h4><a href="https://www.jetbrains.com/ai/" target="_blank" rel="noopener">JetBrains AI</a></h4>
+        <div class="maker">by <a href="https://www.jetbrains.com" target="_blank" rel="noopener">JetBrains</a></div>
+        <div class="tool-desc">Native AI in IntelliJ, PyCharm, WebStorm, and all JetBrains IDEs. Junie agent for autonomous tasks. Leverages JetBrains&rsquo; deep language understanding (type inference, refactoring engine). Built-in &mdash; no extension needed.</div>
+        <div class="tool-meta"><span class="tag tag-freemium">Included w/ IDE</span> <span class="tag tag-paid">AI Pro $10/mo</span></div>
+      </div>
+    </div>
+
+    <div style="overflow-x:auto;">
+    <table class="cmp-table">
+      <thead><tr><th>Tool</th><th>Editor</th><th>Agent Mode</th><th>Models</th><th>Price</th><th>Best For</th></tr></thead>
+      <tbody>
+        <tr><td><a href="https://cursor.com" target="_blank" rel="noopener">Cursor</a></td><td>Own IDE (VS Code fork)</td><td>Composer + background</td><td>Claude, GPT, Gemini</td><td>Free / $20/mo</td><td>All-around AI-native editing</td></tr>
+        <tr><td><a href="https://github.com/features/copilot" target="_blank" rel="noopener">GitHub Copilot</a></td><td>VS Code, JetBrains, Neovim, Xcode</td><td>Copilot Coding Agent</td><td>GPT, Claude, Gemini</td><td>Free / $10/mo</td><td>GitHub-centric workflows</td></tr>
+        <tr><td><a href="https://windsurf.com" target="_blank" rel="noopener">Windsurf</a></td><td>Own IDE (VS Code fork)</td><td>Cascade</td><td>GPT, Claude, Gemini</td><td>Free / $15/mo</td><td>Budget-friendly agent mode</td></tr>
+        <tr><td><a href="https://www.continue.dev" target="_blank" rel="noopener">Continue</a></td><td>VS Code, JetBrains, Neovim</td><td>Agent + CI review</td><td>Any (BYO key)</td><td>Free (OSS)</td><td>Open-source, privacy, BYO model</td></tr>
+        <tr><td><a href="https://ampcode.com" target="_blank" rel="noopener">Amp</a></td><td>VS Code, JetBrains, CLI</td><td>Full agent</td><td>Claude, GPT, Gemini</td><td>Enterprise</td><td>Large codebases, team threads</td></tr>
+        <tr><td><a href="https://www.augmentcode.com" target="_blank" rel="noopener">Augment Code</a></td><td>VS Code, JetBrains, CLI, desktop</td><td>Intent multi-agent</td><td>Proprietary + Claude</td><td>$20&ndash;$200/mo</td><td>Deep codebase understanding</td></tr>
+        <tr><td><a href="https://kilo.ai" target="_blank" rel="noopener">Kilo Code</a></td><td>VS Code</td><td>Multi-mode</td><td>Any (500+)</td><td>Free (OSS)</td><td>Customizable modes, community</td></tr>
+        <tr><td><a href="https://www.jetbrains.com/ai/" target="_blank" rel="noopener">JetBrains AI</a></td><td>All JetBrains IDEs</td><td>Junie agent</td><td>JetBrains models + Claude</td><td>Included / $10/mo</td><td>JetBrains users, type-aware AI</td></tr>
+      </tbody>
+    </table>
+    </div>
+
+    <!-- ════════════════════ TERMINAL AGENTS ════════════════════ -->
+    <div class="cat-header"><div class="cat-icon">&gt;_</div><h2 id="terminal" style="margin:0;">Terminal &amp; CLI Agents</h2></div>
+    <p>These run in your terminal and operate autonomously &mdash; reading files, writing code, executing commands, running tests, and iterating on failures. They have full access to your development environment and can accomplish complex multi-step tasks without supervision.</p>
+
+    <div class="tool-grid">
+      <div class="tool-card">
+        <h4><a href="https://claude.ai/code" target="_blank" rel="noopener">Claude Code</a></h4>
+        <div class="maker">by <a href="https://anthropic.com" target="_blank" rel="noopener">Anthropic</a></div>
+        <div class="tool-desc">Anthropic&rsquo;s official CLI agent. Deep tool use (bash, file edit, search, browser), <a href="/guides/claude-code-hooks-cookbook/">hooks</a> system for programmatic constraints, subagent spawning, <a href="/guides/claude-code-routines/">routines</a> for scheduled tasks, and <a href="/guides/harness-engineering/">CLAUDE.md harness</a> for project-specific rules. The most configurable terminal agent. <a href="/compare/amux-vs-cursor/">Compared to Cursor &rsaquo;</a></div>
+        <div class="tool-meta"><span class="tag tag-paid">API usage / Max $100&ndash;$200/mo</span></div>
+      </div>
+      <div class="tool-card">
+        <h4><a href="https://github.com/openai/codex" target="_blank" rel="noopener">Codex CLI</a></h4>
+        <div class="maker">by <a href="https://openai.com" target="_blank" rel="noopener">OpenAI</a></div>
+        <div class="tool-desc">Open-source terminal agent built in Rust. Sandboxed execution, multi-model support (GPT-5.x series), and <a href="https://agents.md" target="_blank" rel="noopener">AGENTS.md</a> configuration. Included with ChatGPT Plus. <a href="/compare/amux-vs-codex/">Compared to amux &rsaquo;</a></div>
+        <div class="tool-meta"><span class="tag tag-freemium">Included w/ ChatGPT+</span> <span class="tag tag-oss">Open source</span></div>
+      </div>
+      <div class="tool-card">
+        <h4><a href="https://github.com/google-gemini/gemini-cli" target="_blank" rel="noopener">Gemini CLI</a></h4>
+        <div class="maker">by <a href="https://deepmind.google" target="_blank" rel="noopener">Google DeepMind</a></div>
+        <div class="tool-desc">Open-source terminal agent powered by Gemini 2.5 Pro with a 1M-token context window. Google Search grounding, MCP support, shell and file tools. Free: 1,000 requests/day with a personal Google account.</div>
+        <div class="tool-meta"><span class="tag tag-free">Free (1k req/day)</span> <span class="tag tag-oss">Open source</span></div>
+      </div>
+      <div class="tool-card">
+        <h4><a href="https://aider.chat" target="_blank" rel="noopener">Aider</a></h4>
+        <div class="maker">Open source &middot; <a href="https://github.com/Aider-AI/aider" target="_blank" rel="noopener">GitHub</a></div>
+        <div class="tool-desc">The original open-source AI pair-programming CLI. Git-aware: auto-commits changes. Works with any model via API key. Extensive linting and testing integration. Popular for its simplicity and reliability. <a href="/compare/amux-vs-aider/">Compared to amux &rsaquo;</a></div>
+        <div class="tool-meta"><span class="tag tag-free">Free (BYO key)</span> <span class="tag tag-oss">Open source</span></div>
+      </div>
+      <div class="tool-card">
+        <h4><a href="https://cline.bot" target="_blank" rel="noopener">Cline</a></h4>
+        <div class="maker">Open source &middot; <a href="https://github.com/cline/cline" target="_blank" rel="noopener">GitHub</a></div>
+        <div class="tool-desc">VS Code extension that operates as an autonomous agent &mdash; reads/writes files, runs terminal commands, browses the web. Human-in-the-loop approval flow. Spawned forks like Roo Code and Kilo Code. <a href="/compare/amux-vs-cline/">Compared to amux &rsaquo;</a></div>
+        <div class="tool-meta"><span class="tag tag-free">Free (BYO key)</span> <span class="tag tag-oss">Open source</span></div>
+      </div>
+      <div class="tool-card">
+        <h4><a href="https://goose-docs.ai" target="_blank" rel="noopener">Goose</a></h4>
+        <div class="maker">by <a href="https://block.xyz" target="_blank" rel="noopener">Block</a> / <a href="https://www.linuxfoundation.org/press/linux-foundation-announces-the-formation-of-the-agentic-ai-foundation" target="_blank" rel="noopener">AAIF</a></div>
+        <div class="tool-desc">Open-source general-purpose agent with desktop app, CLI, and API. Model-agnostic (15+ providers). MCP-native for tool extensibility. Now stewarded by the Linux Foundation&rsquo;s Agentic AI Foundation alongside AGENTS.md and MCP. <a href="/compare/amux-vs-goose/">Compared to amux &rsaquo;</a></div>
+        <div class="tool-meta"><span class="tag tag-free">Free</span> <span class="tag tag-oss">Open source (Apache 2.0)</span></div>
+      </div>
+    </div>
+
+    <div style="overflow-x:auto;">
+    <table class="cmp-table">
+      <thead><tr><th>Tool</th><th>Models</th><th>Sandboxed</th><th>Git-Aware</th><th>MCP</th><th>Price</th><th>Best For</th></tr></thead>
+      <tbody>
+        <tr><td><a href="https://claude.ai/code" target="_blank" rel="noopener">Claude Code</a></td><td>Claude (Opus, Sonnet, Haiku)</td><td>Optional (Docker)</td><td>Yes</td><td>Yes</td><td>API / Max plan</td><td>Complex autonomous tasks, hooks</td></tr>
+        <tr><td><a href="https://github.com/openai/codex" target="_blank" rel="noopener">Codex CLI</a></td><td>GPT-5.x</td><td>Yes (default)</td><td>Yes</td><td>Yes</td><td>Included w/ ChatGPT+</td><td>Safe sandboxed execution</td></tr>
+        <tr><td><a href="https://github.com/google-gemini/gemini-cli" target="_blank" rel="noopener">Gemini CLI</a></td><td>Gemini 2.5 Pro</td><td>No</td><td>No</td><td>Yes</td><td>Free (1k/day)</td><td>Free unlimited usage, huge context</td></tr>
+        <tr><td><a href="https://aider.chat" target="_blank" rel="noopener">Aider</a></td><td>Any (BYO key)</td><td>No</td><td>Yes (auto-commit)</td><td>No</td><td>Free (OSS)</td><td>Git-first workflow, model agnostic</td></tr>
+        <tr><td><a href="https://cline.bot" target="_blank" rel="noopener">Cline</a></td><td>Any (BYO key)</td><td>No</td><td>Yes</td><td>Yes</td><td>Free (OSS)</td><td>VS Code-native agent, human-in-loop</td></tr>
+        <tr><td><a href="https://goose-docs.ai" target="_blank" rel="noopener">Goose</a></td><td>Any (15+ providers)</td><td>No</td><td>Yes</td><td>Yes (native)</td><td>Free (OSS)</td><td>MCP-native, multi-provider</td></tr>
+      </tbody>
+    </table>
+    </div>
+
+    <!-- ════════════════════ CLOUD AGENTS ════════════════════ -->
+    <div class="cat-header"><div class="cat-icon">&#9729;</div><h2 id="cloud" style="margin:0;">Cloud &amp; Background Agents</h2></div>
+    <p>These run on remote infrastructure. You assign a task (or GitHub issue) and the agent works autonomously &mdash; reading the codebase, writing code, running tests, and opening a pull request. No local compute required. The trade-off: less control, higher latency, and typically higher cost per task.</p>
+
+    <div class="tool-grid">
+      <div class="tool-card">
+        <h4><a href="https://devin.ai" target="_blank" rel="noopener">Devin</a></h4>
+        <div class="maker">by <a href="https://cognition.ai" target="_blank" rel="noopener">Cognition</a></div>
+        <div class="tool-desc">The first &ldquo;AI software engineer.&rdquo; Full cloud sandbox with shell, browser, and editor. Handles multi-hour tasks end-to-end. Slack and GitHub integration for assigning work. Most autonomous of any cloud agent. <a href="/compare/amux-vs-devin/">Compared to amux &rsaquo;</a></div>
+        <div class="tool-meta"><span class="tag tag-paid">$500/mo (Team)</span> <span class="tag tag-enterprise">Enterprise</span></div>
+      </div>
+      <div class="tool-card">
+        <h4><a href="https://openai.com/codex/" target="_blank" rel="noopener">OpenAI Codex</a> (Cloud)</h4>
+        <div class="maker">by <a href="https://openai.com" target="_blank" rel="noopener">OpenAI</a></div>
+        <div class="tool-desc">Cloud-based coding agent inside ChatGPT. Spins up a sandboxed environment per task. Reads repos, writes code, runs tests, opens PRs. Powered by codex-mini (optimized for code) and GPT-5.x. Available on Pro, Team, and Enterprise plans. <a href="/compare/amux-vs-codex/">Compared to amux &rsaquo;</a></div>
+        <div class="tool-meta"><span class="tag tag-paid">ChatGPT Pro $200/mo</span></div>
+      </div>
+      <div class="tool-card">
+        <h4><a href="https://www.openhands.dev" target="_blank" rel="noopener">OpenHands</a></h4>
+        <div class="maker">Open source &middot; <a href="https://github.com/All-Hands-AI/OpenHands" target="_blank" rel="noopener">GitHub</a></div>
+        <div class="tool-desc">Open-source cloud agent platform (formerly OpenDevin). Self-hostable. Full sandbox with shell, browser, and file access. Model-agnostic. Free SaaS tier with Minimax model. The open-source Devin alternative. <a href="/compare/amux-vs-openhands/">Compared to amux &rsaquo;</a></div>
+        <div class="tool-meta"><span class="tag tag-free">Free tier</span> <span class="tag tag-oss">Open source</span></div>
+      </div>
+      <div class="tool-card">
+        <h4><a href="https://bolt.new" target="_blank" rel="noopener">Bolt</a></h4>
+        <div class="maker">by <a href="https://stackblitz.com" target="_blank" rel="noopener">StackBlitz</a></div>
+        <div class="tool-desc">Browser-based AI app builder. Describe what you want, get a running full-stack app in minutes. WebContainer sandbox &mdash; runs entirely in the browser. Best for prototyping and MVPs, not production codebases. <a href="/compare/amux-vs-bolt-new/">Compared to amux &rsaquo;</a></div>
+        <div class="tool-meta"><span class="tag tag-freemium">Free tier</span> <span class="tag tag-paid">$20/mo Pro</span></div>
+      </div>
+      <div class="tool-card">
+        <h4><a href="https://lovable.dev" target="_blank" rel="noopener">Lovable</a></h4>
+        <div class="maker">by <a href="https://lovable.dev" target="_blank" rel="noopener">Lovable</a></div>
+        <div class="tool-desc">Full-stack AI development platform. Generates production-ready TypeScript + React apps from natural language. Plan Mode shows intent before generating code. Mobile app available. Expanding beyond code into data analysis and business workflows.</div>
+        <div class="tool-meta"><span class="tag tag-freemium">Free tier</span> <span class="tag tag-paid">$20/mo Starter</span></div>
+      </div>
+      <div class="tool-card">
+        <h4><a href="https://v0.dev" target="_blank" rel="noopener">v0</a></h4>
+        <div class="maker">by <a href="https://vercel.com" target="_blank" rel="noopener">Vercel</a></div>
+        <div class="tool-desc">AI-powered UI generation. Describe a component, get deployable React code using shadcn/ui and Tailwind. Tightly integrated with Vercel&rsquo;s deployment platform. Best for frontend prototyping and design-to-code workflows. <a href="/compare/amux-vs-v0/">Compared to amux &rsaquo;</a></div>
+        <div class="tool-meta"><span class="tag tag-freemium">Free tier</span> <span class="tag tag-paid">$20/mo Premium</span></div>
+      </div>
+      <div class="tool-card">
+        <h4><a href="https://replit.com" target="_blank" rel="noopener">Replit Agent</a></h4>
+        <div class="maker">by <a href="https://replit.com" target="_blank" rel="noopener">Replit</a></div>
+        <div class="tool-desc">Cloud IDE with built-in AI agent. Describe an app, Agent builds and deploys it &mdash; database, auth, hosting included. Zero local setup. Best for rapid prototyping and non-developers building production apps. <a href="/compare/amux-vs-replit-agent/">Compared to amux &rsaquo;</a></div>
+        <div class="tool-meta"><span class="tag tag-freemium">Free tier</span> <span class="tag tag-paid">$25/mo Replit Core</span></div>
+      </div>
+      <div class="tool-card">
+        <h4><a href="https://aws.amazon.com/q/developer/" target="_blank" rel="noopener">Amazon Q Developer</a></h4>
+        <div class="maker">by <a href="https://aws.amazon.com" target="_blank" rel="noopener">Amazon Web Services</a></div>
+        <div class="tool-desc">AWS-native AI coding agent. Inline completions, chat, autonomous agents for feature development and code transformation. Deep AWS service integration &mdash; best for teams building on the AWS stack. Runs in VS Code, JetBrains, and the AWS console.</div>
+        <div class="tool-meta"><span class="tag tag-freemium">Free tier</span> <span class="tag tag-paid">$19/mo Pro</span></div>
+      </div>
+    </div>
+
+    <div style="overflow-x:auto;">
+    <table class="cmp-table">
+      <thead><tr><th>Tool</th><th>Sandbox</th><th>GitHub PR</th><th>Self-Hostable</th><th>Price</th><th>Best For</th></tr></thead>
+      <tbody>
+        <tr><td><a href="https://devin.ai" target="_blank" rel="noopener">Devin</a></td><td>Full cloud VM</td><td>Yes</td><td>No</td><td>$500/mo</td><td>Complex multi-hour autonomous tasks</td></tr>
+        <tr><td><a href="https://openai.com/codex/" target="_blank" rel="noopener">OpenAI Codex</a></td><td>Per-task sandbox</td><td>Yes</td><td>No</td><td>$200/mo (Pro)</td><td>ChatGPT-integrated coding</td></tr>
+        <tr><td><a href="https://www.openhands.dev" target="_blank" rel="noopener">OpenHands</a></td><td>Docker container</td><td>Yes</td><td>Yes</td><td>Free (OSS)</td><td>Self-hosted cloud agent</td></tr>
+        <tr><td><a href="https://bolt.new" target="_blank" rel="noopener">Bolt</a></td><td>WebContainer</td><td>Export only</td><td>No</td><td>Free / $20/mo</td><td>Instant full-stack prototypes</td></tr>
+        <tr><td><a href="https://lovable.dev" target="_blank" rel="noopener">Lovable</a></td><td>Cloud</td><td>Yes</td><td>No</td><td>Free / $20/mo</td><td>Non-technical app building</td></tr>
+        <tr><td><a href="https://v0.dev" target="_blank" rel="noopener">v0</a></td><td>Preview</td><td>Export</td><td>No</td><td>Free / $20/mo</td><td>UI component generation</td></tr>
+        <tr><td><a href="https://replit.com" target="_blank" rel="noopener">Replit Agent</a></td><td>Full cloud VM</td><td>No (own hosting)</td><td>No</td><td>Free / $25/mo</td><td>Zero-setup app building</td></tr>
+        <tr><td><a href="https://aws.amazon.com/q/developer/" target="_blank" rel="noopener">Amazon Q</a></td><td>AWS cloud</td><td>Yes</td><td>No</td><td>Free / $19/mo</td><td>AWS-native development</td></tr>
+      </tbody>
+    </table>
+    </div>
+
+    <!-- ════════════════════ ORCHESTRATION ════════════════════ -->
+    <div class="cat-header"><div class="cat-icon">&#9881;</div><h2 id="orchestration" style="margin:0;">Agent Orchestration Platforms</h2></div>
+    <p>When you run more than one AI coding agent at a time, you need coordination: workspace isolation so agents don&rsquo;t overwrite each other&rsquo;s work, task assignment so they don&rsquo;t duplicate effort, and monitoring so you know what&rsquo;s happening. Orchestration platforms solve this.</p>
+
+    <div class="key-insight">
+      <strong>Why orchestration matters:</strong> Running 5 agents without coordination is like hiring 5 developers who can&rsquo;t see each other&rsquo;s work. Orchestration turns a group of agents into a team &mdash; with shared context, divided tasks, and visible progress. See our <a href="/guides/multi-agent-orchestrator-architecture/">architecture guide</a> for patterns.
+    </div>
+
+    <div class="tool-grid">
+      <div class="tool-card" style="border-color: rgba(110,231,183,0.25); background: rgba(110,231,183,0.03);">
+        <h4><a href="https://amux.io" target="_blank" rel="noopener">amux</a></h4>
+        <div class="maker">by <a href="https://mixpeek.com" target="_blank" rel="noopener">Mixpeek</a></div>
+        <div class="tool-desc">Open-source agent multiplexer. Manages parallel <a href="https://claude.ai/code" target="_blank" rel="noopener">Claude Code</a> sessions via tmux with a web dashboard, mobile PWA, REST API, kanban board for task coordination, self-healing watchdog, and browser automation. Single-file Python server. <a href="/docs/">Full documentation &rsaquo;</a></div>
+        <div class="tool-meta"><span class="tag tag-free">Free</span> <span class="tag tag-oss">Open source (MIT)</span></div>
+      </div>
+      <div class="tool-card">
+        <h4><a href="https://github.com/smtg-ai/claude-squad" target="_blank" rel="noopener">Claude Squad</a></h4>
+        <div class="maker">Open source &middot; <a href="https://smtg-ai.github.io/claude-squad/" target="_blank" rel="noopener">Docs</a></div>
+        <div class="tool-desc">tmux-based terminal harness that manages multiple Claude Code, Codex, and Gemini CLI sessions side-by-side. Lightweight: run agents in parallel with a simple TUI. 7.5k+ GitHub stars. <a href="/blog/best-multi-agent-orchestrators-2026/">Compared to orchestrators &rsaquo;</a></div>
+        <div class="tool-meta"><span class="tag tag-free">Free</span> <span class="tag tag-oss">Open source</span></div>
+      </div>
+      <div class="tool-card">
+        <h4><a href="https://docs.anthropic.com/en/docs/agents" target="_blank" rel="noopener">Claude Code Agent Teams</a></h4>
+        <div class="maker">by <a href="https://anthropic.com" target="_blank" rel="noopener">Anthropic</a> (built into Claude Code)</div>
+        <div class="tool-desc">Built-in multi-agent capability in Claude Code. A lead agent spawns and coordinates sub-agents, each working in isolated git worktrees. No external tool needed &mdash; native to Claude Code. <a href="/compare/amux-vs-claude-code-agent-teams/">Compared to amux &rsaquo;</a></div>
+        <div class="tool-meta"><span class="tag tag-paid">Included w/ Claude Code</span></div>
+      </div>
+      <div class="tool-card">
+        <h4><a href="https://www.augmentcode.com" target="_blank" rel="noopener">Augment Intent</a></h4>
+        <div class="maker">by <a href="https://www.augmentcode.com" target="_blank" rel="noopener">Augment Code</a></div>
+        <div class="tool-desc">Standalone macOS workspace for multi-agent orchestration. A Coordinator agent breaks tasks into a living spec and delegates to parallel specialist agents. Powered by Augment&rsquo;s Context Engine for deep codebase awareness.</div>
+        <div class="tool-meta"><span class="tag tag-paid">$200/mo Max</span></div>
+      </div>
+    </div>
+
+    <div style="overflow-x:auto;">
+    <table class="cmp-table">
+      <thead><tr><th>Platform</th><th>Agent Support</th><th>Coordination</th><th>Monitoring</th><th>Price</th></tr></thead>
+      <tbody>
+        <tr><td><a href="https://amux.io">amux</a></td><td>Claude Code (primary)</td><td>Kanban board + REST API + atomic claiming</td><td>Web dashboard + mobile PWA + SSE</td><td>Free (OSS)</td></tr>
+        <tr><td><a href="https://github.com/smtg-ai/claude-squad" target="_blank" rel="noopener">Claude Squad</a></td><td>Claude Code, Codex, Gemini CLI</td><td>Side-by-side TUI</td><td>Terminal UI</td><td>Free (OSS)</td></tr>
+        <tr><td><a href="https://docs.anthropic.com/en/docs/agents" target="_blank" rel="noopener">Agent Teams</a></td><td>Claude Code only</td><td>Lead &rarr; sub-agent delegation</td><td>Claude Code output</td><td>Included</td></tr>
+        <tr><td><a href="https://www.augmentcode.com" target="_blank" rel="noopener">Augment Intent</a></td><td>Augment agents</td><td>Coordinator + specialist</td><td>Intent desktop app</td><td>$200/mo</td></tr>
+      </tbody>
+    </table>
+    </div>
+
+    <div class="amux-cta">
+      <div class="cta-text">
+        <h4>Running multiple agents? amux gives you the control plane.</h4>
+        <p>Open-source agent multiplexer with web dashboard, mobile app, kanban board for task coordination, self-healing watchdog, and REST API. Manage 1&ndash;50 parallel Claude Code sessions from your phone or browser.</p>
+        <div class="cta-links">
+          <a href="/guides/getting-started/" class="cta-primary">Get started</a>
+          <a href="/docs/" class="cta-secondary">Documentation</a>
+        </div>
+      </div>
+    </div>
+
+    <!-- ════════════════════ SDKs ════════════════════ -->
+    <div class="cat-header"><div class="cat-icon">{&nbsp;}</div><h2 id="sdks" style="margin:0;">Agent SDKs &amp; Frameworks</h2></div>
+    <p>These are libraries for building your own AI agents and custom agentic workflows. Use them when off-the-shelf tools don&rsquo;t fit your use case, or when you need agents that go beyond coding (CI/CD automation, testing pipelines, infrastructure management).</p>
+
+    <div class="tool-grid">
+      <div class="tool-card">
+        <h4><a href="https://docs.anthropic.com/en/docs/agents" target="_blank" rel="noopener">Claude Agent SDK</a></h4>
+        <div class="maker">by <a href="https://anthropic.com" target="_blank" rel="noopener">Anthropic</a></div>
+        <div class="tool-desc">Official Python SDK for building agents on Claude. Tool use, multi-turn conversation, guardrails, and managed agent infrastructure. Tight integration with Claude&rsquo;s extended thinking and computer use capabilities.</div>
+        <div class="tool-meta"><span class="tag tag-freemium">API pricing</span></div>
+      </div>
+      <div class="tool-card">
+        <h4><a href="https://github.com/openai/openai-agents-python" target="_blank" rel="noopener">OpenAI Agents SDK</a></h4>
+        <div class="maker">by <a href="https://openai.com" target="_blank" rel="noopener">OpenAI</a></div>
+        <div class="tool-desc">Python framework for building multi-agent systems on OpenAI models. Agent loops, tool execution, handoffs between agents, guardrails, and tracing. Lightweight and opinionated.</div>
+        <div class="tool-meta"><span class="tag tag-freemium">API pricing</span> <span class="tag tag-oss">Open source</span></div>
+      </div>
+      <div class="tool-card">
+        <h4><a href="https://google.github.io/adk-docs/" target="_blank" rel="noopener">Google ADK</a></h4>
+        <div class="maker">by <a href="https://cloud.google.com" target="_blank" rel="noopener">Google Cloud</a></div>
+        <div class="tool-desc">Agent Development Kit for building, evaluating, and deploying agents. Python, TypeScript, Go, and Java. Multi-agent architectures, Vertex AI integration, and the broadest language support of any agent SDK.</div>
+        <div class="tool-meta"><span class="tag tag-freemium">API pricing</span> <span class="tag tag-oss">Open source</span></div>
+      </div>
+      <div class="tool-card">
+        <h4><a href="https://www.langchain.com/langgraph" target="_blank" rel="noopener">LangGraph</a></h4>
+        <div class="maker">by <a href="https://www.langchain.com" target="_blank" rel="noopener">LangChain</a></div>
+        <div class="tool-desc">Graph-based agent orchestration framework. Define agents as nodes in a stateful graph with controllable edges. Model-agnostic. Best for complex multi-step workflows with branching logic, human-in-the-loop, and persistent state. <a href="/compare/amux-vs-langraph/">Compared to amux &rsaquo;</a></div>
+        <div class="tool-meta"><span class="tag tag-free">Free (OSS)</span> <span class="tag tag-paid">LangSmith for tracing</span></div>
+      </div>
+      <div class="tool-card">
+        <h4><a href="https://www.crewai.com" target="_blank" rel="noopener">CrewAI</a></h4>
+        <div class="maker">by <a href="https://www.crewai.com" target="_blank" rel="noopener">CrewAI</a></div>
+        <div class="tool-desc">Role-based multi-agent framework. Define agents with roles (researcher, coder, reviewer), assign tasks, and let them collaborate. Simple API, good for teams new to multi-agent patterns. <a href="/compare/amux-vs-crewai/">Compared to amux &rsaquo;</a></div>
+        <div class="tool-meta"><span class="tag tag-free">Free (OSS)</span> <span class="tag tag-paid">Enterprise</span></div>
+      </div>
+      <div class="tool-card">
+        <h4><a href="https://microsoft.github.io/autogen/" target="_blank" rel="noopener">AutoGen</a></h4>
+        <div class="maker">by <a href="https://microsoft.com" target="_blank" rel="noopener">Microsoft</a></div>
+        <div class="tool-desc">Multi-agent conversation framework. Agents with different roles discuss and collaborate to solve tasks. Strong research backing. Good for conversational multi-agent patterns and complex reasoning chains. <a href="/compare/amux-vs-autogen/">Compared to amux &rsaquo;</a></div>
+        <div class="tool-meta"><span class="tag tag-free">Free (OSS)</span></div>
+      </div>
+    </div>
+
+    <div style="overflow-x:auto;">
+    <table class="cmp-table">
+      <thead><tr><th>SDK</th><th>Languages</th><th>Multi-Agent</th><th>Model Lock-in</th><th>Best For</th></tr></thead>
+      <tbody>
+        <tr><td><a href="https://docs.anthropic.com/en/docs/agents" target="_blank" rel="noopener">Claude Agent SDK</a></td><td>Python</td><td>Managed agents</td><td>Claude only</td><td>Production Claude agents, managed infra</td></tr>
+        <tr><td><a href="https://github.com/openai/openai-agents-python" target="_blank" rel="noopener">OpenAI Agents SDK</a></td><td>Python</td><td>Handoffs + guardrails</td><td>OpenAI only</td><td>Multi-agent with OpenAI models</td></tr>
+        <tr><td><a href="https://google.github.io/adk-docs/" target="_blank" rel="noopener">Google ADK</a></td><td>Python, TS, Go, Java</td><td>Yes</td><td>Gemini primary, others via extension</td><td>Polyglot teams, Vertex AI deployment</td></tr>
+        <tr><td><a href="https://www.langchain.com/langgraph" target="_blank" rel="noopener">LangGraph</a></td><td>Python, TypeScript</td><td>Graph-based</td><td>Any model</td><td>Complex stateful workflows</td></tr>
+        <tr><td><a href="https://www.crewai.com" target="_blank" rel="noopener">CrewAI</a></td><td>Python</td><td>Role-based crews</td><td>Any model</td><td>Simple multi-agent, rapid prototyping</td></tr>
+        <tr><td><a href="https://microsoft.github.io/autogen/" target="_blank" rel="noopener">AutoGen</a></td><td>Python</td><td>Conversational</td><td>Any model</td><td>Research, conversational agents</td></tr>
+      </tbody>
+    </table>
+    </div>
+
+    <!-- ════════════════════ STANDARDS ════════════════════ -->
+    <div class="cat-header"><div class="cat-icon">&#9878;</div><h2 id="standards" style="margin:0;">Open Standards &amp; Protocols</h2></div>
+    <p>The glue that makes tools interoperable. In 2026, three open standards emerged as the foundation for AI coding tooling, all now stewarded by the <a href="https://www.linuxfoundation.org/press/linux-foundation-announces-the-formation-of-the-agentic-ai-foundation" target="_blank" rel="noopener">Linux Foundation&rsquo;s Agentic AI Foundation (AAIF)</a>.</p>
+
+    <div class="std-card">
+      <h4><a href="https://agents.md" target="_blank" rel="noopener">AGENTS.md</a></h4>
+      <div class="steward">Originally by <a href="https://openai.com" target="_blank" rel="noopener">OpenAI</a> &middot; Now AAIF / Linux Foundation</div>
+      <p>A simple, universal file format for giving AI coding agents project-specific context &mdash; build steps, test commands, coding conventions, and architectural rules. A README for AI agents. Supported by <a href="https://github.com/features/copilot" target="_blank" rel="noopener">GitHub Copilot</a>, <a href="https://cursor.com" target="_blank" rel="noopener">Cursor</a>, <a href="https://windsurf.com" target="_blank" rel="noopener">Windsurf</a>, <a href="https://github.com/openai/codex" target="_blank" rel="noopener">Codex CLI</a>, <a href="https://github.com/google-gemini/gemini-cli" target="_blank" rel="noopener">Gemini CLI</a>, <a href="https://devin.ai" target="_blank" rel="noopener">Devin</a>, <a href="https://aider.chat" target="_blank" rel="noopener">Aider</a>, <a href="https://goose-docs.ai" target="_blank" rel="noopener">Goose</a>, <a href="https://kilo.ai" target="_blank" rel="noopener">Kilo Code</a>, and more. 60,000+ repos use it. See our <a href="/guides/agent-config-files-compared/">config files comparison</a>.</p>
+    </div>
+    <div class="std-card">
+      <h4><a href="https://modelcontextprotocol.io" target="_blank" rel="noopener">Model Context Protocol (MCP)</a></h4>
+      <div class="steward">Originally by <a href="https://anthropic.com" target="_blank" rel="noopener">Anthropic</a> &middot; Now AAIF / Linux Foundation</div>
+      <p>Open standard for connecting AI agents to external tools and data sources via a standardized API. Think of it as USB-C for AI tools &mdash; any MCP-compatible agent can use any MCP server. 15,000+ servers in the <a href="https://registry.modelcontextprotocol.io" target="_blank" rel="noopener">official registry</a>. Supported by <a href="https://claude.ai/code" target="_blank" rel="noopener">Claude Code</a>, <a href="https://cursor.com" target="_blank" rel="noopener">Cursor</a>, <a href="https://github.com/openai/codex" target="_blank" rel="noopener">Codex CLI</a>, <a href="https://github.com/google-gemini/gemini-cli" target="_blank" rel="noopener">Gemini CLI</a>, <a href="https://goose-docs.ai" target="_blank" rel="noopener">Goose</a>, and every major agent. See our <a href="/guides/using-mcp-servers/">MCP guide</a> and <a href="/guides/a2a-mcp-agent-protocols/">A2A + MCP comparison</a>.</p>
+    </div>
+    <div class="std-card">
+      <h4><a href="https://developers.google.com/a2a" target="_blank" rel="noopener">Agent-to-Agent Protocol (A2A)</a></h4>
+      <div class="steward">by <a href="https://cloud.google.com" target="_blank" rel="noopener">Google Cloud</a></div>
+      <p>Open protocol for agent-to-agent communication. While MCP connects agents to tools, A2A connects agents to <em>each other</em> &mdash; enabling multi-agent collaboration across different frameworks and vendors. Still early-stage compared to MCP but backed by Google and growing. See our <a href="/guides/a2a-mcp-agent-protocols/">complete A2A vs MCP comparison</a>.</p>
+    </div>
+
+    <!-- ════════════════════ MASTER MATRIX ════════════════════ -->
+    <h2 id="matrix">The Master Comparison Matrix</h2>
+    <p>Every tool in one table. Sort by what matters to you.</p>
+
+    <div style="overflow-x:auto;">
+    <table class="cmp-table">
+      <thead><tr><th>Tool</th><th>Category</th><th>Open Source</th><th>Free Tier</th><th>Starting Price</th><th>MCP</th><th>AGENTS.md</th></tr></thead>
+      <tbody>
+        <tr><td><a href="https://cursor.com" target="_blank" rel="noopener">Cursor</a></td><td>IDE</td><td>No</td><td>Yes</td><td>$20/mo</td><td>Yes</td><td>Yes</td></tr>
+        <tr><td><a href="https://github.com/features/copilot" target="_blank" rel="noopener">GitHub Copilot</a></td><td>IDE</td><td>No</td><td>Yes</td><td>$10/mo</td><td>Yes</td><td>Yes</td></tr>
+        <tr><td><a href="https://windsurf.com" target="_blank" rel="noopener">Windsurf</a></td><td>IDE</td><td>No</td><td>Yes</td><td>$15/mo</td><td>Yes</td><td>Yes</td></tr>
+        <tr><td><a href="https://www.continue.dev" target="_blank" rel="noopener">Continue</a></td><td>IDE</td><td>Yes</td><td>Yes</td><td>Free</td><td>Yes</td><td>Yes</td></tr>
+        <tr><td><a href="https://ampcode.com" target="_blank" rel="noopener">Amp</a></td><td>IDE</td><td>No</td><td>No</td><td>Enterprise</td><td>Yes</td><td>Yes</td></tr>
+        <tr><td><a href="https://www.augmentcode.com" target="_blank" rel="noopener">Augment Code</a></td><td>IDE</td><td>No</td><td>No</td><td>$20/mo</td><td>Yes</td><td>Yes</td></tr>
+        <tr><td><a href="https://kilo.ai" target="_blank" rel="noopener">Kilo Code</a></td><td>IDE</td><td>Yes</td><td>Yes</td><td>Free</td><td>Yes</td><td>Yes</td></tr>
+        <tr><td><a href="https://www.jetbrains.com/ai/" target="_blank" rel="noopener">JetBrains AI</a></td><td>IDE</td><td>No</td><td>Partial</td><td>$10/mo</td><td>Yes</td><td>Yes</td></tr>
+        <tr style="border-top: 2px solid var(--border);"><td><a href="https://claude.ai/code" target="_blank" rel="noopener">Claude Code</a></td><td>Terminal</td><td>No</td><td>Limited</td><td>$20/mo (Max)</td><td>Yes</td><td>CLAUDE.md</td></tr>
+        <tr><td><a href="https://github.com/openai/codex" target="_blank" rel="noopener">Codex CLI</a></td><td>Terminal</td><td>Yes</td><td>Yes</td><td>Included w/ Plus</td><td>Yes</td><td>Yes</td></tr>
+        <tr><td><a href="https://github.com/google-gemini/gemini-cli" target="_blank" rel="noopener">Gemini CLI</a></td><td>Terminal</td><td>Yes</td><td>Yes</td><td>Free</td><td>Yes</td><td>Yes</td></tr>
+        <tr><td><a href="https://aider.chat" target="_blank" rel="noopener">Aider</a></td><td>Terminal</td><td>Yes</td><td>Yes</td><td>Free</td><td>No</td><td>Yes</td></tr>
+        <tr><td><a href="https://cline.bot" target="_blank" rel="noopener">Cline</a></td><td>Terminal</td><td>Yes</td><td>Yes</td><td>Free</td><td>Yes</td><td>Yes</td></tr>
+        <tr><td><a href="https://goose-docs.ai" target="_blank" rel="noopener">Goose</a></td><td>Terminal</td><td>Yes</td><td>Yes</td><td>Free</td><td>Yes</td><td>Yes</td></tr>
+        <tr style="border-top: 2px solid var(--border);"><td><a href="https://devin.ai" target="_blank" rel="noopener">Devin</a></td><td>Cloud</td><td>No</td><td>No</td><td>$500/mo</td><td>No</td><td>Yes</td></tr>
+        <tr><td><a href="https://openai.com/codex/" target="_blank" rel="noopener">OpenAI Codex</a></td><td>Cloud</td><td>No</td><td>No</td><td>$200/mo</td><td>No</td><td>Yes</td></tr>
+        <tr><td><a href="https://www.openhands.dev" target="_blank" rel="noopener">OpenHands</a></td><td>Cloud</td><td>Yes</td><td>Yes</td><td>Free</td><td>No</td><td>No</td></tr>
+        <tr><td><a href="https://bolt.new" target="_blank" rel="noopener">Bolt</a></td><td>Cloud</td><td>No</td><td>Yes</td><td>$20/mo</td><td>No</td><td>No</td></tr>
+        <tr><td><a href="https://lovable.dev" target="_blank" rel="noopener">Lovable</a></td><td>Cloud</td><td>No</td><td>Yes</td><td>$20/mo</td><td>No</td><td>No</td></tr>
+        <tr><td><a href="https://replit.com" target="_blank" rel="noopener">Replit Agent</a></td><td>Cloud</td><td>No</td><td>Yes</td><td>$25/mo</td><td>No</td><td>No</td></tr>
+        <tr style="border-top: 2px solid var(--border);"><td><a href="https://amux.io">amux</a></td><td>Orchestration</td><td>Yes</td><td>Yes</td><td>Free</td><td>Via agents</td><td>Via agents</td></tr>
+        <tr><td><a href="https://github.com/smtg-ai/claude-squad" target="_blank" rel="noopener">Claude Squad</a></td><td>Orchestration</td><td>Yes</td><td>Yes</td><td>Free</td><td>Via agents</td><td>Via agents</td></tr>
+      </tbody>
+    </table>
+    </div>
+
+    <!-- ════════════════════ DECISION GUIDE ════════════════════ -->
+    <h2 id="choose">Which Tools Should You Use?</h2>
+    <p>Your ideal setup depends on your workflow, team size, and budget. Here are the most common stacks:</p>
+
+    <div class="decision-box">
+      <h4>Solo developer, interactive coding</h4>
+      <p>You want AI help while you code &mdash; completions, chat, and occasional multi-file edits. You stay in the loop.</p>
+      <p class="rec"><a href="https://cursor.com" target="_blank" rel="noopener">Cursor</a> or <a href="https://github.com/features/copilot" target="_blank" rel="noopener">GitHub Copilot</a></p>
+      <p style="font-size:0.85rem;color:var(--dim);">Budget pick: <a href="https://www.continue.dev" target="_blank" rel="noopener">Continue</a> (free, open-source) with your own API key.</p>
+    </div>
+    <div class="decision-box">
+      <h4>Solo developer, autonomous agents</h4>
+      <p>You want to assign tasks and let the agent work while you do something else. Fire-and-forget coding.</p>
+      <p class="rec"><a href="https://claude.ai/code" target="_blank" rel="noopener">Claude Code</a> or <a href="https://github.com/openai/codex" target="_blank" rel="noopener">Codex CLI</a></p>
+      <p style="font-size:0.85rem;color:var(--dim);">Budget pick: <a href="https://github.com/google-gemini/gemini-cli" target="_blank" rel="noopener">Gemini CLI</a> (free 1k requests/day) or <a href="https://aider.chat" target="_blank" rel="noopener">Aider</a> (BYO key).</p>
+    </div>
+    <div class="decision-box">
+      <h4>Solo developer, parallel agents</h4>
+      <p>You want to run 3&ndash;10 agents on different tasks simultaneously. Maximum throughput for one person.</p>
+      <p class="rec"><a href="https://claude.ai/code" target="_blank" rel="noopener">Claude Code</a> + <a href="https://amux.io">amux</a> or <a href="https://github.com/smtg-ai/claude-squad" target="_blank" rel="noopener">Claude Squad</a></p>
+      <p style="font-size:0.85rem;color:var(--dim);">See our <a href="/guides/running-10-plus-agents/">guide to running 10+ agents</a> and <a href="/guides/cost-optimization/">cost optimization</a>.</p>
+    </div>
+    <div class="decision-box">
+      <h4>Team, mixed workflow</h4>
+      <p>Multiple developers using AI tools on the same codebase. Need consistency, shared context, and code review workflows.</p>
+      <p class="rec"><a href="https://cursor.com" target="_blank" rel="noopener">Cursor</a> or <a href="https://github.com/features/copilot" target="_blank" rel="noopener">Copilot</a> (IDE) + <a href="https://claude.ai/code" target="_blank" rel="noopener">Claude Code</a> (autonomous tasks) + <a href="https://agents.md" target="_blank" rel="noopener">AGENTS.md</a> (shared config)</p>
+      <p style="font-size:0.85rem;color:var(--dim);">Enterprise pick: <a href="https://ampcode.com" target="_blank" rel="noopener">Amp</a> or <a href="https://www.augmentcode.com" target="_blank" rel="noopener">Augment Code</a> for deep codebase understanding across the team.</p>
+    </div>
+    <div class="decision-box">
+      <h4>Non-developer, building an app</h4>
+      <p>You don&rsquo;t code but need a working application. Describe what you want and get a deployable result.</p>
+      <p class="rec"><a href="https://lovable.dev" target="_blank" rel="noopener">Lovable</a>, <a href="https://bolt.new" target="_blank" rel="noopener">Bolt</a>, or <a href="https://replit.com" target="_blank" rel="noopener">Replit Agent</a></p>
+      <p style="font-size:0.85rem;color:var(--dim);">For UI-focused work: <a href="https://v0.dev" target="_blank" rel="noopener">v0</a> by Vercel.</p>
+    </div>
+    <div class="decision-box">
+      <h4>Building custom agents</h4>
+      <p>You need to build AI agents for your own product or internal tooling &mdash; not just coding assistance.</p>
+      <p class="rec"><a href="https://docs.anthropic.com/en/docs/agents" target="_blank" rel="noopener">Claude Agent SDK</a> or <a href="https://www.langchain.com/langgraph" target="_blank" rel="noopener">LangGraph</a></p>
+      <p style="font-size:0.85rem;color:var(--dim);">Multi-language: <a href="https://google.github.io/adk-docs/" target="_blank" rel="noopener">Google ADK</a> (Python, TS, Go, Java). Quick prototyping: <a href="https://www.crewai.com" target="_blank" rel="noopener">CrewAI</a>.</p>
+    </div>
+
+    <!-- ════════════════════ FAQ ════════════════════ -->
+    <h2 id="faq">FAQ</h2>
+
+    <details style="margin-bottom:0.75rem;">
+      <summary style="cursor:pointer;font-weight:600;padding:0.5rem 0;">What is the best AI coding tool in 2026?</summary>
+      <p style="padding:0.5rem 0 0.5rem 1rem;color:var(--dim);font-size:0.9rem;">There is no single best tool. For interactive coding, <a href="https://cursor.com" target="_blank" rel="noopener">Cursor</a> and <a href="https://github.com/features/copilot" target="_blank" rel="noopener">GitHub Copilot</a> lead. For autonomous terminal tasks, <a href="https://claude.ai/code" target="_blank" rel="noopener">Claude Code</a> and <a href="https://github.com/openai/codex" target="_blank" rel="noopener">Codex CLI</a> are the top choices. For fully autonomous cloud agents, <a href="https://devin.ai" target="_blank" rel="noopener">Devin</a> and <a href="https://openai.com/codex/" target="_blank" rel="noopener">OpenAI Codex</a> are the most capable. For parallel agent orchestration, <a href="https://amux.io">amux</a> and <a href="https://github.com/smtg-ai/claude-squad" target="_blank" rel="noopener">Claude Squad</a> are the leading open-source options. Most productive developers use 2&ndash;3 tools together.</p>
+    </details>
+    <details style="margin-bottom:0.75rem;">
+      <summary style="cursor:pointer;font-weight:600;padding:0.5rem 0;">What is the cheapest way to use AI coding tools?</summary>
+      <p style="padding:0.5rem 0 0.5rem 1rem;color:var(--dim);font-size:0.9rem;">A fully free stack: <a href="https://github.com/google-gemini/gemini-cli" target="_blank" rel="noopener">Gemini CLI</a> (1,000 free requests/day on Gemini 2.5 Pro) + <a href="https://www.continue.dev" target="_blank" rel="noopener">Continue</a> (free open-source IDE extension) + <a href="https://amux.io">amux</a> (free open-source orchestration). Or use <a href="https://aider.chat" target="_blank" rel="noopener">Aider</a>, <a href="https://goose-docs.ai" target="_blank" rel="noopener">Goose</a>, or <a href="https://kilo.ai" target="_blank" rel="noopener">Kilo Code</a> &mdash; all free and open-source, just bring your own API key. See our <a href="/blog/ai-coding-tools-pricing-2026/">full pricing comparison</a>.</p>
+    </details>
+    <details style="margin-bottom:0.75rem;">
+      <summary style="cursor:pointer;font-weight:600;padding:0.5rem 0;">Should I use an IDE agent or a terminal agent?</summary>
+      <p style="padding:0.5rem 0 0.5rem 1rem;color:var(--dim);font-size:0.9rem;">Use IDE agents for real-time code completion, inline chat, and interactive editing where you want tight feedback loops. Use terminal agents for autonomous multi-file tasks, background coding, and workflows where the agent runs commands, tests, and iterates without supervision. Many developers use both: an IDE agent for interactive work and a terminal agent for larger autonomous tasks.</p>
+    </details>
+    <details style="margin-bottom:0.75rem;">
+      <summary style="cursor:pointer;font-weight:600;padding:0.5rem 0;">What are AGENTS.md and MCP?</summary>
+      <p style="padding:0.5rem 0 0.5rem 1rem;color:var(--dim);font-size:0.9rem;"><a href="https://agents.md" target="_blank" rel="noopener">AGENTS.md</a> is an open standard for giving AI coding agents project-specific context &mdash; build steps, test commands, coding conventions. Think of it as a README for AI agents. <a href="https://modelcontextprotocol.io" target="_blank" rel="noopener">MCP</a> is Anthropic&rsquo;s open standard for connecting agents to external tools via a standardized API. Both are now under the <a href="https://www.linuxfoundation.org/press/linux-foundation-announces-the-formation-of-the-agentic-ai-foundation" target="_blank" rel="noopener">Linux Foundation&rsquo;s Agentic AI Foundation</a>. Together: AGENTS.md tells agents <em>what</em> to do, MCP gives them the <em>tools</em> to do it.</p>
+    </details>
+    <details style="margin-bottom:0.75rem;">
+      <summary style="cursor:pointer;font-weight:600;padding:0.5rem 0;">Can I run multiple AI coding agents at the same time?</summary>
+      <p style="padding:0.5rem 0 0.5rem 1rem;color:var(--dim);font-size:0.9rem;">Yes &mdash; and it&rsquo;s one of the biggest productivity multipliers in 2026. You need workspace isolation (git worktrees), task coordination (a shared board or spec), and monitoring. Tools like <a href="https://amux.io">amux</a>, <a href="https://github.com/smtg-ai/claude-squad" target="_blank" rel="noopener">Claude Squad</a>, and <a href="https://docs.anthropic.com/en/docs/agents" target="_blank" rel="noopener">Claude Code Agent Teams</a> provide this. See our <a href="/guides/running-10-plus-agents/">guide to running 10+ agents</a>.</p>
+    </details>
+    <details style="margin-bottom:0.75rem;">
+      <summary style="cursor:pointer;font-weight:600;padding:0.5rem 0;">Which tools support AGENTS.md?</summary>
+      <p style="padding:0.5rem 0 0.5rem 1rem;color:var(--dim);font-size:0.9rem;">As of May 2026: <a href="https://github.com/features/copilot" target="_blank" rel="noopener">GitHub Copilot</a>, <a href="https://cursor.com" target="_blank" rel="noopener">Cursor</a>, <a href="https://windsurf.com" target="_blank" rel="noopener">Windsurf</a>, <a href="https://github.com/openai/codex" target="_blank" rel="noopener">Codex CLI</a>, <a href="https://github.com/google-gemini/gemini-cli" target="_blank" rel="noopener">Gemini CLI</a>, <a href="https://devin.ai" target="_blank" rel="noopener">Devin</a>, <a href="https://aider.chat" target="_blank" rel="noopener">Aider</a>, <a href="https://goose-docs.ai" target="_blank" rel="noopener">Goose</a>, <a href="https://kilo.ai" target="_blank" rel="noopener">Kilo Code</a>, <a href="https://www.augmentcode.com" target="_blank" rel="noopener">Augment Code</a>, <a href="https://ampcode.com" target="_blank" rel="noopener">Amp</a>, and <a href="https://www.jetbrains.com/ai/" target="_blank" rel="noopener">JetBrains Junie</a>. <a href="https://claude.ai/code" target="_blank" rel="noopener">Claude Code</a> uses CLAUDE.md, which serves the same purpose. See our <a href="/guides/agent-config-files-compared/">config file comparison</a>.</p>
+    </details>
+    <details style="margin-bottom:0.75rem;">
+      <summary style="cursor:pointer;font-weight:600;padding:0.5rem 0;">What happened to Roo Code?</summary>
+      <p style="padding:0.5rem 0 0.5rem 1rem;color:var(--dim);font-size:0.9rem;">Roo Code (a fork of <a href="https://cline.bot" target="_blank" rel="noopener">Cline</a>) shut down all products on May 15, 2026. The team pivoted to Roomote, a cloud-based autonomous agent. <a href="https://kilo.ai" target="_blank" rel="noopener">Kilo Code</a>, another fork from the same lineage, is the active community continuation with 3M+ users.</p>
+    </details>
+
+    <h2 style="margin-top:2.5rem;">Keep exploring</h2>
+    <ul style="line-height:2;">
+      <li><a href="/blog/ai-coding-tools-pricing-2026/">AI Coding Tools Pricing Compared (2026)</a> &mdash; detailed cost breakdowns for every tool</li>
+      <li><a href="/guides/harness-engineering/">Harness Engineering: The Complete Guide</a> &mdash; the discipline of designing everything around the model</li>
+      <li><a href="/guides/agent-config-files-compared/">Agent Config Files Compared</a> &mdash; CLAUDE.md vs AGENTS.md vs .cursorrules</li>
+      <li><a href="/blog/best-multi-agent-orchestrators-2026/">Best Multi-Agent Orchestrators (2026)</a> &mdash; deep dive on orchestration tools</li>
+      <li><a href="/guides/background-agents-compared/">Background Coding Agents Compared</a> &mdash; Cursor, Claude Code, Devin, Copilot, Codex</li>
+      <li><a href="/guides/cost-optimization/">Cost Optimization Guide</a> &mdash; how to reduce your AI coding spend</li>
+      <li><a href="/guides/running-10-plus-agents/">Running 10+ Agents</a> &mdash; scaling parallel development</li>
+    </ul>
+
+  </main>
+  <footer class="site-footer">
+    <div class="footer-inner">
+      <div class="footer-grid">
+        <div class="footer-col">
+          <div class="footer-col-label">Product</div>
+          <ul>
+            <li><a href="/features/">Features</a></li>
+            <li><a href="/pricing/">Pricing</a></li>
+            <li><a href="/docs/">Documentation</a></li>
+            <li><a href="/guides/getting-started/">Getting Started</a></li>
+          </ul>
+        </div>
+        <div class="footer-col">
+          <div class="footer-col-label">Resources</div>
+          <ul>
+            <li><a href="/guides/">Guides</a></li>
+            <li><a href="/blog/">Blog</a></li>
+            <li><a href="/demos/">Demos</a></li>
+            <li><a href="/glossary/">Glossary</a></li>
+            <li><a href="/faq/">FAQ</a></li>
+          </ul>
+        </div>
+        <div class="footer-col">
+          <div class="footer-col-label">Compare</div>
+          <ul>
+            <li><a href="/compare/amux-vs-cursor/">vs Cursor</a></li>
+            <li><a href="/compare/amux-vs-devin/">vs Devin</a></li>
+            <li><a href="/compare/amux-vs-cline/">vs Cline</a></li>
+            <li><a href="/compare/">All comparisons</a></li>
+          </ul>
+        </div>
+        <div class="footer-col">
+          <div class="footer-col-label">More</div>
+          <ul>
+            <li><a href="/use-cases/">Use Cases</a></li>
+            <li><a href="/solutions/">Solutions</a></li>
+            <li><a href="/for/">For your stack</a></li>
+            <li><a href="/changelog/">Changelog</a></li>
+          </ul>
+        </div>
+      </div>
+      <div class="footer-bottom">
+        <span>MIT License. Built by <a href="https://mixpeek.com">Mixpeek</a></span>
+        <div class="footer-bottom-links">
+          <a href="https://apps.apple.com/us/app/amux-agent-multiplexer/id6760410435" target="_blank" rel="noopener">iOS App</a>
+          <a href="https://github.com/mixpeek/amux" target="_blank" rel="noopener">GitHub</a>
+        </div>
+      </div>
+    </div>
+  </footer>
+<script>fetch('https://api.github.com/repos/mixpeek/amux').then(function(r){return r.json()}).then(function(d){var el=document.getElementById('gh-stars');if(el&&d.stargazers_count) el.textContent='★ '+d.stargazers_count}).catch(function(){})</script>
+</body>
+</html>

@@ -1,0 +1,874 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="dark">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="theme-color" content="#1e2330">
+  <title>Best Self-Hosted AI Coding Tools 2026 — Run Your AI Dev Team Locally — amux</title>
+  <link rel="icon" href="/icon.svg" type="image/svg+xml">
+  <meta name="description" content="The definitive guide to self-hosted AI coding tools in 2026. 25+ tools across 5 categories — local LLM servers, code completion, terminal agents, orchestration, and complete stack recipes — ranked, reviewed, with install commands and cost analysis.">
+  <meta name="keywords" content="self-hosted AI coding tools, local AI development, self-hosted copilot alternative, private AI coding, self-hosted coding assistant, local LLM coding, ollama coding, self-hosted AI agent, run AI locally, on-premise AI coding, air-gapped AI development, self-hosted AI tools 2026, local-first AI development, private AI development environment">
+  <link rel="canonical" href="https://amux.io/guides/best-self-hosted-ai-coding-tools-2026/">
+  <meta property="og:title" content="Best Self-Hosted AI Coding Tools 2026 — Run Your AI Dev Team Locally">
+  <meta property="og:description" content="25+ self-hosted AI coding tools ranked across 5 categories. Local LLM servers, code completion, terminal agents, orchestration, and complete stack recipes with cost analysis.">
+  <meta property="og:url" content="https://amux.io/guides/best-self-hosted-ai-coding-tools-2026/">
+  <meta property="og:image" content="https://amux.io/og-image.png">
+  <meta property="og:type" content="article">
+  <meta name="twitter:card" content="summary_large_image">
+  <link rel="alternate" type="application/rss+xml" title="amux Blog" href="https://amux.io/blog/rss.xml">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600;700&family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="/style.css">
+  <script type="application/ld+json">{"@context":"https://schema.org","@type":"BreadcrumbList","itemListElement":[{"@type":"ListItem","position":1,"name":"amux","item":"https://amux.io/"},{"@type":"ListItem","position":2,"name":"Guides","item":"https://amux.io/guides/"},{"@type":"ListItem","position":3,"name":"Best Self-Hosted AI Coding Tools 2026","item":"https://amux.io/guides/best-self-hosted-ai-coding-tools-2026/"}]}</script>
+  <script type="application/ld+json">{"@context":"https://schema.org","@type":"Article","headline":"Best Self-Hosted AI Coding Tools 2026 — Run Your AI Dev Team Locally","description":"The definitive guide to self-hosted AI coding tools in 2026. 25+ tools across 5 categories — local LLM servers, code completion, terminal agents, orchestration, and complete stack recipes.","url":"https://amux.io/guides/best-self-hosted-ai-coding-tools-2026/","datePublished":"2026-05-28","dateModified":"2026-05-28","author":{"@type":"Organization","name":"amux","url":"https://amux.io/"},"publisher":{"@type":"Organization","name":"amux","url":"https://amux.io/","logo":{"@type":"ImageObject","url":"https://amux.io/icon.png"}}}</script>
+  <script type="application/ld+json">{"@context":"https://schema.org","@type":"ItemList","name":"Best Self-Hosted AI Coding Tools 2026","itemListElement":[{"@type":"ListItem","position":1,"name":"Ollama","url":"https://ollama.com"},{"@type":"ListItem","position":2,"name":"llama.cpp","url":"https://github.com/ggml-org/llama.cpp"},{"@type":"ListItem","position":3,"name":"vLLM","url":"https://github.com/vllm-project/vllm"},{"@type":"ListItem","position":4,"name":"LocalAI","url":"https://localai.io"},{"@type":"ListItem","position":5,"name":"LM Studio","url":"https://lmstudio.ai"},{"@type":"ListItem","position":6,"name":"Jan","url":"https://jan.ai"},{"@type":"ListItem","position":7,"name":"Tabby","url":"https://github.com/TabbyML/tabby"},{"@type":"ListItem","position":8,"name":"Continue","url":"https://www.continue.dev"},{"@type":"ListItem","position":9,"name":"Cline","url":"https://github.com/cline/cline"},{"@type":"ListItem","position":10,"name":"Aider","url":"https://aider.chat"},{"@type":"ListItem","position":11,"name":"OpenHands","url":"https://github.com/All-Hands-AI/OpenHands"},{"@type":"ListItem","position":12,"name":"Goose","url":"https://github.com/block/goose"},{"@type":"ListItem","position":13,"name":"amux","url":"https://github.com/mixpeek/amux"},{"@type":"ListItem","position":14,"name":"CrewAI","url":"https://github.com/crewAIInc/crewAI"},{"@type":"ListItem","position":15,"name":"LangGraph","url":"https://github.com/langchain-ai/langgraph"}]}</script>
+  <script type="application/ld+json">{"@context":"https://schema.org","@type":"FAQPage","mainEntity":[{"@type":"Question","name":"What does 'self-hosted AI coding' mean?","acceptedAnswer":{"@type":"Answer","text":"Self-hosted AI coding means running AI development tools on your own hardware — your laptop, your server, your cloud VM — rather than using a vendor's hosted service. The spectrum ranges from fully local (local LLM + local tools, no internet needed) to locally-run tools that call cloud APIs (like Claude Code or Aider with Anthropic's API). The key distinction: your code stays on your machine, you control the infrastructure, and you can operate without vendor lock-in."}},{"@type":"Question","name":"Can I run AI coding tools completely offline?","acceptedAnswer":{"@type":"Answer","text":"Yes. Pair a local LLM server (Ollama, llama.cpp, LM Studio, or LocalAI) with a compatible coding tool (Continue, Cline, Aider, or Tabby) and you have a fully air-gapped AI coding setup. No internet required after the initial model download. The tradeoff: local models (even the best open-source ones like Qwen 2.5 Coder 32B or DeepSeek Coder V3) are less capable than cloud models like Claude Opus or GPT-4o for complex reasoning tasks."}},{"@type":"Question","name":"How much does self-hosted AI coding cost compared to cloud?","acceptedAnswer":{"@type":"Answer","text":"For a solo developer, cloud APIs (Anthropic, OpenAI) typically cost $50-200/month for moderate usage. A Max subscription plan costs $100-200/month. Self-hosted with local models costs $0/month after hardware investment — but you need a GPU. A used NVIDIA RTX 3090 (24GB VRAM, runs most coding models) costs roughly $600-800. Breakeven vs cloud API: 3-6 months. For teams, the economics shift further toward self-hosting because you avoid per-seat licensing."}},{"@type":"Question","name":"What hardware do I need to run local AI models for coding?","acceptedAnswer":{"@type":"Answer","text":"Minimum: Apple Silicon Mac with 16GB unified memory (runs 7-14B parameter models well via Ollama) or a PC with an NVIDIA GPU with 8GB+ VRAM. Recommended: 32GB+ RAM Mac or NVIDIA RTX 3090/4090 (24GB VRAM) for 32-70B parameter models. For enterprise serving: NVIDIA A100/H100 GPUs with vLLM. CPU-only inference works via llama.cpp but is 5-20x slower than GPU."}},{"@type":"Question","name":"Which local model is best for coding in 2026?","acceptedAnswer":{"@type":"Answer","text":"For code completion: Qwen 2.5 Coder 32B is the consensus best open-source coding model — it matches GPT-4o on many benchmarks. For general coding tasks with reasoning: DeepSeek Coder V3 (236B MoE, runs on 2x RTX 4090) or Llama 3.3 70B. For fast inline completion on limited hardware: Qwen 2.5 Coder 7B or StarCoder2 3B. Run any of these through Ollama with one command."}},{"@type":"Question","name":"Can I use amux with local models instead of cloud APIs?","acceptedAnswer":{"@type":"Answer","text":"amux orchestrates AI coding agents — it manages sessions, monitors health, coordinates work, and tracks costs. The agents it manages (Claude Code, Aider, etc.) connect to whatever model backend you configure. Use Aider with Ollama for fully local operation, or Claude Code with the Anthropic API for maximum capability. amux itself runs entirely on your machine with zero cloud dependencies."}},{"@type":"Question","name":"Is self-hosted AI coding secure enough for enterprise use?","acceptedAnswer":{"@type":"Answer","text":"Self-hosted is more secure than cloud for sensitive codebases — your code never leaves your network. For enterprise compliance: deploy Tabby or Continue with vLLM behind your firewall, use OIDC/SAML auth, enable audit logging, and run models on air-gapped infrastructure. LocalAI supports full air-gap mode with OIDC auth. Tools like amux add session monitoring, permission controls, and cost governance on top."}},{"@type":"Question","name":"What is the easiest self-hosted AI coding setup?","acceptedAnswer":{"@type":"Answer","text":"Install Ollama (one command: curl -fsSL https://ollama.com/install.sh | sh), pull a model (ollama pull qwen2.5-coder:32b), then install Continue in VS Code and point it at localhost:11434. Total setup time: under 5 minutes. You now have AI code completion and chat running entirely on your machine. For a more powerful setup, add Aider for terminal-based pair programming and amux for parallel agent orchestration."}}]}</script>
+  <style>
+    .tool-card { background: var(--bg-2); border: 1px solid var(--line); border-radius: 8px; padding: 1.2rem 1.4rem; margin-bottom: 1rem; }
+    .tool-card h3 { margin-top: 0; padding-top: 0; border: none; }
+    .tool-card .tool-meta { font-family: var(--font-mono); font-size: 12px; color: var(--fg-mute); margin-bottom: 0.6rem; display: flex; gap: 1rem; flex-wrap: wrap; }
+    .tool-card .tool-meta a { color: var(--fg-dim); text-decoration: underline; text-underline-offset: 2px; }
+    .tool-card .tool-meta a:hover { color: var(--accent); }
+    .quick-pick { background: var(--bg-2); border: 1px solid var(--line); border-radius: 8px; padding: 1rem 1.2rem; margin-bottom: 0.75rem; }
+    .quick-pick strong { color: var(--accent); }
+    .quick-pick .pick-label { font-family: var(--font-mono); font-size: 11px; text-transform: uppercase; letter-spacing: 0.06em; color: var(--fg-mute); margin-bottom: 0.3rem; }
+    .verdict { background: var(--accent-dim); border: 1px solid var(--accent); border-radius: 8px; padding: 1.2rem 1.4rem; margin: 2rem 0; }
+    .verdict strong { color: var(--accent); }
+    .stack-recipe { background: var(--bg-2); border: 1px solid var(--line); border-radius: 8px; padding: 1.4rem 1.6rem; margin-bottom: 1.2rem; }
+    .stack-recipe h3 { margin-top: 0; padding-top: 0; border: none; color: var(--accent); }
+    .stack-recipe .stack-meta { font-family: var(--font-mono); font-size: 12px; color: var(--fg-mute); margin-bottom: 0.8rem; }
+    .category-label { display: inline-block; font-family: var(--font-mono); font-size: 10px; font-weight: 600; letter-spacing: 0.06em; text-transform: uppercase; padding: 3px 8px; border-radius: 4px; margin-bottom: 0.5rem; }
+    .cat-llm { background: oklch(0.72 0.14 240 / .15); color: var(--blue); }
+    .cat-completion { background: oklch(0.80 0.18 145 / .15); color: var(--ok); }
+    .cat-agent { background: oklch(0.82 0.17 85 / .15); color: var(--accent); }
+    .cat-orch { background: oklch(0.72 0.20 25 / .15); color: var(--err); }
+    .privacy-badge { display: inline-block; font-family: var(--font-mono); font-size: 10px; font-weight: 600; padding: 2px 6px; border-radius: 3px; margin-left: 0.5rem; }
+    .privacy-full { background: oklch(0.80 0.18 145 / .2); color: var(--ok); }
+    .privacy-partial { background: oklch(0.82 0.17 85 / .2); color: var(--accent); }
+    @media (max-width: 640px) {
+      .tool-card .tool-meta { flex-direction: column; gap: 0.3rem; }
+    }
+  </style>
+</head>
+<body>
+  <header class="site-header">
+    <a class="logo" href="/">amux</a>
+    <nav>
+      <a href="/docs/" class="hide-mobile">docs</a>
+      <a href="/guides/" class="hide-mobile">guides</a>
+      <a href="/compare/" class="hide-mobile">compare</a>
+      <a href="/demos/" class="hide-mobile">demos</a>
+      <a href="/blog/" class="hide-mobile">blog</a>
+      <a href="https://apps.apple.com/us/app/amux-agent-multiplexer/id6760410435" target="_blank" rel="noopener" class="nav-cta-primary nav-cta">iOS app</a>
+      <a href="https://github.com/mixpeek/amux" target="_blank" rel="noopener" class="nav-cta">GitHub <span class="gh-stars" id="gh-stars"></span></a>
+    </nav>
+  </header>
+  <main>
+    <div class="breadcrumb"><a href="/">amux</a> <span class="sep">&rsaquo;</span> <a href="/guides/">Guides</a> <span class="sep">&rsaquo;</span> <span>Best Self-Hosted AI Coding Tools 2026</span></div>
+    <h1>Best Self-Hosted AI Coding Tools in 2026</h1>
+    <p class="subtitle">Your code never leaves your machine. 25+ tools across 5 categories &mdash; local LLM servers, self-hosted code completion, terminal coding agents, agent orchestration, and ready-to-use stack recipes &mdash; ranked, reviewed, with install commands and real cost analysis.</p>
+
+    <div style="background:var(--surface);border:1px solid var(--border);border-radius:8px;padding:1.2rem 1.4rem;margin:1.5rem 0;font-size:0.88rem;line-height:1.7;">
+      <strong>TLDR:</strong> For the fastest fully-local setup, install <a href="https://ollama.com" target="_blank" rel="noopener">Ollama</a> + <a href="https://www.continue.dev" target="_blank" rel="noopener">Continue</a> in VS Code and you have private AI coding in 5 minutes. For the most capable self-hosted stack, pair <a href="https://aider.chat" target="_blank" rel="noopener">Aider</a> or <a href="https://github.com/anthropics/claude-code" target="_blank" rel="noopener">Claude Code</a> with <a href="https://github.com/mixpeek/amux" target="_blank" rel="noopener">amux</a> for parallel agent orchestration. For enterprise air-gapped deployment, run <a href="https://github.com/TabbyML/tabby" target="_blank" rel="noopener">Tabby</a> + <a href="https://github.com/vllm-project/vllm" target="_blank" rel="noopener">vLLM</a> behind your firewall. Below: the full ranked directory.
+    </div>
+
+    <nav class="toc" style="background:var(--surface);border:1px solid var(--border);border-radius:8px;padding:1.2rem 1.6rem;margin:2rem 0;">
+      <strong style="font-size:0.82rem;text-transform:uppercase;letter-spacing:0.05em;color:var(--muted);">Contents</strong>
+      <ol style="margin:0.6rem 0 0;padding-left:1.2rem;font-size:0.88rem;line-height:2;">
+        <li><a href="#why" style="color:var(--dim);text-decoration:none;">Why Self-Hosted AI Coding Matters</a></li>
+        <li><a href="#quick-picks" style="color:var(--dim);text-decoration:none;">Quick Picks</a></li>
+        <li><a href="#spectrum" style="color:var(--dim);text-decoration:none;">The Self-Hosting Spectrum</a></li>
+        <li><a href="#matrix" style="color:var(--dim);text-decoration:none;">Master Comparison Matrix</a></li>
+        <li><a href="#llm-servers" style="color:var(--dim);text-decoration:none;">Local LLM Servers (6 tools)</a></li>
+        <li><a href="#code-completion" style="color:var(--dim);text-decoration:none;">Self-Hosted Code Completion (3 tools)</a></li>
+        <li><a href="#terminal-agents" style="color:var(--dim);text-decoration:none;">Terminal Coding Agents (7 tools)</a></li>
+        <li><a href="#orchestration" style="color:var(--dim);text-decoration:none;">Agent Orchestration (4 tools)</a></li>
+        <li><a href="#stack-recipes" style="color:var(--dim);text-decoration:none;">Complete Stack Recipes</a></li>
+        <li><a href="#cost" style="color:var(--dim);text-decoration:none;">Cost Analysis: Self-Hosted vs Cloud</a></li>
+        <li><a href="#hardware" style="color:var(--dim);text-decoration:none;">Hardware Requirements</a></li>
+        <li><a href="#decision" style="color:var(--dim);text-decoration:none;">Decision Framework</a></li>
+        <li><a href="#faq" style="color:var(--dim);text-decoration:none;">FAQ</a></li>
+      </ol>
+    </nav>
+
+    <!-- ═══════════════ WHY SELF-HOSTED ═══════════════ -->
+    <h2 id="why">Why Self-Hosted AI Coding Matters</h2>
+
+    <p>Every major AI coding tool &mdash; <a href="https://www.cursor.com/" target="_blank" rel="noopener">Cursor</a>, <a href="https://github.com/features/copilot" target="_blank" rel="noopener">GitHub Copilot</a>, <a href="https://windsurf.com/" target="_blank" rel="noopener">Windsurf</a>, <a href="https://devin.ai/" target="_blank" rel="noopener">Devin</a> &mdash; sends your code to someone else&rsquo;s servers. For many teams, that&rsquo;s a dealbreaker. Healthcare companies bound by HIPAA. Defense contractors with ITAR restrictions. Financial firms with data residency requirements. Open-source maintainers who refuse to feed proprietary training pipelines. Or developers who simply believe their code is their business.</p>
+
+    <p>Self-hosted AI coding has matured dramatically in 2026. Open-source models like <a href="https://huggingface.co/Qwen" target="_blank" rel="noopener">Qwen 2.5 Coder</a> now match <a href="https://openai.com/" target="_blank" rel="noopener">GPT-4o</a> on coding benchmarks. <a href="https://ollama.com/" target="_blank" rel="noopener">Ollama</a> passed 170K GitHub stars and makes running local models trivial. Self-hosted code completion engines like <a href="https://github.com/TabbyML/tabby" target="_blank" rel="noopener">Tabby</a> offer genuine <a href="https://github.com/features/copilot" target="_blank" rel="noopener">Copilot</a> alternatives with zero data exfiltration. And tools like <a href="https://aider.chat/" target="_blank" rel="noopener">Aider</a> and <a href="https://github.com/cline/cline" target="_blank" rel="noopener">Cline</a> work with any model backend &mdash; cloud or local &mdash; so you can choose your privacy/capability tradeoff per task.</p>
+
+    <p>This guide covers every self-hosted AI coding tool worth using in 2026 &mdash; from local LLM servers that run models on your GPU, to code completion engines that replace Copilot, to terminal agents that write and ship code autonomously, to orchestration platforms that run fleets of agents on your own hardware. Each tool is ranked, reviewed, and linked to its source.</p>
+
+    <!-- ═══════════════ QUICK PICKS ═══════════════ -->
+    <h2 id="quick-picks">Quick Picks</h2>
+    <p>If you don&rsquo;t want to read 5,000 words, here&rsquo;s who should use what:</p>
+
+    <div class="quick-pick">
+      <div class="pick-label">Easiest fully-local setup (5 minutes)</div>
+      <p><strong><a href="https://ollama.com" target="_blank" rel="noopener">Ollama</a> + <a href="https://www.continue.dev" target="_blank" rel="noopener">Continue</a></strong> &mdash; Install Ollama, pull a model, add the Continue extension to VS Code. Private AI code completion and chat with zero configuration. Works on Mac, Linux, and Windows.</p>
+    </div>
+    <div class="quick-pick">
+      <div class="pick-label">Most capable self-hosted agent</div>
+      <p><strong><a href="https://aider.chat" target="_blank" rel="noopener">Aider</a></strong> &mdash; Works with 100+ models including local ones via <a href="https://ollama.com" target="_blank" rel="noopener">Ollama</a>. Battle-tested with 4M+ installs. Pair programming in your terminal that actually understands your codebase and commits to git.</p>
+    </div>
+    <div class="quick-pick">
+      <div class="pick-label">Best enterprise / air-gapped deployment</div>
+      <p><strong><a href="https://github.com/TabbyML/tabby" target="_blank" rel="noopener">Tabby</a> + <a href="https://github.com/vllm-project/vllm" target="_blank" rel="noopener">vLLM</a></strong> &mdash; Self-hosted code completion with multi-user auth, IDE extensions, and production-grade model serving. Runs behind your firewall. No data leaves your network.</p>
+    </div>
+    <div class="quick-pick">
+      <div class="pick-label">Best for parallel agent fleets</div>
+      <p><strong><a href="https://github.com/mixpeek/amux" target="_blank" rel="noopener">amux</a></strong> &mdash; Orchestrate 10&ndash;50+ coding agents on your own machine. Self-healing, cost tracking, mobile monitoring. The control plane for your self-hosted agent fleet. Works with any agent that runs in a terminal.</p>
+    </div>
+    <div class="quick-pick">
+      <div class="pick-label">Best all-in-one platform (fully local)</div>
+      <p><strong><a href="https://localai.io" target="_blank" rel="noopener">LocalAI</a></strong> &mdash; Drop-in OpenAI API replacement supporting LLMs, image generation, audio, and video &mdash; all on your hardware. Docker-first deployment with OIDC auth and distributed cluster mode. The Swiss Army knife of self-hosted AI.</p>
+    </div>
+
+    <!-- ═══════════════ SPECTRUM ═══════════════ -->
+    <h2 id="spectrum">The Self-Hosting Spectrum</h2>
+
+    <p>&ldquo;Self-hosted&rdquo; is not binary. Tools exist on a spectrum from fully cloud-dependent to completely air-gapped:</p>
+
+    <div style="overflow-x:auto;margin:2rem 0;">
+      <table class="data-table">
+        <thead><tr><th>Level</th><th>Description</th><th>Examples</th><th>Code Leaves Machine?</th></tr></thead>
+        <tbody>
+          <tr>
+            <td><strong>Fully Local</strong></td>
+            <td>Model + tool run on your hardware. No internet after initial setup.</td>
+            <td><a href="https://ollama.com" target="_blank" rel="noopener">Ollama</a> + <a href="https://www.continue.dev" target="_blank" rel="noopener">Continue</a>, <a href="https://github.com/TabbyML/tabby" target="_blank" rel="noopener">Tabby</a>, <a href="https://localai.io" target="_blank" rel="noopener">LocalAI</a></td>
+            <td>No</td>
+          </tr>
+          <tr>
+            <td><strong>Local Tool + Cloud API</strong></td>
+            <td>Tool runs locally; code sent to a model API for inference.</td>
+            <td><a href="https://github.com/anthropics/claude-code" target="_blank" rel="noopener">Claude Code</a>, <a href="https://aider.chat" target="_blank" rel="noopener">Aider</a>+API, <a href="https://github.com/openai/codex" target="_blank" rel="noopener">Codex CLI</a></td>
+            <td>To API only</td>
+          </tr>
+          <tr>
+            <td><strong>Self-Hosted Server</strong></td>
+            <td>You run the model on your own server/VM; tools connect via your network.</td>
+            <td><a href="https://github.com/vllm-project/vllm" target="_blank" rel="noopener">vLLM</a> cluster, <a href="https://github.com/TabbyML/tabby" target="_blank" rel="noopener">Tabby</a> on-prem</td>
+            <td>Within your infra</td>
+          </tr>
+          <tr>
+            <td><strong>Fully Cloud</strong></td>
+            <td>Code and model both run on vendor infrastructure.</td>
+            <td><a href="https://www.cursor.com" target="_blank" rel="noopener">Cursor</a>, <a href="https://github.com/features/copilot" target="_blank" rel="noopener">Copilot</a>, <a href="https://devin.ai" target="_blank" rel="noopener">Devin</a></td>
+            <td>Yes</td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+
+    <p>This guide covers tools in the first three categories. We mark each tool&rsquo;s privacy level so you can match it to your requirements.</p>
+
+    <!-- ═══════════════ MASTER MATRIX ═══════════════ -->
+    <h2 id="matrix">Master Comparison Matrix</h2>
+
+    <p>Every tool at a glance. Sorted by category, then by GitHub stars within each category.</p>
+
+    <div style="overflow-x:auto;margin:2rem 0;">
+      <table class="data-table">
+        <thead>
+          <tr>
+            <th>Tool</th>
+            <th>Category</th>
+            <th>Stars</th>
+            <th>License</th>
+            <th>Fully Local?</th>
+            <th>GPU Required?</th>
+            <th>Key Strength</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr><td><a href="https://github.com/ollama/ollama" target="_blank" rel="noopener"><strong>Ollama</strong></a></td><td>LLM Server</td><td>172K+</td><td>MIT</td><td>Yes</td><td>No (CPU ok)</td><td>Simplest model runner</td></tr>
+          <tr><td><a href="https://github.com/ggml-org/llama.cpp" target="_blank" rel="noopener"><strong>llama.cpp</strong></a></td><td>LLM Server</td><td>109K+</td><td>MIT</td><td>Yes</td><td>No (CPU ok)</td><td>Maximum performance</td></tr>
+          <tr><td><a href="https://github.com/vllm-project/vllm" target="_blank" rel="noopener"><strong>vLLM</strong></a></td><td>LLM Server</td><td>75K+</td><td>Apache 2.0</td><td>Yes</td><td>Yes</td><td>Production throughput</td></tr>
+          <tr><td><a href="https://github.com/mudler/LocalAI" target="_blank" rel="noopener"><strong>LocalAI</strong></a></td><td>LLM Server</td><td>46K+</td><td>MIT</td><td>Yes</td><td>No (CPU ok)</td><td>All-in-one platform</td></tr>
+          <tr><td><a href="https://github.com/janhq/jan" target="_blank" rel="noopener"><strong>Jan</strong></a></td><td>LLM Server</td><td>42K+</td><td>AGPL-3.0</td><td>Yes</td><td>No (CPU ok)</td><td>Best desktop GUI</td></tr>
+          <tr><td><a href="https://lmstudio.ai" target="_blank" rel="noopener"><strong>LM Studio</strong></a></td><td>LLM Server</td><td>&mdash;</td><td>Proprietary (free)</td><td>Yes</td><td>No (CPU ok)</td><td>Model discovery UX</td></tr>
+          <tr><td><a href="https://github.com/cline/cline" target="_blank" rel="noopener"><strong>Cline</strong></a></td><td>Completion</td><td>58K+</td><td>Apache 2.0</td><td>With local model</td><td>No</td><td>Autonomous agent in IDE</td></tr>
+          <tr><td><a href="https://github.com/continuedev/continue" target="_blank" rel="noopener"><strong>Continue</strong></a></td><td>Completion</td><td>33K+</td><td>Apache 2.0</td><td>With local model</td><td>No</td><td>Best open-source IDE ext</td></tr>
+          <tr><td><a href="https://github.com/TabbyML/tabby" target="_blank" rel="noopener"><strong>Tabby</strong></a></td><td>Completion</td><td>23K+</td><td>Apache 2.0</td><td>Yes</td><td>Recommended</td><td>Enterprise Copilot alt</td></tr>
+          <tr><td><a href="https://github.com/anthropics/claude-code" target="_blank" rel="noopener"><strong>Claude Code</strong></a></td><td>Agent</td><td>115K+</td><td>MIT</td><td>No (API)</td><td>No</td><td>Most capable agent</td></tr>
+          <tr><td><a href="https://github.com/All-Hands-AI/OpenHands" target="_blank" rel="noopener"><strong>OpenHands</strong></a></td><td>Agent</td><td>71K+</td><td>MIT</td><td>With local model</td><td>No</td><td>Full dev platform</td></tr>
+          <tr><td><a href="https://github.com/Aider-AI/aider" target="_blank" rel="noopener"><strong>Aider</strong></a></td><td>Agent</td><td>41K+</td><td>Apache 2.0</td><td>With local model</td><td>No</td><td>Best pair programmer</td></tr>
+          <tr><td><a href="https://github.com/block/goose" target="_blank" rel="noopener"><strong>Goose</strong></a></td><td>Agent</td><td>27K+</td><td>Apache 2.0</td><td>With local model</td><td>No</td><td>General-purpose agent</td></tr>
+          <tr><td><a href="https://github.com/SWE-agent/SWE-agent" target="_blank" rel="noopener"><strong>SWE-agent</strong></a></td><td>Agent</td><td>19K+</td><td>MIT</td><td>With local model</td><td>No</td><td>Issue-to-fix pipeline</td></tr>
+          <tr><td><a href="https://github.com/openai/codex" target="_blank" rel="noopener"><strong>Codex CLI</strong></a></td><td>Agent</td><td>85K+</td><td>Apache 2.0</td><td>No (API)</td><td>No</td><td>Sandboxed execution</td></tr>
+          <tr><td><a href="https://github.com/crewAIInc/crewAI" target="_blank" rel="noopener"><strong>CrewAI</strong></a></td><td>Orchestration</td><td>50K+</td><td>MIT</td><td>With local model</td><td>No</td><td>Multi-agent framework</td></tr>
+          <tr><td><a href="https://github.com/langchain-ai/langgraph" target="_blank" rel="noopener"><strong>LangGraph</strong></a></td><td>Orchestration</td><td>33K+</td><td>MIT</td><td>With local model</td><td>No</td><td>Stateful agent graphs</td></tr>
+          <tr><td><a href="https://github.com/mixpeek/amux" target="_blank" rel="noopener"><strong>amux</strong></a></td><td>Orchestration</td><td>&mdash;</td><td>MIT</td><td>Yes</td><td>No</td><td>Agent fleet control plane</td></tr>
+          <tr><td><a href="https://github.com/microsoft/autogen" target="_blank" rel="noopener"><strong>AutoGen</strong></a></td><td>Orchestration</td><td>55K+</td><td>MIT</td><td>With local model</td><td>No</td><td>Enterprise multi-agent</td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <!-- ═══════════════ LOCAL LLM SERVERS ═══════════════ -->
+    <h2 id="llm-servers">Local LLM Servers</h2>
+
+    <p>The foundation layer. These tools run large language models on your own hardware &mdash; your laptop, your workstation, or your server &mdash; and expose an API that coding tools can connect to. Most provide an <a href="https://openai.com/" target="_blank" rel="noopener">OpenAI</a>-compatible API, so any tool that works with the OpenAI API works with these too.</p>
+
+    <div class="tool-card">
+      <span class="category-label cat-llm">LLM Server</span>
+      <h3><a href="https://ollama.com" target="_blank" rel="noopener">Ollama</a> <span class="privacy-badge privacy-full">Fully Local</span></h3>
+      <div class="tool-meta">
+        <a href="https://github.com/ollama/ollama" target="_blank" rel="noopener">github.com/ollama/ollama</a>
+        <span>172K+ stars</span>
+        <span>MIT License</span>
+      </div>
+      <p>The default choice for local LLM serving. One-command install, one-command model download (<code>ollama pull qwen2.5-coder:32b</code>), OpenAI-compatible API at <code>localhost:11434</code>. Runs on macOS, Linux, and Windows. Supports GPU acceleration on Apple Silicon, NVIDIA, and AMD.</p>
+      <p><strong>Why it wins:</strong> Dead simple. No Docker, no config files, no GPU drivers to wrestle with. Over 112 million model pulls for Llama 3.1 alone. The ecosystem standard &mdash; when a tool says &ldquo;works with local models,&rdquo; they mean Ollama.</p>
+      <pre><code>curl -fsSL https://ollama.com/install.sh | sh
+ollama pull qwen2.5-coder:32b
+ollama serve  # API on localhost:11434</code></pre>
+    </div>
+
+    <div class="tool-card">
+      <span class="category-label cat-llm">LLM Server</span>
+      <h3><a href="https://github.com/ggml-org/llama.cpp" target="_blank" rel="noopener">llama.cpp</a> <span class="privacy-badge privacy-full">Fully Local</span></h3>
+      <div class="tool-meta">
+        <a href="https://github.com/ggml-org/llama.cpp" target="_blank" rel="noopener">github.com/ggml-org/llama.cpp</a>
+        <span>109K+ stars</span>
+        <span>MIT License</span>
+      </div>
+      <p>LLM inference in pure C/C++. The engine under the hood of <a href="https://ollama.com" target="_blank" rel="noopener">Ollama</a>, <a href="https://lmstudio.ai" target="_blank" rel="noopener">LM Studio</a>, and dozens of other tools. Runs on CPU, Apple Silicon, CUDA, and more. GGUF quantized model format enables running large models on consumer hardware. Includes a built-in HTTP server.</p>
+      <p><strong>Why it matters:</strong> The foundation of the local LLM ecosystem. Created by Georgi Gerganov. First open-source AI project to reach 100K stars (March 2026). Use it directly when you need maximum performance tuning or when <a href="https://ollama.com" target="_blank" rel="noopener">Ollama</a>&rsquo;s abstractions get in the way.</p>
+      <pre><code># Build from source
+git clone https://github.com/ggml-org/llama.cpp && cd llama.cpp
+cmake -B build && cmake --build build --config Release
+# Serve a model
+./build/bin/llama-server -m model.gguf --port 8080</code></pre>
+    </div>
+
+    <div class="tool-card">
+      <span class="category-label cat-llm">LLM Server</span>
+      <h3><a href="https://vllm.ai" target="_blank" rel="noopener">vLLM</a> <span class="privacy-badge privacy-full">Fully Local</span></h3>
+      <div class="tool-meta">
+        <a href="https://github.com/vllm-project/vllm" target="_blank" rel="noopener">github.com/vllm-project/vllm</a>
+        <span>75K+ stars</span>
+        <span>Apache 2.0</span>
+      </div>
+      <p>High-throughput, memory-efficient LLM serving engine built for production. Features PagedAttention and continuous batching to serve multiple concurrent users efficiently. OpenAI-compatible API. 2,000+ contributors.</p>
+      <p><strong>Best for:</strong> Teams and enterprises that need to serve models to multiple developers simultaneously. If you have NVIDIA GPUs and need to run a shared model server for 5&ndash;50 developers, <a href="https://github.com/vllm-project/vllm" target="_blank" rel="noopener">vLLM</a> is the production-grade choice. Overkill for solo developers &mdash; use <a href="https://ollama.com" target="_blank" rel="noopener">Ollama</a> instead.</p>
+      <pre><code>pip install vllm
+vllm serve Qwen/Qwen2.5-Coder-32B-Instruct --port 8000</code></pre>
+    </div>
+
+    <div class="tool-card">
+      <span class="category-label cat-llm">LLM Server</span>
+      <h3><a href="https://localai.io" target="_blank" rel="noopener">LocalAI</a> <span class="privacy-badge privacy-full">Fully Local</span></h3>
+      <div class="tool-meta">
+        <a href="https://github.com/mudler/LocalAI" target="_blank" rel="noopener">github.com/mudler/LocalAI</a>
+        <span>46K+ stars</span>
+        <span>MIT License</span>
+      </div>
+      <p>Drop-in OpenAI API replacement that runs any model on any hardware. Not just LLMs &mdash; supports image generation, audio transcription, text-to-speech, and video generation in one unified API. Docker-first deployment. As of v4.3.0: distributed cluster mode, multi-user platform with OIDC authentication, and full air-gap support.</p>
+      <p><strong>Best for:</strong> Teams that need a single self-hosted platform replacing multiple AI services. Run <a href="https://github.com/mudler/LocalAI" target="_blank" rel="noopener">LocalAI</a> as your private AI cloud &mdash; code completion, image generation, voice interfaces, all behind your firewall. The Docker-first approach makes it easy to deploy and manage.</p>
+      <pre><code>docker run -p 8080:8080 --name local-ai \
+  -v ./models:/models localai/localai:latest</code></pre>
+    </div>
+
+    <div class="tool-card">
+      <span class="category-label cat-llm">LLM Server</span>
+      <h3><a href="https://jan.ai" target="_blank" rel="noopener">Jan</a> <span class="privacy-badge privacy-full">Fully Local</span></h3>
+      <div class="tool-meta">
+        <a href="https://github.com/janhq/jan" target="_blank" rel="noopener">github.com/janhq/jan</a>
+        <span>42K+ stars</span>
+        <span>AGPL-3.0</span>
+      </div>
+      <p>Open-source ChatGPT alternative that runs 100% offline. Desktop app with built-in model browser, OpenAI-compatible API at <code>localhost:1337</code>, <a href="https://modelcontextprotocol.io/" target="_blank" rel="noopener">MCP</a> support, and <a href="https://huggingface.co/" target="_blank" rel="noopener">Hugging Face</a> model integration. 5.3M+ downloads. Zero telemetry.</p>
+      <p><strong>Best for:</strong> Developers who want a polished desktop experience for chatting with local models. <a href="https://jan.ai" target="_blank" rel="noopener">Jan</a> can also connect to cloud APIs (<a href="https://www.anthropic.com/" target="_blank" rel="noopener">Anthropic</a>, <a href="https://openai.com/" target="_blank" rel="noopener">OpenAI</a>) as a unified interface &mdash; useful for switching between local and cloud models without changing tools.</p>
+    </div>
+
+    <div class="tool-card">
+      <span class="category-label cat-llm">LLM Server</span>
+      <h3><a href="https://lmstudio.ai" target="_blank" rel="noopener">LM Studio</a> <span class="privacy-badge privacy-full">Fully Local</span></h3>
+      <div class="tool-meta">
+        <a href="https://lmstudio.ai" target="_blank" rel="noopener">lmstudio.ai</a>
+        <span>Free (proprietary)</span>
+      </div>
+      <p>Polished desktop GUI for discovering, downloading, and running local LLMs. Built-in model browser with one-click downloads, visual parameter controls, and OpenAI-compatible API server. Also offers <code>llmster</code> &mdash; headless LM Studio for server deployments.</p>
+      <p><strong>Best for:</strong> Developers who prefer GUI-first workflows. The model discovery experience is best-in-class &mdash; browse models, see compatibility with your hardware, download with one click. Use <a href="https://lmstudio.ai" target="_blank" rel="noopener">LM Studio</a> when you want a desktop app; use <a href="https://ollama.com" target="_blank" rel="noopener">Ollama</a> when you want CLI-first simplicity.</p>
+    </div>
+
+    <div class="verdict">
+      <strong>Our pick for LLM serving:</strong> Start with <a href="https://ollama.com" target="_blank" rel="noopener">Ollama</a>. It has the largest ecosystem, the simplest setup, and works with every tool in this guide. Move to <a href="https://github.com/vllm-project/vllm" target="_blank" rel="noopener">vLLM</a> when you need multi-user serving, or <a href="https://localai.io" target="_blank" rel="noopener">LocalAI</a> when you need more than just LLMs.
+    </div>
+
+    <!-- ═══════════════ CODE COMPLETION ═══════════════ -->
+    <h2 id="code-completion">Self-Hosted Code Completion</h2>
+
+    <p>These tools replace <a href="https://github.com/features/copilot" target="_blank" rel="noopener">GitHub Copilot</a> with something you control. Inline code suggestions, chat, and multi-file editing &mdash; all powered by models running on your infrastructure.</p>
+
+    <div class="tool-card">
+      <span class="category-label cat-completion">Code Completion</span>
+      <h3><a href="https://github.com/cline/cline" target="_blank" rel="noopener">Cline</a> <span class="privacy-badge privacy-partial">Local with local model</span></h3>
+      <div class="tool-meta">
+        <a href="https://github.com/cline/cline" target="_blank" rel="noopener">github.com/cline/cline</a>
+        <span>58K+ stars</span>
+        <span>Apache 2.0</span>
+        <span>5M+ installs</span>
+      </div>
+      <p>Autonomous coding agent as an IDE extension. Available for VS Code, JetBrains, <a href="https://www.cursor.com/" target="_blank" rel="noopener">Cursor</a>, <a href="https://windsurf.com/" target="_blank" rel="noopener">Windsurf</a>, <a href="https://zed.dev/" target="_blank" rel="noopener">Zed</a>, and Neovim. Creates and edits files, runs terminal commands, browses the web, uses <a href="https://modelcontextprotocol.io/" target="_blank" rel="noopener">MCP</a> tools. Human-in-the-loop approval for all actions. Works with any LLM provider including local models via <a href="https://ollama.com" target="_blank" rel="noopener">Ollama</a>.</p>
+      <p><strong>Why it wins:</strong> GitHub Octoverse&rsquo;s fastest-growing AI open-source project by contributors. More autonomous than <a href="https://www.continue.dev" target="_blank" rel="noopener">Continue</a> &mdash; it can execute multi-step tasks, not just suggest code. Recently released <a href="https://cline.bot" target="_blank" rel="noopener">Cline SDK</a> as an open-source agent runtime for building custom agents.</p>
+    </div>
+
+    <div class="tool-card">
+      <span class="category-label cat-completion">Code Completion</span>
+      <h3><a href="https://www.continue.dev" target="_blank" rel="noopener">Continue</a> <span class="privacy-badge privacy-partial">Local with local model</span></h3>
+      <div class="tool-meta">
+        <a href="https://github.com/continuedev/continue" target="_blank" rel="noopener">github.com/continuedev/continue</a>
+        <span>33K+ stars</span>
+        <span>Apache 2.0</span>
+        <span>800+ releases</span>
+      </div>
+      <p>The leading open-source AI coding assistant as an IDE extension. Inline completions, chat, multi-file edits. First-class <a href="https://ollama.com" target="_blank" rel="noopener">Ollama</a> integration for fully local operation. Also works with cloud providers. <a href="https://modelcontextprotocol.io/" target="_blank" rel="noopener">MCP</a> support. Available for VS Code, JetBrains, and Neovim.</p>
+      <p><strong>Best for:</strong> The easiest path to private AI code completion in your IDE. Point it at <a href="https://ollama.com" target="_blank" rel="noopener">Ollama</a> running <code>qwen2.5-coder:32b</code> and you have a <a href="https://github.com/features/copilot" target="_blank" rel="noopener">Copilot</a> alternative with zero data exfiltration. The autocomplete experience is smooth enough for daily use.</p>
+      <pre><code># In VS Code: install Continue extension, then config:
+{
+  "models": [{
+    "title": "Qwen 2.5 Coder (local)",
+    "provider": "ollama",
+    "model": "qwen2.5-coder:32b"
+  }]
+}</code></pre>
+    </div>
+
+    <div class="tool-card">
+      <span class="category-label cat-completion">Code Completion</span>
+      <h3><a href="https://github.com/TabbyML/tabby" target="_blank" rel="noopener">Tabby</a> <span class="privacy-badge privacy-full">Fully Local</span></h3>
+      <div class="tool-meta">
+        <a href="https://github.com/TabbyML/tabby" target="_blank" rel="noopener">github.com/TabbyML/tabby</a>
+        <span>23K+ stars</span>
+        <span>Apache 2.0</span>
+      </div>
+      <p>Purpose-built self-hosted AI coding assistant. Code completion, chat, and repository context indexing with Git integration. Supports open-source models (<a href="https://huggingface.co/Qwen" target="_blank" rel="noopener">Qwen</a>, <a href="https://huggingface.co/bigcode" target="_blank" rel="noopener">StarCoder</a>, <a href="https://huggingface.co/codellama" target="_blank" rel="noopener">CodeLlama</a>). Multi-user with authentication. IDE extensions for VS Code, JetBrains, and Vim. Docker, binary, and Homebrew deployment.</p>
+      <p><strong>Best for:</strong> Enterprise teams that need a proper self-hosted <a href="https://github.com/features/copilot" target="_blank" rel="noopener">Copilot</a> replacement with multi-user auth, usage tracking, and audit logging. <a href="https://github.com/TabbyML/tabby" target="_blank" rel="noopener">Tabby</a> is the most production-ready self-hosted code completion server. No data leaves your infrastructure.</p>
+      <pre><code># Quick start with Docker
+docker run -it --gpus all -p 8080:8080 \
+  tabbyml/tabby serve --model Qwen/Qwen2.5-Coder-7B
+# Then install Tabby extension in your IDE</code></pre>
+    </div>
+
+    <div class="verdict">
+      <strong>Our pick for code completion:</strong> <a href="https://www.continue.dev" target="_blank" rel="noopener">Continue</a> + <a href="https://ollama.com" target="_blank" rel="noopener">Ollama</a> for solo developers (fastest setup, good enough quality). <a href="https://github.com/TabbyML/tabby" target="_blank" rel="noopener">Tabby</a> for teams (multi-user, auth, centralized model serving). <a href="https://github.com/cline/cline" target="_blank" rel="noopener">Cline</a> when you want more than completion &mdash; a full autonomous agent in your IDE.
+    </div>
+
+    <!-- ═══════════════ TERMINAL AGENTS ═══════════════ -->
+    <h2 id="terminal-agents">Terminal Coding Agents</h2>
+
+    <p>These tools go beyond code completion &mdash; they write code, run commands, manage git, and execute multi-step development tasks from the terminal. Most can work with local models via <a href="https://ollama.com" target="_blank" rel="noopener">Ollama</a> for fully self-contained operation, or with cloud APIs for maximum capability.</p>
+
+    <div class="tool-card">
+      <span class="category-label cat-agent">Terminal Agent</span>
+      <h3><a href="https://github.com/anthropics/claude-code" target="_blank" rel="noopener">Claude Code</a> <span class="privacy-badge privacy-partial">Local tool + Cloud API</span></h3>
+      <div class="tool-meta">
+        <a href="https://github.com/anthropics/claude-code" target="_blank" rel="noopener">github.com/anthropics/claude-code</a>
+        <span>115K+ stars</span>
+        <span>MIT License</span>
+        <span>by <a href="https://www.anthropic.com/" target="_blank" rel="noopener">Anthropic</a></span>
+      </div>
+      <p>The most capable terminal coding agent. Understands entire codebases, executes multi-step tasks, manages git workflows, and integrates with GitHub/GitLab. Runs entirely in your terminal &mdash; no IDE required. Supports hooks, skills, <a href="https://modelcontextprotocol.io/" target="_blank" rel="noopener">MCP</a> servers, and sub-agents. Open source.</p>
+      <p><strong>Self-hosting caveat:</strong> The tool runs locally but all inference goes through <a href="https://www.anthropic.com/" target="_blank" rel="noopener">Anthropic&rsquo;s</a> API. Your code is sent to Claude for processing. For many teams this is acceptable (Anthropic doesn&rsquo;t train on API data), but it doesn&rsquo;t satisfy air-gap requirements. The tool itself is open source and self-hostable &mdash; the model is not.</p>
+      <pre><code>npm install -g @anthropic-ai/claude-code
+cd ~/your-project && claude</code></pre>
+    </div>
+
+    <div class="tool-card">
+      <span class="category-label cat-agent">Terminal Agent</span>
+      <h3><a href="https://github.com/All-Hands-AI/OpenHands" target="_blank" rel="noopener">OpenHands</a> <span class="privacy-badge privacy-partial">Local with local model</span></h3>
+      <div class="tool-meta">
+        <a href="https://github.com/All-Hands-AI/OpenHands" target="_blank" rel="noopener">github.com/All-Hands-AI/OpenHands</a>
+        <span>71K+ stars</span>
+        <span>MIT License</span>
+      </div>
+      <p>Full AI-powered development platform. Agents browse the web, write and execute code, manage files, and handle end-to-end development workflows. CLI, web GUI, and cloud version. Works with <a href="https://www.anthropic.com/" target="_blank" rel="noopener">Claude</a>, <a href="https://openai.com/" target="_blank" rel="noopener">GPT</a>, <a href="https://huggingface.co/Qwen" target="_blank" rel="noopener">Qwen</a>, or any local LLM. Kubernetes support. $18.8M Series A funded.</p>
+      <p><strong>Best for:</strong> Teams that want an open-source <a href="https://devin.ai/" target="_blank" rel="noopener">Devin</a> alternative they can self-host. The web GUI gives non-terminal-users a way to interact with AI agents. Pair with <a href="https://ollama.com" target="_blank" rel="noopener">Ollama</a> for fully local operation.</p>
+      <pre><code>docker pull ghcr.io/all-hands-ai/openhands:latest
+docker run -p 3000:3000 ghcr.io/all-hands-ai/openhands</code></pre>
+    </div>
+
+    <div class="tool-card">
+      <span class="category-label cat-agent">Terminal Agent</span>
+      <h3><a href="https://aider.chat" target="_blank" rel="noopener">Aider</a> <span class="privacy-badge privacy-partial">Local with local model</span></h3>
+      <div class="tool-meta">
+        <a href="https://github.com/Aider-AI/aider" target="_blank" rel="noopener">github.com/Aider-AI/aider</a>
+        <span>41K+ stars</span>
+        <span>Apache 2.0</span>
+        <span>4.1M+ installs</span>
+      </div>
+      <p>AI pair programming in your terminal. Add files to a session, describe what you want, <a href="https://aider.chat" target="_blank" rel="noopener">Aider</a> edits code directly and auto-commits with descriptive git messages. Works with 100+ models: <a href="https://www.anthropic.com/" target="_blank" rel="noopener">Claude</a>, <a href="https://openai.com/" target="_blank" rel="noopener">GPT</a>, <a href="https://deepseek.com/" target="_blank" rel="noopener">DeepSeek</a>, and local models via <a href="https://ollama.com" target="_blank" rel="noopener">Ollama</a>. Pioneered the &ldquo;AI pair programmer in the CLI&rdquo; pattern.</p>
+      <p><strong>Best for self-hosting:</strong> <a href="https://aider.chat" target="_blank" rel="noopener">Aider</a> has the most mature local model support of any terminal agent. Run <code>aider --model ollama/qwen2.5-coder:32b</code> and you have a fully local, privacy-preserving coding agent. The quality gap between local and cloud models is noticeable but shrinking.</p>
+      <pre><code>pip install aider-chat
+# With local model:
+aider --model ollama/qwen2.5-coder:32b
+# With cloud API:
+aider --model claude-3-opus-20240229</code></pre>
+    </div>
+
+    <div class="tool-card">
+      <span class="category-label cat-agent">Terminal Agent</span>
+      <h3><a href="https://github.com/block/goose" target="_blank" rel="noopener">Goose</a> <span class="privacy-badge privacy-partial">Local with local model</span></h3>
+      <div class="tool-meta">
+        <a href="https://github.com/block/goose" target="_blank" rel="noopener">github.com/block/goose</a>
+        <span>27K+ stars</span>
+        <span>Apache 2.0</span>
+        <span>by <a href="https://block.xyz/" target="_blank" rel="noopener">Block</a></span>
+      </div>
+      <p>General-purpose AI agent built in Rust. Not just for code &mdash; connects to 70+ extensions via <a href="https://modelcontextprotocol.io/" target="_blank" rel="noopener">MCP</a>. Native desktop app, CLI, and API. Works with 15+ providers including <a href="https://ollama.com" target="_blank" rel="noopener">Ollama</a> for local models. Now part of the Agentic AI Foundation at the <a href="https://www.linuxfoundation.org/" target="_blank" rel="noopener">Linux Foundation</a>.</p>
+      <p><strong>Best for:</strong> Developers who want a single agent for coding, DevOps, data analysis, and more. <a href="https://github.com/block/goose" target="_blank" rel="noopener">Goose</a>&rsquo;s broad <a href="https://modelcontextprotocol.io/" target="_blank" rel="noopener">MCP</a> integration makes it the most extensible self-hosted agent. The Rust implementation is fast and memory-efficient.</p>
+    </div>
+
+    <div class="tool-card">
+      <span class="category-label cat-agent">Terminal Agent</span>
+      <h3><a href="https://github.com/SWE-agent/SWE-agent" target="_blank" rel="noopener">SWE-agent</a> <span class="privacy-badge privacy-partial">Local with local model</span></h3>
+      <div class="tool-meta">
+        <a href="https://github.com/SWE-agent/SWE-agent" target="_blank" rel="noopener">github.com/SWE-agent/SWE-agent</a>
+        <span>19K+ stars</span>
+        <span>MIT License</span>
+      </div>
+      <p>Takes a GitHub issue and automatically fixes it. Born from NeurIPS 2024 research (Princeton/Stanford). Achieved state-of-the-art on SWE-bench with <a href="https://www.anthropic.com/" target="_blank" rel="noopener">Claude</a>. Works with any LLM. Also ships <code>mini-SWE-agent</code> &mdash; the core in ~100 lines of code.</p>
+      <p><strong>Best for:</strong> Automated bug fixing pipelines. Point it at a GitHub issue, let it generate a patch. Integrates well into CI/CD workflows for automated issue triage.</p>
+    </div>
+
+    <div class="tool-card">
+      <span class="category-label cat-agent">Terminal Agent</span>
+      <h3><a href="https://github.com/openai/codex" target="_blank" rel="noopener">Codex CLI</a> <span class="privacy-badge privacy-partial">Local tool + Cloud API</span></h3>
+      <div class="tool-meta">
+        <a href="https://github.com/openai/codex" target="_blank" rel="noopener">github.com/openai/codex</a>
+        <span>85K+ stars</span>
+        <span>Apache 2.0</span>
+        <span>by <a href="https://openai.com/" target="_blank" rel="noopener">OpenAI</a></span>
+      </div>
+      <p>Lightweight coding agent in your terminal, built in Rust. Sandboxed execution by default. Goal mode for long-running objectives. GitHub Action available. Fast iteration &mdash; open source despite being from a primarily closed-source company.</p>
+      <p><strong>Self-hosting caveat:</strong> Like <a href="https://github.com/anthropics/claude-code" target="_blank" rel="noopener">Claude Code</a>, the tool runs locally but requires the <a href="https://openai.com/" target="_blank" rel="noopener">OpenAI</a> API for inference. The sandboxed execution model is a strong security differentiator &mdash; agent actions run in an isolated environment.</p>
+    </div>
+
+    <div class="tool-card">
+      <span class="category-label cat-agent">Terminal Agent</span>
+      <h3><a href="https://github.com/opencode-ai/opencode" target="_blank" rel="noopener">OpenCode</a> <span class="privacy-badge privacy-partial">Local with local model</span></h3>
+      <div class="tool-meta">
+        <a href="https://github.com/opencode-ai/opencode" target="_blank" rel="noopener">github.com/opencode-ai/opencode</a>
+        <span>MIT License</span>
+      </div>
+      <p>Open-source terminal AI coding agent with a polished TUI (terminal user interface). Built in Go. Multi-provider (75+ models), LSP-aware for deep code understanding. Privacy-first &mdash; no code or context stored externally. Session management via SQLite.</p>
+      <p><strong>Best for:</strong> Developers who want a <a href="https://github.com/anthropics/claude-code" target="_blank" rel="noopener">Claude Code</a>-like experience with full model flexibility. The Go implementation is fast and produces a single binary &mdash; no runtime dependencies. Pair with <a href="https://ollama.com" target="_blank" rel="noopener">Ollama</a> for fully local operation.</p>
+    </div>
+
+    <div class="verdict">
+      <strong>Our pick for terminal agents:</strong> <a href="https://github.com/anthropics/claude-code" target="_blank" rel="noopener">Claude Code</a> when capability matters more than privacy. <a href="https://aider.chat" target="_blank" rel="noopener">Aider</a> when you need a battle-tested agent that works equally well with local and cloud models. <a href="https://github.com/All-Hands-AI/OpenHands" target="_blank" rel="noopener">OpenHands</a> when you want a web GUI and full-platform approach.
+    </div>
+
+    <!-- ═══════════════ ORCHESTRATION ═══════════════ -->
+    <h2 id="orchestration">Agent Orchestration</h2>
+
+    <p>One agent is useful. Five agents working in parallel are transformative. These tools coordinate multiple AI agents &mdash; managing sessions, distributing work, tracking costs, and preventing conflicts.</p>
+
+    <div class="tool-card">
+      <span class="category-label cat-orch">Orchestration</span>
+      <h3><a href="https://github.com/crewAIInc/crewAI" target="_blank" rel="noopener">CrewAI</a> <span class="privacy-badge privacy-partial">Local with local model</span></h3>
+      <div class="tool-meta">
+        <a href="https://github.com/crewAIInc/crewAI" target="_blank" rel="noopener">github.com/crewAIInc/crewAI</a>
+        <span>50K+ stars</span>
+        <span>MIT License</span>
+      </div>
+      <p>Framework for orchestrating autonomous multi-agent teams. Define agents with roles and tools, organize them into &ldquo;Crews&rdquo; (autonomous collaboration) or &ldquo;Flows&rdquo; (event-driven control). Hundreds of built-in tools. 100K+ certified developers.</p>
+      <p><strong>Best for:</strong> Building custom multi-agent workflows with code. <a href="https://github.com/crewAIInc/crewAI" target="_blank" rel="noopener">CrewAI</a> is a framework, not a ready-to-use tool &mdash; you write Python to define your agent team. Works with local models via <a href="https://ollama.com" target="_blank" rel="noopener">Ollama</a>.</p>
+    </div>
+
+    <div class="tool-card">
+      <span class="category-label cat-orch">Orchestration</span>
+      <h3><a href="https://github.com/microsoft/autogen" target="_blank" rel="noopener">AutoGen</a> <span class="privacy-badge privacy-partial">Local with local model</span></h3>
+      <div class="tool-meta">
+        <a href="https://github.com/microsoft/autogen" target="_blank" rel="noopener">github.com/microsoft/autogen</a>
+        <span>55K+ stars</span>
+        <span>MIT License</span>
+        <span>by <a href="https://www.microsoft.com/" target="_blank" rel="noopener">Microsoft</a></span>
+      </div>
+      <p>Enterprise-grade multi-agent orchestration framework. Supports Python and .NET. Multi-provider model support. A2A and <a href="https://modelcontextprotocol.io/" target="_blank" rel="noopener">MCP</a> interoperability. <a href="https://www.microsoft.com/" target="_blank" rel="noopener">Microsoft</a> is consolidating <a href="https://github.com/microsoft/autogen" target="_blank" rel="noopener">AutoGen</a> with Semantic Kernel into a unified Agent Framework.</p>
+      <p><strong>Best for:</strong> Enterprise teams already in the <a href="https://www.microsoft.com/" target="_blank" rel="noopener">Microsoft</a> ecosystem. Works with <a href="https://azure.microsoft.com/en-us/products/ai-services/openai-service" target="_blank" rel="noopener">Azure OpenAI</a>, local models, and third-party APIs. The .NET support is unique among orchestration frameworks.</p>
+    </div>
+
+    <div class="tool-card">
+      <span class="category-label cat-orch">Orchestration</span>
+      <h3><a href="https://github.com/langchain-ai/langgraph" target="_blank" rel="noopener">LangGraph</a> <span class="privacy-badge privacy-partial">Local with local model</span></h3>
+      <div class="tool-meta">
+        <a href="https://github.com/langchain-ai/langgraph" target="_blank" rel="noopener">github.com/langchain-ai/langgraph</a>
+        <span>33K+ stars</span>
+        <span>MIT License</span>
+        <span>by <a href="https://www.langchain.com/" target="_blank" rel="noopener">LangChain</a></span>
+      </div>
+      <p>Low-level orchestration framework for stateful, multi-actor agents. Graph-based workflow definition with durable execution, streaming, and human-in-the-loop. Single and multi-agent hierarchical control flows. Integrates with the <a href="https://www.langchain.com/" target="_blank" rel="noopener">LangChain</a> ecosystem.</p>
+      <p><strong>Best for:</strong> Complex agent workflows with branching logic, state persistence, and error recovery. More control than <a href="https://github.com/crewAIInc/crewAI" target="_blank" rel="noopener">CrewAI</a> but more boilerplate. The graph abstraction is powerful for workflows that don&rsquo;t fit linear or hierarchical patterns.</p>
+    </div>
+
+    <div class="tool-card">
+      <span class="category-label cat-orch">Orchestration</span>
+      <h3><a href="https://github.com/mixpeek/amux" target="_blank" rel="noopener">amux</a> <span class="privacy-badge privacy-full">Fully Local</span></h3>
+      <div class="tool-meta">
+        <a href="https://github.com/mixpeek/amux" target="_blank" rel="noopener">github.com/mixpeek/amux</a>
+        <span>MIT License</span>
+        <span>Self-hosted control plane</span>
+      </div>
+      <p>The control plane for self-hosted agent fleets. Wraps <a href="https://github.com/tmux/tmux" target="_blank" rel="noopener">tmux</a> with a web dashboard, REST API, self-healing watchdog, per-session cost tracking, shared kanban board, inter-agent messaging, browser automation, and a cron scheduler. Single Python file, zero cloud dependencies.</p>
+      <p><strong>How it differs:</strong> <a href="https://github.com/crewAIInc/crewAI" target="_blank" rel="noopener">CrewAI</a>, <a href="https://github.com/microsoft/autogen" target="_blank" rel="noopener">AutoGen</a>, and <a href="https://github.com/langchain-ai/langgraph" target="_blank" rel="noopener">LangGraph</a> are frameworks for building agent systems with code. <a href="https://github.com/mixpeek/amux" target="_blank" rel="noopener">amux</a> is a ready-to-use tool that manages existing agents (<a href="https://github.com/anthropics/claude-code" target="_blank" rel="noopener">Claude Code</a>, <a href="https://aider.chat" target="_blank" rel="noopener">Aider</a>, <a href="https://github.com/openai/codex" target="_blank" rel="noopener">Codex</a>, anything that runs in a terminal) without writing custom orchestration code. Start agents, monitor health, coordinate via board, track costs &mdash; all from a dashboard or your phone.</p>
+      <pre><code>git clone https://github.com/mixpeek/amux && cd amux && ./install.sh
+amux register myproject --dir ~/Dev/myproject --yolo
+amux start myproject
+amux serve  # Dashboard at https://localhost:8822</code></pre>
+    </div>
+
+    <div class="verdict">
+      <strong>Our pick for orchestration:</strong> <a href="https://github.com/mixpeek/amux" target="_blank" rel="noopener">amux</a> if you want a ready-to-use tool that manages existing agents with zero custom code. <a href="https://github.com/crewAIInc/crewAI" target="_blank" rel="noopener">CrewAI</a> if you want to build custom agent workflows with Python. <a href="https://github.com/langchain-ai/langgraph" target="_blank" rel="noopener">LangGraph</a> for complex stateful graphs. <a href="https://github.com/microsoft/autogen" target="_blank" rel="noopener">AutoGen</a> for <a href="https://www.microsoft.com/" target="_blank" rel="noopener">Microsoft</a>-ecosystem teams.
+    </div>
+
+    <!-- ═══════════════ STACK RECIPES ═══════════════ -->
+    <h2 id="stack-recipes">Complete Stack Recipes</h2>
+
+    <p>Individual tools are useful, but the real power comes from combining them. Here are three battle-tested stacks, from simplest to most capable:</p>
+
+    <div class="stack-recipe">
+      <h3>Stack 1: The 5-Minute Local Setup</h3>
+      <div class="stack-meta">Privacy: Fully local &bull; Cost: $0/month &bull; Setup time: 5 minutes &bull; Best for: Solo developers</div>
+      <p>AI code completion and chat running entirely on your machine. No accounts, no API keys, no data leaving your network.</p>
+      <div style="overflow-x:auto;margin:1rem 0;">
+        <table class="data-table">
+          <thead><tr><th>Layer</th><th>Tool</th><th>Role</th></tr></thead>
+          <tbody>
+            <tr><td>Model Server</td><td><a href="https://ollama.com" target="_blank" rel="noopener">Ollama</a></td><td>Runs Qwen 2.5 Coder 32B locally</td></tr>
+            <tr><td>IDE Integration</td><td><a href="https://www.continue.dev" target="_blank" rel="noopener">Continue</a></td><td>Inline completion + chat in VS Code</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <pre><code># 1. Install Ollama
+curl -fsSL https://ollama.com/install.sh | sh
+
+# 2. Pull a coding model
+ollama pull qwen2.5-coder:32b
+
+# 3. Install Continue in VS Code
+# Extensions → search "Continue" → Install
+# Configure: Ctrl+L → Settings → Provider: Ollama</code></pre>
+      <p><strong>Upgrade path:</strong> Add <a href="https://aider.chat" target="_blank" rel="noopener">Aider</a> for terminal-based pair programming alongside your IDE. Add <a href="https://github.com/cline/cline" target="_blank" rel="noopener">Cline</a> for autonomous multi-step tasks in VS Code.</p>
+    </div>
+
+    <div class="stack-recipe">
+      <h3>Stack 2: The Power User Terminal Stack</h3>
+      <div class="stack-meta">Privacy: Code sent to API only &bull; Cost: $50&ndash;200/month (API) &bull; Setup time: 15 minutes &bull; Best for: Senior developers / small teams</div>
+      <p>Multiple AI coding agents running in parallel, with fleet management and cost tracking. Uses cloud APIs for maximum model capability.</p>
+      <div style="overflow-x:auto;margin:1rem 0;">
+        <table class="data-table">
+          <thead><tr><th>Layer</th><th>Tool</th><th>Role</th></tr></thead>
+          <tbody>
+            <tr><td>Primary Agent</td><td><a href="https://github.com/anthropics/claude-code" target="_blank" rel="noopener">Claude Code</a></td><td>Complex reasoning, architecture, refactoring</td></tr>
+            <tr><td>Secondary Agent</td><td><a href="https://aider.chat" target="_blank" rel="noopener">Aider</a></td><td>Pair programming, quick edits, test writing</td></tr>
+            <tr><td>Orchestration</td><td><a href="https://github.com/mixpeek/amux" target="_blank" rel="noopener">amux</a></td><td>Session management, monitoring, coordination</td></tr>
+            <tr><td>Fallback Model</td><td><a href="https://ollama.com" target="_blank" rel="noopener">Ollama</a></td><td>Local model for privacy-sensitive tasks</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <pre><code># 1. Install amux
+git clone https://github.com/mixpeek/amux && cd amux && ./install.sh
+
+# 2. Register projects
+amux register api-server --dir ~/Dev/api --yolo
+amux register frontend --dir ~/Dev/frontend --yolo
+
+# 3. Start agents and serve dashboard
+amux start api-server
+amux start frontend
+amux serve  # → https://localhost:8822
+
+# 4. Monitor from your phone (install as PWA)</code></pre>
+      <p><strong>Upgrade path:</strong> Add <a href="https://github.com/vllm-project/vllm" target="_blank" rel="noopener">vLLM</a> on a GPU server for team-wide local model serving. Route privacy-sensitive tasks to local models, everything else to <a href="https://www.anthropic.com/" target="_blank" rel="noopener">Anthropic</a> API.</p>
+    </div>
+
+    <div class="stack-recipe">
+      <h3>Stack 3: The Air-Gapped Enterprise Stack</h3>
+      <div class="stack-meta">Privacy: Fully air-gapped &bull; Cost: Hardware only &bull; Setup time: 1&ndash;2 hours &bull; Best for: Regulated industries / defense / healthcare</div>
+      <p>Complete AI coding infrastructure behind your firewall. No internet dependency after initial setup. Multi-user with authentication and audit logging.</p>
+      <div style="overflow-x:auto;margin:1rem 0;">
+        <table class="data-table">
+          <thead><tr><th>Layer</th><th>Tool</th><th>Role</th></tr></thead>
+          <tbody>
+            <tr><td>Model Serving</td><td><a href="https://github.com/vllm-project/vllm" target="_blank" rel="noopener">vLLM</a></td><td>High-throughput model serving on GPU cluster</td></tr>
+            <tr><td>Code Completion</td><td><a href="https://github.com/TabbyML/tabby" target="_blank" rel="noopener">Tabby</a></td><td>IDE integration with auth and usage tracking</td></tr>
+            <tr><td>Terminal Agent</td><td><a href="https://aider.chat" target="_blank" rel="noopener">Aider</a></td><td>Pointed at internal vLLM endpoint</td></tr>
+            <tr><td>Platform</td><td><a href="https://localai.io" target="_blank" rel="noopener">LocalAI</a></td><td>OpenAI-compatible API with OIDC auth</td></tr>
+            <tr><td>Orchestration</td><td><a href="https://github.com/mixpeek/amux" target="_blank" rel="noopener">amux</a></td><td>Fleet management for multiple developers</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <pre><code># 1. Deploy vLLM on GPU server
+pip install vllm
+vllm serve Qwen/Qwen2.5-Coder-32B-Instruct \
+  --host 0.0.0.0 --port 8000
+
+# 2. Deploy Tabby for IDE users
+docker run -it -p 8080:8080 tabbyml/tabby \
+  serve --model Qwen/Qwen2.5-Coder-7B
+
+# 3. Configure Aider for internal endpoint
+export OPENAI_API_BASE=http://gpu-server:8000/v1
+export OPENAI_API_KEY=none
+aider --model openai/Qwen2.5-Coder-32B-Instruct
+
+# 4. Deploy amux for fleet management
+amux serve --host 0.0.0.0  # Accessible to team</code></pre>
+      <p><strong>Hardware requirement:</strong> At minimum, one NVIDIA A100 (80GB) or 2x RTX 4090 (48GB total) for serving a 32B parameter model to 5&ndash;10 concurrent users.</p>
+    </div>
+
+    <!-- ═══════════════ COST ═══════════════ -->
+    <h2 id="cost">Cost Analysis: Self-Hosted vs Cloud</h2>
+
+    <p>The cost equation depends on usage volume, team size, and whether you already own GPU hardware.</p>
+
+    <div style="overflow-x:auto;margin:2rem 0;">
+      <table class="data-table">
+        <thead>
+          <tr>
+            <th>Setup</th>
+            <th>Monthly Cost (Solo)</th>
+            <th>Monthly Cost (5-person team)</th>
+            <th>Breakeven vs Cloud</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td><strong>Cloud APIs</strong> (<a href="https://www.anthropic.com/" target="_blank" rel="noopener">Anthropic</a>/<a href="https://openai.com/" target="_blank" rel="noopener">OpenAI</a>)</td>
+            <td>$50&ndash;200</td>
+            <td>$250&ndash;1,000</td>
+            <td>&mdash;</td>
+          </tr>
+          <tr>
+            <td><strong>Max/Pro subscriptions</strong></td>
+            <td>$100&ndash;200</td>
+            <td>$500&ndash;1,000</td>
+            <td>&mdash;</td>
+          </tr>
+          <tr>
+            <td><strong><a href="https://ollama.com" target="_blank" rel="noopener">Ollama</a> on existing Mac</strong></td>
+            <td>$0 (electricity)</td>
+            <td>$0 per seat</td>
+            <td>Immediate</td>
+          </tr>
+          <tr>
+            <td><strong>Dedicated GPU</strong> (RTX 4090, $1,600)</td>
+            <td>~$15 (electricity)</td>
+            <td>~$15 total</td>
+            <td>2&ndash;4 months</td>
+          </tr>
+          <tr>
+            <td><strong>GPU cloud</strong> (<a href="https://lambdalabs.com/" target="_blank" rel="noopener">Lambda</a>/<a href="https://www.runpod.io/" target="_blank" rel="noopener">RunPod</a>)</td>
+            <td>$150&ndash;400</td>
+            <td>$150&ndash;400 total</td>
+            <td>Comparable to API</td>
+          </tr>
+          <tr>
+            <td><strong>Enterprise on-prem</strong> (A100 cluster)</td>
+            <td colspan="2">$15K&ndash;50K hardware + $200/month electricity</td>
+            <td>6&ndash;12 months at scale</td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+
+    <p><strong>The honest tradeoff:</strong> Self-hosted with local models saves money but sacrifices capability. Claude Opus and GPT-4o are still meaningfully better than the best open-source models for complex reasoning, large-scale refactoring, and architectural decisions. The sweet spot for many teams: use local models for routine tasks (code completion, tests, documentation) and cloud APIs for hard problems (architecture, debugging, security review). <a href="https://github.com/mixpeek/amux" target="_blank" rel="noopener">amux</a> makes this model-routing approach practical by managing sessions with different model backends.</p>
+
+    <!-- ═══════════════ HARDWARE ═══════════════ -->
+    <h2 id="hardware">Hardware Requirements</h2>
+
+    <div style="overflow-x:auto;margin:2rem 0;">
+      <table class="data-table">
+        <thead>
+          <tr>
+            <th>Hardware</th>
+            <th>Model Size</th>
+            <th>Performance</th>
+            <th>Good For</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td><strong>Apple Silicon 16GB</strong></td>
+            <td>7&ndash;14B params</td>
+            <td>15&ndash;30 tok/s</td>
+            <td>Code completion, simple chat</td>
+          </tr>
+          <tr>
+            <td><strong>Apple Silicon 32GB</strong></td>
+            <td>14&ndash;32B params</td>
+            <td>10&ndash;25 tok/s</td>
+            <td>Full coding agent quality</td>
+          </tr>
+          <tr>
+            <td><strong>Apple Silicon 64GB+</strong></td>
+            <td>32&ndash;70B params</td>
+            <td>8&ndash;15 tok/s</td>
+            <td>Near-cloud quality reasoning</td>
+          </tr>
+          <tr>
+            <td><strong>RTX 3090 (24GB)</strong></td>
+            <td>7&ndash;32B params (quantized)</td>
+            <td>20&ndash;50 tok/s</td>
+            <td>Fast local inference, best value</td>
+          </tr>
+          <tr>
+            <td><strong>RTX 4090 (24GB)</strong></td>
+            <td>7&ndash;32B params (quantized)</td>
+            <td>40&ndash;80 tok/s</td>
+            <td>Near-instant code completion</td>
+          </tr>
+          <tr>
+            <td><strong>2&times; RTX 4090 (48GB)</strong></td>
+            <td>32&ndash;70B params</td>
+            <td>20&ndash;40 tok/s</td>
+            <td>Full-size models, team serving</td>
+          </tr>
+          <tr>
+            <td><strong>A100/H100 (80GB)</strong></td>
+            <td>70B+ params</td>
+            <td>50&ndash;100 tok/s</td>
+            <td>Enterprise production serving</td>
+          </tr>
+          <tr>
+            <td><strong>CPU only (any modern PC)</strong></td>
+            <td>3&ndash;7B params</td>
+            <td>3&ndash;10 tok/s</td>
+            <td>Basic completion, slow but works</td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+
+    <p><strong>Recommended starting point:</strong> If you have an Apple Silicon Mac with 32GB+ RAM, you already have everything you need &mdash; <a href="https://ollama.com" target="_blank" rel="noopener">Ollama</a> leverages the unified memory architecture to run 32B models at useful speeds with zero additional hardware. For PC users, a used RTX 3090 (24GB, ~$600&ndash;800) is the best value for local AI inference.</p>
+
+    <!-- ═══════════════ DECISION FRAMEWORK ═══════════════ -->
+    <h2 id="decision">Decision Framework</h2>
+
+    <p>Answer these questions to find your stack:</p>
+
+    <div style="overflow-x:auto;margin:2rem 0;">
+      <table class="data-table">
+        <thead><tr><th>If you need&hellip;</th><th>Use this</th><th>Why</th></tr></thead>
+        <tbody>
+          <tr><td>Fastest setup possible</td><td><a href="https://ollama.com" target="_blank" rel="noopener">Ollama</a> + <a href="https://www.continue.dev" target="_blank" rel="noopener">Continue</a></td><td>5 minutes to private AI coding</td></tr>
+          <tr><td>Maximum coding capability</td><td><a href="https://github.com/anthropics/claude-code" target="_blank" rel="noopener">Claude Code</a> + <a href="https://github.com/mixpeek/amux" target="_blank" rel="noopener">amux</a></td><td>Best model + fleet orchestration</td></tr>
+          <tr><td>Full air-gap compliance</td><td><a href="https://github.com/vllm-project/vllm" target="_blank" rel="noopener">vLLM</a> + <a href="https://github.com/TabbyML/tabby" target="_blank" rel="noopener">Tabby</a> + <a href="https://aider.chat" target="_blank" rel="noopener">Aider</a></td><td>Zero external network calls</td></tr>
+          <tr><td>Best local pair programmer</td><td><a href="https://aider.chat" target="_blank" rel="noopener">Aider</a> + <a href="https://ollama.com" target="_blank" rel="noopener">Ollama</a></td><td>Most mature local model support</td></tr>
+          <tr><td>IDE-first experience</td><td><a href="https://github.com/cline/cline" target="_blank" rel="noopener">Cline</a> or <a href="https://www.continue.dev" target="_blank" rel="noopener">Continue</a></td><td>Stays inside VS Code/JetBrains</td></tr>
+          <tr><td>Multi-agent parallel fleets</td><td><a href="https://github.com/mixpeek/amux" target="_blank" rel="noopener">amux</a></td><td>Built for managing 10&ndash;50+ sessions</td></tr>
+          <tr><td>Custom agent workflows</td><td><a href="https://github.com/crewAIInc/crewAI" target="_blank" rel="noopener">CrewAI</a> or <a href="https://github.com/langchain-ai/langgraph" target="_blank" rel="noopener">LangGraph</a></td><td>Code-first frameworks for custom logic</td></tr>
+          <tr><td>Open-source Devin alternative</td><td><a href="https://github.com/All-Hands-AI/OpenHands" target="_blank" rel="noopener">OpenHands</a></td><td>Web GUI + Docker deployment</td></tr>
+          <tr><td>All-in-one AI platform</td><td><a href="https://localai.io" target="_blank" rel="noopener">LocalAI</a></td><td>LLMs + images + audio + video</td></tr>
+          <tr><td>Automated bug fixing</td><td><a href="https://github.com/SWE-agent/SWE-agent" target="_blank" rel="noopener">SWE-agent</a></td><td>Issue-to-patch pipeline</td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <!-- ═══════════════ FAQ ═══════════════ -->
+    <h2 id="faq">FAQ</h2>
+
+    <details class="faq-item">
+      <summary>What does &ldquo;self-hosted AI coding&rdquo; mean?</summary>
+      <p>Self-hosted AI coding means running AI development tools on your own hardware &mdash; your laptop, your server, your cloud VM &mdash; rather than using a vendor&rsquo;s hosted service. The spectrum ranges from fully local (local LLM + local tools, no internet needed) to locally-run tools that call cloud APIs (like <a href="https://github.com/anthropics/claude-code" target="_blank" rel="noopener">Claude Code</a> or <a href="https://aider.chat" target="_blank" rel="noopener">Aider</a> with <a href="https://www.anthropic.com/" target="_blank" rel="noopener">Anthropic&rsquo;s</a> API). The key distinction: your code stays on your machine, you control the infrastructure, and you can operate without vendor lock-in.</p>
+    </details>
+
+    <details class="faq-item">
+      <summary>Can I run AI coding tools completely offline?</summary>
+      <p>Yes. Pair a local LLM server (<a href="https://ollama.com" target="_blank" rel="noopener">Ollama</a>, <a href="https://github.com/ggml-org/llama.cpp" target="_blank" rel="noopener">llama.cpp</a>, <a href="https://lmstudio.ai" target="_blank" rel="noopener">LM Studio</a>, or <a href="https://localai.io" target="_blank" rel="noopener">LocalAI</a>) with a compatible coding tool (<a href="https://www.continue.dev" target="_blank" rel="noopener">Continue</a>, <a href="https://github.com/cline/cline" target="_blank" rel="noopener">Cline</a>, <a href="https://aider.chat" target="_blank" rel="noopener">Aider</a>, or <a href="https://github.com/TabbyML/tabby" target="_blank" rel="noopener">Tabby</a>) and you have a fully air-gapped setup. No internet required after the initial model download. The tradeoff: local models (even the best open-source ones like Qwen 2.5 Coder 32B) are less capable than cloud models like Claude Opus or GPT-4o for complex reasoning tasks.</p>
+    </details>
+
+    <details class="faq-item">
+      <summary>How much does self-hosted AI coding cost compared to cloud?</summary>
+      <p>For a solo developer, cloud APIs (<a href="https://www.anthropic.com/" target="_blank" rel="noopener">Anthropic</a>, <a href="https://openai.com/" target="_blank" rel="noopener">OpenAI</a>) typically cost $50&ndash;200/month for moderate usage. A Max subscription plan costs $100&ndash;200/month. Self-hosted with local models costs $0/month after hardware investment &mdash; but you need a GPU. A used NVIDIA RTX 3090 (24GB VRAM, runs most coding models) costs roughly $600&ndash;800. Breakeven vs cloud API: 3&ndash;6 months. For teams, the economics shift further toward self-hosting because you avoid per-seat licensing.</p>
+    </details>
+
+    <details class="faq-item">
+      <summary>What hardware do I need to run local AI models for coding?</summary>
+      <p>Minimum: Apple Silicon Mac with 16GB unified memory (runs 7&ndash;14B parameter models well via <a href="https://ollama.com" target="_blank" rel="noopener">Ollama</a>) or a PC with an NVIDIA GPU with 8GB+ VRAM. Recommended: 32GB+ RAM Mac or NVIDIA RTX 3090/4090 (24GB VRAM) for 32&ndash;70B parameter models. For enterprise serving: NVIDIA A100/H100 GPUs with <a href="https://github.com/vllm-project/vllm" target="_blank" rel="noopener">vLLM</a>. CPU-only inference works via <a href="https://github.com/ggml-org/llama.cpp" target="_blank" rel="noopener">llama.cpp</a> but is 5&ndash;20x slower than GPU.</p>
+    </details>
+
+    <details class="faq-item">
+      <summary>Which local model is best for coding in 2026?</summary>
+      <p>For code completion: <a href="https://huggingface.co/Qwen" target="_blank" rel="noopener">Qwen 2.5 Coder 32B</a> is the consensus best open-source coding model &mdash; it matches <a href="https://openai.com/" target="_blank" rel="noopener">GPT-4o</a> on many benchmarks. For general coding tasks with reasoning: DeepSeek Coder V3 (236B MoE, runs on 2x RTX 4090) or Llama 3.3 70B. For fast inline completion on limited hardware: Qwen 2.5 Coder 7B or StarCoder2 3B. Run any of these through <a href="https://ollama.com" target="_blank" rel="noopener">Ollama</a> with one command.</p>
+    </details>
+
+    <details class="faq-item">
+      <summary>Can I use amux with local models instead of cloud APIs?</summary>
+      <p><a href="https://github.com/mixpeek/amux" target="_blank" rel="noopener">amux</a> orchestrates AI coding agents &mdash; it manages sessions, monitors health, coordinates work, and tracks costs. The agents it manages (<a href="https://github.com/anthropics/claude-code" target="_blank" rel="noopener">Claude Code</a>, <a href="https://aider.chat" target="_blank" rel="noopener">Aider</a>, etc.) connect to whatever model backend you configure. Use <a href="https://aider.chat" target="_blank" rel="noopener">Aider</a> with <a href="https://ollama.com" target="_blank" rel="noopener">Ollama</a> for fully local operation, or <a href="https://github.com/anthropics/claude-code" target="_blank" rel="noopener">Claude Code</a> with the <a href="https://www.anthropic.com/" target="_blank" rel="noopener">Anthropic</a> API for maximum capability. <a href="https://github.com/mixpeek/amux" target="_blank" rel="noopener">amux</a> itself runs entirely on your machine with zero cloud dependencies.</p>
+    </details>
+
+    <details class="faq-item">
+      <summary>Is self-hosted AI coding secure enough for enterprise use?</summary>
+      <p>Self-hosted is <em>more</em> secure than cloud for sensitive codebases &mdash; your code never leaves your network. For enterprise compliance: deploy <a href="https://github.com/TabbyML/tabby" target="_blank" rel="noopener">Tabby</a> or <a href="https://www.continue.dev" target="_blank" rel="noopener">Continue</a> with <a href="https://github.com/vllm-project/vllm" target="_blank" rel="noopener">vLLM</a> behind your firewall, use OIDC/SAML auth, enable audit logging, and run models on air-gapped infrastructure. <a href="https://localai.io" target="_blank" rel="noopener">LocalAI</a> supports full air-gap mode with OIDC auth. Tools like <a href="https://github.com/mixpeek/amux" target="_blank" rel="noopener">amux</a> add session monitoring, permission controls, and cost governance on top.</p>
+    </details>
+
+    <details class="faq-item">
+      <summary>What is the easiest self-hosted AI coding setup?</summary>
+      <p>Install <a href="https://ollama.com" target="_blank" rel="noopener">Ollama</a> (one command: <code>curl -fsSL https://ollama.com/install.sh | sh</code>), pull a model (<code>ollama pull qwen2.5-coder:32b</code>), then install <a href="https://www.continue.dev" target="_blank" rel="noopener">Continue</a> in VS Code and point it at <code>localhost:11434</code>. Total setup time: under 5 minutes. You now have AI code completion and chat running entirely on your machine. For a more powerful setup, add <a href="https://aider.chat" target="_blank" rel="noopener">Aider</a> for terminal-based pair programming and <a href="https://github.com/mixpeek/amux" target="_blank" rel="noopener">amux</a> for parallel agent orchestration.</p>
+    </details>
+
+    <div class="cta-box" style="margin-top:3rem;">
+      <h3>Try amux</h3>
+      <p>Run dozens of self-hosted AI coding agents in parallel with self-healing, mobile monitoring, and cost tracking. Works with any terminal agent &mdash; <a href="https://github.com/anthropics/claude-code" target="_blank" rel="noopener">Claude Code</a>, <a href="https://aider.chat" target="_blank" rel="noopener">Aider</a>, <a href="https://github.com/openai/codex" target="_blank" rel="noopener">Codex</a>, or your own. Python 3 + tmux. Open source.</p>
+      <pre><code>git clone https://github.com/mixpeek/amux && cd amux && ./install.sh
+amux register myproject --dir ~/Dev/myproject --yolo
+amux start myproject
+amux serve  # → https://localhost:8822</code></pre>
+      <a class="btn btn-primary" href="https://github.com/mixpeek/amux">View on GitHub</a>
+    </div>
+  </main>
+  <footer class="sub-footer">
+    <div class="footer-inner">
+      <div class="footer-top">
+        <div class="footer-brand-col">
+          <a href="/" class="footer-logo">amux</a>
+          <p>Open-source control plane for AI agents.</p>
+        </div>
+        <div class="footer-col">
+          <div class="footer-col-label">Resources</div>
+          <ul>
+            <li><a href="/guides/">Guides</a></li>
+            <li><a href="/blog/">Blog</a></li>
+            <li><a href="/demos/">Demos</a></li>
+            <li><a href="/glossary/">Glossary</a></li>
+            <li><a href="/faq/">FAQ</a></li>
+          </ul>
+        </div>
+        <div class="footer-col">
+          <div class="footer-col-label">Compare</div>
+          <ul>
+            <li><a href="/compare/amux-vs-cursor/">vs Cursor</a></li>
+            <li><a href="/compare/amux-vs-devin/">vs Devin</a></li>
+            <li><a href="/compare/amux-vs-cline/">vs Cline</a></li>
+            <li><a href="/compare/">All comparisons</a></li>
+          </ul>
+        </div>
+        <div class="footer-col">
+          <div class="footer-col-label">More</div>
+          <ul>
+            <li><a href="/use-cases/">Use Cases</a></li>
+            <li><a href="/solutions/">Solutions</a></li>
+            <li><a href="/for/">For your stack</a></li>
+            <li><a href="/changelog/">Changelog</a></li>
+          </ul>
+        </div>
+      </div>
+      <div class="footer-bottom">
+        <span>MIT License. Built by <a href="https://mixpeek.com">Mixpeek</a></span>
+        <div class="footer-bottom-links">
+          <a href="https://apps.apple.com/us/app/amux-agent-multiplexer/id6760410435" target="_blank" rel="noopener">iOS App</a>
+          <a href="https://github.com/mixpeek/amux" target="_blank" rel="noopener">GitHub</a>
+        </div>
+      </div>
+    </div>
+  </footer>
+
+<script>fetch('https://api.github.com/repos/mixpeek/amux').then(function(r){return r.json()}).then(function(d){var el=document.getElementById('gh-stars');if(el&&d.stargazers_count) el.textContent='★ '+d.stargazers_count}).catch(function(){})</script>
+</body>
+</html>

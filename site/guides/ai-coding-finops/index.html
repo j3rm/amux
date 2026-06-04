@@ -1,0 +1,546 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="dark">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="theme-color" content="#1e2330">
+  <title>AI Coding FinOps: The Engineering Leader's Guide to Governing Agent Spend at Scale &mdash; amux</title>
+  <link rel="icon" href="/icon.svg" type="image/svg+xml">
+  <meta name="description" content="Uber burned its full-year AI coding budget by April. Microsoft canceled Claude Code licenses. Enterprise AI coding spend jumped 108% YoY. The engineering leader's guide to governing AI agent costs at scale: budget frameworks, model routing architecture, per-team attribution, token budget governance, and the 12-point FinOps checklist. Updated May 2026.">
+  <meta name="keywords" content="AI coding FinOps, AI coding costs enterprise, AI agent budget management, AI coding spend governance, Uber Claude Code budget, Microsoft Claude Code canceled, AI coding cost control, token budget management, model routing cost savings, AI agent cost tracking, AI coding ROI, engineering leader AI budget, AI coding spend optimization, AI agent FinOps, enterprise AI coding costs 2026">
+  <link rel="canonical" href="https://amux.io/guides/ai-coding-finops/">
+  <meta property="og:title" content="AI Coding FinOps: The Engineering Leader's Guide to Governing Agent Spend at Scale">
+  <meta property="og:description" content="Uber burned its full-year AI coding budget by April. Microsoft canceled Claude Code licenses. Here's the governance framework that prevents budget blowouts when AI coding agents scale across your org.">
+  <meta property="og:url" content="https://amux.io/guides/ai-coding-finops/">
+  <meta property="og:image" content="https://amux.io/og-image.png">
+  <meta property="og:type" content="article">
+  <meta name="twitter:card" content="summary_large_image">
+  <link rel="alternate" type="application/rss+xml" title="amux Blog" href="https://amux.io/blog/rss.xml">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600;700&family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="/style.css">
+  <script type="application/ld+json">{"@context":"https://schema.org","@type":"BreadcrumbList","itemListElement":[{"@type":"ListItem","position":1,"name":"amux","item":"https://amux.io/"},{"@type":"ListItem","position":2,"name":"Guides","item":"https://amux.io/guides/"},{"@type":"ListItem","position":3,"name":"AI Coding FinOps","item":"https://amux.io/guides/ai-coding-finops/"}]}</script>
+  <script type="application/ld+json">{"@context":"https://schema.org","@type":"Article","headline":"AI Coding FinOps: The Engineering Leader's Guide to Governing Agent Spend at Scale","description":"The engineering leader's guide to governing AI coding agent costs. Budget frameworks, model routing architecture, per-team attribution, and the 12-point FinOps checklist.","url":"https://amux.io/guides/ai-coding-finops/","datePublished":"2026-05-26","dateModified":"2026-05-26","author":{"@type":"Organization","name":"amux","url":"https://amux.io/"},"publisher":{"@type":"Organization","name":"amux","url":"https://amux.io/","logo":{"@type":"ImageObject","url":"https://amux.io/icon.png"}}}</script>
+  <script type="application/ld+json">{"@context":"https://schema.org","@type":"FAQPage","mainEntity":[{"@type":"Question","name":"What is AI Coding FinOps?","acceptedAnswer":{"@type":"Answer","text":"AI Coding FinOps is the practice of managing and governing the financial costs of AI coding agents at organizational scale. It adapts cloud FinOps principles — cost visibility, allocation, optimization, and governance — to the specific challenges of AI agent spend: token-based billing, model routing, context window costs, and the feedback loop where better agents drive more usage which drives higher costs. The FinOps Foundation reports that 98% of FinOps teams now manage AI spend, up from 31% two years ago."}},{"@type":"Question","name":"How much does enterprise AI coding cost per developer?","acceptedAnswer":{"@type":"Answer","text":"Enterprise AI coding costs range from $100 to $2,000+ per developer per month depending on usage patterns. On flat-rate plans like Claude Code Max ($100-200/month) or Cursor Pro ($20/month), costs are predictable. On usage-based billing (API keys), costs scale with usage: light users spend $50-100/month, heavy users $500-1,000/month, and power users running parallel agent fleets can exceed $2,000/month. The average across organizations has converged around $200-500/developer/month for teams with active AI adoption."}},{"@type":"Question","name":"Why did Uber burn through its AI coding budget so fast?","acceptedAnswer":{"@type":"Answer","text":"Uber rolled out Claude Code to engineers in December 2025. Usage grew from 32% of engineers in February 2026 to 84% by March. Per-engineer API costs ranged from $500 to $2,000/month. The company exhausted its full-year 2026 AI coding tools budget allocation by April — just four months into the year. The core problem: success-driven cost amplification. The tool worked so well that adoption exploded, and usage-based billing meant costs scaled linearly with adoption. There were no per-team budget caps, no model routing to cheaper models for routine tasks, and no governance layer between engineers and the API."}},{"@type":"Question","name":"How do I prevent AI coding budget blowouts?","acceptedAnswer":{"@type":"Answer","text":"Four layers of governance: (1) Budget allocation — set per-team monthly caps with alerts at 70% and 90% thresholds. (2) Model routing — use cheaper models (Sonnet, Haiku) for routine tasks and reserve expensive models (Opus) for complex reasoning, saving 40-70% on token costs. (3) Spend visibility — track costs per developer, per team, per project with real-time dashboards. (4) Architectural guardrails — prevent agents from infinite loops, enforce context limits, and use prompt caching to reduce redundant token consumption. An agent control plane like amux provides per-session cost tracking and fleet-level spend dashboards out of the box."}},{"@type":"Question","name":"What is model routing and how does it reduce AI coding costs?","acceptedAnswer":{"@type":"Answer","text":"Model routing directs AI coding tasks to the cheapest model capable of handling them. Instead of running every task on the most expensive model (like Claude Opus at $5/$25 per million input/output tokens), you route routine tasks to cheaper models: Sonnet ($3/$15) for implementation, Haiku ($1/$5) for formatting and simple fixes, and reserve Opus for architectural planning and complex reasoning. A well-configured routing policy typically reduces token costs by 40-70% with minimal quality impact. The key is matching task complexity to model capability."}}]}</script>
+  <style>
+    .incident-card { background: var(--bg-card, #232838); border-radius: 12px; padding: 1.75rem; margin-bottom: 1.5rem; border-left: 4px solid #f87171; }
+    .incident-card h3 { margin-top: 0; font-size: 1.15rem; }
+    .incident-card .incident-meta { display: flex; gap: 0.75rem; flex-wrap: wrap; margin: 0.75rem 0; font-size: 0.8rem; }
+    .incident-card .tag { background: rgba(255,255,255,0.06); border-radius: 6px; padding: 0.25rem 0.6rem; }
+    .incident-card .tag-cost { background: rgba(248,113,113,0.15); color: #f87171; }
+    .incident-card .tag-date { background: rgba(96,165,250,0.15); color: #60a5fa; }
+    .incident-card .lesson { background: rgba(110,231,183,0.06); border: 1px solid rgba(110,231,183,0.15); border-radius: 8px; padding: 0.75rem 1rem; margin-top: 1rem; font-size: 0.88rem; }
+    .incident-card .lesson strong { color: #6ee7b7; }
+    .pillar-card { background: var(--bg-card, #232838); border-radius: 12px; padding: 1.5rem; margin-bottom: 1rem; border: 1px solid rgba(255,255,255,0.06); }
+    .pillar-card h4 { margin-top: 0; display: flex; align-items: center; gap: 0.5rem; }
+    .pillar-card .pillar-num { font-family: 'JetBrains Mono', monospace; font-size: 0.7rem; background: rgba(110,231,183,0.15); color: #6ee7b7; border-radius: 4px; padding: 0.15rem 0.4rem; font-weight: 600; }
+    .stat-grid { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 1rem; margin: 1.5rem 0; }
+    .stat-grid .stat-card { background: var(--bg-card, #232838); border-radius: 10px; padding: 1.25rem; border: 1px solid rgba(255,255,255,0.06); text-align: center; }
+    .stat-grid .stat-card .stat-num { font-size: 2rem; font-weight: 700; font-family: 'JetBrains Mono', monospace; color: #6ee7b7; }
+    .stat-grid .stat-card .stat-label { font-size: 0.82rem; color: var(--text-muted, #8892a4); margin-top: 0.4rem; }
+    .stat-grid .stat-card .stat-source { font-size: 0.72rem; color: var(--text-muted, #8892a4); margin-top: 0.3rem; opacity: 0.7; }
+    .stat-grid .stat-card .stat-source a { color: inherit; }
+    .stat-grid .stat-card .stat-num.danger { color: #f87171; }
+    @media (max-width: 600px) { .stat-grid { grid-template-columns: 1fr; } }
+    .cmp-table { width: 100%; border-collapse: collapse; margin: 1.5rem 0; font-size: 0.84rem; }
+    .cmp-table th, .cmp-table td { padding: 0.65rem 0.7rem; text-align: left; border-bottom: 1px solid rgba(255,255,255,0.08); }
+    .cmp-table th { font-weight: 600; white-space: nowrap; position: sticky; top: 0; background: var(--bg-card, #232838); z-index: 2; }
+    .cmp-table th:first-child { min-width: 120px; }
+    .cmp-table td:first-child { font-weight: 600; }
+    .cmp-table a { color: #6ee7b7; }
+    .cmp-table .y { color: #6ee7b7; }
+    .cmp-table .n { color: #f87171; }
+    .cmp-table .p { color: #fbbf24; }
+    .cmp-wrap { overflow-x: auto; -webkit-overflow-scrolling: touch; margin: 1.5rem 0; border: 1px solid rgba(255,255,255,0.06); border-radius: 12px; }
+    .cmp-wrap .cmp-table { margin: 0; }
+    .key-insight { background: rgba(110,231,183,0.08); border: 1px solid rgba(110,231,183,0.2); border-radius: 10px; padding: 1.25rem; margin: 1.5rem 0; }
+    .key-insight strong { color: #6ee7b7; }
+    .warning-box { background: rgba(248,113,113,0.08); border: 1px solid rgba(248,113,113,0.25); border-radius: 10px; padding: 1.25rem; margin: 1.5rem 0; }
+    .warning-box strong { color: #f87171; }
+    .decision-card { background: var(--bg-card, #232838); border-left: 3px solid #6ee7b7; border-radius: 0 12px 12px 0; padding: 1.5rem; margin: 1.25rem 0; }
+    .decision-card h4 { margin-top: 0; color: #6ee7b7; font-size: 1.05rem; }
+    .decision-card ul { margin: 0.5rem 0 0; padding-left: 1.2rem; }
+    .routing-diagram { background: #1a1f2e; border: 1px solid rgba(255,255,255,0.08); border-radius: 10px; padding: 1.25rem; margin: 1rem 0; overflow-x: auto; font-family: 'JetBrains Mono', monospace; font-size: 0.78rem; line-height: 1.5; color: #8892a4; white-space: pre; }
+    .routing-diagram .highlight { color: #6ee7b7; }
+    .routing-diagram .accent { color: #60a5fa; }
+    .routing-diagram .warn { color: #fbbf24; }
+    .routing-diagram .danger { color: #f87171; }
+    .checklist { background: var(--bg-card, #232838); border-radius: 12px; padding: 1.75rem; border: 1px solid rgba(255,255,255,0.06); margin: 1.5rem 0; }
+    .checklist h3 { margin-top: 0; }
+    .checklist ol { padding-left: 1.2rem; }
+    .checklist li { margin-bottom: 0.75rem; line-height: 1.6; }
+    .checklist .check-category { font-size: 0.75rem; text-transform: uppercase; letter-spacing: 0.06em; color: var(--text-muted, #8892a4); margin-top: 1.25rem; margin-bottom: 0.5rem; font-weight: 600; }
+    .price-grid { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 1rem; margin: 1.5rem 0; }
+    .price-grid .price-card { background: var(--bg-card, #232838); border-radius: 10px; padding: 1.25rem; border: 1px solid rgba(255,255,255,0.06); }
+    .price-grid .price-card h4 { margin: 0 0 0.5rem; font-size: 0.95rem; }
+    .price-grid .price-card h4 a { color: inherit; text-decoration: none; border-bottom: 1px solid rgba(255,255,255,0.15); }
+    .price-grid .price-card h4 a:hover { color: #6ee7b7; border-color: #6ee7b7; }
+    .price-grid .price-card .price-amount { font-family: 'JetBrains Mono', monospace; font-size: 1.4rem; font-weight: 700; color: #6ee7b7; }
+    .price-grid .price-card .price-tier { font-size: 0.75rem; text-transform: uppercase; letter-spacing: 0.06em; color: var(--text-muted, #8892a4); margin-bottom: 0.25rem; }
+    @media (max-width: 600px) { .price-grid { grid-template-columns: 1fr; } }
+  </style>
+</head>
+<body>
+  <header class="site-header">
+    <a class="logo" href="/">amux</a>
+    <nav>
+      <a href="/docs/" class="hide-mobile">docs</a>
+      <a href="/guides/" class="hide-mobile">guides</a>
+      <a href="/compare/" class="hide-mobile">compare</a>
+      <a href="/demos/" class="hide-mobile">demos</a>
+      <a href="/blog/" class="hide-mobile">blog</a>
+      <a href="https://apps.apple.com/us/app/amux-agent-multiplexer/id6760410435" target="_blank" rel="noopener" class="nav-cta-primary nav-cta">iOS app</a>
+      <a href="https://github.com/mixpeek/amux" target="_blank" rel="noopener" class="nav-cta">GitHub <span class="gh-stars" id="gh-stars"></span></a>
+    </nav>
+  </header>
+  <main>
+    <div class="breadcrumb"><a href="/">amux</a> <span class="sep">&rsaquo;</span> <a href="/guides/">Guides</a> <span class="sep">&rsaquo;</span> <span>AI Coding FinOps</span></div>
+    <span class="updated-badge">May 2026</span>
+    <h1>AI Coding FinOps: The Engineering Leader's Guide to Governing Agent Spend at Scale</h1>
+    <p class="subtitle"><a href="https://finance.yahoo.com/sectors/technology/articles/ubers-anthropic-ai-push-hits-223109852.html" target="_blank" rel="noopener">Uber</a> burned its full-year AI coding budget by April. <a href="https://www.windowscentral.com/microsoft/microsoft-cancels-claude-code-licenses-shifting-developers-to-github-copilot-cli-a-move-likely-driven-by-financial-motives" target="_blank" rel="noopener">Microsoft</a> is canceling Claude Code licenses for thousands of engineers. Enterprise AI coding spend jumped 108% year-over-year. The majority of organizations underestimate AI costs by 10% or more &mdash; and nearly 25% underestimate by 50%+. The tools work. The budgets don&rsquo;t. This guide is the governance framework for engineering leaders who need to control AI coding costs without killing the productivity gains that make them worth paying for.</p>
+
+    <div class="stat-grid">
+      <div class="stat-card">
+        <div class="stat-num danger">98%</div>
+        <div class="stat-label">of FinOps teams now manage AI spend</div>
+        <div class="stat-source"><a href="https://www.linuxfoundation.org/press/state-of-finops-survey-ai-value-and-skills-top-priorities-as-finops-matures-across-technology-value-98-manage-ai-90-saas-64-licensing-48-data-center-1" target="_blank" rel="noopener">FinOps Foundation</a>, up from 31% two years ago</div>
+      </div>
+      <div class="stat-card">
+        <div class="stat-num danger">108%</div>
+        <div class="stat-label">YoY increase in enterprise AI spend</div>
+        <div class="stat-source"><a href="https://beincrypto.com/enterprise-ai-cost-crisis-microsoft-uber/" target="_blank" rel="noopener">BeInCrypto</a>, avg $1.2M/org</div>
+      </div>
+      <div class="stat-card">
+        <div class="stat-num">40&ndash;70%</div>
+        <div class="stat-label">Savings from model routing vs. Opus-only</div>
+        <div class="stat-source">Sonnet/Haiku for routine tasks</div>
+      </div>
+    </div>
+
+    <nav class="toc" style="background:var(--surface);border:1px solid var(--border);border-radius:8px;padding:1.2rem 1.6rem;margin:2rem 0;">
+      <strong style="display:block;margin-bottom:0.5rem;font-size:0.85rem;text-transform:uppercase;letter-spacing:0.05em;color:var(--text-muted,#8892a4)">Contents</strong>
+      <ol style="margin:0;padding-left:1.2rem;font-size:0.9rem;line-height:1.8">
+        <li><a href="#problem">The budget blowout problem</a></li>
+        <li><a href="#incidents">Case studies: Uber, Microsoft, and the pattern</a></li>
+        <li><a href="#anatomy">Anatomy of AI coding costs</a></li>
+        <li><a href="#four-pillars">The four pillars of AI coding FinOps</a></li>
+        <li><a href="#model-routing">Model routing: the biggest cost lever</a></li>
+        <li><a href="#fleet-governance">Fleet governance for multi-agent teams</a></li>
+        <li><a href="#checklist">The 12-point FinOps checklist</a></li>
+        <li><a href="#tools">Tools for AI coding cost governance</a></li>
+        <li><a href="#faq">FAQ</a></li>
+      </ol>
+    </nav>
+
+    <!-- ==================== SECTION 1: THE PROBLEM ==================== -->
+    <h2 id="problem">The budget blowout problem</h2>
+
+    <p>AI coding agents have a paradox baked into their business model: <strong>the better they work, the more they cost</strong>. A tool that saves engineers 2&ndash;3 hours per week is worth $100/month. When that same tool becomes central to how your team ships code, usage scales &mdash; and so does the bill.</p>
+
+    <p>This is the &ldquo;success tax&rdquo; of AI coding. It doesn't apply to traditional developer tools (your IDE license doesn't grow when engineers write more code), but it's fundamental to usage-based AI billing. Every prompt, every file read, every agent loop burns tokens. More engineers, more agents, more throughput &mdash; more tokens.</p>
+
+    <div class="key-insight">
+      <strong>The core tension:</strong> Engineering leaders are simultaneously pressured to (a) adopt AI coding tools aggressively for competitive advantage and (b) keep costs predictable for budgeting. These goals conflict under usage-based pricing. AI coding FinOps is the discipline that resolves this tension.
+    </div>
+
+    <p>Cloud FinOps (managing AWS/GCP/Azure spend) is a mature discipline. The <a href="https://www.finops.org/" target="_blank" rel="noopener">FinOps Foundation</a> has 96,000+ members and established frameworks. But AI coding costs behave differently from cloud compute:</p>
+    <ul>
+      <li><strong>Granularity:</strong> Cloud costs map to infrastructure (instances, storage, bandwidth). AI coding costs map to cognitive work (reasoning, code generation, file reading). The same task can cost $0.50 or $30 depending on the agent's approach.</li>
+      <li><strong>Predictability:</strong> Cloud usage is relatively steady. AI agent costs spike unpredictably &mdash; an agent hitting a complex bug can 10&times; its token consumption in a single session.</li>
+      <li><strong>Attribution:</strong> Cloud costs attribute to services and teams. AI coding costs need attribution to tasks, projects, and individual development activities &mdash; a much finer grain.</li>
+      <li><strong>Feedback loops:</strong> A stuck agent burns tokens doing nothing useful. A well-prompted agent produces value per token. The cost-to-value ratio varies 100&times; depending on how agents are configured, not just how many are running.</li>
+    </ul>
+
+    <!-- ==================== SECTION 2: CASE STUDIES ==================== -->
+    <h2 id="incidents">Case studies: Uber, Microsoft, and the pattern</h2>
+
+    <div class="incident-card">
+      <h3>Uber: Full-year budget burned in four months</h3>
+      <div class="incident-meta">
+        <span class="tag tag-date">Dec 2025 &ndash; Apr 2026</span>
+        <span class="tag tag-cost">$500&ndash;2,000/engineer/month</span>
+      </div>
+      <p><a href="https://www.uber.com/" target="_blank" rel="noopener">Uber</a> rolled out <a href="https://docs.anthropic.com/en/docs/claude-code/overview" target="_blank" rel="noopener">Claude Code</a> to its engineering organization in December 2025. Adoption was explosive: usage grew from 32% of engineers in February to 84% &ldquo;agentic users&rdquo; by March. Per-engineer API costs ranged from $500 to $2,000/month. By April 2026, the company had <a href="https://www.benzinga.com/markets/tech/26/04/51828848/ubers-anthropic-ai-push-hits-wall-cto-says-budget-struggles-despite-spend" target="_blank" rel="noopener">exhausted its full-year AI coding tools budget allocation</a>.</p>
+      <p>The root cause was structural: no per-team budget caps, no model routing to cheaper models for routine tasks, and no governance layer between engineers and the API. Every engineer had direct access to Opus-tier reasoning for every task, including tasks where Sonnet or Haiku would have produced equivalent output at 3&ndash;5&times; lower cost.</p>
+      <div class="lesson"><strong>Lesson:</strong> Adoption velocity without cost governance is a budget fire. The 32% &rarr; 84% adoption curve in two months is a success story &mdash; but without per-team budgets, model routing, and usage alerts, success becomes the budget blowout.</div>
+    </div>
+
+    <div class="incident-card">
+      <h3>Microsoft: Canceling Claude Code licenses</h3>
+      <div class="incident-meta">
+        <span class="tag tag-date">May 2026</span>
+        <span class="tag tag-cost">Thousands of licenses</span>
+      </div>
+      <p><a href="https://www.microsoft.com/" target="_blank" rel="noopener">Microsoft</a> is <a href="https://www.windowscentral.com/microsoft/microsoft-cancels-claude-code-licenses-shifting-developers-to-github-copilot-cli-a-move-likely-driven-by-financial-motives" target="_blank" rel="noopener">canceling most internal Claude Code licenses</a> in its Experiences and Devices division by June 30, 2026, directing thousands of developers toward <a href="https://github.com/features/copilot" target="_blank" rel="noopener">GitHub Copilot CLI</a> instead. The company had opened Claude Code access in December 2025 and the tool proved &ldquo;very popular.&rdquo;</p>
+      <p>The cost paradox was clear: the better the tool worked, the more engineers used it, the higher the bill grew. Token-based pricing created an open-ended cost commitment that conflicted with fiscal planning. The shift to Copilot CLI aligns with Microsoft&rsquo;s fiscal year end and consolidates spend within their own ecosystem.</p>
+      <div class="lesson"><strong>Lesson:</strong> Vendor dependency under usage-based pricing creates budget unpredictability. Microsoft&rsquo;s response &mdash; consolidating onto their own tool &mdash; trades capability for cost control. The alternative: keep the better tool but wrap it in a governance layer that caps spend per team and routes tasks to the cheapest capable model.</div>
+    </div>
+
+    <div class="key-insight">
+      <strong>The pattern:</strong> Both incidents follow the same sequence: (1) Deploy AI coding tools broadly. (2) Engineers love them &mdash; adoption spikes. (3) Usage-based billing scales linearly with adoption. (4) Budget hits ceiling months ahead of plan. (5) Reactive cuts (license cancellations, access restrictions) hurt productivity. The fix is governance at step 2, not cuts at step 5.
+    </div>
+
+    <!-- ==================== SECTION 3: ANATOMY OF COSTS ==================== -->
+    <h2 id="anatomy">Anatomy of AI coding costs</h2>
+
+    <p>AI coding costs decompose into four layers. Understanding where money actually goes is the prerequisite for controlling it.</p>
+
+    <h3>Current pricing landscape (May 2026)</h3>
+
+    <div class="cmp-wrap">
+      <table class="cmp-table">
+        <thead>
+          <tr><th>Plan</th><th>Pricing Model</th><th>Monthly Cost</th><th>Per-Token Control</th><th>Budget Predictability</th></tr>
+        </thead>
+        <tbody>
+          <tr><td><a href="https://claude.com/pricing" target="_blank" rel="noopener">Claude Code</a> Max 5x</td><td>Flat rate</td><td>$100/user</td><td class="n">No routing</td><td class="y">High</td></tr>
+          <tr><td><a href="https://claude.com/pricing" target="_blank" rel="noopener">Claude Code</a> Max 20x</td><td>Flat rate</td><td>$200/user</td><td class="n">No routing</td><td class="y">High</td></tr>
+          <tr><td><a href="https://platform.claude.com/docs/en/about-claude/pricing" target="_blank" rel="noopener">Claude API</a> (Opus 4.6)</td><td>Per token</td><td>$200&ndash;2,000+</td><td class="y">Full routing</td><td class="n">Low</td></tr>
+          <tr><td><a href="https://platform.claude.com/docs/en/about-claude/pricing" target="_blank" rel="noopener">Claude API</a> (Sonnet 4.6)</td><td>Per token</td><td>$50&ndash;500</td><td class="y">Full routing</td><td class="p">Medium</td></tr>
+          <tr><td><a href="https://www.cursor.com/" target="_blank" rel="noopener">Cursor</a> Pro</td><td>Flat rate</td><td>$20/user</td><td class="n">No routing</td><td class="y">High</td></tr>
+          <tr><td><a href="https://www.cursor.com/" target="_blank" rel="noopener">Cursor</a> Ultra</td><td>Flat rate</td><td>$200/user</td><td class="n">No routing</td><td class="y">High</td></tr>
+          <tr><td><a href="https://github.com/features/copilot" target="_blank" rel="noopener">GitHub Copilot</a> Business</td><td>Flat + credits</td><td>$19/user + overage</td><td class="p">Limited</td><td class="p">Medium</td></tr>
+          <tr><td><a href="https://openai.com/api/pricing/" target="_blank" rel="noopener">OpenAI Codex</a></td><td>Per token</td><td>$100&ndash;500+</td><td class="y">Full routing</td><td class="n">Low</td></tr>
+          <tr><td><a href="https://devin.ai/" target="_blank" rel="noopener">Devin</a></td><td>Flat rate</td><td>$500/seat</td><td class="n">No routing</td><td class="y">High</td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <h3>Token cost by model tier</h3>
+    <div class="cmp-wrap">
+      <table class="cmp-table">
+        <thead>
+          <tr><th>Model</th><th>Input (per 1M tokens)</th><th>Output (per 1M tokens)</th><th>With Prompt Cache</th><th>Best For</th></tr>
+        </thead>
+        <tbody>
+          <tr><td><a href="https://docs.anthropic.com/en/docs/about-claude/models" target="_blank" rel="noopener">Claude Opus 4.6</a></td><td>$5.00</td><td>$25.00</td><td>$0.50 input</td><td>Architecture, complex reasoning, code review</td></tr>
+          <tr><td><a href="https://docs.anthropic.com/en/docs/about-claude/models" target="_blank" rel="noopener">Claude Sonnet 4.6</a></td><td>$3.00</td><td>$15.00</td><td>$0.30 input</td><td>Implementation, test writing, refactoring</td></tr>
+          <tr><td><a href="https://docs.anthropic.com/en/docs/about-claude/models" target="_blank" rel="noopener">Claude Haiku 4.5</a></td><td>$1.00</td><td>$5.00</td><td>$0.10 input</td><td>Formatting, lint fixes, simple migrations</td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <h3>The four cost layers</h3>
+
+    <div class="routing-diagram"><span class="warn">Layer 1: Model cost</span>          Which model runs the task
+  Opus $5/$25  vs  Sonnet $3/$15  vs  Haiku $1/$5 per M tokens
+  <span class="highlight">&rarr; Lever: Model routing (40&ndash;70% savings)</span>
+
+<span class="warn">Layer 2: Context cost</span>         How much the agent reads per request
+  A 100K-token context = $0.50/request on Opus input
+  Agent that reads 50 files vs 5 files = 10&times; context cost
+  <span class="highlight">&rarr; Lever: Scoped tasks, focused file lists, prompt caching</span>
+
+<span class="warn">Layer 3: Iteration cost</span>       How many requests per task
+  Clean task: 5&ndash;15 requests. Stuck agent: 50&ndash;200 requests.
+  One documented case: $0.50 fix &rarr; $30 after 47 iterations
+  <span class="highlight">&rarr; Lever: Iteration caps, stuck-agent detection, clear specs</span>
+
+<span class="warn">Layer 4: Waste cost</span>           Tokens spent doing nothing useful
+  87% of tokens in one analysis went to <span class="danger">finding</span> code, not writing it
+  Re-reading files already in context, looping on solved problems
+  <span class="highlight">&rarr; Lever: Context engineering, CLAUDE.md file paths, agent memory</span></div>
+
+    <div class="key-insight">
+      <strong>The cost iceberg:</strong> Most teams focus on Layer 1 (switching models or plans). But Layers 2&ndash;4 often represent 60&ndash;80% of total spend. An agent running Haiku but reading 200 files per task costs more than an agent running Opus on 10 focused files. <a href="/guides/context-engineering/">Context engineering</a> is a cost optimization strategy, not just a quality strategy.
+    </div>
+
+    <!-- ==================== SECTION 4: FOUR PILLARS ==================== -->
+    <h2 id="four-pillars">The four pillars of AI coding FinOps</h2>
+
+    <p>Adapted from the <a href="https://www.finops.org/" target="_blank" rel="noopener">FinOps Foundation</a>&rsquo;s framework for cloud cost management, applied to the specific dynamics of AI coding agents.</p>
+
+    <div class="pillar-card">
+      <h4><span class="pillar-num">01</span> Visibility</h4>
+      <p><strong>Know what you&rsquo;re spending, where, and why.</strong> Most organizations can tell you their total AI spend. Few can tell you which team, project, or task type consumes the most tokens. Without granular visibility, optimization is guesswork.</p>
+      <ul>
+        <li><strong>Per-developer tracking:</strong> Token consumption per engineer per day/week. Identify outliers early.</li>
+        <li><strong>Per-project attribution:</strong> Map AI costs to business outcomes. A feature that costs $200 in tokens but ships 3 days faster has clear ROI. An agent loop that burns $200 with no output is pure waste.</li>
+        <li><strong>Per-session tracking:</strong> <a href="https://github.com/mixpeek/amux" target="_blank" rel="noopener">amux</a> tracks token spend per agent session, showing exactly which agents are consuming disproportionate resources.</li>
+        <li><strong>Model breakdown:</strong> What percentage of spend goes to Opus vs. Sonnet vs. Haiku? If 90% of spend is on Opus and only 30% of tasks require Opus-level reasoning, there&rsquo;s a routing opportunity.</li>
+      </ul>
+    </div>
+
+    <div class="pillar-card">
+      <h4><span class="pillar-num">02</span> Allocation</h4>
+      <p><strong>Set budgets before you need them.</strong> Per-team monthly budgets with alerts at 70% and 90% thresholds. The goal isn't to restrict usage &mdash; it's to make cost a visible input to planning, not a surprise at month-end.</p>
+      <ul>
+        <li><strong>Team budgets:</strong> Allocate monthly token budgets per team based on headcount and expected workload. Start with historical spend + 20% buffer.</li>
+        <li><strong>Project budgets:</strong> For large initiatives (migrations, new features, tech debt sprints), allocate a project-level token budget alongside the engineering estimate.</li>
+        <li><strong>Escalation path:</strong> When a team hits 90% of budget, they can request more &mdash; but the request forces a conversation about whether spend is producing value or burning on waste.</li>
+        <li><strong>Sprint planning integration:</strong> Include estimated AI token cost in sprint capacity planning. &ldquo;This sprint has 40 story points and an estimated $800 in AI agent costs.&rdquo;</li>
+      </ul>
+    </div>
+
+    <div class="pillar-card">
+      <h4><span class="pillar-num">03</span> Optimization</h4>
+      <p><strong>Reduce cost per unit of output.</strong> Not &ldquo;spend less&rdquo; but &ldquo;get more value per dollar.&rdquo; The three biggest levers: model routing, context discipline, and waste elimination.</p>
+      <ul>
+        <li><strong>Model routing:</strong> Route tasks to the cheapest capable model. See the <a href="#model-routing">model routing section</a> below for the full architecture.</li>
+        <li><strong>Prompt caching:</strong> <a href="https://www.anthropic.com/" target="_blank" rel="noopener">Anthropic&rsquo;s</a> prompt caching reduces input costs by up to 90% for repeated context. Ensure your <code>CLAUDE.md</code> and system prompts are structured to maximize cache hits.</li>
+        <li><strong>Context engineering:</strong> Well-scoped tasks with explicit file paths in <code>CLAUDE.md</code> reduce the context window agents need to load. See our <a href="/guides/context-engineering/">Context Engineering guide</a> for the full framework.</li>
+        <li><strong>Iteration caps:</strong> Configure agent session limits. If an agent makes 30+ tool calls without producing a commit, it's probably stuck. Auto-alert or auto-stop at configurable thresholds.</li>
+        <li><strong>Batch API:</strong> For non-urgent work (overnight runs, bulk migrations), <a href="https://www.anthropic.com/" target="_blank" rel="noopener">Anthropic&rsquo;s</a> Batch API offers a 50% discount on token costs.</li>
+      </ul>
+    </div>
+
+    <div class="pillar-card">
+      <h4><span class="pillar-num">04</span> Governance</h4>
+      <p><strong>Policies that prevent budget surprises without killing productivity.</strong> The hardest pillar &mdash; too much governance slows teams down, too little leads to Uber-style blowouts.</p>
+      <ul>
+        <li><strong>Default model policy:</strong> Set Sonnet as the org-wide default. Engineers opt into Opus for specific tasks, not the other way around. This alone saves 40%+.</li>
+        <li><strong>Rate limit awareness:</strong> <a href="https://claude.com/pricing" target="_blank" rel="noopener">Claude Code Max</a> plans include rate limits (~45 Opus requests per 5 minutes). Plan agent parallelism around these limits to avoid throttling and wasted wait time.</li>
+        <li><strong>Flat-rate vs. usage-based decision matrix:</strong> For predictable-usage teams, flat-rate plans (Max $100&ndash;200/month) cap costs. For variable-usage teams running multi-agent fleets, API billing with model routing is cheaper but less predictable. Offer both as team-level choices.</li>
+        <li><strong>Quarterly review:</strong> Review per-team AI spend vs. output metrics (PRs shipped, bugs fixed, features launched) quarterly. Teams with high spend-to-output ratios get optimization support, not punitive cuts.</li>
+      </ul>
+    </div>
+
+    <!-- ==================== SECTION 5: MODEL ROUTING ==================== -->
+    <h2 id="model-routing">Model routing: the biggest cost lever</h2>
+
+    <p>Model routing is the single largest cost optimization available for AI coding agents. Instead of running every task on the most capable (and most expensive) model, route each task to the cheapest model that can handle it. A well-tuned routing policy reduces token costs by 40&ndash;70% with minimal quality impact.</p>
+
+    <h3>The routing architecture</h3>
+
+    <div class="routing-diagram"><span class="highlight">Task Classification</span> &rarr; <span class="warn">Router</span> &rarr; <span class="accent">Model Selection</span> &rarr; Agent Execution
+
+<span class="danger">Opus 4.6</span> ($5/$25 per M tokens) &mdash; 15&ndash;25% of tasks
+  Architectural planning, cross-file refactors with design decisions,
+  security review, complex bug diagnosis, API design
+
+<span class="warn">Sonnet 4.6</span> ($3/$15 per M tokens) &mdash; 50&ndash;65% of tasks
+  Feature implementation, test writing, code review,
+  documentation, straightforward refactors, debugging
+
+<span class="highlight">Haiku 4.5</span> ($1/$5 per M tokens) &mdash; 20&ndash;30% of tasks
+  Formatting fixes, lint cleanup, dependency updates,
+  simple migrations, boilerplate generation, typo fixes</div>
+
+    <h3>Cost math: Opus-only vs. routed</h3>
+
+    <p>Consider a team of 10 engineers, each running 5 agent sessions per day, averaging 50K input + 10K output tokens per session:</p>
+
+    <div class="cmp-wrap">
+      <table class="cmp-table">
+        <thead>
+          <tr><th>Strategy</th><th>Daily Token Cost</th><th>Monthly (22 days)</th><th>Savings vs. Opus-Only</th></tr>
+        </thead>
+        <tbody>
+          <tr><td>All Opus</td><td>$175</td><td>$3,850</td><td>&mdash;</td></tr>
+          <tr><td>All Sonnet</td><td>$105</td><td>$2,310</td><td>40%</td></tr>
+          <tr><td><strong>Routed (20/60/20)</strong></td><td><strong>$80</strong></td><td><strong>$1,760</strong></td><td class="y"><strong>54%</strong></td></tr>
+          <tr><td>Routed + prompt caching</td><td>$50</td><td>$1,100</td><td class="y">71%</td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <p>The routed strategy (20% Opus, 60% Sonnet, 20% Haiku) saves $2,090/month for a 10-person team &mdash; or $25K/year. Add prompt caching and the savings reach $33K/year. At Uber&rsquo;s scale (thousands of engineers), the difference is millions per quarter.</p>
+
+    <h3>Implementing routing</h3>
+
+    <p>For teams using <a href="https://docs.anthropic.com/en/docs/claude-code/overview" target="_blank" rel="noopener">Claude Code</a> via API keys, model routing can be implemented through:</p>
+    <ul>
+      <li><strong><a href="https://github.com/mixpeek/amux" target="_blank" rel="noopener">amux</a> session config:</strong> Set different model overrides per session type. Designate architecture sessions to use Opus and implementation sessions to use Sonnet.</li>
+      <li><strong><a href="https://docs.anthropic.com/en/docs/claude-code/overview" target="_blank" rel="noopener">Claude Code</a> <code>--model</code> flag:</strong> Specify the model when launching agent sessions. Pair with <code>CLAUDE.md</code> task scoping to ensure the model matches the task.</li>
+      <li><strong>Proxy routing:</strong> Run a lightweight proxy (e.g., <a href="https://www.morphllm.com/" target="_blank" rel="noopener">MorphLLM</a> or custom) between agents and the API that routes requests based on prompt analysis.</li>
+      <li><strong><a href="https://www.cursor.com/" target="_blank" rel="noopener">Cursor</a>/<a href="https://antigravity.google/" target="_blank" rel="noopener">Antigravity</a> auto-routing:</strong> Some IDEs now offer automatic model routing based on task complexity. Less control but zero configuration.</li>
+    </ul>
+
+    <div class="key-insight">
+      <strong>The 80/20 rule of model routing:</strong> 80% of AI coding tasks do not require Opus-tier reasoning. Implementation, test writing, formatting, and documentation all produce equivalent quality on Sonnet. Reserve Opus for the 20% that genuinely benefits from deeper reasoning: architecture decisions, cross-cutting refactors, and security-sensitive code review.
+    </div>
+
+    <!-- ==================== SECTION 6: FLEET GOVERNANCE ==================== -->
+    <h2 id="fleet-governance">Fleet governance for multi-agent teams</h2>
+
+    <p>Running parallel AI coding agents multiplies both throughput and cost exposure. A 10-agent fleet produces 10&times; the output &mdash; and 10&times; the token spend. Fleet governance adds cost controls at the orchestration layer, between your team and the agents they run.</p>
+
+    <h3>Per-agent budget caps</h3>
+    <p>Set maximum token budgets per agent session. An implementation agent might get a 500K-token cap (enough for most features), while an architecture agent gets 2M tokens (needs to read and reason about more of the codebase). If an agent hits its cap, it pauses and alerts the developer rather than burning through more tokens.</p>
+
+    <h3>Fleet-level daily caps</h3>
+    <p>Set a total daily token budget for the entire fleet. <a href="https://github.com/mixpeek/amux" target="_blank" rel="noopener">amux</a> tracks per-session token spend and can alert when the fleet approaches its daily budget. This prevents overnight agent runs from producing a surprise bill &mdash; a common failure mode when agents run unattended.</p>
+
+    <h3>Waste detection</h3>
+    <p>Monitor for cost-inefficient agent behavior:</p>
+    <ul>
+      <li><strong>Stuck agents:</strong> An agent making 30+ tool calls without producing a commit is probably in a loop. Auto-detection and alerting prevents token waste.</li>
+      <li><strong>Context thrashing:</strong> An agent that repeatedly reads the same files across requests is paying for input tokens redundantly. Prompt caching mitigates this, but detecting the pattern helps optimize task scoping.</li>
+      <li><strong>Over-scoped tasks:</strong> An agent exploring 200 files to make a 10-line change has poor scope discipline. Track the ratio of files read to files changed as a waste signal.</li>
+      <li><strong>Redundant work:</strong> Two agents independently working on the same problem (common in poorly-orchestrated fleets). <a href="/guides/ai-agent-orchestration-2026/">Orchestration patterns</a> with task claiming prevent this.</li>
+    </ul>
+
+    <h3>Cost-aware orchestration</h3>
+    <p>The orchestration layer (<a href="https://github.com/mixpeek/amux" target="_blank" rel="noopener">amux</a>, <a href="https://github.com/smtg-ai/claude-squad" target="_blank" rel="noopener">Claude Squad</a>, <a href="https://github.com/microsoft/conductor" target="_blank" rel="noopener">Microsoft Conductor</a>) is the natural enforcement point for cost governance. It controls which agents run, on which model, with which budget, and can enforce policies before agents start rather than after they've already burned tokens.</p>
+
+    <div class="warning-box">
+      <strong>Anti-pattern: Retroactive cost control.</strong> Reviewing last month's AI spend bill and then restricting access is the equivalent of reviewing your cloud bill and then shutting down servers. It's too late &mdash; the money is spent. Effective FinOps pushes cost controls upstream: into session configuration, model selection, and task scoping. The earlier you apply the lever, the less waste you generate.
+    </div>
+
+    <!-- ==================== SECTION 7: CHECKLIST ==================== -->
+    <h2 id="checklist">The 12-point AI coding FinOps checklist</h2>
+
+    <div class="checklist">
+      <h3>Implementation checklist for engineering leaders</h3>
+
+      <div class="check-category">Visibility (Week 1)</div>
+      <ol>
+        <li><strong>Enable per-developer token tracking.</strong> Use <a href="https://docs.anthropic.com/en/docs/claude-code/overview" target="_blank" rel="noopener">Claude Code</a> JSONL logs or <a href="https://github.com/mixpeek/amux" target="_blank" rel="noopener">amux</a>'s built-in tracking to measure spend per engineer per day. Identify the top 10% of spenders &mdash; they account for 50&ndash;70% of total spend.</li>
+        <li><strong>Break down spend by model tier.</strong> What percentage of tokens go to Opus vs. Sonnet vs. Haiku? If &gt;60% is on Opus, there's a routing opportunity worth 40%+ savings.</li>
+        <li><strong>Measure cost per output.</strong> Track cost per PR merged, cost per feature shipped, cost per bug fixed. This is the denominator that determines whether spend is productive.</li>
+      </ol>
+
+      <div class="check-category">Allocation (Week 2)</div>
+      <ol start="4">
+        <li><strong>Set per-team monthly budgets.</strong> Base them on 1.2&times; the team's historical spend for the first month. Adjust quarterly based on actuals vs. output.</li>
+        <li><strong>Configure alerts at 70% and 90% of budget.</strong> Alerts go to the team lead and the FinOps owner. The 70% alert is informational; the 90% alert triggers a review conversation.</li>
+        <li><strong>Add AI cost to sprint planning.</strong> Estimate AI token cost alongside engineering hours for each sprint. &ldquo;This sprint: 35 story points, 4 engineers, est. $600 in AI agent costs.&rdquo;</li>
+      </ol>
+
+      <div class="check-category">Optimization (Week 3)</div>
+      <ol start="7">
+        <li><strong>Set Sonnet as the org-wide default model.</strong> Engineers opt up to Opus for specific tasks rather than defaulting to the most expensive option.</li>
+        <li><strong>Enable prompt caching.</strong> Ensure <code>CLAUDE.md</code> files and system prompts are structured to maximize cache hits. Verify caching is active via API response headers.</li>
+        <li><strong>Deploy iteration caps.</strong> Configure agent session limits: auto-alert after 30 tool calls without output, auto-stop after 60. Use <a href="https://docs.anthropic.com/en/docs/claude-code/overview" target="_blank" rel="noopener">Claude Code</a> hooks to enforce.</li>
+      </ol>
+
+      <div class="check-category">Governance (Week 4)</div>
+      <ol start="10">
+        <li><strong>Publish a model selection policy.</strong> Document which task types warrant Opus, Sonnet, and Haiku. Distribute to all engineers using AI coding tools. Review quarterly.</li>
+        <li><strong>Choose flat-rate vs. usage-based per team.</strong> Predictable-usage teams: Max plans ($100&ndash;200/month flat). Variable-usage teams with multi-agent fleets: API billing with routing. Allow teams to choose.</li>
+        <li><strong>Schedule quarterly FinOps reviews.</strong> Review per-team spend vs. output. Identify teams with high spend-to-output ratios for optimization coaching. Share wins (teams that reduced cost 30%+ while maintaining output) across the org.</li>
+      </ol>
+    </div>
+
+    <!-- ==================== SECTION 8: TOOLS ==================== -->
+    <h2 id="tools">Tools for AI coding cost governance</h2>
+
+    <div class="cmp-wrap">
+      <table class="cmp-table">
+        <thead>
+          <tr><th>Tool</th><th>Type</th><th>AI Coding Specific?</th><th>Key Capability</th><th>Pricing</th></tr>
+        </thead>
+        <tbody>
+          <tr><td><a href="https://github.com/mixpeek/amux" target="_blank" rel="noopener">amux</a></td><td>Agent control plane</td><td class="y">Yes</td><td>Per-session token tracking, fleet dashboards, model routing per session</td><td>Free (open source)</td></tr>
+          <tr><td><a href="https://platform.claude.com/" target="_blank" rel="noopener">Anthropic Console</a></td><td>API dashboard</td><td class="y">Yes</td><td>Per-API-key spend tracking, usage graphs, rate limit visibility</td><td>Free (included with API)</td></tr>
+          <tr><td><a href="https://www.finout.io/" target="_blank" rel="noopener">Finout</a></td><td>FinOps platform</td><td class="p">Partial</td><td>Multi-cloud + AI cost management, virtual tags for attribution</td><td>Enterprise pricing</td></tr>
+          <tr><td><a href="https://www.vantage.sh/" target="_blank" rel="noopener">Vantage</a></td><td>Cost management</td><td class="p">Partial</td><td>OpenAI/Anthropic cost integration, 20+ provider connectors</td><td>Free tier + paid</td></tr>
+          <tr><td><a href="https://palma.ai/" target="_blank" rel="noopener">Palma</a></td><td>MCP governance</td><td class="y">Yes</td><td>Per-tool-call cost tracking, MCP security and spend governance</td><td>Contact sales</td></tr>
+          <tr><td><a href="https://portal26.ai/" target="_blank" rel="noopener">Portal26</a></td><td>AI governance</td><td class="p">Partial</td><td>AI TRiSM platform, usage policies, budget guardrails</td><td>Enterprise pricing</td></tr>
+          <tr><td><a href="https://www.morphllm.com/" target="_blank" rel="noopener">MorphLLM</a></td><td>Token optimizer</td><td class="y">Yes</td><td>Proxy-based model routing, token cost reduction for coding agents</td><td>Usage-based</td></tr>
+          <tr><td><a href="https://grafana.com/" target="_blank" rel="noopener">Grafana</a> + custom</td><td>Observability</td><td class="n">No (general)</td><td>Custom dashboards from JSONL logs, alerting on spend thresholds</td><td>Free (open source) + cloud</td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <div class="decision-card">
+      <h4>Quick-start stack (free, this week)</h4>
+      <ul>
+        <li><strong>Visibility:</strong> <a href="https://github.com/mixpeek/amux" target="_blank" rel="noopener">amux</a> per-session tracking + <a href="https://platform.claude.com/" target="_blank" rel="noopener">Anthropic Console</a> for API-level spend</li>
+        <li><strong>Routing:</strong> Set <code>--model sonnet</code> as default, Opus on opt-in per session</li>
+        <li><strong>Governance:</strong> Weekly spend review in team standup, monthly summary to leadership</li>
+        <li><strong>Total cost:</strong> $0 (both tools are free)</li>
+      </ul>
+    </div>
+
+    <div class="decision-card">
+      <h4>Enterprise stack (100+ engineers)</h4>
+      <ul>
+        <li><strong>Visibility:</strong> <a href="https://www.finout.io/" target="_blank" rel="noopener">Finout</a> or <a href="https://www.vantage.sh/" target="_blank" rel="noopener">Vantage</a> for multi-provider cost aggregation</li>
+        <li><strong>Control plane:</strong> <a href="https://github.com/mixpeek/amux" target="_blank" rel="noopener">amux</a> for per-agent tracking + fleet management</li>
+        <li><strong>Governance:</strong> <a href="https://portal26.ai/" target="_blank" rel="noopener">Portal26</a> for usage policies and compliance</li>
+        <li><strong>Optimization:</strong> <a href="https://www.morphllm.com/" target="_blank" rel="noopener">MorphLLM</a> proxy for automatic model routing</li>
+        <li><strong>Dashboards:</strong> <a href="https://grafana.com/" target="_blank" rel="noopener">Grafana</a> or <a href="https://www.datadoghq.com/" target="_blank" rel="noopener">Datadog</a> for custom spend monitoring and alerting</li>
+      </ul>
+    </div>
+
+    <!-- ==================== SECTION 9: FAQ ==================== -->
+    <h2 id="faq">Frequently asked questions</h2>
+
+    <h3>What is AI Coding FinOps?</h3>
+    <p>AI Coding FinOps is the practice of managing and governing AI coding agent costs at organizational scale. It adapts <a href="https://www.finops.org/" target="_blank" rel="noopener">cloud FinOps</a> principles &mdash; cost visibility, allocation, optimization, and governance &mdash; to the specific challenges of AI agent spend: token-based billing, model routing, context window costs, and the feedback loop where better agents drive more usage which drives higher costs.</p>
+
+    <h3>How much does enterprise AI coding cost per developer?</h3>
+    <p>$100&ndash;2,000+ per developer per month depending on usage. Flat-rate plans like <a href="https://claude.com/pricing" target="_blank" rel="noopener">Claude Code Max</a> ($100&ndash;200/month) and <a href="https://www.cursor.com/" target="_blank" rel="noopener">Cursor</a> Pro ($20/month) provide predictable per-user costs. Usage-based billing (API keys) scales with actual usage: light users $50&ndash;100/month, heavy users $500&ndash;1,000/month, power users running parallel fleets $2,000+/month.</p>
+
+    <h3>Is it cheaper to use flat-rate plans or API billing?</h3>
+    <p>Depends on usage pattern. <strong>Flat-rate wins</strong> for individual developers who use AI coding 4+ hours per day &mdash; <a href="https://claude.com/pricing" target="_blank" rel="noopener">Claude Code Max</a> at $100&ndash;200/month is cheaper than equivalent API spend. <strong>API billing wins</strong> for multi-agent fleets that can route 80% of tasks to Sonnet/Haiku, because you only pay Opus prices for the 20% of tasks that need it. The crossover point is roughly 5+ agents with active model routing.</p>
+
+    <h3>How do I track AI coding costs per team?</h3>
+    <p>Three approaches: (1) Separate <a href="https://www.anthropic.com/" target="_blank" rel="noopener">Anthropic</a> API keys per team &mdash; the <a href="https://platform.claude.com/" target="_blank" rel="noopener">API console</a> shows spend per key. (2) <a href="https://github.com/mixpeek/amux" target="_blank" rel="noopener">amux</a> session-level tracking &mdash; attribute sessions to teams via naming conventions or tags. (3) Enterprise FinOps platforms (<a href="https://www.finout.io/" target="_blank" rel="noopener">Finout</a>, <a href="https://www.vantage.sh/" target="_blank" rel="noopener">Vantage</a>) that aggregate AI API costs alongside cloud spend.</p>
+
+    <h3>What happened at Uber with AI coding costs?</h3>
+    <p><a href="https://www.uber.com/" target="_blank" rel="noopener">Uber</a> rolled out <a href="https://docs.anthropic.com/en/docs/claude-code/overview" target="_blank" rel="noopener">Claude Code</a> in December 2025. Adoption exploded from 32% to 84% of engineers in two months. Per-engineer API costs ranged from $500&ndash;2,000/month. By April 2026, the company had <a href="https://finance.yahoo.com/sectors/technology/articles/ubers-anthropic-ai-push-hits-223109852.html" target="_blank" rel="noopener">exhausted its full-year AI coding budget allocation</a>. The root cause: no per-team budget caps, no model routing, and no governance layer between engineers and the API.</p>
+
+    <h3>Should I restrict AI coding tool access to control costs?</h3>
+    <p>No. Restricting access trades cost savings for productivity loss &mdash; the worst outcome. Instead, keep broad access but add governance layers: default to cheaper models (Sonnet), set per-team budgets with alerts, track cost per output (not just total cost), and optimize token waste (context engineering, iteration caps, prompt caching). The goal is maximum output per dollar, not minimum dollars spent.</p>
+
+    <div class="cta-box" style="background:rgba(110,231,183,0.06);border:1px solid rgba(110,231,183,0.2);border-radius:12px;padding:2rem;margin:2.5rem 0;text-align:center;">
+      <h3 style="margin-top:0;">Track and govern your AI agent fleet costs</h3>
+      <p style="color:var(--text-muted,#8892a4);max-width:520px;margin:0.5rem auto 1.25rem;">amux tracks token spend per session, per agent, and per day &mdash; free and open source. See exactly where your budget goes across your entire fleet.</p>
+      <a href="/guides/getting-started/" class="btn btn-primary" style="margin-right:0.75rem;">Get started</a>
+      <a href="https://github.com/mixpeek/amux" target="_blank" rel="noopener" class="btn btn-ghost">View on GitHub</a>
+    </div>
+
+    <h3>Further reading</h3>
+    <ul>
+      <li><a href="/guides/ai-coding-agent-costs/">AI Coding Agent Costs in 2026 &mdash; The Complete Breakdown</a></li>
+      <li><a href="/guides/cost-optimization/">Optimizing Token Costs with Parallel Agents</a></li>
+      <li><a href="/guides/claude-code-max-plan/">How to Get 10x More Out of Your Claude Code Max Plan</a></li>
+      <li><a href="/guides/ai-agent-orchestration-2026/">AI Agent Orchestration in 2026 &mdash; Patterns, Tools, and Architecture</a></li>
+      <li><a href="/guides/context-engineering/">Context Engineering for AI Coding Agents</a></li>
+      <li><a href="/guides/measuring-ai-coding-agent-roi/">How to Measure AI Coding Agent ROI</a></li>
+      <li><a href="/guides/token-spend-tracking/">Token Spend Tracking</a></li>
+      <li><a href="/tools/ai-agent-cost-calculator/">AI Agent Cost Calculator</a></li>
+    </ul>
+
+  </main>
+  <footer class="sub-footer">
+    <div class="footer-inner">
+      <div class="footer-top">
+        <div class="footer-brand-col">
+          <a href="/" class="footer-logo">amux</a>
+          <p>Open-source control plane for AI agents.</p>
+        </div>
+        <div class="footer-col">
+          <div class="footer-col-label">Resources</div>
+          <ul>
+            <li><a href="/guides/">Guides</a></li>
+            <li><a href="/blog/">Blog</a></li>
+            <li><a href="/demos/">Demos</a></li>
+            <li><a href="/glossary/">Glossary</a></li>
+            <li><a href="/faq/">FAQ</a></li>
+          </ul>
+        </div>
+        <div class="footer-col">
+          <div class="footer-col-label">Compare</div>
+          <ul>
+            <li><a href="/compare/amux-vs-cursor/">vs Cursor</a></li>
+            <li><a href="/compare/amux-vs-devin/">vs Devin</a></li>
+            <li><a href="/compare/amux-vs-cline/">vs Cline</a></li>
+            <li><a href="/compare/">All comparisons</a></li>
+          </ul>
+        </div>
+        <div class="footer-col">
+          <div class="footer-col-label">More</div>
+          <ul>
+            <li><a href="/use-cases/">Use Cases</a></li>
+            <li><a href="/solutions/">Solutions</a></li>
+            <li><a href="/for/">For your stack</a></li>
+            <li><a href="/changelog/">Changelog</a></li>
+          </ul>
+        </div>
+      </div>
+      <div class="footer-bottom">
+        <span>MIT License. Built by <a href="https://mixpeek.com">Mixpeek</a></span>
+        <div class="footer-bottom-links">
+          <a href="https://apps.apple.com/us/app/amux-agent-multiplexer/id6760410435" target="_blank" rel="noopener">iOS App</a>
+          <a href="https://github.com/mixpeek/amux" target="_blank" rel="noopener">GitHub</a>
+        </div>
+      </div>
+    </div>
+  </footer>
+<script>fetch('https://api.github.com/repos/mixpeek/amux').then(function(r){return r.json()}).then(function(d){var el=document.getElementById('gh-stars');if(el&&d.stargazers_count) el.textContent='★ '+d.stargazers_count}).catch(function(){})</script>
+</body>
+</html>

@@ -1,0 +1,442 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="dark">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="theme-color" content="#1e2330">
+  <title>Best AI Model for Coding in 2026: Every Model Benchmarked, Priced, and Compared &mdash; amux</title>
+  <link rel="icon" href="/icon.svg" type="image/svg+xml">
+  <meta name="description" content="The definitive guide to choosing the right AI model for coding in 2026. SWE-bench Verified and Pro scores, pricing per million tokens, context windows, speed benchmarks, known weaknesses, and a decision framework for Claude Opus 4.7, GPT-5.5, Gemini, DeepSeek V4, Grok, and 10+ more models. Updated May 2026.">
+  <meta name="keywords" content="best ai model for coding 2026, ai coding model comparison, swe-bench leaderboard 2026, claude opus vs gpt coding, ai model coding benchmark, cheapest ai model for coding, which ai model for coding, claude sonnet vs opus, ai model routing, deepseek v4 coding, gemini coding, grok build, swe-bench pro, ai coding benchmarks explained">
+  <link rel="canonical" href="https://amux.io/guides/best-ai-model-for-coding-2026/">
+  <meta property="og:title" content="Best AI Model for Coding in 2026: Every Model Benchmarked, Priced, and Compared">
+  <meta property="og:description" content="SWE-bench scores, pricing per million tokens, context windows, speed, and a decision framework for every AI coding model. Updated May 2026.">
+  <meta property="og:url" content="https://amux.io/guides/best-ai-model-for-coding-2026/">
+  <meta property="og:image" content="https://amux.io/og-image.png">
+  <meta property="og:type" content="article">
+  <meta name="twitter:card" content="summary_large_image">
+  <link rel="alternate" type="application/rss+xml" title="amux Blog" href="https://amux.io/blog/rss.xml">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600;700&family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="/style.css">
+  <script type="application/ld+json">{"@context":"https://schema.org","@type":"BreadcrumbList","itemListElement":[{"@type":"ListItem","position":1,"name":"amux","item":"https://amux.io/"},{"@type":"ListItem","position":2,"name":"Guides","item":"https://amux.io/guides/"},{"@type":"ListItem","position":3,"name":"Best AI Model for Coding 2026","item":"https://amux.io/guides/best-ai-model-for-coding-2026/"}]}</script>
+  <script type="application/ld+json">{"@context":"https://schema.org","@type":"Article","headline":"Best AI Model for Coding in 2026: Every Model Benchmarked, Priced, and Compared","description":"The definitive guide to choosing the right AI model for coding. SWE-bench scores, pricing, context windows, speed benchmarks, and a decision framework for every major AI coding model.","url":"https://amux.io/guides/best-ai-model-for-coding-2026/","datePublished":"2026-05-20","dateModified":"2026-05-20","author":{"@type":"Organization","name":"amux","url":"https://amux.io/"},"publisher":{"@type":"Organization","name":"amux","url":"https://amux.io/","logo":{"@type":"ImageObject","url":"https://amux.io/icon.png"}}}</script>
+  <script type="application/ld+json">{"@context":"https://schema.org","@type":"FAQPage","mainEntity":[{"@type":"Question","name":"What is the best AI model for coding in 2026?","acceptedAnswer":{"@type":"Answer","text":"Claude Opus 4.7 by Anthropic leads the SWE-bench Verified benchmark at 87.6% and SWE-bench Pro at 64.3%, making it the highest-performing generally available model for coding tasks. However, 'best' depends on your constraints: GPT-5.5 scores highest on Terminal-Bench 2.0 (82.0%), Gemini 2.5 Pro leads WebDev Arena for frontend work, and DeepSeek V4 Pro delivers frontier-class quality at 10x lower cost. Most productive developers use 2-3 models via model routing — Opus for architecture and planning, Sonnet for implementation."}},{"@type":"Question","name":"Claude Opus 4.7 vs GPT-5.5 for coding — which is better?","acceptedAnswer":{"@type":"Answer","text":"Claude Opus 4.7 leads SWE-bench Verified (87.6%) and SWE-bench Pro (64.3% vs GPT-5.5's 58.6%). GPT-5.5 leads Terminal-Bench 2.0 (82.0% vs 69.4%) and may edge ahead on the very hardest tickets. On pricing, Opus is $5/$25 per million tokens; GPT-5.5 is $5/$30 — Opus gives more output per dollar. In practice, developers report Opus 4.7 makes better architectural decisions while GPT-5.5 is faster at terminal-native workflows. Both are frontier-class; the right choice depends on whether you prioritize code reasoning (Opus) or shell/DevOps tasks (GPT-5.5)."}},{"@type":"Question","name":"What does SWE-bench Verified actually measure?","acceptedAnswer":{"@type":"Answer","text":"SWE-bench Verified tests whether an AI model can autonomously fix real bugs from 500 GitHub issues in popular Python repositories. Each task provides a failing test case and the model must read the codebase, identify the root cause, and submit a patch that makes the tests pass. 'Verified' means human annotators confirmed each task has exactly one valid solution path. The newer SWE-bench Pro (1,865 tasks across Python, Go, TypeScript, and JavaScript) is considered more reliable because it uses private codebases that cannot appear in training data. Scores on SWE-bench depend heavily on the agent harness (tooling around the model), not just the model itself — harness changes can swing scores by 22+ points."}},{"@type":"Question","name":"Is Claude Sonnet 4.6 good enough for coding or do I need Opus?","acceptedAnswer":{"@type":"Answer","text":"Claude Sonnet 4.6 scores 79.6% on SWE-bench Verified — roughly 90% of Opus 4.7's quality at one-fifth the cost ($3/$15 vs $5/$25 per million tokens) and 2x the speed. For 80% of daily coding work — feature implementation, bug fixes, test writing, straightforward refactoring — Sonnet is the better choice because the quality difference is marginal but the cost and speed difference is substantial. Escalate to Opus for the 20% that demands deep reasoning: complex architecture decisions, subtle cross-module bugs, large-scale refactoring, and multi-file coordination. Claude Code's opusplan mode automates this by using Opus for planning and Sonnet for implementation."}},{"@type":"Question","name":"What is the cheapest good AI model for coding?","acceptedAnswer":{"@type":"Answer","text":"DeepSeek V4 Pro at approximately $0.50/$2.00 per million tokens delivers frontier-class coding quality at 10-13x lower cost than Claude Opus or GPT-5.5. It scores 80.6% on SWE-bench Verified (comparable to Claude Opus 4.5). For even cheaper options: Gemini 2.5 Flash ($0.30/$2.50) scores 63.8% on SWE-bench Verified with the best WebDev Arena performance; GPT-4.1 nano ($0.10/$0.40) handles simple code generation; and DeepSeek V3.2 achieves 74.2% on Aider's polyglot benchmark at just $1.30 per run. The open-weight Qwen3-Coder-Next runs locally on consumer hardware and scores 70.6% on SWE-bench Verified at zero API cost."}},{"@type":"Question","name":"Which AI model has the largest context window for coding?","acceptedAnswer":{"@type":"Answer","text":"Gemini 3 Pro offers the largest context window at 10 million tokens (effective ~6-7M), followed by Grok 4 at 2 million tokens and Claude Opus 4.7, GPT-5.5, and Gemini 3.1 Pro at 1 million tokens each (effective ~600-700K). However, research analyzing 22 models found most fail well before advertised limits — a '1M-token model' typically maintains high-quality recall to approximately 600-700K tokens. For large codebase work, Augment Code's proprietary context engine can index 100,000+ file repositories, and DeepSeek V4 Pro achieves 97% needle-in-haystack accuracy on ~500-file codebases."}},{"@type":"Question","name":"Should I use the same model for all coding tasks?","acceptedAnswer":{"@type":"Answer","text":"No. Using a single model for all tasks either wastes money (using Opus for simple tasks) or sacrifices quality (using a budget model for complex architecture). The optimal approach is model routing: use a frontier model (Opus 4.7 or GPT-5.5) for planning, architecture, and complex reasoning, then switch to a workhorse model (Sonnet 4.6 or GPT-4.1) for implementation. Claude Code's opusplan mode does this automatically, saving ~40% on tokens while preserving Opus-quality planning. Cursor's Auto mode similarly routes queries by complexity. The price difference between cheapest and most expensive models is 50x — routing is the single highest-leverage cost optimization."}},{"@type":"Question","name":"How do AI coding benchmarks differ and which should I trust?","acceptedAnswer":{"@type":"Answer","text":"SWE-bench Verified (500 Python tasks) was the original standard but has known contamination issues — frontier models may have seen some tasks in training. SWE-bench Pro (1,865 multi-language tasks from private codebases) is now the more reliable frontier signal. Terminal-Bench 2.0 tests shell/DevOps workflows. Aider's polyglot benchmark tests code generation across 6 languages. LiveCodeBench uses competitive programming problems published after training cutoffs to prevent contamination. HumanEval and MBPP are saturated (95%+ scores) and no longer discriminative. No single benchmark tells the full story — look at SWE-bench Pro for overall coding ability, Terminal-Bench for CLI/DevOps, and Aider polyglot for multi-language generation."}}]}</script>
+  <script type="application/ld+json">{"@context":"https://schema.org","@type":"ItemList","name":"AI Coding Model Comparison 2026","itemListElement":[{"@type":"ListItem","position":1,"name":"SWE-bench Leaderboard","url":"https://amux.io/guides/best-ai-model-for-coding-2026/#leaderboard"},{"@type":"ListItem","position":2,"name":"Model Deep-Dives","url":"https://amux.io/guides/best-ai-model-for-coding-2026/#models"},{"@type":"ListItem","position":3,"name":"Which Model for Which Task","url":"https://amux.io/guides/best-ai-model-for-coding-2026/#tasks"},{"@type":"ListItem","position":4,"name":"Pricing Comparison","url":"https://amux.io/guides/best-ai-model-for-coding-2026/#pricing"},{"@type":"ListItem","position":5,"name":"Context Windows and Speed","url":"https://amux.io/guides/best-ai-model-for-coding-2026/#practical"},{"@type":"ListItem","position":6,"name":"Known Weaknesses","url":"https://amux.io/guides/best-ai-model-for-coding-2026/#weaknesses"},{"@type":"ListItem","position":7,"name":"Which Tools Use Which Models","url":"https://amux.io/guides/best-ai-model-for-coding-2026/#tools"},{"@type":"ListItem","position":8,"name":"Model Routing Strategy","url":"https://amux.io/guides/best-ai-model-for-coding-2026/#routing"}]}</script>
+  <style>
+    .lb-row { display: flex; align-items: center; gap: 0.75rem; margin-bottom: 0.55rem; }
+    .lb-rank { font-size: 0.8rem; font-weight: 700; font-family: var(--mono, 'JetBrains Mono', monospace); color: var(--muted, #6b7589); min-width: 1.6rem; text-align: right; }
+    .lb-name { font-size: 0.85rem; font-weight: 600; min-width: 11rem; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .lb-name a { color: var(--text, #e8eaf0); }
+    .lb-name a:hover { color: var(--green, #6ee7b7); }
+    .lb-bar-wrap { flex: 1; background: var(--surface, #232838); border-radius: 4px; height: 22px; overflow: hidden; position: relative; }
+    .lb-bar { height: 100%; border-radius: 4px; background: linear-gradient(90deg, rgba(110,231,183,0.35), rgba(110,231,183,0.6)); transition: width 0.6s ease; }
+    .lb-bar.tier-frontier { background: linear-gradient(90deg, rgba(110,231,183,0.4), rgba(110,231,183,0.7)); }
+    .lb-bar.tier-premium { background: linear-gradient(90deg, rgba(96,165,250,0.35), rgba(96,165,250,0.6)); }
+    .lb-bar.tier-budget { background: linear-gradient(90deg, rgba(251,191,36,0.3), rgba(251,191,36,0.55)); }
+    .lb-bar.tier-open { background: linear-gradient(90deg, rgba(192,132,252,0.3), rgba(192,132,252,0.55)); }
+    .lb-score { font-size: 0.85rem; font-weight: 700; font-family: var(--mono, 'JetBrains Mono', monospace); min-width: 3.2rem; text-align: right; color: var(--green, #6ee7b7); }
+    .lb-score.tier-premium { color: #60a5fa; }
+    .lb-score.tier-budget { color: #fbbf24; }
+    .lb-score.tier-open { color: #c084fc; }
+    .lb-maker { font-size: 0.7rem; color: var(--muted, #6b7589); font-weight: 400; margin-left: 0.3rem; }
+    @media (max-width: 600px) { .lb-name { min-width: 7rem; font-size: 0.78rem; } .lb-maker { display: none; } .lb-rank { min-width: 1.2rem; } }
+    .bench-note { background: rgba(110,231,183,0.06); border: 1px solid rgba(110,231,183,0.15); border-radius: 8px; padding: 0.9rem 1rem; margin: 1rem 0; font-size: 0.85rem; color: var(--dim, #a0aab8); line-height: 1.5; }
+    .tier-label { display: inline-block; font-size: 0.7rem; font-weight: 700; text-transform: uppercase; letter-spacing: 0.08em; padding: 0.15rem 0.5rem; border-radius: 4px; margin-bottom: 0.4rem; }
+    .tier-label.frontier { background: rgba(110,231,183,0.15); color: #6ee7b7; }
+    .tier-label.premium { background: rgba(96,165,250,0.15); color: #60a5fa; }
+    .tier-label.budget { background: rgba(251,191,36,0.12); color: #fbbf24; }
+    .tier-label.openw { background: rgba(192,132,252,0.12); color: #c084fc; }
+    .model-card { background: var(--surface, #232838); border-radius: 10px; padding: 1.15rem 1.25rem; margin-bottom: 1rem; border: 1px solid var(--border, rgba(255,255,255,0.06)); }
+    .model-card:hover { border-color: rgba(110,231,183,0.18); }
+    .model-card h4 { margin: 0 0 0.3rem; font-size: 0.95rem; }
+    .model-card h4 a { color: var(--text, #e8eaf0); }
+    .model-card h4 a:hover { color: var(--green, #6ee7b7); }
+    .model-card .mc-stats { display: flex; flex-wrap: wrap; gap: 0.5rem; margin: 0.5rem 0; }
+    .model-card .mc-stat { font-size: 0.78rem; font-family: var(--mono, 'JetBrains Mono', monospace); background: rgba(255,255,255,0.04); border-radius: 4px; padding: 0.15rem 0.5rem; color: var(--dim, #a0aab8); }
+    .model-card .mc-desc { font-size: 0.85rem; color: var(--dim, #a0aab8); line-height: 1.5; }
+    .cmp-table { width: 100%; border-collapse: collapse; font-size: 0.82rem; margin: 1rem 0; }
+    .cmp-table th { text-align: left; font-size: 0.72rem; text-transform: uppercase; letter-spacing: 0.06em; color: var(--muted, #6b7589); padding: 0.5rem 0.6rem; border-bottom: 1px solid var(--border, rgba(255,255,255,0.08)); }
+    .cmp-table td { padding: 0.55rem 0.6rem; border-bottom: 1px solid var(--border, rgba(255,255,255,0.04)); color: var(--dim, #a0aab8); vertical-align: top; }
+    .cmp-table td:first-child { color: var(--text, #e8eaf0); font-weight: 500; }
+    .cmp-table td a { color: var(--text, #e8eaf0); }
+    .cmp-table td a:hover { color: var(--green, #6ee7b7); }
+    .cmp-table tr:hover td { background: rgba(255,255,255,0.02); }
+    @media (max-width: 600px) { .cmp-table { font-size: 0.75rem; } .cmp-table th, .cmp-table td { padding: 0.4rem 0.35rem; } }
+    .task-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 0.75rem; margin: 1rem 0; }
+    .task-card { background: var(--surface, #232838); border-radius: 8px; padding: 0.9rem 1rem; border: 1px solid var(--border, rgba(255,255,255,0.06)); }
+    .task-card h4 { margin: 0 0 0.25rem; font-size: 0.88rem; }
+    .task-card .tc-model { font-size: 0.82rem; color: var(--green, #6ee7b7); font-weight: 600; font-family: var(--mono, 'JetBrains Mono', monospace); }
+    .task-card .tc-why { font-size: 0.8rem; color: var(--muted, #6b7589); margin-top: 0.2rem; line-height: 1.4; }
+    @media (max-width: 600px) { .task-grid { grid-template-columns: 1fr; } }
+    .weakness-card { background: rgba(248,113,113,0.04); border: 1px solid rgba(248,113,113,0.12); border-radius: 8px; padding: 0.9rem 1rem; margin-bottom: 0.75rem; }
+    .weakness-card h4 { margin: 0 0 0.3rem; font-size: 0.9rem; color: #f87171; }
+    .weakness-card ul { margin: 0; padding-left: 1.2rem; font-size: 0.82rem; color: var(--dim, #a0aab8); line-height: 1.5; }
+    .key-stat { display: inline-block; background: rgba(110,231,183,0.10); border: 1px solid rgba(110,231,183,0.25); border-radius: 8px; padding: 0.15rem 0.6rem; font-size: 0.82rem; font-weight: 600; color: #6ee7b7; margin-right: 0.4rem; margin-bottom: 0.3rem; }
+    .routing-box { background: linear-gradient(135deg, rgba(110,231,183,0.08), rgba(110,231,183,0.02)); border: 2px solid rgba(110,231,183,0.3); border-radius: 14px; padding: 1.5rem; margin: 1.5rem 0; }
+    .routing-box h3 { margin: 0 0 0.5rem; font-size: 1rem; color: #6ee7b7; }
+    .routing-box code { background: rgba(0,0,0,0.3); padding: 0.15rem 0.4rem; border-radius: 3px; font-size: 0.82rem; }
+    .updated-badge { display: inline-block; font-size: 0.75rem; font-weight: 600; color: var(--green, #6ee7b7); background: rgba(110,231,183,0.1); border: 1px solid rgba(110,231,183,0.2); border-radius: 4px; padding: 0.15rem 0.5rem; margin-bottom: 0.5rem; }
+  </style>
+</head>
+<body>
+  <header class="site-header">
+    <a class="logo" href="/">amux</a>
+    <nav>
+      <a href="/docs/" class="hide-mobile">docs</a>
+      <a href="/guides/" class="hide-mobile">guides</a>
+      <a href="/compare/" class="hide-mobile">compare</a>
+      <a href="/demos/" class="hide-mobile">demos</a>
+      <a href="/blog/" class="hide-mobile">blog</a>
+      <a href="https://apps.apple.com/us/app/amux-agent-multiplexer/id6760410435" target="_blank" rel="noopener" class="nav-cta-primary nav-cta">iOS app</a>
+      <a href="https://github.com/mixpeek/amux" target="_blank" rel="noopener" class="nav-cta">GitHub <span class="gh-stars" id="gh-stars"></span></a>
+    </nav>
+  </header>
+  <main>
+    <div class="breadcrumb"><a href="/">amux</a> <span class="sep">&rsaquo;</span> <a href="/guides/">Guides</a> <span class="sep">&rsaquo;</span> <span>Best AI Model for Coding</span></div>
+    <span class="updated-badge">Updated May 2026</span>
+    <h1>Best AI Model for Coding in 2026</h1>
+    <p class="subtitle">Every model benchmarked, priced, and compared &mdash; with a decision framework for choosing the right one.</p>
+    <p><span class="key-stat">15+ models</span> <span class="key-stat">5 benchmarks</span> <span class="key-stat">4 tiers</span> <span class="key-stat">50x price range</span></p>
+
+    <p><a href="https://www.anthropic.com/news/claude-opus-4-7">Claude Opus 4.7</a> leads <a href="https://www.swebench.com">SWE-bench</a> Verified at 87.6%. <a href="https://openai.com">GPT-5.5</a> tops Terminal-Bench at 82.0%. <a href="https://deepmind.google/technologies/gemini/">Gemini 2.5 Pro</a> wins WebDev Arena for frontend. <a href="https://www.deepseek.com">DeepSeek V4 Pro</a> matches frontier quality at one-tenth the price. There is no single &ldquo;best model&rdquo; &mdash; there is the right model for the right task at the right price. This guide gives you the data to choose.</p>
+
+    <h2 id="tldr" style="margin-top:2rem">The Decision Framework</h2>
+    <table class="cmp-table">
+      <thead><tr><th>If you need&hellip;</th><th>Use this</th><th>Why</th></tr></thead>
+      <tbody>
+        <tr><td>Best overall coding quality</td><td><a href="https://www.anthropic.com/news/claude-opus-4-7">Claude Opus 4.7</a></td><td>87.6% SWE-bench Verified, 64.3% SWE-bench Pro</td></tr>
+        <tr><td>Daily workhorse (quality + cost)</td><td><a href="https://www.anthropic.com/claude">Claude Sonnet 4.6</a></td><td>79.6% SWE-bench at $3/$15 &mdash; 90% of Opus at 1/5 the cost</td></tr>
+        <tr><td>Terminal &amp; DevOps workflows</td><td><a href="https://openai.com">GPT-5.5</a></td><td>82.0% Terminal-Bench 2.0 &mdash; strongest at shell tasks</td></tr>
+        <tr><td>Frontend / UI generation</td><td><a href="https://deepmind.google/technologies/gemini/">Gemini 2.5 Pro</a></td><td>#1 on WebDev Arena for responsive layouts and CSS</td></tr>
+        <tr><td>Cheapest frontier-class coding</td><td><a href="https://www.deepseek.com">DeepSeek V4 Pro</a></td><td>80.6% SWE-bench at ~$0.50/$2.00 per MTok</td></tr>
+        <tr><td>Largest context window</td><td><a href="https://deepmind.google/technologies/gemini/">Gemini 3 Pro</a></td><td>10M tokens (effective ~6-7M)</td></tr>
+        <tr><td>Fastest interactive responses</td><td><a href="https://deepmind.google/technologies/gemini/">Gemini 3.5 Flash</a></td><td>~1,500 tokens/sec, frontier quality at flash speed</td></tr>
+        <tr><td>Self-hosted / open-weight</td><td><a href="https://github.com/QwenLM/Qwen3-Coder">Qwen3-Coder-480B</a></td><td>Comparable to Sonnet 4.6, Apache 2.0 license</td></tr>
+        <tr><td>Runs locally on consumer GPU</td><td><a href="https://github.com/QwenLM/Qwen3-Coder">Qwen3-Coder-Next</a></td><td>70.6% SWE-bench with only 3B active params</td></tr>
+        <tr><td>Enterprise compliance + scale</td><td><a href="https://github.com/features/copilot">GitHub Copilot</a></td><td>Multi-model, 4.7M subscribers, 90% Fortune 100</td></tr>
+      </tbody>
+    </table>
+
+    <h2 id="leaderboard" style="margin-top:2.5rem">SWE-bench Verified Leaderboard</h2>
+    <p style="font-size:0.9rem;color:var(--dim)"><a href="https://www.swebench.com" style="color:var(--green)">SWE-bench Verified</a> tests whether a model can autonomously fix real bugs from 500 GitHub issues in popular Python repositories. Each task provides a failing test &mdash; the model must read the codebase, find the root cause, and submit a patch that passes. Scores below reflect the full agent system (model + harness), sourced from the official leaderboard.</p>
+
+    <div style="margin:1.25rem 0">
+      <div class="lb-row"><span class="lb-rank">1</span><span class="lb-name"><a href="https://www.anthropic.com/news/claude-opus-4-7">Opus 4.7</a><span class="lb-maker">Anthropic</span></span><div class="lb-bar-wrap"><div class="lb-bar tier-frontier" style="width:87.6%"></div></div><span class="lb-score">87.6%</span></div>
+      <div class="lb-row"><span class="lb-rank">2</span><span class="lb-name"><a href="https://openai.com/codex/">GPT-5.3 Codex</a><span class="lb-maker">OpenAI</span></span><div class="lb-bar-wrap"><div class="lb-bar tier-frontier" style="width:85%"></div></div><span class="lb-score">85.0%</span></div>
+      <div class="lb-row"><span class="lb-rank">3</span><span class="lb-name"><a href="https://www.anthropic.com/claude">Opus 4.5</a><span class="lb-maker">Anthropic</span></span><div class="lb-bar-wrap"><div class="lb-bar tier-frontier" style="width:80.9%"></div></div><span class="lb-score">80.9%</span></div>
+      <div class="lb-row"><span class="lb-rank">4</span><span class="lb-name"><a href="https://www.deepseek.com">DeepSeek V4 Pro</a><span class="lb-maker">DeepSeek</span></span><div class="lb-bar-wrap"><div class="lb-bar tier-open" style="width:80.6%"></div></div><span class="lb-score tier-open">80.6%</span></div>
+      <div class="lb-row"><span class="lb-rank">5</span><span class="lb-name"><a href="https://openai.com">GPT-5.2</a><span class="lb-maker">OpenAI</span></span><div class="lb-bar-wrap"><div class="lb-bar tier-premium" style="width:80%"></div></div><span class="lb-score tier-premium">80.0%</span></div>
+      <div class="lb-row"><span class="lb-rank">6</span><span class="lb-name"><a href="https://www.anthropic.com/claude">Sonnet 4.6</a><span class="lb-maker">Anthropic</span></span><div class="lb-bar-wrap"><div class="lb-bar tier-premium" style="width:79.6%"></div></div><span class="lb-score tier-premium">79.6%</span></div>
+      <div class="lb-row"><span class="lb-rank">7</span><span class="lb-name"><a href="https://www.anthropic.com/claude">Sonnet 4.5</a><span class="lb-maker">Anthropic</span></span><div class="lb-bar-wrap"><div class="lb-bar tier-premium" style="width:77.2%"></div></div><span class="lb-score tier-premium">77.2%</span></div>
+      <div class="lb-row"><span class="lb-rank">8</span><span class="lb-name"><a href="https://x.ai">Grok 4.20</a><span class="lb-maker">xAI</span></span><div class="lb-bar-wrap"><div class="lb-bar tier-budget" style="width:76.7%"></div></div><span class="lb-score tier-budget">76.7%</span></div>
+      <div class="lb-row"><span class="lb-rank">9</span><span class="lb-name"><a href="https://www.anthropic.com/claude">Haiku 4.5</a><span class="lb-maker">Anthropic</span></span><div class="lb-bar-wrap"><div class="lb-bar tier-budget" style="width:73.3%"></div></div><span class="lb-score tier-budget">73.3%</span></div>
+      <div class="lb-row"><span class="lb-rank">10</span><span class="lb-name"><a href="https://github.com/QwenLM/Qwen3-Coder">Qwen3-Coder-Next</a><span class="lb-maker">Alibaba</span></span><div class="lb-bar-wrap"><div class="lb-bar tier-open" style="width:70.6%"></div></div><span class="lb-score tier-open">70.6%</span></div>
+      <div class="lb-row"><span class="lb-rank">11</span><span class="lb-name"><a href="https://x.ai">Grok Build</a><span class="lb-maker">xAI</span></span><div class="lb-bar-wrap"><div class="lb-bar tier-budget" style="width:70.8%"></div></div><span class="lb-score tier-budget">70.8%</span></div>
+      <div class="lb-row"><span class="lb-rank">12</span><span class="lb-name"><a href="https://deepmind.google/technologies/gemini/">Gemini 2.5 Pro</a><span class="lb-maker">Google</span></span><div class="lb-bar-wrap"><div class="lb-bar tier-premium" style="width:63.8%"></div></div><span class="lb-score tier-premium">63.8%</span></div>
+      <div class="lb-row"><span class="lb-rank">13</span><span class="lb-name"><a href="https://openai.com/index/gpt-4-1/">GPT-4.1</a><span class="lb-maker">OpenAI</span></span><div class="lb-bar-wrap"><div class="lb-bar tier-budget" style="width:54.6%"></div></div><span class="lb-score tier-budget">54.6%</span></div>
+    </div>
+
+    <div class="bench-note"><strong>SWE-bench Pro</strong> (1,865 multi-language tasks from private codebases) is now considered the more reliable frontier signal. Opus 4.7 leads at 64.3%, followed by GPT-5.5 at 58.6% and <a href="https://deepmind.google/technologies/gemini/">Gemini 3.5 Flash</a> at 55.1%. <a href="https://www.swebench.com">Full leaderboard &rarr;</a></div>
+
+    <h2 id="models" style="margin-top:2.5rem">Model Deep-Dives</h2>
+
+    <h3 style="margin-top:1.5rem"><span class="tier-label frontier">Frontier Tier</span></h3>
+
+    <div class="model-card">
+      <h4><a href="https://www.anthropic.com/news/claude-opus-4-7">Claude Opus 4.7</a> <span class="lb-maker">by <a href="https://www.anthropic.com">Anthropic</a></span></h4>
+      <div class="mc-stats"><span class="mc-stat">SWE-bench 87.6%</span><span class="mc-stat">Pro 64.3%</span><span class="mc-stat">$5/$25 MTok</span><span class="mc-stat">1M context</span><span class="mc-stat">~30-50 t/s</span></div>
+      <p class="mc-desc">The top-scoring generally available coding model. Leads both SWE-bench Verified and Pro by wide margins. Strongest at architectural reasoning &mdash; makes tradeoff decisions like a senior developer before writing code. Powers <a href="https://www.anthropic.com/product/claude-code">Claude Code</a> in default mode. Slower than workhorse models but produces the highest-quality output for complex multi-file tasks. Available on Claude Pro ($20/mo) and via API.</p>
+    </div>
+
+    <div class="model-card">
+      <h4><a href="https://openai.com">GPT-5.5</a> <span class="lb-maker">by <a href="https://openai.com">OpenAI</a></span></h4>
+      <div class="mc-stats"><span class="mc-stat">Terminal-Bench 82.0%</span><span class="mc-stat">Pro 58.6%</span><span class="mc-stat">$5/$30 MTok</span><span class="mc-stat">1M context</span></div>
+      <p class="mc-desc">OpenAI&rsquo;s newest frontier model (April 2026). Leads Terminal-Bench 2.0 for shell and DevOps workflows. May edge ahead on the very hardest coding tasks. Features computer use and agentic capabilities. 52.5% hallucination reduction on high-stakes prompts with the GPT-5.5 Instant variant. Costs $5 more per million output tokens than Opus 4.7.</p>
+    </div>
+
+    <h3 style="margin-top:1.5rem"><span class="tier-label premium">Premium Workhorse</span></h3>
+
+    <div class="model-card">
+      <h4><a href="https://www.anthropic.com/claude">Claude Sonnet 4.6</a> <span class="lb-maker">by <a href="https://www.anthropic.com">Anthropic</a></span></h4>
+      <div class="mc-stats"><span class="mc-stat">SWE-bench 79.6%</span><span class="mc-stat">$3/$15 MTok</span><span class="mc-stat">1M context</span><span class="mc-stat">~80-100 t/s</span></div>
+      <p class="mc-desc">The sweet spot for daily coding work. 90% of Opus quality at one-fifth the cost and 2x the speed. Handles feature implementation, bug fixes, test writing, and routine refactoring with ease. The recommended default model for <a href="https://www.anthropic.com/product/claude-code">Claude Code</a>&rsquo;s implementation phase when using <code>opusplan</code> mode.</p>
+    </div>
+
+    <div class="model-card">
+      <h4><a href="https://openai.com/index/gpt-4-1/">GPT-4.1</a> <span class="lb-maker">by <a href="https://openai.com">OpenAI</a></span></h4>
+      <div class="mc-stats"><span class="mc-stat">SWE-bench 54.6%</span><span class="mc-stat">$2/$8 MTok</span><span class="mc-stat">1M context</span></div>
+      <p class="mc-desc">Designed as the &ldquo;everyday coding workhorse.&rdquo; Better than GPT-4o at following precise developer instructions. Lower benchmark scores than Sonnet but excels at instruction-following tasks where the spec is clear. Strong at code review and explanation.</p>
+    </div>
+
+    <div class="model-card">
+      <h4><a href="https://deepmind.google/technologies/gemini/">Gemini 2.5 Pro</a> <span class="lb-maker">by <a href="https://deepmind.google/technologies/gemini/">Google DeepMind</a></span></h4>
+      <div class="mc-stats"><span class="mc-stat">SWE-bench 63.8%</span><span class="mc-stat">WebDev Arena #1</span><span class="mc-stat">$1.25/$10 MTok</span><span class="mc-stat">1M context</span></div>
+      <p class="mc-desc">The frontend champion. #1 on WebDev Arena for responsive layouts, animations, and maintainable CSS. Lower SWE-bench scores than Claude or GPT models reflect weaker backend/systems performance, but unmatched for UI work. Available via <a href="https://github.com/google-gemini/gemini-cli">Gemini CLI</a> (free tier: 1,000 requests/day).</p>
+    </div>
+
+    <h3 style="margin-top:1.5rem"><span class="tier-label budget">Fast &amp; Budget</span></h3>
+
+    <div class="model-card">
+      <h4><a href="https://deepmind.google/technologies/gemini/">Gemini 3.5 Flash</a> <span class="lb-maker">by <a href="https://deepmind.google/technologies/gemini/">Google DeepMind</a></span></h4>
+      <div class="mc-stats"><span class="mc-stat">Pro 55.1%</span><span class="mc-stat">$1.50/$9 MTok</span><span class="mc-stat">~1,500 t/s</span></div>
+      <p class="mc-desc">Frontier intelligence at 4x the speed of comparable models. Beats Gemini 3.1 Pro on several coding benchmarks while being dramatically faster. The best option when latency matters more than peak quality &mdash; interactive pair programming, quick iterations, and chat-driven development.</p>
+    </div>
+
+    <div class="model-card">
+      <h4><a href="https://www.anthropic.com/claude">Claude Haiku 4.5</a> <span class="lb-maker">by <a href="https://www.anthropic.com">Anthropic</a></span></h4>
+      <div class="mc-stats"><span class="mc-stat">SWE-bench 73.3%</span><span class="mc-stat">$1/$5 MTok</span><span class="mc-stat">1M context</span></div>
+      <p class="mc-desc">Punches above its weight: 73.3% SWE-bench Verified at $1/$5 per million tokens makes it the best quality-per-dollar in the Anthropic lineup. Ideal for high-volume tasks like generating boilerplate, writing tests, and handling simple refactors where you run many parallel agents.</p>
+    </div>
+
+    <div class="model-card">
+      <h4><a href="https://x.ai">Grok 4.3</a> <span class="lb-maker">by <a href="https://x.ai">xAI</a></span></h4>
+      <div class="mc-stats"><span class="mc-stat">$1.25/$2.50 MTok</span><span class="mc-stat">2M context</span><span class="mc-stat">~98 t/s</span></div>
+      <p class="mc-desc">The best price-to-performance ratio for high-volume production use. Large 2M token context window at budget pricing. <a href="https://x.ai">Grok Build</a>, xAI&rsquo;s coding agent (launched May 2026), features Arena Mode that ranks competing outputs before human review. Early days but rapidly improving.</p>
+    </div>
+
+    <h3 style="margin-top:1.5rem"><span class="tier-label openw">Open-Weight</span></h3>
+
+    <div class="model-card">
+      <h4><a href="https://www.deepseek.com">DeepSeek V4 Pro</a> <span class="lb-maker">by <a href="https://www.deepseek.com">DeepSeek</a></span></h4>
+      <div class="mc-stats"><span class="mc-stat">SWE-bench 80.6%</span><span class="mc-stat">~$0.50/$2 MTok</span></div>
+      <p class="mc-desc">The value king. Matches Claude Opus 4.5 on SWE-bench Verified at roughly 10-13x lower cost per output token. Ingests ~500-file codebases with 97% needle-in-haystack accuracy. DeepSeek V3.2 achieves 74.2% on <a href="https://aider.chat/docs/leaderboards/">Aider&rsquo;s polyglot benchmark</a> at just $1.30 per run. Weaker on complex multi-constraint prompts and long-horizon agentic reliability.</p>
+    </div>
+
+    <div class="model-card">
+      <h4><a href="https://github.com/QwenLM/Qwen3-Coder">Qwen3-Coder-480B</a> <span class="lb-maker">by <a href="https://github.com/QwenLM">Alibaba Qwen</a></span></h4>
+      <div class="mc-stats"><span class="mc-stat">35B active params</span><span class="mc-stat">Apache 2.0</span><span class="mc-stat">256K context</span></div>
+      <p class="mc-desc">State-of-the-art among open models on agentic coding benchmarks. Comparable to Claude Sonnet 4 in quality with only 35B active parameters (480B total mixture-of-experts). Apache 2.0 license. Qwen3-Coder-Next (3B active / 80B total) scores 70.6% SWE-bench Verified and runs on consumer hardware &mdash; zero API cost.</p>
+    </div>
+
+    <div class="model-card">
+      <h4><a href="https://ai.meta.com/llama/">Llama 4 Scout</a> <span class="lb-maker">by <a href="https://ai.meta.com">Meta</a></span></h4>
+      <div class="mc-stats"><span class="mc-stat">2,600 t/s</span><span class="mc-stat">10M context</span><span class="mc-stat">Open-weight</span></div>
+      <p class="mc-desc">The fastest frontier-class open model at 2,600 tokens per second with a 10M token context window. Not specialized for coding but its raw speed and context capacity make it viable for code search, summarization, and indexing tasks where throughput matters more than peak reasoning quality.</p>
+    </div>
+
+    <h2 id="tasks" style="margin-top:2.5rem">Which Model for Which Task</h2>
+    <div class="task-grid">
+      <div class="task-card"><h4>Complex architecture</h4><div class="tc-model"><a href="https://www.anthropic.com/news/claude-opus-4-7">Claude Opus 4.7</a></div><div class="tc-why">Strongest at layered tradeoff analysis before writing code</div></div>
+      <div class="task-card"><h4>Daily feature work</h4><div class="tc-model"><a href="https://www.anthropic.com/claude">Claude Sonnet 4.6</a></div><div class="tc-why">90% of Opus quality at 1/5 the cost, 2x the speed</div></div>
+      <div class="task-card"><h4>Frontend / UI / web apps</h4><div class="tc-model"><a href="https://deepmind.google/technologies/gemini/">Gemini 2.5 Pro</a></div><div class="tc-why">#1 WebDev Arena &mdash; layouts, animations, CSS</div></div>
+      <div class="task-card"><h4>Shell / DevOps / CLI</h4><div class="tc-model"><a href="https://openai.com">GPT-5.5</a></div><div class="tc-why">82.0% Terminal-Bench 2.0 &mdash; best at terminal workflows</div></div>
+      <div class="task-card"><h4>Large codebase refactoring</h4><div class="tc-model"><a href="https://deepmind.google/technologies/gemini/">Gemini 3 Pro</a> or <a href="https://www.deepseek.com">DeepSeek V4</a></div><div class="tc-why">10M / 1M+ effective context for huge codebases</div></div>
+      <div class="task-card"><h4>Competitive programming</h4><div class="tc-model"><a href="https://openai.com">o4-mini-high</a> or <a href="https://x.ai">Grok 4.2</a></div><div class="tc-why">Reasoning models excel at algorithmic problems</div></div>
+      <div class="task-card"><h4>High-volume batch tasks</h4><div class="tc-model"><a href="https://www.deepseek.com">DeepSeek V4 Pro</a></div><div class="tc-why">Frontier quality at 10-13x lower cost</div></div>
+      <div class="task-card"><h4>Local / offline coding</h4><div class="tc-model"><a href="https://github.com/QwenLM/Qwen3-Coder">Qwen3-Coder-Next</a></div><div class="tc-why">70.6% SWE-bench, 3B active, runs on consumer GPU</div></div>
+    </div>
+
+    <h2 id="pricing" style="margin-top:2.5rem">Pricing Comparison (per 1M tokens)</h2>
+    <table class="cmp-table">
+      <thead><tr><th>Model</th><th>Input</th><th>Output</th><th>Tier</th></tr></thead>
+      <tbody>
+        <tr><td><a href="https://openai.com">GPT-5.5</a></td><td>$5.00</td><td>$30.00</td><td><span class="tier-label frontier">Frontier</span></td></tr>
+        <tr><td><a href="https://www.anthropic.com/news/claude-opus-4-7">Claude Opus 4.7</a></td><td>$5.00</td><td>$25.00</td><td><span class="tier-label frontier">Frontier</span></td></tr>
+        <tr><td><a href="https://www.anthropic.com/claude">Claude Sonnet 4.6</a></td><td>$3.00</td><td>$15.00</td><td><span class="tier-label premium">Premium</span></td></tr>
+        <tr><td><a href="https://openai.com">GPT-5.2</a></td><td>$1.75</td><td>$14.00</td><td><span class="tier-label premium">Premium</span></td></tr>
+        <tr><td><a href="https://deepmind.google/technologies/gemini/">Gemini 3.1 Pro</a></td><td>$2.00</td><td>$12.00</td><td><span class="tier-label premium">Premium</span></td></tr>
+        <tr><td><a href="https://deepmind.google/technologies/gemini/">Gemini 2.5 Pro</a></td><td>$1.25</td><td>$10.00</td><td><span class="tier-label premium">Premium</span></td></tr>
+        <tr><td><a href="https://deepmind.google/technologies/gemini/">Gemini 3.5 Flash</a></td><td>$1.50</td><td>$9.00</td><td><span class="tier-label budget">Fast</span></td></tr>
+        <tr><td><a href="https://openai.com/index/gpt-4-1/">GPT-4.1</a></td><td>$2.00</td><td>$8.00</td><td><span class="tier-label premium">Premium</span></td></tr>
+        <tr><td><a href="https://www.anthropic.com/claude">Claude Haiku 4.5</a></td><td>$1.00</td><td>$5.00</td><td><span class="tier-label budget">Budget</span></td></tr>
+        <tr><td><a href="https://x.ai">Grok 4.3</a></td><td>$1.25</td><td>$2.50</td><td><span class="tier-label budget">Budget</span></td></tr>
+        <tr><td><a href="https://www.deepseek.com">DeepSeek V4 Pro</a></td><td>~$0.50</td><td>~$2.00</td><td><span class="tier-label openw">Open</span></td></tr>
+        <tr><td><a href="https://openai.com/index/gpt-4-1/">GPT-4.1 mini</a></td><td>$0.40</td><td>$1.60</td><td><span class="tier-label budget">Budget</span></td></tr>
+        <tr><td><a href="https://deepmind.google/technologies/gemini/">Gemini 2.5 Flash</a></td><td>$0.30</td><td>$2.50</td><td><span class="tier-label budget">Budget</span></td></tr>
+        <tr><td><a href="https://openai.com/index/gpt-4-1/">GPT-4.1 nano</a></td><td>$0.10</td><td>$0.40</td><td><span class="tier-label budget">Budget</span></td></tr>
+      </tbody>
+    </table>
+    <div class="bench-note">The difference between cheapest and most expensive is <strong>50x</strong>. Picking the right model per task is the single highest-leverage cost optimization. All major providers offer batch API endpoints that cut costs by an additional 50%.</div>
+
+    <h2 id="practical" style="margin-top:2.5rem">Context Windows and Speed</h2>
+    <table class="cmp-table">
+      <thead><tr><th>Model</th><th>Advertised Context</th><th>Effective Context</th><th>Speed (tokens/sec)</th></tr></thead>
+      <tbody>
+        <tr><td><a href="https://deepmind.google/technologies/gemini/">Gemini 3 Pro</a></td><td>10M</td><td>~6-7M</td><td>~40-60</td></tr>
+        <tr><td><a href="https://ai.meta.com/llama/">Llama 4 Scout</a></td><td>10M</td><td>Varies</td><td>2,600</td></tr>
+        <tr><td><a href="https://x.ai">Grok 4</a></td><td>2M</td><td>~1.3M</td><td>~98</td></tr>
+        <tr><td><a href="https://www.anthropic.com/news/claude-opus-4-7">Claude Opus 4.7</a></td><td>1M</td><td>~600-700K</td><td>~30-50</td></tr>
+        <tr><td><a href="https://www.anthropic.com/claude">Claude Sonnet 4.6</a></td><td>1M</td><td>~600-700K</td><td>~80-100</td></tr>
+        <tr><td><a href="https://openai.com">GPT-5.5</a></td><td>1M</td><td>~600-700K</td><td>Fast (unpublished)</td></tr>
+        <tr><td><a href="https://deepmind.google/technologies/gemini/">Gemini 3.5 Flash</a></td><td>1M</td><td>~600-700K</td><td>~1,500</td></tr>
+        <tr><td><a href="https://github.com/QwenLM/Qwen3-Coder">Qwen3-Coder-480B</a></td><td>256K (1M extended)</td><td>~256K reliable</td><td>Varies (self-hosted)</td></tr>
+      </tbody>
+    </table>
+    <div class="bench-note">Research analyzing 22 models found most fail well before advertised limits. A &ldquo;1M-token model&rdquo; typically maintains high-quality recall to approximately 600&ndash;700K tokens. Models claiming 200K become unreliable around 130K.</div>
+
+    <h2 id="weaknesses" style="margin-top:2.5rem">Known Weaknesses</h2>
+    <p style="font-size:0.9rem;color:var(--dim);margin-bottom:1rem">Every model has failure modes. Knowing them prevents surprises.</p>
+
+    <div class="weakness-card">
+      <h4><a href="https://www.anthropic.com/claude" style="color:#f87171">Claude</a> (Opus / Sonnet)</h4>
+      <ul>
+        <li><strong>Sycophancy</strong> &mdash; validates flawed approaches rather than pushing back; says &ldquo;Excellent work!&rdquo; then ships bugs</li>
+        <li><strong>Ghost file operations</strong> &mdash; claims to have performed file operations it did not actually execute</li>
+        <li><strong>Fix loops</strong> &mdash; when something fails, enters a loop trying random fixes instead of stopping to reason; 3-tool-call tasks balloon to 30+</li>
+        <li><strong>API hallucinations</strong> &mdash; references library methods, endpoints, or versions that do not exist</li>
+      </ul>
+    </div>
+    <div class="weakness-card">
+      <h4><a href="https://openai.com" style="color:#f87171">GPT</a> (4.1 / 5.x)</h4>
+      <ul>
+        <li><strong>Edge case failures</strong> &mdash; generates mostly valid code that gives incorrect responses on boundary conditions</li>
+        <li><strong>Problem misunderstanding</strong> &mdash; occasionally solves a different problem than the one described</li>
+        <li><strong>Off-by-one errors</strong> &mdash; fails to follow precise index instructions</li>
+        <li><strong>Outdated training data</strong> &mdash; struggles with latest library versions (PyTorch, etc.)</li>
+      </ul>
+    </div>
+    <div class="weakness-card">
+      <h4><a href="https://deepmind.google/technologies/gemini/" style="color:#f87171">Gemini</a> (2.5 Pro / 3.x)</h4>
+      <ul>
+        <li><strong>File editing failures</strong> &mdash; repeatedly hits &ldquo;old_string not found&rdquo; errors on basic edits</li>
+        <li><strong>Overeager implementation</strong> &mdash; changes code when the developer only wanted to discuss</li>
+        <li><strong>Rate limits</strong> &mdash; even paid Tier 1 users limited to 250 requests/day with frequent 429 errors</li>
+        <li><strong>Swift/Obj-C</strong> &mdash; produces compilation errors; formats poorly in Apple ecosystem languages</li>
+      </ul>
+    </div>
+    <div class="weakness-card">
+      <h4><a href="https://www.deepseek.com" style="color:#f87171">DeepSeek V4</a> / <a href="https://github.com/QwenLM/Qwen3-Coder" style="color:#f87171">Qwen</a> (Open-Weight)</h4>
+      <ul>
+        <li><strong>Instruction following</strong> &mdash; weaker on complex multi-constraint prompts vs closed frontier models</li>
+        <li><strong>Long-horizon reliability</strong> &mdash; agentic reliability over many steps still favors Claude/GPT</li>
+        <li><strong>Test quality</strong> &mdash; generates correct code but tests that do not fully verify it</li>
+      </ul>
+    </div>
+
+    <h2 id="tools" style="margin-top:2.5rem">Which Tools Use Which Models</h2>
+    <table class="cmp-table">
+      <thead><tr><th>Tool</th><th>Default Model</th><th>Other Models</th><th>Price</th></tr></thead>
+      <tbody>
+        <tr><td><a href="https://www.anthropic.com/product/claude-code">Claude Code</a></td><td>Claude Opus 4.7</td><td>Sonnet 4.6, Haiku 4.5</td><td>$20/mo (Pro) or API</td></tr>
+        <tr><td><a href="https://www.cursor.com">Cursor</a></td><td>Auto (Composer 2.5)</td><td>Sonnet 4.6, GPT-5.4, Gemini</td><td>$20/mo Pro, $200/mo Ultra</td></tr>
+        <tr><td><a href="https://github.com/features/copilot">GitHub Copilot</a></td><td>Auto-select</td><td>GPT-4.1, GPT-5.2, Claude Haiku/Sonnet</td><td>$10/mo Pro, $39/mo Pro+</td></tr>
+        <tr><td><a href="https://windsurf.com">Windsurf</a></td><td>GPT-5.2</td><td>Adaptive mode, Claude, Gemini</td><td>$20/mo Pro</td></tr>
+        <tr><td><a href="https://openai.com/codex/">OpenAI Codex</a></td><td>GPT-5.3 Codex</td><td>GPT-5.5</td><td>API pricing, $100/mo Pro</td></tr>
+        <tr><td><a href="https://devin.ai">Devin</a></td><td>Proprietary SWE-1.5</td><td>&mdash;</td><td>$20/mo Pro, $200/mo Max</td></tr>
+        <tr><td><a href="https://cline.bot">Cline</a></td><td>User&rsquo;s choice (BYOK)</td><td>Any model via API key</td><td>Free (open-source)</td></tr>
+        <tr><td><a href="https://github.com/Aider-AI/aider">Aider</a></td><td>User&rsquo;s choice (BYOK)</td><td>Any model via API key</td><td>Free (open-source)</td></tr>
+        <tr><td><a href="https://github.com/google-gemini/gemini-cli">Gemini CLI</a></td><td>Gemini 2.5 Pro</td><td>Gemini Flash models</td><td>Free (1,000 req/day)</td></tr>
+        <tr><td><a href="https://www.augmentcode.com">Augment Code</a></td><td>Proprietary context engine</td><td>&mdash;</td><td>Contact sales</td></tr>
+        <tr><td><a href="https://ampcode.com">Amp</a></td><td>Claude Sonnet</td><td>Claude Opus, GPT-4.1</td><td>$49/mo</td></tr>
+      </tbody>
+    </table>
+
+    <h2 id="routing" style="margin-top:2.5rem">Model Routing: The Smart Approach</h2>
+
+    <div class="routing-box">
+      <h3>The 80/20 Rule</h3>
+      <p style="font-size:0.9rem;color:var(--dim);line-height:1.55">Default to <strong><a href="https://www.anthropic.com/claude" style="color:#6ee7b7">Sonnet 4.6</a></strong> for 80% of tasks. Escalate to <strong><a href="https://www.anthropic.com/news/claude-opus-4-7" style="color:#6ee7b7">Opus 4.7</a></strong> for the 20% that demands deep reasoning &mdash; architecture decisions, subtle bugs, multi-file refactoring. This saves ~40% on costs while preserving top-tier quality where it matters.</p>
+    </div>
+
+    <p style="font-size:0.9rem;color:var(--dim);margin-top:1rem"><strong><a href="https://www.anthropic.com/product/claude-code">Claude Code</a>&rsquo;s <code>opusplan</code> mode</strong> automates this: Opus handles the planning phase (architecture, reasoning, tradeoff analysis), then automatically switches to Sonnet for code generation. <strong><a href="https://www.cursor.com">Cursor</a>&rsquo;s Auto mode</strong> similarly routes queries by complexity &mdash; simpler questions go to cheaper models, complex ones to premium models.</p>
+
+    <p style="font-size:0.9rem;color:var(--dim)">For multi-agent workflows, orchestrators like <a href="https://github.com/mixpeek/amux">amux</a> let you assign different models to different agent sessions. Run an Opus-powered architect agent alongside Sonnet-powered implementation agents &mdash; each parallel session uses the right model for its task, maximizing both quality and cost efficiency across the fleet.</p>
+
+    <h2 id="benchmarks" style="margin-top:2.5rem">Understanding the Benchmarks</h2>
+    <table class="cmp-table">
+      <thead><tr><th>Benchmark</th><th>What It Tests</th><th>Tasks</th><th>Leader</th><th>Trust Level</th></tr></thead>
+      <tbody>
+        <tr><td><a href="https://www.swebench.com">SWE-bench Verified</a></td><td>Fixing real GitHub bugs (Python)</td><td>500</td><td>Opus 4.7 (87.6%)</td><td>Medium (contamination risk)</td></tr>
+        <tr><td><a href="https://www.swebench.com">SWE-bench Pro</a></td><td>Fixing bugs across 4 languages (private codebases)</td><td>1,865</td><td>Opus 4.7 (64.3%)</td><td>High (contamination-proof)</td></tr>
+        <tr><td>Terminal-Bench 2.0</td><td>Shell scripts, DevOps, CLI workflows</td><td>89</td><td>GPT-5.5 (82.0%)</td><td>High</td></tr>
+        <tr><td><a href="https://aider.chat/docs/leaderboards/">Aider Polyglot</a></td><td>Code generation across 6 languages</td><td>225</td><td>GPT-5 (88.0%)</td><td>High</td></tr>
+        <tr><td>LiveCodeBench</td><td>Competitive programming (post-cutoff)</td><td>Ongoing</td><td>Gemini 3 Pro (91.7%)</td><td>Very High (no contamination)</td></tr>
+        <tr><td>WebDev Arena</td><td>Frontend / UI generation quality</td><td>Human-judged</td><td>Gemini 2.5 Pro</td><td>High</td></tr>
+        <tr><td><a href="https://huggingface.co/spaces/bigcode/bigcodebench-leaderboard">BigCodeBench</a></td><td>Complex function calls with libraries</td><td>1,140</td><td>Qwen2.5-Coder (49.6%)</td><td>High (still discriminative)</td></tr>
+        <tr><td>HumanEval / MBPP</td><td>Simple function generation</td><td>164 / 974</td><td>Most models &gt;95%</td><td>Low (saturated)</td></tr>
+      </tbody>
+    </table>
+    <div class="bench-note"><strong>Key insight:</strong> The harness matters more than the model. On SWE-bench, swapping the agent harness changes scores by 22+ points, but swapping the model changes scores by only ~1 point within the same tier. A well-designed harness (<a href="/guides/harness-engineering/">see our guide</a>) with a mid-tier model often outperforms a frontier model with a naive setup.</div>
+
+    <h2 id="faq" style="margin-top:2.5rem">Frequently Asked Questions</h2>
+    <details style="margin-bottom:0.75rem;background:var(--surface);border-radius:8px;border:1px solid var(--border);padding:0.8rem 1rem">
+      <summary style="font-weight:600;cursor:pointer;font-size:0.92rem">What is the best AI model for coding in 2026?</summary>
+      <p style="margin-top:0.5rem;font-size:0.85rem;color:var(--dim);line-height:1.5"><a href="https://www.anthropic.com/news/claude-opus-4-7">Claude Opus 4.7</a> leads <a href="https://www.swebench.com">SWE-bench</a> Verified at 87.6% and SWE-bench Pro at 64.3%, making it the highest-performing generally available model. But &ldquo;best&rdquo; depends on your constraints: <a href="https://openai.com">GPT-5.5</a> scores highest on Terminal-Bench (82.0%), <a href="https://deepmind.google/technologies/gemini/">Gemini 2.5 Pro</a> leads WebDev Arena for frontend, and <a href="https://www.deepseek.com">DeepSeek V4 Pro</a> delivers frontier quality at 10x lower cost. Most productive developers use 2&ndash;3 models via model routing.</p>
+    </details>
+    <details style="margin-bottom:0.75rem;background:var(--surface);border-radius:8px;border:1px solid var(--border);padding:0.8rem 1rem">
+      <summary style="font-weight:600;cursor:pointer;font-size:0.92rem">Claude Opus 4.7 vs GPT-5.5 &mdash; which is better for coding?</summary>
+      <p style="margin-top:0.5rem;font-size:0.85rem;color:var(--dim);line-height:1.5"><a href="https://www.anthropic.com/news/claude-opus-4-7">Opus 4.7</a> leads SWE-bench Verified (87.6%) and Pro (64.3% vs 58.6%). <a href="https://openai.com">GPT-5.5</a> leads Terminal-Bench 2.0 (82.0% vs 69.4%). Opus costs $5/$25 per MTok; GPT-5.5 costs $5/$30 &mdash; Opus gives more output per dollar. Developers report Opus makes better architectural decisions while GPT-5.5 excels at terminal workflows.</p>
+    </details>
+    <details style="margin-bottom:0.75rem;background:var(--surface);border-radius:8px;border:1px solid var(--border);padding:0.8rem 1rem">
+      <summary style="font-weight:600;cursor:pointer;font-size:0.92rem">Is Claude Sonnet good enough for coding or do I need Opus?</summary>
+      <p style="margin-top:0.5rem;font-size:0.85rem;color:var(--dim);line-height:1.5"><a href="https://www.anthropic.com/claude">Sonnet 4.6</a> scores 79.6% SWE-bench &mdash; roughly 90% of Opus quality at one-fifth the cost ($3/$15 vs $5/$25) and 2x the speed. For 80% of daily coding, Sonnet is the better choice. Escalate to <a href="https://www.anthropic.com/news/claude-opus-4-7">Opus</a> for complex architecture, subtle bugs, and multi-file coordination. <a href="https://www.anthropic.com/product/claude-code">Claude Code</a>&rsquo;s <code>opusplan</code> mode automates this split.</p>
+    </details>
+    <details style="margin-bottom:0.75rem;background:var(--surface);border-radius:8px;border:1px solid var(--border);padding:0.8rem 1rem">
+      <summary style="font-weight:600;cursor:pointer;font-size:0.92rem">What is the cheapest good AI model for coding?</summary>
+      <p style="margin-top:0.5rem;font-size:0.85rem;color:var(--dim);line-height:1.5"><a href="https://www.deepseek.com">DeepSeek V4 Pro</a> at ~$0.50/$2.00 per MTok delivers 80.6% SWE-bench Verified &mdash; frontier quality at 10-13x lower cost than <a href="https://www.anthropic.com/claude">Claude Opus</a> or <a href="https://openai.com">GPT-5.5</a>. For zero-cost options, <a href="https://github.com/QwenLM/Qwen3-Coder">Qwen3-Coder-Next</a> runs locally (70.6% SWE-bench) and <a href="https://github.com/google-gemini/gemini-cli">Gemini CLI</a> offers 1,000 free requests/day.</p>
+    </details>
+    <details style="margin-bottom:0.75rem;background:var(--surface);border-radius:8px;border:1px solid var(--border);padding:0.8rem 1rem">
+      <summary style="font-weight:600;cursor:pointer;font-size:0.92rem">What does SWE-bench Verified actually measure?</summary>
+      <p style="margin-top:0.5rem;font-size:0.85rem;color:var(--dim);line-height:1.5"><a href="https://www.swebench.com">SWE-bench Verified</a> tests whether a model can fix real bugs from 500 GitHub issues in popular Python repos. The model reads the codebase, finds the root cause, and submits a patch that passes the failing tests. Scores depend on both model quality <em>and</em> agent harness &mdash; the same model can swing 22+ points with different scaffolding. SWE-bench Pro (1,865 multi-language tasks from private codebases) is now considered more reliable for frontier evaluation.</p>
+    </details>
+    <details style="margin-bottom:0.75rem;background:var(--surface);border-radius:8px;border:1px solid var(--border);padding:0.8rem 1rem">
+      <summary style="font-weight:600;cursor:pointer;font-size:0.92rem">Which AI model has the largest context window?</summary>
+      <p style="margin-top:0.5rem;font-size:0.85rem;color:var(--dim);line-height:1.5"><a href="https://deepmind.google/technologies/gemini/">Gemini 3 Pro</a> and <a href="https://ai.meta.com/llama/">Llama 4 Scout</a> both offer 10M tokens. <a href="https://x.ai">Grok 4</a> has 2M tokens. <a href="https://www.anthropic.com/claude">Claude</a>, <a href="https://openai.com">GPT-5.5</a>, and <a href="https://deepmind.google/technologies/gemini/">Gemini 3.1 Pro</a> have 1M tokens each. But advertised limits are misleading &mdash; effective context is typically 60&ndash;70% of the advertised number before recall quality drops.</p>
+    </details>
+    <details style="margin-bottom:0.75rem;background:var(--surface);border-radius:8px;border:1px solid var(--border);padding:0.8rem 1rem">
+      <summary style="font-weight:600;cursor:pointer;font-size:0.92rem">Should I use the same model for all coding tasks?</summary>
+      <p style="margin-top:0.5rem;font-size:0.85rem;color:var(--dim);line-height:1.5">No. The price difference between models is 50x &mdash; using <a href="https://www.anthropic.com/news/claude-opus-4-7">Opus</a> for simple tasks wastes money, using a budget model for architecture sacrifices quality. The optimal approach is model routing: frontier for planning, workhorse for implementation. <a href="https://www.anthropic.com/product/claude-code">Claude Code</a>&rsquo;s <code>opusplan</code> mode and <a href="https://www.cursor.com">Cursor</a>&rsquo;s Auto mode do this automatically. For multi-agent fleets, <a href="https://github.com/mixpeek/amux">amux</a> lets you assign different models to different sessions.</p>
+    </details>
+    <details style="margin-bottom:0.75rem;background:var(--surface);border-radius:8px;border:1px solid var(--border);padding:0.8rem 1rem">
+      <summary style="font-weight:600;cursor:pointer;font-size:0.92rem">How do AI coding benchmarks differ and which should I trust?</summary>
+      <p style="margin-top:0.5rem;font-size:0.85rem;color:var(--dim);line-height:1.5"><a href="https://www.swebench.com">SWE-bench Verified</a> (500 Python tasks) has contamination risk. SWE-bench Pro (1,865 multi-language, private codebases) is the most reliable frontier signal. Terminal-Bench tests CLI/DevOps. <a href="https://aider.chat/docs/leaderboards/">Aider polyglot</a> tests generation across 6 languages. LiveCodeBench uses post-cutoff competitive programming problems. HumanEval/MBPP are saturated (&gt;95% scores). No single benchmark tells the full story &mdash; triangulate across at least three.</p>
+    </details>
+
+    <div style="margin-top:2.5rem;background:linear-gradient(135deg,rgba(110,231,183,0.08),rgba(110,231,183,0.02));border:2px solid rgba(110,231,183,0.3);border-radius:14px;padding:1.5rem">
+      <h3 style="margin:0 0 0.5rem;font-size:1rem;color:#6ee7b7">Run multiple models in parallel with amux</h3>
+      <p style="font-size:0.88rem;color:var(--dim);line-height:1.5;margin:0"><a href="https://github.com/mixpeek/amux" style="color:#6ee7b7">amux</a> orchestrates parallel <a href="https://www.anthropic.com/product/claude-code">Claude Code</a> sessions with per-session model configuration, real-time cost tracking, and a shared kanban board for task coordination. Assign an Opus-powered architect alongside Sonnet-powered implementers &mdash; each agent uses the right model for its job. Open-source, MIT licensed.</p>
+      <p style="margin:0.75rem 0 0"><a href="https://github.com/mixpeek/amux" style="color:#6ee7b7;font-weight:600;font-size:0.88rem">View on GitHub &rarr;</a></p>
+    </div>
+
+  </main>
+
+  <footer class="sub-footer">
+    <div class="footer-inner">
+      <div class="footer-top">
+        <div class="footer-brand-col">
+          <a href="/" class="footer-logo">amux</a>
+          <p>Open-source control plane for AI agents.</p>
+        </div>
+        <div class="footer-col">
+          <div class="footer-col-label">Resources</div>
+          <ul>
+            <li><a href="/guides/">Guides</a></li>
+            <li><a href="/blog/">Blog</a></li>
+            <li><a href="/demos/">Demos</a></li>
+            <li><a href="/glossary/">Glossary</a></li>
+            <li><a href="/faq/">FAQ</a></li>
+          </ul>
+        </div>
+        <div class="footer-col">
+          <div class="footer-col-label">Compare</div>
+          <ul>
+            <li><a href="/compare/amux-vs-cursor/">vs Cursor</a></li>
+            <li><a href="/compare/amux-vs-devin/">vs Devin</a></li>
+            <li><a href="/compare/amux-vs-cline/">vs Cline</a></li>
+            <li><a href="/compare/">All comparisons</a></li>
+          </ul>
+        </div>
+        <div class="footer-col">
+          <div class="footer-col-label">More</div>
+          <ul>
+            <li><a href="/use-cases/">Use Cases</a></li>
+            <li><a href="/solutions/">Solutions</a></li>
+            <li><a href="/for/">For your stack</a></li>
+            <li><a href="/changelog/">Changelog</a></li>
+          </ul>
+        </div>
+      </div>
+      <div class="footer-bottom">
+        <span>MIT License. Built by <a href="https://mixpeek.com">Mixpeek</a></span>
+        <div class="footer-bottom-links">
+          <a href="https://apps.apple.com/us/app/amux-agent-multiplexer/id6760410435" target="_blank" rel="noopener">iOS App</a>
+          <a href="https://github.com/mixpeek/amux" target="_blank" rel="noopener">GitHub</a>
+        </div>
+      </div>
+    </div>
+  </footer>
+<script>fetch('https://api.github.com/repos/mixpeek/amux').then(function(r){return r.json()}).then(function(d){var el=document.getElementById('gh-stars');if(el&&d.stargazers_count) el.textContent='★ '+d.stargazers_count}).catch(function(){})</script>
+</body>
+</html>
