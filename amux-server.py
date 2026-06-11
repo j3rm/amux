@@ -27,12 +27,17 @@ from urllib.parse import urlparse, parse_qs, unquote
 for _cv in ("CLAUDECODE", "CLAUDE_CODE_ENTRYPOINT"):
     os.environ.pop(_cv, None)
 
-# Support both ~/.amux (new) and legacy dirs for migration
-_amux_home = Path.home() / ".amux"
-for _old_home in [Path.home() / ".cmux", Path.home() / ".cc"]:
-    if not _amux_home.exists() and _old_home.exists():
-        _old_home.rename(_amux_home)
-        break
+# Home directory for all amux state. Override with AMUX_HOME (preferred) or the
+# legacy CC_HOME — both read from the *process* env, since server.env lives inside
+# this dir and therefore can't choose it. Defaults to ~/.amux.
+_env_home = os.environ.get("AMUX_HOME") or os.environ.get("CC_HOME")
+_amux_home = Path(_env_home).expanduser() if _env_home else Path.home() / ".amux"
+# Migrate legacy default dirs only when using the default location.
+if not _env_home:
+    for _old_home in [Path.home() / ".cmux", Path.home() / ".cc"]:
+        if not _amux_home.exists() and _old_home.exists():
+            _old_home.rename(_amux_home)
+            break
 
 # Load ~/.amux/server.env before reading any env vars (persistent server config)
 # server.env values OVERRIDE process env — user-saved settings (e.g. API keys
@@ -47,7 +52,7 @@ if _server_env_file.exists():
             if _v:  # only override if value is non-empty
                 os.environ[_k] = _v
 
-CC_HOME = Path(os.environ.get("CC_HOME", _amux_home))
+CC_HOME = _amux_home
 CC_SESSIONS = CC_HOME / "sessions"
 CC_LOGS = CC_HOME / "logs"
 CC_MEMORY = CC_HOME / "memory"
@@ -80,6 +85,14 @@ def _safe_note_path(note_rel: str, base: Path = None) -> Path | None:
     except ValueError:
         return None  # traversal detected
     return candidate
+
+def _path_is_within(path: Path, base: Path) -> bool:
+    """Return True when path resolves inside base, not just under a string prefix."""
+    try:
+        path.resolve().relative_to(base.resolve())
+        return True
+    except (OSError, ValueError):
+        return False
 
 # ── Filesystem access control ────────────────────────────────────────────────
 _SENSITIVE_PATHS = {".ssh", ".gnupg", ".aws", ".kube", ".netrc", ".npmrc",
@@ -493,7 +506,7 @@ def _bu_list_profiles() -> list:
 
 def _bu_screenshot(session: str = "amux", path: str = "", retries: int = 3) -> dict:
     """Take a screenshot, return {path, size}. Retries on SessionManager errors."""
-    dest = path or str(Path.home() / ".amux" / "browser-screenshots" / "latest.jpg")
+    dest = path or str(CC_HOME / "browser-screenshots" / "latest.jpg")
     Path(dest).parent.mkdir(parents=True, exist_ok=True)
     for attempt in range(retries):
         result = _bu_call(["screenshot", dest], session=session)
@@ -1302,6 +1315,9 @@ def tmux_target(session: str) -> str:
 
 def is_running(session: str) -> bool:
     """Check if Claude is running in this session's tmux pane."""
+    iterm2_id = _session_iterm2_id(session)
+    if iterm2_id:
+        return _iterm2_session_exists(iterm2_id)
     try:
         r = subprocess.run(
             ["tmux", "list-sessions", "-F", "#{session_name}"],
@@ -1338,9 +1354,12 @@ def is_running(session: str) -> bool:
 
 
 def tmux_capture(session: str, lines: int = 500) -> str:
+    iterm2_id = _session_iterm2_id(session)
+    if iterm2_id:
+        return _iterm2_capture(iterm2_id)
     try:
         r = subprocess.run(
-            ["tmux", "capture-pane", "-t", tmux_target(session), "-p", "-S", f"-{lines}"],
+            ["tmux", "capture-pane", "-t", tmux_target(session), "-p", "-e", "-S", f"-{lines}"],
             capture_output=True, text=True, timeout=5,
         )
         # Strip leading/trailing blank lines so content isn't cut off
@@ -1359,6 +1378,116 @@ def _tmux_capture_batch(sessions: list, lines: int = 30) -> dict:
         return name, tmux_capture(name, lines)
     with ThreadPoolExecutor(max_workers=min(len(sessions), 16)) as pool:
         return dict(pool.map(_cap, sessions))
+
+
+# ── iTerm2 integration (AppleScript via osascript) ────────────────────────────
+
+def _iterm2_applescript(script: str, timeout: int = 8) -> str:
+    """Run an AppleScript and return stdout, or '' on error."""
+    try:
+        r = subprocess.run(["osascript", "-e", script],
+                           capture_output=True, text=True, timeout=timeout)
+        return r.stdout.strip()
+    except Exception:
+        return ""
+
+
+def _iterm2_list_panes() -> list:
+    """Return list of dicts describing every open iTerm2 pane.
+    Each dict: {id, name, tty, window, tab}"""
+    script = """
+tell application "iTerm2"
+    set out to ""
+    set wi to 0
+    repeat with w in windows
+        set ti to 0
+        repeat with t in tabs of w
+            repeat with s in sessions of t
+                set out to out & (id of s) & "|" & (name of s) & "|" & (tty of s) & "|" & wi & "|" & ti & "\n"
+            end repeat
+            set ti to ti + 1
+        end repeat
+        set wi to wi + 1
+    end repeat
+    return out
+end tell"""
+    raw = _iterm2_applescript(script)
+    panes = []
+    for line in raw.splitlines():
+        parts = line.split("|")
+        if len(parts) >= 5:
+            panes.append({"id": parts[0], "name": parts[1], "tty": parts[2],
+                          "window": int(parts[3]), "tab": int(parts[4])})
+    return panes
+
+
+def _iterm2_capture(session_id: str) -> str:
+    """Return the visible screen content of an iTerm2 pane by its session ID."""
+    sid = session_id.replace('"', '')
+    script = f"""
+tell application "iTerm2"
+    repeat with w in windows
+        repeat with t in tabs of w
+            repeat with s in sessions of t
+                if (id of s) = "{sid}" then
+                    return contents of s
+                end if
+            end repeat
+        end repeat
+    end repeat
+    return ""
+end tell"""
+    return _iterm2_applescript(script, timeout=10)
+
+
+def _iterm2_session_exists(session_id: str) -> bool:
+    """Return True if the iTerm2 pane with this ID is still open."""
+    return bool(_iterm2_capture(session_id))
+
+
+def _iterm2_send(session_id: str, text: str) -> tuple[bool, str]:
+    """Send text (followed by newline) to an iTerm2 pane."""
+    sid = session_id.replace('"', '')
+    # Write text to a temp file to avoid AppleScript quoting issues
+    import tempfile as _tmp
+    with _tmp.NamedTemporaryFile(mode='w', delete=False, suffix='.txt', encoding='utf-8') as f:
+        f.write(text)
+        tmp_path = f.name
+    try:
+        script = f"""
+tell application "iTerm2"
+    repeat with w in windows
+        repeat with t in tabs of w
+            repeat with s in sessions of t
+                if (id of s) = "{sid}" then
+                    set fileRef to open for access POSIX file "{tmp_path}"
+                    set txt to read fileRef as «class utf8»
+                    close access fileRef
+                    tell s to write text txt
+                    return "ok"
+                end if
+            end repeat
+        end repeat
+    end repeat
+    return "not found"
+end tell"""
+        result = _iterm2_applescript(script, timeout=15)
+        if result == "ok":
+            return True, "sent"
+        return False, result or "not found"
+    finally:
+        try:
+            os.unlink(tmp_path)
+        except Exception:
+            pass
+
+
+def _session_iterm2_id(name: str) -> str:
+    """Return the stored iTerm2 session ID for an amux session, or ''."""
+    env_file = CC_SESSIONS / f"{name}.env"
+    if not env_file.exists():
+        return ""
+    return parse_env_file(env_file).get("CC_ITERM2_SESSION_ID", "").strip()
 
 
 def _log_path(session: str) -> Path:
@@ -2201,8 +2330,18 @@ def _claude_ui_visible(clean_output: str) -> bool:
         s = l.strip()
         if s and "\u2700" <= s[0] <= "\u27bf" and s[0] != "\u276f":
             return True
-    # Codex prompt: line starting with > or › (only if "codex" banner seen in output)
-    has_codex = any("codex" in l.lower() for l in lines[:15])
+    # Codex UI patterns — checked unconditionally so long-running sessions still
+    # match after the initial "codex" banner has scrolled past the capture window
+    for l in lines[-12:]:
+        s = l.strip()
+        # "• Working (Xs • esc to interrupt)" spinner — U+2022 is below dingbats range
+        if s.startswith("•") and "working" in s.lower() and "esc to interrupt" in s.lower():
+            return True
+        # Codex model status bar: "gpt-5.5 xhigh · ~/path"
+        if "·" in s and re.search(r"gpt-\d|o[34][-m]", s):
+            return True
+    # Codex idle prompt: > or › (gate on "codex" in first 15 OR last 20 lines)
+    has_codex = any("codex" in l.lower() for l in lines[:15] + lines[-20:])
     if has_codex:
         for l in lines[-5:]:
             ls = l.strip()
@@ -2924,12 +3063,14 @@ INSERT OR IGNORE INTO statuses (id, label, position, is_builtin) VALUES
     ('doing',     'In Progress',  2, 1),
     ('review',    'In Review',    3, 1),
     ('done',      'Done',         4, 1),
-    ('discarded', 'Discarded',    5, 1);
+    ('verified',  'Verified',     5, 1),
+    ('discarded', 'Discarded',    6, 1);
 -- Migrate existing DBs: when 'review' was inserted into a pre-existing table,
 -- 'done' and 'discarded' kept their old positions (3, 4) and would tie with
 -- 'review' at 3, breaking ORDER BY position. Idempotent fix:
 UPDATE statuses SET position = 4 WHERE id = 'done'      AND position <> 4;
-UPDATE statuses SET position = 5 WHERE id = 'discarded' AND position <> 5;
+-- 'verified' inserted at position 5 above shifts 'discarded' to 6.
+UPDATE statuses SET position = 6 WHERE id = 'discarded' AND position <> 6;
 CREATE TABLE IF NOT EXISTS issues (
     id          TEXT PRIMARY KEY,
     title       TEXT NOT NULL,
@@ -3338,7 +3479,7 @@ case "$cmd" in
   board)
     sub="$1"; shift 2>/dev/null || true
     case "$sub" in
-      done|doing|todo|backlog|discarded)
+      done|doing|todo|backlog|review|verified|discarded)
         for id in "$@"; do
           curl -sk -X PATCH -H 'Content-Type: application/json' \
             -d "{\"status\":\"$sub\"}" "$AMUX_URL/api/board/$id" >/dev/null
@@ -3595,7 +3736,9 @@ def _init_db():
         ("backlog",   "Backlog"),
         ("todo",      "To Do"),
         ("doing",     "In Progress"),
+        ("review",    "In Review"),
         ("done",      "Done"),
+        ("verified",  "Verified"),
         ("discarded", "Discarded"),
     ]):
         db.execute(
@@ -3615,6 +3758,15 @@ def _init_db():
         "ALTER TABLE schedules ADD COLUMN watch_timeout INTEGER NOT NULL DEFAULT 120",
         "ALTER TABLE schedules ADD COLUMN done_pattern TEXT",
         "ALTER TABLE schedules ADD COLUMN done_action TEXT NOT NULL DEFAULT 'disable'",
+        # Event triggers: wake a schedule's session when something changes (closed-loop
+        # orchestration), in addition to (not instead of) the cron schedule_expr heartbeat.
+        # trigger_on is a comma-separated set of event names (e.g. 'session_idle,board').
+        "ALTER TABLE schedules ADD COLUMN trigger_on TEXT",
+        "ALTER TABLE schedules ADD COLUMN trigger_cooldown INTEGER NOT NULL DEFAULT 120",
+        # Optional comma-separated allowlist of sessions whose events count for this
+        # trigger (empty/null = any session). Scopes session_idle to e.g. the sessions
+        # an orchestrator manages, so unrelated fleet activity doesn't wake it.
+        "ALTER TABLE schedules ADD COLUMN trigger_sessions TEXT",
         "ALTER TABLE graph_nodes ADD COLUMN source_path TEXT NOT NULL DEFAULT ''",
         "ALTER TABLE issues ADD COLUMN gcal_event_id TEXT",
         "ALTER TABLE issues ADD COLUMN pos REAL NOT NULL DEFAULT 0",
@@ -3936,7 +4088,7 @@ def _migrate_flat_to_sqlite():
         return  # nothing to migrate
     # Import statuses
     statuses = raw.get("statuses", list(_DEFAULT_STATUSES))
-    builtin_ids = {"backlog", "todo", "doing", "done", "discarded"}
+    builtin_ids = {"backlog", "todo", "doing", "review", "done", "verified", "discarded"}
     existing_ids = {s["id"] for s in statuses}
     for s in _DEFAULT_STATUSES:
         if s["id"] not in existing_ids:
@@ -4016,6 +4168,14 @@ def _update_meta(name: str, **kwargs):
     _save_meta(name, meta)
 
 
+def _session_instructions(name: str) -> str:
+    """Per-session standing instruction — free text amux re-sends to the session
+    whenever it (re)starts, so a directive (e.g. 'act autonomously, don't ask the
+    user') survives stops and context compaction. amux assigns the text no meaning;
+    the model interprets it. Set/applied via /api/sessions/<name>/instructions."""
+    return (_load_meta(name).get("instructions") or "").strip()
+
+
 def _summarize_task_bg(session_name: str, text: str):
     """Call Claude Haiku in a background thread to summarize a message into a 3-word task label,
     then auto-create a board issue for the session."""
@@ -4046,7 +4206,7 @@ def _auto_create_board_issue(session_name: str, title: str, prompt_text: str):
         # Check for existing active issue for this session
         existing = db.execute(
             "SELECT id, status FROM issues WHERE session=? AND deleted IS NULL "
-            "AND status NOT IN ('done','discarded') ORDER BY created DESC LIMIT 1",
+            "AND status NOT IN ('done','verified','discarded') ORDER BY created DESC LIMIT 1",
             (session_name,)
         ).fetchone()
         now = int(time.time())
@@ -4055,7 +4215,7 @@ def _auto_create_board_issue(session_name: str, title: str, prompt_text: str):
             db.execute("UPDATE issues SET title=?, status='doing', updated=? WHERE id=?",
                        (title, now, existing["id"]))
             db.commit()
-            _sse_cache["board"]["time"] = 0
+            _board_changed()
             _append_board_log(existing["id"], f"New task: {prompt_text[:200]}")
             return
         # Create new issue
@@ -4067,7 +4227,7 @@ def _auto_create_board_issue(session_name: str, title: str, prompt_text: str):
             (item_id, title, f"**Prompt:** {prompt_text[:300]}", session_name, now, now),
         )
         db.commit()
-        _sse_cache["board"]["time"] = 0
+        _board_changed()
     except Exception as e:
         print(f"[board] auto-create failed for {session_name}: {e}", flush=True)
 
@@ -4085,7 +4245,7 @@ def _append_board_log(issue_id: str, line: str):
         db.execute("UPDATE issues SET desc=?, updated=? WHERE id=?",
                    (desc, int(time.time()), issue_id))
         db.commit()
-        _sse_cache["board"]["time"] = 0
+        _board_changed()
     except Exception:
         pass
 
@@ -4095,7 +4255,7 @@ def _session_board_issue_id(session_name: str) -> str | None:
     try:
         row = get_db().execute(
             "SELECT id FROM issues WHERE session=? AND deleted IS NULL "
-            "AND status NOT IN ('done','discarded') ORDER BY created DESC LIMIT 1",
+            "AND status NOT IN ('done','verified','discarded') ORDER BY created DESC LIMIT 1",
             (session_name,)
         ).fetchone()
         return row["id"] if row else None
@@ -4115,7 +4275,7 @@ def _complete_session_board_issue(session_name: str):
         rows = db.execute(
             "SELECT i.id FROM issues i "
             "WHERE i.session=? AND i.deleted IS NULL "
-            "AND i.status NOT IN ('done','discarded','review') "
+            "AND i.status NOT IN ('done','verified','discarded','review') "
             "ORDER BY i.created DESC",
             (session_name,)
         ).fetchall()
@@ -4133,7 +4293,7 @@ def _complete_session_board_issue(session_name: str):
             _append_board_log(row["id"], "Session completed")
             db.execute("UPDATE issues SET status='done', updated=? WHERE id=?", (now, row["id"]))
         db.commit()
-        _sse_cache["board"]["time"] = 0
+        _board_changed()
     except Exception:
         pass
 
@@ -4157,7 +4317,7 @@ def _pickup_next_board_task(session_name: str):
         now = int(time.time())
         db.execute("UPDATE issues SET status='doing', updated=? WHERE id=?", (now, item_id))
         db.commit()
-        _sse_cache["board"]["time"] = 0
+        _board_changed()
         _append_board_log(item_id, "Auto-picked up from queue")
         prompt = title
         if desc:
@@ -4207,6 +4367,7 @@ _DEFAULT_STATUSES = [
     {"id": "doing",     "label": "In Progress"},
     {"id": "review",    "label": "In Review"},
     {"id": "done",      "label": "Done"},
+    {"id": "verified",  "label": "Verified"},
     {"id": "discarded", "label": "Discarded"},
 ]
 
@@ -4215,7 +4376,7 @@ def _load_board(done_limit: int = 100) -> list:
     """Load non-deleted issues from SQLite, with tags joined.
 
     To keep payloads manageable, only the most recent `done_limit` items in
-    terminal statuses (done/discarded) are returned.  Pass done_limit=0 for
+    terminal statuses (done/verified/discarded) are returned.  Pass done_limit=0 for
     unlimited (all items).
     """
     db = get_db()
@@ -4225,17 +4386,17 @@ def _load_board(done_limit: int = 100) -> list:
                COALESCE(i.pos, 0) AS pos,
                GROUP_CONCAT(t.tag) AS tags_csv"""
     if done_limit > 0:
-        # Active items (unlimited) UNION most recent done/discarded
+        # Active items (unlimited) UNION most recent done/verified/discarded
         rows = db.execute(
             f"""SELECT {_COLS}
                 FROM issues i LEFT JOIN issue_tags t ON t.issue_id = i.id
-                WHERE i.deleted IS NULL AND i.status NOT IN ('done','discarded')
+                WHERE i.deleted IS NULL AND i.status NOT IN ('done','verified','discarded')
                 GROUP BY i.id
               UNION ALL
               SELECT * FROM (
                 SELECT {_COLS}
                 FROM issues i LEFT JOIN issue_tags t ON t.issue_id = i.id
-                WHERE i.deleted IS NULL AND i.status IN ('done','discarded')
+                WHERE i.deleted IS NULL AND i.status IN ('done','verified','discarded')
                 GROUP BY i.id
                 ORDER BY i.updated DESC
                 LIMIT ?
@@ -4668,6 +4829,93 @@ def _next_run_dt(sched):
     return base.strftime("%Y-%m-%dT%H:%M")
 
 
+# ── Event-triggered schedules (closed-loop orchestration) ────────────────────
+# amux is a dumb substrate here: it only records that *something changed* (a
+# worker session went idle, the board changed) and arms a debounced wake-up of
+# any schedule subscribed to that event. The target session (e.g. an
+# orchestrator) decides what to do — no task semantics live in the server.
+_sched_event_lock = threading.Lock()
+_sched_pending_events: list = []          # [(event_type, source_session|None, ts)] — hot-path append only
+_sched_event_armed: dict = {}             # sched_id -> epoch when an event-triggered run should fire
+_sched_last_fire: dict = {}               # sched_id -> epoch of last fire (event OR cron), for cooldown
+
+# Recognized event types (kept deliberately generic / model-agnostic).
+SCHED_EVENT_TYPES = ("session_idle", "board")
+
+def _board_changed():
+    """Invalidate the board SSE cache and emit a closed-loop 'board' event.
+    (Written without the literal cache-assignment substring so the bulk
+    replace that routed all board writes here didn't rewrite this body too.)"""
+    _bc = _sse_cache["board"]
+    _bc["time"] = 0
+    _fire_schedule_event("board")
+
+def _fire_schedule_event(event_type: str, source_session: str | None = None):
+    """Record an orchestration event. Hot-path safe: just appends under a lock,
+    no DB access. The scheduler loop drains and matches these against schedules'
+    trigger_on sets. `source_session` (when known) is excluded from matching so a
+    schedule's own session can never trigger itself into a loop."""
+    try:
+        with _sched_event_lock:
+            _sched_pending_events.append((event_type, source_session, time.time()))
+            if len(_sched_pending_events) > 1000:      # backstop against unbounded growth
+                del _sched_pending_events[:500]
+    except Exception:
+        pass
+
+def _drain_and_fire_sched_events(now: float):
+    """Drain pending events, arm matching schedules (debounced + cooldown-guarded),
+    then fire any armed schedules that are due. Called from the 1s scheduler tick."""
+    from datetime import datetime
+    with _sched_event_lock:
+        events = _sched_pending_events[:]
+        _sched_pending_events.clear()
+    db = get_db()
+    cols = [d[0] for d in db.execute("SELECT * FROM schedules LIMIT 0").description]
+    if events:
+        rows = db.execute(
+            "SELECT * FROM schedules WHERE deleted IS NULL AND enabled=1 "
+            "AND trigger_on IS NOT NULL AND trigger_on != ''"
+        ).fetchall()
+        for row in rows:
+            s = dict(zip(cols, row))
+            triggers = {t.strip() for t in (s.get("trigger_on") or "").split(",") if t.strip()}
+            if not triggers:
+                continue
+            allow = {t.strip() for t in (s.get("trigger_sessions") or "").split(",") if t.strip()}
+            def _matches(et, src):
+                if et not in triggers:
+                    return False
+                if src and s.get("session") == src:      # never self-trigger
+                    return False
+                if allow and src and src not in allow:    # scoped: source must be allowlisted
+                    return False
+                return True
+            # Re-arm if any drained event matches.
+            if any(_matches(et, src) for (et, src, _ts) in events):
+                cooldown = int(s.get("trigger_cooldown") or 120)
+                fire_at = max(now, _sched_last_fire.get(s["id"], 0) + cooldown)
+                cur = _sched_event_armed.get(s["id"])
+                if cur is None or fire_at < cur:
+                    _sched_event_armed[s["id"]] = fire_at
+    # Fire armed triggers that have come due.
+    if _sched_event_armed:
+        for sid in [k for k, t in list(_sched_event_armed.items()) if t <= now]:
+            _sched_event_armed.pop(sid, None)
+            row = db.execute(
+                "SELECT * FROM schedules WHERE id=? AND deleted IS NULL AND enabled=1", (sid,)
+            ).fetchone()
+            if not row:
+                continue
+            s = dict(zip(cols, row))
+            _sched_last_fire[sid] = now
+            slog(f"[sched] event-trigger firing '{s['title']}' → {s.get('session')}")
+            _run_schedule(s)
+            db.execute("UPDATE schedules SET last_run=?, updated=? WHERE id=?",
+                       (datetime.now().strftime("%Y-%m-%dT%H:%M"), int(now), sid))
+            db.commit()
+
+
 def _run_schedule(sched):
     """Execute a schedule entry — send message to tmux session (kind='tmux')
     or run as shell command (kind='shell'). Logs the run.
@@ -4828,6 +5076,13 @@ def _scheduler_loop():
                 job["next_run"] = now + job["interval"]
                 threading.Thread(target=job["func"], daemon=True, name=job["name"]).start()
 
+        # ── 1b. Event-triggered schedules (closed-loop wake-ups) ──────────────
+        # Runs every tick (not gated by the 10s DB-check) so events fire promptly.
+        try:
+            _drain_and_fire_sched_events(now)
+        except Exception as e:
+            slog(f"[sched] event-trigger error: {e}")
+
         # ── 2. DB-backed user schedules (tmux commands) ───────────────────────
         if now - _last_db_check < _DB_CHECK_INTERVAL:
             continue
@@ -4843,6 +5098,7 @@ def _scheduler_loop():
             for row in due:
                 sched = dict(zip(cols, row))
                 _run_schedule(sched)
+                _sched_last_fire[sched["id"]] = now  # cron fire counts toward event cooldown
                 now_ts = int(time.time())
                 if sched["sched_type"] == "once":
                     db.execute("UPDATE schedules SET enabled=0, last_run=?, updated=? WHERE id=?",
@@ -5425,6 +5681,144 @@ def _parse_task_time(raw_output: str) -> str:
 
 
 _session_prev_status: dict[str, str] = {}  # track status changes for board auto-updates
+_commit_guard_nudged: dict[str, bool] = {}  # session -> nudged this dirty episode (re-armed when clean)
+
+
+def _session_dirty_files(name: str, work_dir: str) -> list:
+    """Uncommitted/untracked files this session owns. Scoped to its working dir,
+    and — for a session whose cwd is a monorepo root — excludes subdirectories that
+    are *other* sessions' working dirs, so each session is only accountable for its
+    own territory. Returns paths; [] if clean or not a git repo."""
+    try:
+        wd = str(Path(work_dir).expanduser().resolve())
+        # Exclude other sessions' cwds that live inside this one (ownership partition).
+        excludes = []
+        for f in CC_SESSIONS.glob("*.env"):
+            if f.stem == name:
+                continue
+            try:
+                od = parse_env_file(f).get("CC_DIR")
+            except Exception:
+                od = None
+            if not od:
+                continue
+            od = str(Path(od).expanduser().resolve())
+            if od != wd and (od + os.sep).startswith(wd + os.sep):
+                excludes.append(":(exclude)" + os.path.relpath(od, wd))
+        r = subprocess.run(
+            ["git", "-C", wd, "status", "--porcelain", "--", "."] + excludes,
+            capture_output=True, text=True, timeout=10,
+        )
+        if r.returncode != 0:
+            return []
+        return [ln[3:].strip() for ln in r.stdout.splitlines() if ln.strip()]
+    except Exception:
+        return []
+
+
+def _checkout_busy_cotenant(name: str, work_dir: str) -> str:
+    """Name of another session that shares this EXACT working tree and is currently
+    busy (active/waiting), or "" if none.
+
+    When two sessions cwd into the same checkout (e.g. several agents in one
+    monorepo root), uncommitted files there cannot be attributed to either by
+    path — git sees one shared tree. The ownership partition in
+    _session_dirty_files only excludes *subdirectory* cwds, so co-tenants of the
+    same root each see the union of everyone's dirt. Holding a session
+    accountable for that union is what derailed a session into nearly committing
+    a peer's in-flight WIP. So when a busy co-tenant exists, callers must NOT
+    nudge or gate this session on the shared dirt. Uses the snapshot loop's
+    cached status (cheap, no extra tmux capture)."""
+    try:
+        wd = str(Path(work_dir).expanduser().resolve())
+    except Exception:
+        return ""
+    for f in CC_SESSIONS.glob("*.env"):
+        other = f.stem
+        if other == name:
+            continue
+        try:
+            od = parse_env_file(f).get("CC_DIR")
+            od = str(Path(od).expanduser().resolve()) if od else None
+        except Exception:
+            od = None
+        if od == wd and _session_prev_status.get(other) in ("active", "waiting"):
+            return other
+    return ""
+
+
+def _commit_guard_enabled() -> bool:
+    """Global on/off for the idle commit-guard (configurable in the UI settings →
+    persisted as AMUX_COMMIT_GUARD in ~/.amux/server.env). Default ON."""
+    return os.environ.get("AMUX_COMMIT_GUARD", "1").strip().lower() not in ("0", "false", "off", "no")
+
+
+def _commit_guard_session_enabled(name: str) -> bool:
+    """Per-session override for the commit-guard.
+    Returns True/False when the session .env has AMUX_COMMIT_GUARD_SESSION set,
+    otherwise falls back to the global toggle."""
+    env_file = CC_SESSIONS / f"{name}.env"
+    if env_file.exists():
+        val = parse_env_file(env_file).get("AMUX_COMMIT_GUARD_SESSION", "").strip().lower()
+        if val in ("0", "false", "off", "no"):
+            return False
+        if val in ("1", "true", "on", "yes"):
+            return True
+    return _commit_guard_enabled()
+
+
+def _set_commit_guard_session(name: str, enabled: bool | None):
+    """Write (or clear) the per-session commit-guard override in the session .env."""
+    env_file = CC_SESSIONS / f"{name}.env"
+    cfg = parse_env_file(env_file) if env_file.exists() else {}
+    if enabled is None:
+        cfg.pop("AMUX_COMMIT_GUARD_SESSION", None)
+    else:
+        cfg["AMUX_COMMIT_GUARD_SESSION"] = "1" if enabled else "0"
+    _write_env(env_file, cfg)
+
+
+def _commit_guard(name: str) -> bool:
+    """When a session goes idle, if it left uncommitted work, nudge it once per
+    dirty episode to commit (re-armed once the tree goes clean). amux only detects
+    and reminds — the model decides what/how to commit. Returns True iff it sent a
+    nudge this cycle (caller then skips auto-pickup so we don't pile on)."""
+    if not _commit_guard_session_enabled(name):
+        return False
+    try:
+        wd = _session_work_dir(name)
+        if not wd:
+            return False
+        files = _session_dirty_files(name, wd)
+        if not files:
+            _commit_guard_nudged.pop(name, None)   # clean → re-arm for the next episode
+            return False
+        peer = _checkout_busy_cotenant(name, wd)
+        if peer:
+            # Shared checkout with an actively-working peer → this dirt is
+            # unattributable by path. Nudging would blame `name` for the peer's
+            # in-flight work (the exact failure that derailed a session). Skip.
+            slog(f"[commit-guard] {name}: shared checkout with active '{peer}' — "
+                 f"dirt unattributable, skipping nudge")
+            return False
+        if _commit_guard_nudged.get(name):
+            return False   # already nudged this episode; don't re-nag, allow normal flow
+        _commit_guard_nudged[name] = True
+        n = len(files)
+        sample = "\n".join("  " + f for f in files[:10]) + ("\n  …" if n > 10 else "")
+        msg = (f"You went idle with {n} uncommitted change(s) under your working directory ({wd}):\n"
+               f"{sample}\n\n"
+               "Commit completed work now with a clear, descriptive message (group related changes). "
+               "If something is intentionally incomplete, commit a WIP checkpoint and say so. "
+               "Don't leave the working tree dirty.")
+        if is_running(name):
+            send_text(name, msg)
+        _push_alert("uncommitted", name, f"{n} uncommitted file(s) under {wd} — nudged to commit")
+        slog(f"[commit-guard] {name}: nudged ({n} uncommitted)")
+        return True
+    except Exception as e:
+        slog(f"[commit-guard] {name}: {e}")
+        return False
 
 def list_sessions() -> list:
     sessions = []
@@ -5478,10 +5872,15 @@ def list_sessions() -> list:
             # Detect session becoming idle → auto-complete board issue, then pick up next queued task
             prev = _session_prev_status.get(name)
             if status == "idle" and prev in ("active", "waiting"):
-                def _complete_then_pickup(sname=name):
+                # A worker finished a turn → emit a closed-loop event so any
+                # orchestrator schedule subscribed to 'session_idle' can wake.
+                _fire_schedule_event("session_idle", source_session=name)
+                def _on_idle(sname=name):
+                    nudged = _commit_guard(sname)        # remind to commit dirty work
                     _complete_session_board_issue(sname)
-                    _pickup_next_board_task(sname)
-                threading.Thread(target=_complete_then_pickup, daemon=True).start()
+                    if not nudged:                       # don't pile a new task on a commit nudge
+                        _pickup_next_board_task(sname)
+                threading.Thread(target=_on_idle, daemon=True).start()
             elif status == "idle" and prev == "idle" and not running:
                 threading.Thread(target=_complete_session_board_issue, args=(name,), daemon=True).start()
             elif status == "" and prev in ("active", "waiting", "idle"):
@@ -5832,6 +6231,10 @@ _git_subprocess_sem = threading.Semaphore(4)  # limit concurrent git subprocesse
 _GIT_INFO_DETAIL_TTL = 10  # seconds — detail view can be slightly fresher
 _GIT_INFO_CACHE_MAX_AGE = 300  # evict entries older than 5 min to prevent unbounded growth
 
+_sessions_git_cache: dict = {"data": None, "time": 0}
+_sessions_git_cache_lock = threading.Lock()
+_SESSIONS_GIT_CACHE_TTL = 15
+
 
 def _git_info(work_dir: str, detail: bool = False) -> dict:
     """Return {branch, repo} for a directory. Returns empty strings if not a git repo.
@@ -5946,7 +6349,7 @@ def _evict_stale_caches():
         _model_cache.pop(k, None)
     # Prune session-keyed dicts for sessions that no longer have .env files
     live_sessions = {f.stem for f in CC_SESSIONS.glob("*.env")}
-    for d in (_session_auto_actions, _yolo_last_responded, _last_jsonl_backup, _session_prev_status):
+    for d in (_session_auto_actions, _yolo_last_responded, _last_jsonl_backup, _session_prev_status, _commit_guard_nudged):
         stale_keys = [k for k in d if k not in live_sessions]
         for k in stale_keys:
             d.pop(k, None)
@@ -5962,6 +6365,7 @@ def _cleanup_session_state(name: str):
     _yolo_last_responded.pop(name, None)
     _last_jsonl_backup.pop(name, None)
     _session_prev_status.pop(name, None)
+    _commit_guard_nudged.pop(name, None)
     with _send_locks_lock:
         _send_locks.pop(name, None)
 
@@ -6279,7 +6683,7 @@ def _validate_model_name(value) -> tuple[bool, str, str]:
     return True, normalized, ""
 
 
-_SESSION_PROVIDERS = ("claude", "codex", "gemini")
+_SESSION_PROVIDERS = ("claude", "codex", "gemini", "iterm2")
 
 
 _PROVIDER_YOLO_FLAGS = (
@@ -6302,6 +6706,7 @@ def _provider_label(provider: str) -> str:
         "claude": "Claude Code",
         "codex": "Codex",
         "gemini": "Gemini",
+        "iterm2": "iTerm2",
     }.get(provider, provider or "Claude Code")
 
 
@@ -6628,6 +7033,9 @@ def start_session(name: str, extra_flags: str = "", _skip_conv_id: bool = False)
     f = CC_SESSIONS / f"{name}.env"
     if not f.exists():
         return False, f"session '{name}' not found"
+    # iTerm2 sessions are managed externally — nothing to start
+    if _session_iterm2_id(name):
+        return (True, "running") if is_running(name) else (False, "iTerm2 pane not found")
     with _get_session_lock(name):
         if is_running(name):
             return True, "already running"
@@ -7149,6 +7557,12 @@ def start_session(name: str, extra_flags: str = "", _skip_conv_id: bool = False)
             _save_meta(name, meta)
             if pending_log_reload:
                 _start_pending_log_reload_thread(name, pending_log_reload_reason)
+            # Re-send this session's standing instruction once it's booted and ready,
+            # so directives survive restarts/compaction (closed-loop autonomy config).
+            _instr = _session_instructions(name)
+            if _instr:
+                threading.Thread(target=_send_after_ready, args=(name, _instr, 60),
+                                 daemon=True, name=f"instr-{name}").start()
             return True, "started"
         except subprocess.CalledProcessError as e:
             return False, e.stderr.decode(errors="replace")
@@ -7382,15 +7796,35 @@ def _get_send_lock(name: str) -> threading.Lock:
 _auto_waking = set()
 
 def send_text(name: str, text: str) -> tuple[bool, str]:
+    iterm2_id = _session_iterm2_id(name)
+    if iterm2_id:
+        return _iterm2_send(iterm2_id, text)
     # Don't send into a resume picker — text lands in the search box and
     # corrupts session selection. Wait for Claude to finish loading.
     _actions_st = _session_auto_actions.get(name, {})
     if _actions_st.get("restarting"):
         return False, "session is restarting"
+    # Single capture used for both resume-picker and is_running checks — avoids
+    # spawning two separate tmux subprocesses on the hot send path.
     try:
-        _out_st = tmux_capture(name, 10)
+        _out_st = tmux_capture(name, 15)
         if _out_st and _at_resume_picker(_out_st):
             return False, "session is in resume picker"
+        if _out_st is not None and _at_shell_prompt(_out_st):
+            # Terminal visible but Claude has exited — treat as not running
+            if name not in _auto_waking:
+                env_file = CC_SESSIONS / f"{name}.env"
+                if env_file.exists():
+                    _auto_waking.add(name)
+                    try:
+                        ok, msg = start_session(name)
+                        if not ok:
+                            return False, f"auto-wake failed: {msg}"
+                        _send_after_ready(name, text)
+                        return True, "sent (auto-woke)"
+                    finally:
+                        _auto_waking.discard(name)
+            return False, "not running"
     except Exception:
         pass
     if not is_running(name):
@@ -7453,8 +7887,10 @@ def send_text(name: str, text: str) -> tuple[bool, str]:
                     ["tmux", "send-keys", "-t", t, "-l", text],
                     check=True, capture_output=True, timeout=10,
                 )
-            # Give readline time to process all queued characters before Enter arrives
-            time.sleep(0.15)
+            # Give readline time to process all queued characters before Enter arrives.
+            # 20ms is ample for a local PTY; paste-buffer (long text) is atomic so
+            # needs even less, but we use the same value for simplicity.
+            time.sleep(0.02)
             subprocess.run(
                 ["tmux", "send-keys", "-t", t, "Enter"],
                 check=True, capture_output=True, timeout=5,
@@ -8876,6 +9312,7 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
   .badge.claude { background: rgba(88,166,255,0.18); color: var(--accent); }
   .badge.codex { background: rgba(16,185,129,0.2); color: #10b981; }
   .badge.gemini { background: rgba(168,85,247,0.2); color: #c084fc; }
+  .badge.iterm2 { background: rgba(0,200,160,0.18); color: #00c8a0; }
 
   /* Expanded panel */
   .panel { display: none; margin-top: 12px; }
@@ -9990,6 +10427,9 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
   }
   .peek-tasks-add { display: flex; gap: 8px; flex-shrink: 0; }
   .peek-tasks-list { flex: 1; overflow-y: auto; display: flex; flex-direction: column; gap: 4px; }
+  /* Kanban view of session issues: let the inner .board-columns scroll horizontally */
+  .peek-tasks-list.peek-issues-kanban { overflow-y: auto; }
+  .peek-tasks-list.peek-issues-kanban .board-columns { flex: 1; min-height: 0; }
   .peek-issue-item { display: flex; align-items: flex-start; gap: 8px; padding: 8px 10px;
     border-radius: 8px; border: 1px solid var(--border); cursor: pointer; transition: background 0.15s; }
   .peek-issue-item:hover { background: var(--hover); border-color: var(--accent); }
@@ -12093,6 +12533,7 @@ setTimeout(function(){var f=document.getElementById('js-fallback');if(f&&f.style
       <div class="header-add-menu" id="add-menu">
         <div class="card-menu-item" onclick="event.stopPropagation();closeAddMenu();openCreate()"><span class="mi">&#x2795;</span> New session</div>
         <div class="card-menu-item" onclick="event.stopPropagation();closeAddMenu();openConnect()"><span class="mi">&#x1F517;</span> Connect tmux</div>
+        <div class="card-menu-item" onclick="event.stopPropagation();closeAddMenu();openConnectIterm2()"><span class="mi">&#x1F5A5;</span> Connect iTerm2 pane</div>
       </div>
     </div>
     <div class="settings-wrap">
@@ -12134,6 +12575,7 @@ setTimeout(function(){var f=document.getElementById('js-fallback');if(f&&f.style
             <option value="sonnet">sonnet</option>
             <option value="opus">opus</option>
             <option value="haiku">haiku</option>
+            <option value="claude-fable-5">claude-fable-5</option>
             <option value="claude-opus-4-8">claude-opus-4-8</option>
             <option value="claude-opus-4-8[1m]">claude-opus-4-8 [1M]</option>
             <option value="claude-opus-4-7">claude-opus-4-7</option>
@@ -12187,6 +12629,15 @@ setTimeout(function(){var f=document.getElementById('js-fallback');if(f&&f.style
               onclick="saveApiKey()">Save</button>
           </div>
           <div id="settings-apikey-status" style="font-size:0.7rem;color:var(--dim);margin-top:4px;"></div>
+        </div>
+        <div class="settings-sep"></div>
+        <div class="settings-section" id="settings-commitguard-section">
+          <div class="settings-section-label">Commit guard</div>
+          <label style="display:flex;align-items:center;gap:8px;cursor:pointer;font-size:0.8rem;">
+            <input type="checkbox" id="settings-commitguard-toggle" style="width:auto;accent-color:var(--accent);" onchange="saveCommitGuard(this.checked)">
+            Nudge sessions to commit when they go idle with uncommitted work
+          </label>
+          <div id="settings-commitguard-status" style="font-size:0.7rem;color:var(--dim);margin-top:4px;"></div>
         </div>
         <div class="settings-sep"></div>
         <div class="settings-section" id="settings-pushover-section">
@@ -13006,39 +13457,59 @@ setTimeout(function(){var f=document.getElementById('js-fallback');if(f&&f.style
 
 <!-- Schedule modal -->
 <div id="sched-overlay" class="board-edit-overlay" onclick="if(event.target===this)closeSchedModal()" style="display:none;">
-  <div class="board-edit-box" style="max-width:420px;">
-    <div style="font-weight:600;font-size:0.9rem;margin-bottom:10px;">&#x23F0; Scheduled Task</div>
-    <div class="field-group">
-      <label class="field-label">Title</label>
-      <input id="sched-title" type="text" placeholder="What should run?" autocomplete="off">
+  <div class="board-edit-box" style="max-width:640px;width:100%;height:82dvh;padding:0;overflow:hidden;display:flex;flex-direction:column;">
+    <!-- Header: title, kind, session -->
+    <div style="padding:14px 16px 10px;flex-shrink:0;border-bottom:1px solid var(--border);">
+      <div style="font-weight:600;font-size:0.9rem;margin-bottom:10px;">&#x23F0; Scheduled Task</div>
+      <div class="field-group" style="margin-bottom:8px;">
+        <label class="field-label">Title</label>
+        <input id="sched-title" type="text" placeholder="What should run?" autocomplete="off">
+      </div>
+      <div style="display:flex;gap:12px;">
+        <div style="flex:1;">
+          <label class="field-label">Kind</label>
+          <select id="sched-kind" class="board-detail-session-select" style="width:100%;margin-bottom:0;" onchange="updateSchedKindUI()">
+            <option value="tmux">Send to session (Claude)</option>
+            <option value="shell">Run shell command</option>
+          </select>
+        </div>
+        <div id="sched-session-group" style="flex:1;">
+          <label class="field-label">Session</label>
+          <select id="sched-session" class="board-detail-session-select" style="width:100%;margin-bottom:0;"></select>
+        </div>
+      </div>
     </div>
-    <div class="field-group">
-      <label class="field-label">Kind</label>
-      <select id="sched-kind" class="board-detail-session-select" style="width:100%;" onchange="updateSchedKindUI()">
-        <option value="tmux">Send to session (Claude)</option>
-        <option value="shell">Run shell command</option>
-      </select>
+    <!-- Command: fills remaining vertical space -->
+    <div style="flex:1;display:flex;flex-direction:column;padding:10px 16px;min-height:0;overflow:hidden;">
+      <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:6px;flex-shrink:0;">
+        <label class="field-label" id="sched-command-label" style="margin-bottom:0;">Command</label>
+        <div class="notes-mode-tabs" id="sched-command-tabs" style="margin:0;">
+          <button class="notes-mode-tab active" id="sched-cmd-tab-edit" onclick="schedCmdSwitchMode('edit')">Edit</button>
+          <button class="notes-mode-tab" id="sched-cmd-tab-preview" onclick="schedCmdSwitchMode('preview')">Preview</button>
+        </div>
+      </div>
+      <div id="sched-command-editor-wrap" style="flex:1;display:flex;min-height:0;">
+        <textarea id="sched-command" placeholder="e.g. /status or npm run build" autocomplete="off"
+          style="flex:1;resize:none;box-sizing:border-box;font-size:0.88rem;line-height:1.65;padding:10px 12px;background:var(--card);border:1px solid var(--border);border-radius:6px;color:var(--text);font-family:inherit;min-height:0;width:100%;"></textarea>
+      </div>
+      <div id="sched-command-preview" class="md-content" style="display:none;flex:1;padding:10px 12px;background:var(--card);border:1px solid var(--border);border-radius:6px;overflow-y:auto;font-size:0.88rem;line-height:1.65;color:var(--text);min-height:0;"></div>
     </div>
-    <div class="field-group" id="sched-session-group">
-      <label class="field-label">Session</label>
-      <select id="sched-session" class="board-detail-session-select" style="width:100%;"></select>
-    </div>
-    <div class="field-group">
-      <label class="field-label" id="sched-command-label">Command</label>
-      <textarea id="sched-command" rows="5" placeholder="e.g. /status or npm run build" autocomplete="off" style="resize:vertical;font-family:monospace;font-size:0.85rem;min-height:100px;white-space:pre;"></textarea>
-    </div>
-    <div class="field-group">
-      <label class="field-label">Schedule</label>
-      <select id="sched-type" class="board-detail-session-select" style="width:100%;" onchange="updateSchedTypeUI()">
-        <option value="once">Once</option>
-        <option value="recurring">Recurring</option>
-      </select>
-    </div>
-    <div id="sched-once-fields" class="field-group">
-      <label class="field-label">Run at</label>
-      <input id="sched-run-at" type="datetime-local" class="board-detail-session-select" style="width:100%;">
-    </div>
-    <div id="sched-rec-fields" style="display:none;">
+    <!-- Footer: schedule + advanced + buttons (scrollable) -->
+    <div style="flex-shrink:0;border-top:1px solid var(--border);overflow-y:auto;max-height:260px;padding:10px 16px 14px;">
+      <div style="display:flex;gap:12px;margin-bottom:8px;">
+        <div style="flex:1;">
+          <label class="field-label">Schedule</label>
+          <select id="sched-type" class="board-detail-session-select" style="width:100%;margin-bottom:0;" onchange="updateSchedTypeUI()">
+            <option value="once">Once</option>
+            <option value="recurring">Recurring</option>
+          </select>
+        </div>
+        <div id="sched-once-fields" style="flex:1;">
+          <label class="field-label">Run at</label>
+          <input id="sched-run-at" type="datetime-local" class="board-detail-session-select" style="width:100%;margin-bottom:0;">
+        </div>
+      </div>
+      <div id="sched-rec-fields" style="display:none;">
       <div class="field-group">
         <label class="field-label">Schedule expression <span class="field-optional">(optional — overrides dropdowns below)</span></label>
         <input id="sched-expr" type="text" placeholder='e.g. "every 30m", "daily at 09:00", "0 9 * * 1-5"' autocomplete="off">
@@ -13079,35 +13550,54 @@ setTimeout(function(){var f=document.getElementById('js-fallback');if(f&&f.style
         <label class="field-label">Day of month</label>
         <input id="sched-monthday" type="number" min="1" max="28" value="1" class="board-detail-session-select" style="width:100%;">
       </div>
-    </div>
-    <div class="field-group" style="margin-top:8px;">
-      <label style="display:flex;align-items:center;gap:6px;cursor:pointer;font-size:0.8rem;font-weight:500;">
-        <input type="checkbox" id="sched-watch" style="width:auto;accent-color:var(--accent);" onchange="updateSchedWatchUI()">
-        Watch response
-      </label>
-      <div style="font-size:0.65rem;color:var(--dim);margin-top:2px;">After sending, monitor session output and take action when a pattern matches.</div>
-    </div>
-    <div id="sched-watch-fields" style="display:none;">
-      <div class="field-group">
-        <label class="field-label">Done pattern <span class="field-optional">(text or regex to match in response)</span></label>
-        <input id="sched-done-pattern" type="text" placeholder='e.g. "no more tasks", "all.*complete", "nothing to do"' autocomplete="off">
+      </div><!-- /sched-rec-fields -->
+      <div class="field-group" style="margin-top:4px;">
+        <label class="field-label">Event triggers <span class="field-optional">(runs in addition to the schedule above)</span></label>
+        <div style="display:flex;flex-direction:column;gap:4px;margin-top:2px;">
+          <label style="display:flex;align-items:center;gap:6px;cursor:pointer;font-size:0.8rem;">
+            <input type="checkbox" id="sched-trigger-idle" style="width:auto;accent-color:var(--accent);" onchange="updateSchedTriggerUI()">
+            A managed session goes idle <span style="color:var(--dim);font-size:0.7rem;">(a worker finished a turn)</span>
+          </label>
+          <label style="display:flex;align-items:center;gap:6px;cursor:pointer;font-size:0.8rem;">
+            <input type="checkbox" id="sched-trigger-board" style="width:auto;accent-color:var(--accent);" onchange="updateSchedTriggerUI()">
+            The board changes <span style="color:var(--dim);font-size:0.7rem;">(an issue is created/updated/moved)</span>
+          </label>
+        </div>
+        <div id="sched-trigger-cooldown-field" style="display:none;margin-top:6px;">
+          <label class="field-label">Only these sessions <span class="field-optional">(comma-separated; blank = any session)</span></label>
+          <input id="sched-trigger-sessions" type="text" placeholder="e.g. backend, mvs-infra, ts-gke" autocomplete="off" style="width:100%;box-sizing:border-box;">
+          <label class="field-label" style="margin-top:6px;">Trigger cooldown <span class="field-optional">(min seconds between event-fired runs)</span></label>
+          <input id="sched-trigger-cooldown" type="number" min="10" max="3600" value="120" style="width:100px;">
+        </div>
       </div>
       <div class="field-group">
-        <label class="field-label">When matched</label>
-        <select id="sched-done-action" class="board-detail-session-select" style="width:100%;">
-          <option value="disable">Stop schedule (disable)</option>
-          <option value="notify">Notify only (keep running)</option>
-        </select>
+        <label style="display:flex;align-items:center;gap:6px;cursor:pointer;font-size:0.8rem;font-weight:500;">
+          <input type="checkbox" id="sched-watch" style="width:auto;accent-color:var(--accent);" onchange="updateSchedWatchUI()">
+          Watch response
+        </label>
       </div>
-      <div class="field-group">
-        <label class="field-label">Watch timeout <span class="field-optional">(seconds to wait for response)</span></label>
-        <input id="sched-watch-timeout" type="number" min="10" max="600" value="120" style="width:100px;">
+      <div id="sched-watch-fields" style="display:none;">
+        <div class="field-group">
+          <label class="field-label">Done pattern <span class="field-optional">(text or regex to match in response)</span></label>
+          <input id="sched-done-pattern" type="text" placeholder='e.g. "no more tasks", "all.*complete", "nothing to do"' autocomplete="off">
+        </div>
+        <div class="field-group">
+          <label class="field-label">When matched</label>
+          <select id="sched-done-action" class="board-detail-session-select" style="width:100%;">
+            <option value="disable">Stop schedule (disable)</option>
+            <option value="notify">Notify only (keep running)</option>
+          </select>
+        </div>
+        <div class="field-group">
+          <label class="field-label">Watch timeout <span class="field-optional">(seconds to wait for response)</span></label>
+          <input id="sched-watch-timeout" type="number" min="10" max="600" value="120" style="width:100px;">
+        </div>
       </div>
-    </div>
-    <div style="display:flex;gap:8px;justify-content:flex-end;margin-top:12px;">
-      <button class="btn" onclick="closeSchedModal()">Cancel</button>
-      <button class="btn btn-primary" onclick="saveSchedModal()" id="sched-save-btn">Save</button>
-    </div>
+      <div style="display:flex;gap:8px;justify-content:flex-end;margin-top:10px;">
+        <button class="btn" onclick="closeSchedModal()">Cancel</button>
+        <button class="btn btn-primary" onclick="saveSchedModal()" id="sched-save-btn">Save</button>
+      </div>
+    </div><!-- /footer -->
   </div>
 </div>
 
@@ -13139,7 +13629,7 @@ setTimeout(function(){var f=document.getElementById('js-fallback');if(f&&f.style
     </div>
     <div class="field-group">
       <label class="field-label">Status</label>
-      <select id="be-status"><option value="backlog">Backlog</option><option value="todo">To Do</option><option value="doing">In Progress</option><option value="done">Done</option><option value="discarded">Discarded</option></select>
+      <select id="be-status"><option value="backlog">Backlog</option><option value="todo">To Do</option><option value="doing">In Progress</option><option value="review">In Review</option><option value="done">Done</option><option value="verified">Verified</option><option value="discarded">Discarded</option></select>
     </div>
     <div class="field-group">
       <label class="field-label">Due date <span class="field-optional">(optional)</span></label>
@@ -13291,6 +13781,26 @@ setTimeout(function(){var f=document.getElementById('js-fallback');if(f&&f.style
   </div>
 </div>
 
+<!-- Connect iTerm2 pane modal -->
+<div id="iterm2-connect-overlay" class="edit-overlay" onclick="if(event.target===this)closeConnectIterm2()">
+  <div class="edit-box" style="min-width:400px;max-width:560px;">
+    <h3>&#x1F5A5; Connect iTerm2 pane</h3>
+    <p style="font-size:0.82rem;color:var(--dim);margin:0 0 12px;">Pick an open iTerm2 pane to watch and send messages to from amux.</p>
+    <div id="iterm2-pane-list" style="max-height:300px;overflow-y:auto;margin-bottom:14px;display:flex;flex-direction:column;gap:6px;">
+      <div style="color:var(--dim);font-size:0.85rem;text-align:center;padding:20px;">Loading iTerm2 panes…</div>
+    </div>
+    <div style="display:flex;flex-direction:column;gap:8px;margin-bottom:14px;">
+      <label style="font-size:0.82rem;color:var(--dim);">Session name in amux</label>
+      <input id="iterm2-session-name" class="send-input" style="min-height:34px;padding:6px 10px;font-size:0.88rem;"
+        placeholder="e.g. my-terminal" autocomplete="off" autocorrect="off">
+    </div>
+    <div class="edit-actions">
+      <button class="btn" onclick="closeConnectIterm2()">Cancel</button>
+      <button class="btn primary" id="iterm2-connect-btn" onclick="connectIterm2Pane()" disabled>Connect</button>
+    </div>
+  </div>
+</div>
+
 <!-- Peek overlay -->
 <div id="peek-overlay" class="overlay">
   <div class="overlay-header" style="flex-direction:column;gap:6px;padding-bottom:10px;">
@@ -13310,6 +13820,7 @@ setTimeout(function(){var f=document.getElementById('js-fallback');if(f&&f.style
         <button class="search-clear" onclick="event.stopPropagation();clearPeekSearch()">&#x2715;</button>
       </div>
       <button class="btn peek-split-btn" id="peek-split-toggle" onclick="togglePeekSplit()" title="Split: file browser">&#x1F4C2;</button>
+      <button class="btn" id="peek-commitguard-btn" onclick="togglePeekCommitGuard()" title="Commit guard: nudge this session to commit on idle" style="font-size:0.7rem;padding:3px 8px;opacity:0.5;">&#x1F6E1;</button>
       <button class="btn" onclick="togglePeekFocus()" id="peek-focus-btn" title="Focus mode — hide controls">&#x25B4;</button>
       <button class="btn" onclick="closePeek()">Close</button>
     </div>
@@ -13324,7 +13835,7 @@ setTimeout(function(){var f=document.getElementById('js-fallback');if(f&&f.style
   <div class="peek-tabs">
     <button class="peek-tab active" id="peek-tab-terminal" onclick="setPeekTab('terminal')">Terminal</button>
     <button class="peek-tab" id="peek-tab-steering" onclick="setPeekTab('steering')">Steering<span class="peek-tab-count" id="peek-tab-steering-count"></span></button>
-    <button class="peek-tab" id="peek-tab-issues" onclick="setPeekTab('issues')">Issues</button>
+    <button class="peek-tab" id="peek-tab-issues" onclick="setPeekTab('issues')">Issues<span class="peek-tab-count" id="peek-tab-issues-count"></span></button>
     <button class="peek-tab" id="peek-tab-git" onclick="setPeekTab('git')">Worktree</button>
     <button class="peek-tab" id="peek-tab-commits" onclick="setPeekTab('commits')">Commits</button>
     <button class="peek-tab" id="peek-tab-schedules" onclick="setPeekTab('schedules')">Schedules<span class="peek-tab-count" id="peek-tab-schedules-count"></span></button>
@@ -13383,6 +13894,18 @@ setTimeout(function(){var f=document.getElementById('js-fallback');if(f&&f.style
   </div><!-- /peek-split-wrap -->
   <!-- Steering queue panel -->
   <div id="peek-steering-panel" class="peek-tasks-panel">
+    <div style="flex-shrink:0;border:1px solid var(--border);border-radius:8px;padding:10px;margin-bottom:8px;background:rgba(255,255,255,0.02);">
+      <div style="display:flex;align-items:center;gap:8px;margin-bottom:6px;">
+        <span style="font-size:0.8rem;font-weight:600;">Standing instructions</span>
+        <span style="font-size:0.68rem;color:var(--dim);flex:1;">Re-sent automatically whenever this session (re)starts — survives compaction.</span>
+      </div>
+      <textarea id="peek-instructions" rows="3" placeholder="e.g. Act autonomously — don't ask the user for permission or direction. Execute best practices for your mandate; pick the lowest-risk option. Record progress as evidence on your board items. Escalate only to the orchestrator if blocked outside your scope." style="width:100%;font-size:0.78rem;resize:vertical;box-sizing:border-box;"></textarea>
+      <div style="display:flex;gap:6px;justify-content:flex-end;margin-top:6px;align-items:center;">
+        <span id="peek-instructions-status" style="flex:1;font-size:0.7rem;color:var(--dim);"></span>
+        <button class="btn" style="font-size:0.75rem;padding:4px 12px;" onclick="savePeekInstructions(false)">Save</button>
+        <button class="btn primary" style="font-size:0.75rem;padding:4px 12px;" onclick="savePeekInstructions(true)" title="Save and send to the session now">Save &amp; apply now</button>
+      </div>
+    </div>
     <div class="peek-tasks-add" style="gap:10px;">
       <span id="peek-steering-count" style="flex:1;font-size:0.82rem;color:var(--dim);align-self:center;"></span>
       <button class="btn" style="font-size:0.8rem;padding:5px 12px;" onclick="_steeringClearAll()">Clear all</button>
@@ -13392,6 +13915,10 @@ setTimeout(function(){var f=document.getElementById('js-fallback');if(f&&f.style
   <!-- Issues panel (board issues for this session) -->
   <div id="peek-issues-panel" class="peek-tasks-panel">
     <div class="peek-tasks-add" style="gap:10px;">
+      <div class="board-view-toggle">
+        <button id="piv-list" class="bv-btn" onclick="setPeekIssuesView('list')" title="List view">&#x2630;</button>
+        <button id="piv-kanban" class="bv-btn" onclick="setPeekIssuesView('kanban')" title="Board view">&#x25A4;</button>
+      </div>
       <span id="peek-issues-count" style="flex:1;font-size:0.82rem;color:var(--dim);align-self:center;"></span>
       <button class="btn primary" style="font-size:0.8rem;padding:5px 12px;" onclick="openBoardAdd('backlog')">+ New issue</button>
     </div>
@@ -13564,6 +14091,7 @@ setTimeout(function(){var f=document.getElementById('js-fallback');if(f&&f.style
       <option value="opus">opus</option>
       <option value="sonnet">sonnet</option>
       <option value="haiku">haiku</option>
+      <option value="claude-fable-5">claude-fable-5</option>
       <option value="claude-opus-4-8">claude-opus-4-8</option>
       <option value="claude-opus-4-8[1m]">claude-opus-4-8 [1M]</option>
       <option value="claude-opus-4-7">claude-opus-4-7</option>
@@ -13911,6 +14439,7 @@ let peekSearchQuery = '';
 let peekSearchIndex = 0;
 let _peekMatches = [];
 let lastPeekHTML = '';
+let _lastPeekRaw = '';   // raw output from last peek — skip re-render if unchanged
 const _peekDrafts = {};  // session name → command text
 
 // ═══════ ZOOM ═══════
@@ -14989,12 +15518,13 @@ function flagValue(flags, flag) {
 function providerLabel(provider) {
   if (provider === 'codex') return 'Codex';
   if (provider === 'gemini') return 'Gemini';
+  if (provider === 'iterm2') return 'iTerm2';
   return 'Claude';
 }
 
 function sessionProvider(s) {
   const p = ((s && s.provider) || 'claude').toLowerCase();
-  return (p === 'codex' || p === 'gemini') ? p : 'claude';
+  return (p === 'codex' || p === 'gemini' || p === 'iterm2') ? p : 'claude';
 }
 
 function providerDefaultModel(provider) {
@@ -15917,6 +16447,7 @@ function editField(session, field, current, provider) {
   } else if (field === 'model') {
     const claudeModels = [
       {v:'',l:'Default'},{v:'opus',l:'opus'},{v:'sonnet',l:'sonnet'},{v:'haiku',l:'haiku'},
+      {v:'claude-fable-5',l:'claude-fable-5'},
       {v:'claude-opus-4-8',l:'claude-opus-4-8'},{v:'claude-opus-4-8[1m]',l:'claude-opus-4-8 [1M]'},
       {v:'claude-opus-4-7',l:'claude-opus-4-7'},{v:'claude-opus-4-7[1m]',l:'claude-opus-4-7 [1M]'},
       {v:'claude-opus-4-6',l:'claude-opus-4-6'},{v:'claude-opus-4-6[1m]',l:'claude-opus-4-6 [1M]'},
@@ -16467,7 +16998,7 @@ function setPeekTab(tab) {
   document.getElementById('peek-terminal-panel').style.display = tab === 'terminal' ? '' : 'none';
   document.getElementById('peek-split-wrap').style.display = tab === 'terminal' ? '' : 'none';
   const steering = document.getElementById('peek-steering-panel');
-  if (tab === 'steering') { steering.classList.add('active'); _steeringRender(); }
+  if (tab === 'steering') { steering.classList.add('active'); _steeringRender(); loadPeekInstructions(); }
   else { steering.classList.remove('active'); }
   const issues = document.getElementById('peek-issues-panel');
   if (tab === 'issues') { issues.classList.add('active'); renderPeekIssues(); }
@@ -16484,6 +17015,36 @@ function setPeekTab(tab) {
   const notes = document.getElementById('peek-notes-panel');
   if (tab === 'notes') { notes.classList.add('active'); _peekNotesLoad(); }
   else { notes.classList.remove('active'); }
+}
+
+// ── Standing instructions (autonomy config) ──
+async function loadPeekInstructions() {
+  if (!peekSession) return;
+  const ta = document.getElementById('peek-instructions');
+  const status = document.getElementById('peek-instructions-status');
+  if (!ta) return;
+  if (status) status.textContent = '';
+  try {
+    const r = await fetch(API + '/api/sessions/' + encodeURIComponent(peekSession) + '/instructions');
+    const d = await r.json();
+    if (peekSession && document.getElementById('peek-instructions'))
+      document.getElementById('peek-instructions').value = d.instructions || '';
+  } catch(e) {}
+}
+async function savePeekInstructions(apply) {
+  if (!peekSession) return;
+  const ta = document.getElementById('peek-instructions');
+  const status = document.getElementById('peek-instructions-status');
+  const body = { instructions: ta.value };
+  if (apply) body.apply = true;
+  const r = await apiCall(API + '/api/sessions/' + encodeURIComponent(peekSession) + '/instructions', {
+    method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify(body)
+  });
+  if (r && status) {
+    const d = await r.json().catch(() => ({}));
+    status.textContent = d.applied ? 'Saved & sent to session' : 'Saved';
+    setTimeout(() => { if (status) status.textContent = ''; }, 3000);
+  }
 }
 
 // ── Steering panel ──
@@ -17016,15 +17577,46 @@ function peekGitOpenPR() {
 }
 
 // ── Peek Issues (board issues for this session) ──────────────────────────────
+let _peekIssuesView = localStorage.getItem('amux_peek_issues_view') || 'list';
+let _peekIssuesSortables = [];
+
+function setPeekIssuesView(mode) {
+  _peekIssuesView = mode;
+  localStorage.setItem('amux_peek_issues_view', mode);
+  renderPeekIssues();
+}
+
 function renderPeekIssues() {
+  // Don't rebuild mid-drag — a board SSE refresh would destroy the active Sortable.
+  if (document.body.classList.contains('board-dragging')) return;
   const list = document.getElementById('peek-issues-list');
   const count = document.getElementById('peek-issues-count');
   const items = (boardItems || []).filter(i => i.session === peekSession && !i.deleted);
   count.textContent = items.length ? items.length + ' issue' + (items.length === 1 ? '' : 's') : '';
+  const tabCount = document.getElementById('peek-tab-issues-count');
+  if (tabCount) {
+    if (items.length > 0) { tabCount.textContent = items.length; tabCount.classList.add('has-count'); }
+    else { tabCount.textContent = ''; tabCount.classList.remove('has-count'); }
+  }
+  // Sync toggle active state
+  const bL = document.getElementById('piv-list'), bK = document.getElementById('piv-kanban');
+  if (bL) bL.classList.toggle('active', _peekIssuesView === 'list');
+  if (bK) bK.classList.toggle('active', _peekIssuesView === 'kanban');
+  // Tear down any kanban Sortables from a previous render
+  _peekIssuesSortables.forEach(s => { try { s.destroy(); } catch(e) {} });
+  _peekIssuesSortables = [];
+  list.classList.toggle('peek-issues-kanban', _peekIssuesView === 'kanban');
+
   if (!items.length) {
     list.innerHTML = '<div style="color:var(--dim);font-size:0.85rem;padding:12px 4px;">No issues for this session yet.</div>';
     return;
   }
+
+  if (_peekIssuesView === 'kanban') {
+    _renderPeekIssuesKanban(items, list);
+    return;
+  }
+
   list.innerHTML = items.map(item => {
     const sty = statusStyle(item.status || 'todo');
     const badge = '<span class="status-badge" style="background:' + sty.bg + ';color:' + sty.color + ';border:1px solid ' + sty.border + ';font-size:0.7rem;padding:1px 6px;border-radius:10px;">' + esc(item.status || 'todo') + '</span>';
@@ -17035,6 +17627,87 @@ function renderPeekIssues() {
       '<span class="peek-issue-meta">' + badge + due + '</span>' +
       '</div>';
   }).join('');
+}
+
+function _renderPeekIssuesKanban(items, list) {
+  // Group this session's issues by status, mirroring the regular board columns.
+  const cols = {};
+  boardStatuses.forEach(s => { cols[s.id] = []; });
+  items.forEach(item => {
+    const s = item.status || 'todo';
+    if (cols[s] !== undefined) cols[s].push(item);
+    else (cols['todo'] = cols['todo'] || []).push(item);
+  });
+
+  let html = '<div class="board-columns" id="peek-issues-cols">';
+  boardStatuses.forEach(stObj => {
+    const st = stObj.id;
+    const stCol = cols[st] || [];
+    const sty = statusStyle(st);
+    html += '<div class="board-col" data-col="' + st + '">';
+    html += '<div class="board-col-header" style="cursor:default;">';
+    html += '<span style="color:' + sty.color + '">' + esc(stObj.label) + '</span>';
+    html += '<span class="col-count">' + stCol.length + '</span>';
+    html += '</div>';
+    if (stCol.length === 0) html += '<div class="board-empty">Nothing here</div>';
+    stCol.sort((a, b) => {
+      const pp = (b.pinned || 0) - (a.pinned || 0);
+      if (pp !== 0) return pp;
+      const ap = a.pos || 0, bp = b.pos || 0;
+      if (ap === 0 && bp === 0) return (b.updated || 0) - (a.updated || 0);
+      if (ap === 0) return 1;
+      if (bp === 0) return -1;
+      return ap - bp;
+    });
+    stCol.forEach(item => { html += _renderBoardCard(item); });
+    html += '<button class="board-add-btn" onclick="openBoardAdd(\'' + st + '\')">+ Add</button>';
+    html += '</div>';
+  });
+  html += '</div>';
+  list.innerHTML = html;
+
+  // Drag-to-change-status, scoped to this session's columns (separate Sortable
+  // group so it never interferes with the main board).
+  if (typeof Sortable === 'undefined') return;
+  list.querySelectorAll('.board-col').forEach(colEl => {
+    _peekIssuesSortables.push(Sortable.create(colEl, {
+      group: 'peek-issues',
+      animation: 120,
+      handle: '.board-drag-handle',
+      ghostClass: 'board-sortable-ghost',
+      chosenClass: 'board-sortable-chosen',
+      dragClass: 'board-sortable-drag',
+      filter: '.board-col-header, .board-add-btn, .board-empty',
+      preventOnFilter: false,
+      delay: 120,
+      delayOnTouchOnly: true,
+      touchStartThreshold: 3,
+      swapThreshold: 0.6,
+      onStart: function() { document.body.classList.add('board-dragging'); },
+      onEnd: function(evt) {
+        document.body.classList.remove('board-dragging');
+        const id = evt.item.dataset.id;
+        const newStatus = evt.to.dataset.col;
+        if (!id || !newStatus) { renderPeekIssues(); return; }
+        const cards = [...evt.to.querySelectorAll('.board-card[data-id]')];
+        const myIdx = cards.findIndex(el => el.dataset.id === id);
+        const prevEl = myIdx > 0 ? cards[myIdx - 1] : null;
+        const nextEl = myIdx >= 0 && myIdx < cards.length - 1 ? cards[myIdx + 1] : null;
+        const prevItem = prevEl ? boardItems.find(i => i.id === prevEl.dataset.id) : null;
+        const nextItem = nextEl ? boardItems.find(i => i.id === nextEl.dataset.id) : null;
+        const prevPos = prevItem && prevItem.pos ? prevItem.pos : null;
+        const nextPos = nextItem && nextItem.pos ? nextItem.pos : null;
+        let newPos;
+        if (prevPos != null && nextPos != null) newPos = (prevPos + nextPos) / 2;
+        else if (prevPos != null) newPos = prevPos + 1024;
+        else if (nextPos != null) newPos = nextPos - 1024;
+        else newPos = Date.now() / 1000;
+        const item = boardItems.find(i => i.id === id);
+        if (item && (item.status !== newStatus || item.pos !== newPos)) moveBoardItem(id, newStatus, newPos);
+        renderPeekIssues();
+      }
+    }));
+  });
 }
 // ── Peek Schedules (scheduler tasks for this session) ────────────────────────
 async function _peekUpdateTabCounts() {
@@ -17050,6 +17723,10 @@ async function _peekUpdateTabCounts() {
     const s = sessions.find(s => s.name === sess);
     const sq = (s && s.steering) || [];
     setCount('peek-tab-steering-count', sq.length);
+  }
+  {
+    const n = (boardItems || []).filter(i => i.session === sess && !i.deleted).length;
+    setCount('peek-tab-issues-count', n);
   }
   try {
     const r = await fetch(API + '/api/schedules');
@@ -17105,6 +17782,7 @@ async function _peekLoadSchedules() {
         '<div style="display:flex;gap:4px;margin-top:4px;">' +
           '<button class="btn" style="font-size:0.7rem;padding:2px 8px;" onclick="event.stopPropagation();_peekToggleSchedule(\'' + esc(s.id) + '\',' + (s.enabled ? 0 : 1) + ')">' + (s.enabled ? 'Disable' : 'Enable') + '</button>' +
           '<button class="btn" style="font-size:0.7rem;padding:2px 8px;" onclick="event.stopPropagation();_peekRunSchedule(\'' + esc(s.id) + '\')">Run now</button>' +
+          '<button class="btn" style="font-size:0.7rem;padding:2px 8px;" onclick="event.stopPropagation();_peekEditSchedule(\'' + esc(s.id) + '\')">Edit</button>' +
           '<button class="btn" style="font-size:0.7rem;padding:2px 8px;color:var(--red);" onclick="event.stopPropagation();_peekDeleteSchedule(\'' + esc(s.id) + '\')">Delete</button>' +
         '</div>' +
       '</div>';
@@ -17129,6 +17807,12 @@ async function _peekDeleteSchedule(id) {
   if (!confirm('Delete this schedule?')) return;
   await apiCall(API + '/api/schedules/' + id, { method: 'DELETE' });
   _peekLoadSchedules();
+}
+async function _peekEditSchedule(id) {
+  // openSchedModal reads from the global `schedules` array, which the peek
+  // panel doesn't populate on its own — refresh it first so edit prefills.
+  await fetchSchedules();
+  openSchedModal(id);
 }
 function _peekNewSchedule() {
   const title = prompt('Schedule title:');
@@ -17572,6 +18256,7 @@ function openPeek(name, opts) {
   peekSearchIndex = 0;
   _peekMatches = [];
   lastPeekHTML = '';
+  _lastPeekRaw = '';
   const searchInp = document.getElementById('peek-search');
   if (searchInp) {
     searchInp.value = prefillQuery;
@@ -17589,11 +18274,12 @@ function openPeek(name, opts) {
   updatePeekStatus();
   document.getElementById('peek-body').innerHTML = '<span style="color:var(--dim)">Loading...</span>';
   // Reset tab badges; will be repopulated by _peekUpdateTabCounts
-  ['peek-tab-steering-count','peek-tab-schedules-count','peek-tab-notes-count'].forEach(id => {
+  ['peek-tab-steering-count','peek-tab-issues-count','peek-tab-schedules-count','peek-tab-notes-count'].forEach(id => {
     const el = document.getElementById(id);
     if (el) { el.textContent = ''; el.classList.remove('has-count'); }
   });
   _peekUpdateTabCounts();
+  loadPeekCommitGuard(name);
   updateConnectionStatus();
   const peekOv = document.getElementById('peek-overlay');
   peekOv.classList.add('active');
@@ -17606,7 +18292,7 @@ function openPeek(name, opts) {
   _idb.get('peek_' + name).then(cached => {
     if (peekSession !== name) return;  // session changed before cache resolved
     if (cached && (!lastPeekHTML || lastPeekHTML.includes('Loading...'))) {
-      lastPeekHTML = highlightPrompts(linkifyOutput(stripAnsi(cached.output)));
+      lastPeekHTML = highlightPrompts(ansiToHtml(cached.output));
       applyPeekSearch();
       const ago = Math.floor((Date.now() - cached.time) / 60000);
       document.getElementById('peek-status').textContent = 'Cached ' + (ago < 1 ? 'just now' : ago + 'm ago');
@@ -17615,7 +18301,7 @@ function openPeek(name, opts) {
     }
   });
   refreshPeek();
-  peekTimer = setInterval(refreshPeek, 3000);
+  peekTimer = setInterval(refreshPeek, 1500);
   _savePeekState();
 }
 
@@ -17879,15 +18565,98 @@ function rewriteLocalhostUrls(html) {
 
 // ═══════ PEEK MODE ═══════
 function stripAnsi(text) {
-  // Strip ANSI escape sequences (colors, cursor movement, OSC hyperlinks, etc.)
   return text
-    .replace(/\x1b\]8;[^\x1b]*\x1b\\/g, '')  // OSC 8 hyperlinks
-    .replace(/\x1b\[[0-9;?]*[a-zA-Z]/g, '')    // CSI sequences (colors, DEC private modes, etc.)
-    .replace(/\x1b\][^\x07]*\x07/g, '')        // OSC sequences (BEL terminated)
-    .replace(/\x1b\][^\x1b]*\x1b\\/g, '')      // OSC sequences (ST terminated)
-    .replace(/\x1b[()][A-Z0-9]/g, '')          // Character set selection
-    .replace(/\x1b[\x20-\x2f]*[\x40-\x7e]/g, '')   // Other escape sequences
-    .replace(/^─{10,}\n?/gm, '');   // Remove decorative separator lines (mobile readability)
+    .replace(/\x1b\]8;[^\x1b]*\x1b\\/g, '')
+    .replace(/\x1b\[[0-9;?]*[a-zA-Z]/g, '')
+    .replace(/\x1b\][^\x07]*\x07/g, '')
+    .replace(/\x1b\][^\x1b]*\x1b\\/g, '')
+    .replace(/\x1b[()][A-Z0-9]/g, '')
+    .replace(/\x1b[\x20-\x2f]*[\x40-\x7e]/g, '')
+    .replace(/^─{10,}\n?/gm, '');
+}
+
+function ansiToHtml(text) {
+  // Convert ANSI SGR color codes to HTML spans. Also HTML-escapes and linkifies text.
+  const C16 = ['#1c1c1c','#cc0000','#4e9a06','#c4a000','#3465a4','#75507b','#06989a','#d3d7cf',
+               '#888a85','#ef2929','#8ae234','#fce94f','#729fcf','#ad7fa8','#34e2e2','#eeeeec'];
+  const c256 = n => {
+    if (n < 16) return C16[n];
+    if (n < 232) { const i=n-16,b=i%6,g=Math.floor(i/6)%6,r=Math.floor(i/36),v=x=>x?55+x*40:0; return `rgb(${v(r)},${v(g)},${v(b)})`; }
+    const v=8+(n-232)*10; return `rgb(${v},${v},${v})`;
+  };
+  // Strip non-SGR sequences, preserve \x1b[...m (SGR color codes)
+  let t = text
+    .replace(/\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)/g,'')        // OSC sequences
+    .replace(/\x1b[()][A-Z0-9]/g,'')                          // charset selection
+    .replace(/\x1b[\x20-\x2f]*[\x40-\x5a\x5c-\x7e]/g,'')     // other C1 (excl [ = 0x5b)
+    .replace(/\x1b\[[0-9;?]*[A-Za-ln-z]/g,'')                 // CSI non-SGR (not m)
+    .replace(/^─{10,}\n?/gm,'');
+  let bold=false,dim=false,italic=false,uline=false,fg=null,bg=null,spanOpen=false;
+  const closeSpan=()=>{ if(!spanOpen)return ''; spanOpen=false; return '</span>'; };
+  const openSpan=()=>{
+    const s=[];
+    if(bold)s.push('font-weight:bold');
+    if(dim)s.push('opacity:0.5');
+    if(italic)s.push('font-style:italic');
+    if(uline)s.push('text-decoration:underline');
+    if(fg)s.push('color:'+fg);
+    if(bg)s.push('background:'+bg);
+    if(!s.length)return ''; spanOpen=true; return `<span style="${s.join(';')}">`;
+  };
+  const eh=s=>s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+  const linkChunk=raw=>{
+    const urlRe=/https?:\/\/[^\s<>\]\)'"`,;]+/g;
+    const fileRe=/(?:^|[\s(])((\/[\w./-]+(?:\.\w+)(?::[\d]+)?)|(\.\/[\w./-]+(?:\.\w+)(?::[\d]+)?))/gm;
+    const mx=[]; let m;
+    while((m=urlRe.exec(raw))!==null){const u=m[0].replace(/[.,;:!?)]+$/,'');mx.push({start:m.index,end:m.index+u.length,type:'url',value:u});}
+    while((m=fileRe.exec(raw))!==null){const p=m[1],ps=m.index+m[0].indexOf(p),pe=ps+p.length;if(!mx.some(x=>ps<x.end&&pe>x.start))mx.push({start:ps,end:pe,type:'file',value:p});}
+    mx.sort((a,b)=>a.start-b.start);
+    let out='',last=0;
+    for(const x of mx){
+      if(x.start>last)out+=eh(raw.slice(last,x.start));
+      if(x.type==='url'){out+=`<a href="${eh(x.value)}" target="_blank" rel="noopener noreferrer">${eh(x.value)}</a>`;}
+      else{const rp=x.value.replace(/:[\d]+$/,'');const cls=/\.md$/i.test(rp)?'md-link':'file-link';out+=`<span class="${cls}" onclick="if(window.getSelection().toString())return;event.preventDefault();event.stopPropagation();openFilePreview('${eh(rp)}')">${eh(x.value)}</span>`;}
+      last=x.end;
+    }
+    if(last<raw.length)out+=eh(raw.slice(last));
+    return rewriteLocalhostUrls(out);
+  };
+  const parts=t.split(/(\x1b\[[0-9;]*m)/);
+  let out='';
+  for(let i=0;i<parts.length;i++){
+    const p=parts[i];
+    if(p.startsWith('\x1b[')&&p.endsWith('m')){
+      out+=closeSpan();
+      const codes=p.slice(2,-1).split(';').map(s=>s===''?0:+s);
+      let j=0;
+      while(j<codes.length){
+        const c=codes[j];
+        if(c===0){bold=dim=italic=uline=false;fg=bg=null;}
+        else if(c===1)bold=true;
+        else if(c===2)dim=true;
+        else if(c===3)italic=true;
+        else if(c===4)uline=true;
+        else if(c===22){bold=false;dim=false;}
+        else if(c===23)italic=false;
+        else if(c===24)uline=false;
+        else if(c>=30&&c<=37)fg=C16[c-30];
+        else if(c===39)fg=null;
+        else if(c>=40&&c<=47)bg=C16[c-40];
+        else if(c===49)bg=null;
+        else if(c>=90&&c<=97)fg=C16[c-82];
+        else if(c>=100&&c<=107)bg=C16[c-92];
+        else if(c===38&&codes[j+1]===5){fg=c256(codes[j+2]);j+=2;}
+        else if(c===38&&codes[j+1]===2){fg=`rgb(${codes[j+2]},${codes[j+3]},${codes[j+4]})`;j+=4;}
+        else if(c===48&&codes[j+1]===5){bg=c256(codes[j+2]);j+=2;}
+        else if(c===48&&codes[j+1]===2){bg=`rgb(${codes[j+2]},${codes[j+3]},${codes[j+4]})`;j+=4;}
+        j++;
+      }
+      out+=openSpan();
+    } else if(p){
+      out+=linkChunk(p);
+    }
+  }
+  return out+closeSpan();
 }
 
 function linkifyOutput(text) {
@@ -17950,8 +18719,9 @@ function highlightPrompts(html) {
   const out = [];
   for (let i = 0; i < lines.length; i++) {
     const raw = lines[i];
-    const isPromptStart = raw.startsWith('❯');
-    const isContinuation = inPrompt && /^  \S/.test(raw);
+    const textStart = raw.replace(/^(<[^>]*>)+/, '');
+    const isPromptStart = textStart.startsWith('❯');
+    const isContinuation = inPrompt && /^  \S/.test(textStart);
     if (isPromptStart) {
       inPrompt = true;
       out.push('<span class="peek-prompt">' + raw);
@@ -18002,13 +18772,19 @@ async function refreshPeek() {
   const body = document.getElementById('peek-body');
   const statusEl = document.getElementById('peek-status');
   try {
-    const r = await fetch(API + '/api/sessions/' + name + '/peek?lines=500');
+    const r = await fetch(API + '/api/sessions/' + name + '/peek?lines=300');
     const data = await r.json();
     if (peekSession !== name) return;
     const output = data.output || '(no output)';
+    // Skip re-render when output is identical — saves ansiToHtml work on every poll tick
+    if (output === _lastPeekRaw && lastPeekHTML && !peekSearchQuery.trim()) {
+      statusEl.textContent = 'Updated ' + new Date().toLocaleTimeString();
+      return;
+    }
+    _lastPeekRaw = output;
     const atBottom = _isScrolledToBottom(body);
     if (atBottom) _peekScrollLocked = false;
-    const newHTML = highlightPrompts(linkifyOutput(stripAnsi(output)));
+    const newHTML = highlightPrompts(ansiToHtml(output));
     if (peekSelecting || (window.getSelection()?.toString().length > 0)) return;
     if (_sendingSnapshot && newHTML !== _sendingSnapshot) clearSendingIndicator();
     lastPeekHTML = newHTML;
@@ -18033,7 +18809,7 @@ async function refreshPeek() {
     if (!lastPeekHTML || lastPeekHTML.includes('Loading...')) {
       const cached = await _idb.get('peek_' + peekSession);
       if (cached) {
-        lastPeekHTML = highlightPrompts(linkifyOutput(stripAnsi(cached.output)));
+        lastPeekHTML = highlightPrompts(ansiToHtml(cached.output));
         applyPeekSearch();
         const ago = Math.floor((Date.now() - cached.time) / 60000);
         statusEl.textContent = 'Cached ' + (ago < 1 ? 'just now' : ago + 'm ago');
@@ -21277,6 +22053,85 @@ async function doConnect(tmuxName) {
   await fetchSessions();
 }
 
+// ── Connect iTerm2 pane ──
+let _iterm2SelectedPaneId = null;
+
+async function openConnectIterm2() {
+  _iterm2SelectedPaneId = null;
+  document.getElementById('iterm2-session-name').value = '';
+  document.getElementById('iterm2-connect-btn').disabled = true;
+  document.getElementById('iterm2-connect-overlay').classList.add('active');
+  const list = document.getElementById('iterm2-pane-list');
+  list.innerHTML = '<div style="color:var(--dim);font-size:0.85rem;text-align:center;padding:20px;">Loading iTerm2 panes…</div>';
+  try {
+    const r = await fetch(API + '/api/iterm2/sessions');
+    const d = await r.json();
+    const panes = d.panes || [];
+    if (!panes.length) {
+      list.innerHTML = '<div style="color:var(--dim);font-size:0.85rem;text-align:center;padding:20px;">No open iTerm2 panes found.<br>Make sure iTerm2 is running.</div>';
+      return;
+    }
+    list.innerHTML = panes.map(p => `
+      <div class="connect-item iterm2-pane-item" data-id="${esc(p.id)}" data-name="${esc(p.name)}"
+           onclick="_selectIterm2Pane(this, '${esc(p.id)}', '${esc(p.name)}')"
+           style="cursor:pointer;padding:10px 12px;border:1px solid var(--border);border-radius:6px;transition:border-color 0.15s;"
+           onmouseenter="this.style.borderColor='var(--accent)'" onmouseleave="if(!this.classList.contains('selected'))this.style.borderColor='var(--border)'">
+        <div style="font-weight:500;font-size:0.88rem;">${esc(p.name)}</div>
+        <div style="font-size:0.75rem;color:var(--dim);margin-top:2px;">${esc(p.tty)} &nbsp;·&nbsp; window ${p.window}, tab ${p.tab}</div>
+      </div>`).join('');
+  } catch(e) {
+    list.innerHTML = '<div style="color:var(--red);font-size:0.85rem;text-align:center;padding:20px;">Failed to reach iTerm2.<br>Make sure iTerm2 is running.</div>';
+  }
+}
+
+function _selectIterm2Pane(el, id, name) {
+  document.querySelectorAll('.iterm2-pane-item').forEach(e => {
+    e.classList.remove('selected');
+    e.style.borderColor = 'var(--border)';
+    e.style.background = '';
+  });
+  el.classList.add('selected');
+  el.style.borderColor = 'var(--accent)';
+  el.style.background = 'rgba(88,166,255,0.06)';
+  _iterm2SelectedPaneId = id;
+  const inp = document.getElementById('iterm2-session-name');
+  if (!inp.value) {
+    // Auto-fill session name from pane title, sanitized
+    inp.value = name.replace(/[^a-zA-Z0-9_-]/g, '-').replace(/-+/g, '-').replace(/^-|-$/g, '').slice(0, 40) || 'iterm2';
+  }
+  document.getElementById('iterm2-connect-btn').disabled = false;
+}
+
+function closeConnectIterm2() {
+  document.getElementById('iterm2-connect-overlay').classList.remove('active');
+  _iterm2SelectedPaneId = null;
+}
+
+async function connectIterm2Pane() {
+  if (!_iterm2SelectedPaneId) return;
+  const name = document.getElementById('iterm2-session-name').value.trim();
+  if (!name) { showToast('Enter a session name'); return; }
+  const btn = document.getElementById('iterm2-connect-btn');
+  btn.disabled = true;
+  btn.textContent = 'Connecting…';
+  try {
+    const r = await fetch(API + '/api/sessions', {
+      method: 'POST', headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({ name, provider: 'iterm2', iterm2_session_id: _iterm2SelectedPaneId })
+    });
+    const d = await r.json();
+    if (!r.ok) { showToast('Error: ' + (d.error || r.status)); btn.disabled = false; btn.textContent = 'Connect'; return; }
+    closeConnectIterm2();
+    await fetchSessions();
+    showToast('Connected: ' + name);
+    setTimeout(() => openPeek(name), 300);
+  } catch(e) {
+    showToast('Error: ' + e.message);
+    btn.disabled = false;
+    btn.textContent = 'Connect';
+  }
+}
+
 // ── Create session ──
 let _createBranchEdited = false;  // track if user manually changed branch name
 let _createDirIsGit = false;     // track if current dir is a git repo
@@ -22434,7 +23289,7 @@ function _fmtRelTime(ts) {
 // ═══════ BOARD ═══════
 let activeView = 'sessions';
 let boardItems = [];
-let boardStatuses = [{id:'backlog',label:'Backlog'},{id:'todo',label:'To Do'},{id:'doing',label:'In Progress'},{id:'done',label:'Done'},{id:'discarded',label:'Discarded'}];
+let boardStatuses = [{id:'backlog',label:'Backlog'},{id:'todo',label:'To Do'},{id:'doing',label:'In Progress'},{id:'review',label:'In Review'},{id:'done',label:'Done'},{id:'verified',label:'Verified'},{id:'discarded',label:'Discarded'}];
 let _boardSortables = [];
 let _boardColSortable = null;
 let boardTimer = null;
@@ -22465,6 +23320,7 @@ const _BUILT_IN_STATUS_STYLE = {
   'todo':      {bg:'rgba(139,148,158,0.12)',color:'var(--dim)',border:'rgba(139,148,158,0.3)',dot:'var(--dim)'},
   'doing':     {bg:'rgba(210,153,34,0.15)',color:'var(--yellow)',border:'rgba(210,153,34,0.4)',dot:'var(--yellow)'},
   'done':      {bg:'rgba(63,185,80,0.15)',color:'var(--green)',border:'rgba(63,185,80,0.4)',dot:'var(--green)'},
+  'verified':  {bg:'rgba(45,212,191,0.15)',color:'#2dd4bf',border:'rgba(45,212,191,0.4)',dot:'#2dd4bf'},
   'discarded': {bg:'rgba(139,148,158,0.08)',color:'rgba(139,148,158,0.5)',border:'rgba(139,148,158,0.2)',dot:'rgba(139,148,158,0.4)'},
 };
 // Light-mode versions of the same statuses — opaque/dark enough on white
@@ -22473,6 +23329,7 @@ const _BUILT_IN_STATUS_STYLE_LIGHT = {
   'todo':      {bg:'rgba(101,109,118,0.1)',color:'#57606a',border:'rgba(101,109,118,0.3)',dot:'#57606a'},
   'doing':     {bg:'rgba(154,103,0,0.1)',color:'#7d4e00',border:'rgba(154,103,0,0.35)',dot:'#7d4e00'},
   'done':      {bg:'rgba(26,127,55,0.1)',color:'#1a7f37',border:'rgba(26,127,55,0.35)',dot:'#1a7f37'},
+  'verified':  {bg:'rgba(13,148,136,0.1)',color:'#0d9488',border:'rgba(13,148,136,0.35)',dot:'#0d9488'},
   'discarded': {bg:'rgba(101,109,118,0.07)',color:'#57606a',border:'rgba(101,109,118,0.2)',dot:'#57606a'},
 };
 const _CUSTOM_STATUS_PALETTE = [
@@ -23900,6 +24757,7 @@ function renderScheduler() {
               <span>runs: <strong>${s.run_count || 0}</strong></span>
               ${s.watch ? `<span style="color:var(--accent);">👁 watching</span>` : ''}
               ${s.done_pattern ? `<span style="color:var(--dim);">stop: <code style="font-size:0.65rem;">${esc(s.done_pattern)}</code></span>` : ''}
+              ${s.trigger_on ? `<span style="color:var(--accent);" title="Event-triggered (cooldown ${s.trigger_cooldown||120}s)">⚡ ${esc((s.trigger_on||'').split(',').map(t=>t==='session_idle'?'on idle':t==='board'?'on board':t).join(' + '))}</span>` : ''}
             </div>
             <div style="display:flex;gap:6px;margin-top:8px;flex-wrap:wrap;">
               <button class="btn" style="font-size:0.72rem;padding:4px 12px;"
@@ -24369,7 +25227,7 @@ function renderBoard() {
     oldRects[id] = { top: r.top, left: r.left };
   });
 
-  const builtIn = new Set(['backlog','todo','doing','done','discarded']);
+  const builtIn = new Set(['backlog','todo','doing','review','done','verified','discarded']);
   let html = '';
   boardStatuses.forEach(stObj => {
     const st = stObj.id;
@@ -24583,6 +25441,29 @@ function updateSchedWatchUI() {
   document.getElementById('sched-watch-fields').style.display =
     document.getElementById('sched-watch').checked ? '' : 'none';
 }
+function updateSchedTriggerUI() {
+  const any = document.getElementById('sched-trigger-idle').checked ||
+              document.getElementById('sched-trigger-board').checked;
+  document.getElementById('sched-trigger-cooldown-field').style.display = any ? '' : 'none';
+}
+function schedCmdSwitchMode(mode) {
+  const ta = document.getElementById('sched-command');
+  const preview = document.getElementById('sched-command-preview');
+  const editTab = document.getElementById('sched-cmd-tab-edit');
+  const prevTab = document.getElementById('sched-cmd-tab-preview');
+  if (mode === 'preview') {
+    preview.innerHTML = renderMarkdown(ta.value) || '<span style="color:var(--dim);font-size:0.85rem;">Nothing to preview</span>';
+    ta.style.display = 'none';
+    preview.style.display = 'block';
+    editTab.classList.remove('active');
+    prevTab.classList.add('active');
+  } else {
+    preview.style.display = 'none';
+    ta.style.display = 'block';
+    editTab.classList.add('active');
+    prevTab.classList.remove('active');
+  }
+}
 function updateSchedKindUI() {
   const kind = document.getElementById('sched-kind').value;
   document.getElementById('sched-session-group').style.display = kind === 'shell' ? 'none' : '';
@@ -24614,6 +25495,11 @@ function openSchedModal(editId) {
       document.getElementById('sched-done-pattern').value = s.done_pattern || '';
       document.getElementById('sched-done-action').value = s.done_action || 'disable';
       document.getElementById('sched-watch-timeout').value = s.watch_timeout || 120;
+      const trig = (s.trigger_on || '').split(',').map(x => x.trim());
+      document.getElementById('sched-trigger-idle').checked = trig.includes('session_idle');
+      document.getElementById('sched-trigger-board').checked = trig.includes('board');
+      document.getElementById('sched-trigger-cooldown').value = s.trigger_cooldown || 120;
+      document.getElementById('sched-trigger-sessions').value = s.trigger_sessions || '';
     }
     document.getElementById('sched-save-btn').textContent = 'Update';
   } else {
@@ -24627,14 +25513,24 @@ function openSchedModal(editId) {
     document.getElementById('sched-done-pattern').value = '';
     document.getElementById('sched-done-action').value = 'disable';
     document.getElementById('sched-watch-timeout').value = 120;
+    document.getElementById('sched-trigger-idle').checked = false;
+    document.getElementById('sched-trigger-board').checked = false;
+    document.getElementById('sched-trigger-cooldown').value = 120;
+    document.getElementById('sched-trigger-sessions').value = '';
     document.getElementById('sched-save-btn').textContent = 'Save';
   }
   updateSchedTypeUI();
   updateSchedRecUI();
   updateSchedWatchUI();
+  updateSchedTriggerUI();
   updateSchedKindUI();
+  schedCmdSwitchMode('edit');
   overlay.style.display = 'flex';
-  requestAnimationFrame(() => overlay.classList.add('active'));
+  requestAnimationFrame(() => {
+    overlay.classList.add('active');
+    const box = overlay.querySelector('.board-edit-box');
+    if (box) box.scrollTop = 0;
+  });
   setTimeout(() => document.getElementById('sched-title').focus(), 50);
 }
 function closeSchedModal() {
@@ -24672,9 +25568,15 @@ async function saveSchedModal() {
   const donePattern = document.getElementById('sched-done-pattern').value.trim();
   const doneAction = document.getElementById('sched-done-action').value;
   const watchTimeout = parseInt(document.getElementById('sched-watch-timeout').value) || 120;
+  const trig = [];
+  if (document.getElementById('sched-trigger-idle').checked) trig.push('session_idle');
+  if (document.getElementById('sched-trigger-board').checked) trig.push('board');
+  const triggerCooldown = parseInt(document.getElementById('sched-trigger-cooldown').value) || 120;
+  const triggerSessions = document.getElementById('sched-trigger-sessions').value.split(',').map(x => x.trim()).filter(Boolean).join(',');
   const payload = { title, session, kind, command, sched_type: stype, recurrence: recurrence || null, run_at,
                     schedule_expr: schedExpr || null,
-                    watch, done_pattern: donePattern || null, done_action: doneAction, watch_timeout: watchTimeout };
+                    watch, done_pattern: donePattern || null, done_action: doneAction, watch_timeout: watchTimeout,
+                    trigger_on: trig.join(','), trigger_cooldown: triggerCooldown, trigger_sessions: triggerSessions };
   const url = _schedEditId ? API + '/api/schedules/' + _schedEditId : API + '/api/schedules';
   const method = _schedEditId ? 'PATCH' : 'POST';
   const r = await apiCall(url, { method, headers: {'Content-Type':'application/json'}, body: JSON.stringify(payload) });
@@ -24682,6 +25584,7 @@ async function saveSchedModal() {
     await fetchSchedules();
     renderCalendar();
     renderScheduler();
+    if (typeof peekSession !== 'undefined' && peekSession) _peekLoadSchedules();
     closeSchedModal();
   }
 }
@@ -25393,7 +26296,7 @@ async function _updateGridPane(name) {
     const data = await fetch(API + '/api/sessions/' + encodeURIComponent(name) + '/peek?lines=500').then(r => r.json());
     const atBottom = _isScrolledToBottom(body);
     const locked = body._scrollLocked;
-    body.innerHTML = highlightPrompts(linkifyOutput(stripAnsi(data.output || '')));
+    body.innerHTML = highlightPrompts(ansiToHtml(data.output || ''));
     if (!locked && atBottom) {
       body.scrollTop = body.scrollHeight;
       _hideScrollLockBadge(body);
@@ -26805,6 +27708,7 @@ function toggleSettings() {
     _renderInstanceSwitcher();
     // Populate the notes-folder row
     _notesLoadSource();
+    loadCommitGuard();
   }
 }
 
@@ -26960,6 +27864,77 @@ async function saveApiKey() {
     }
   } catch(e) { if (st) st.textContent = 'Error: ' + e.message; }
 }
+
+// ── Commit guard ─────────────────────────────────────────────────────────────
+let _peekCommitGuardOverride = null;  // null=global, true=on, false=off
+
+async function loadPeekCommitGuard(sessionName) {
+  if (!sessionName) return;
+  try {
+    const r = await fetch(API + '/api/sessions/' + encodeURIComponent(sessionName) + '/commit-guard');
+    if (!r.ok) return;
+    const d = await r.json();
+    _peekCommitGuardOverride = d.override;
+    _renderPeekCommitGuardBtn(d.enabled, d.override, d.global);
+  } catch(e) {}
+}
+
+function _renderPeekCommitGuardBtn(enabled, override, globalEnabled) {
+  const btn = document.getElementById('peek-commitguard-btn');
+  if (!btn) return;
+  btn.style.opacity = enabled ? '1' : '0.35';
+  btn.style.color = enabled ? 'var(--green, #3fb950)' : '';
+  const overrideLabel = override === null ? 'following global (' + (globalEnabled ? 'on' : 'off') + ')' : (override ? 'on for this session' : 'off for this session');
+  btn.title = 'Commit guard: ' + overrideLabel + ' — click to toggle';
+}
+
+async function togglePeekCommitGuard() {
+  if (!peekSession) return;
+  const btn = document.getElementById('peek-commitguard-btn');
+  // Cycle: global-on → session-off → global; global-off → session-on → global
+  const r = await fetch(API + '/api/sessions/' + encodeURIComponent(peekSession) + '/commit-guard');
+  if (!r.ok) return;
+  const cur = await r.json();
+  // If currently override is set, clear it (follow global). Otherwise flip the global value.
+  let nextOverride;
+  if (cur.override !== null) {
+    nextOverride = null;  // remove override, follow global
+  } else {
+    nextOverride = !cur.global;  // override to opposite of global
+  }
+  const pr = await fetch(API + '/api/sessions/' + encodeURIComponent(peekSession) + '/commit-guard', {
+    method: 'PATCH', headers: {'Content-Type':'application/json'},
+    body: JSON.stringify({enabled: nextOverride})
+  });
+  if (!pr.ok) return;
+  const d = await pr.json();
+  _peekCommitGuardOverride = d.override;
+  _renderPeekCommitGuardBtn(d.enabled, d.override, d.global);
+  const label = d.override === null ? 'global (' + (d.global ? 'on' : 'off') + ')' : (d.enabled ? 'on' : 'off');
+  showToast('Commit guard: ' + label + ' for ' + peekSession);
+}
+
+async function loadCommitGuard() {
+  try {
+    const r = await fetch('/api/settings/commit-guard');
+    const d = await r.json();
+    const t = document.getElementById('settings-commitguard-toggle');
+    const st = document.getElementById('settings-commitguard-status');
+    if (t) t.checked = !!d.enabled;
+    if (st) st.textContent = d.enabled ? 'On — sessions are nudged to commit on idle' : 'Off';
+  } catch(e) {}
+}
+async function saveCommitGuard(enabled) {
+  const st = document.getElementById('settings-commitguard-status');
+  try {
+    const r = await fetch('/api/settings/commit-guard', {
+      method: 'PATCH', headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({enabled})
+    });
+    if (r.ok) {
+      if (st) st.textContent = enabled ? 'On — sessions are nudged to commit on idle' : 'Off';
+      showToast('Commit guard ' + (enabled ? 'enabled' : 'disabled'));
+    } else if (st) { st.textContent = 'Save failed'; }
 
 // ── Pushover ───────────────────────────────────────────────────────────────────
 async function loadPushoverKeys() {
@@ -32112,13 +33087,13 @@ class CCHandler(BaseHTTPRequestHandler):
             if not file_path:
                 return self._json({"error": "path required"}, 400)
             # Security: ensure file is within download dir
-            real = os.path.realpath(file_path)
-            if not real.startswith(os.path.realpath(_ARIA2_DOWNLOAD_DIR)):
+            real = Path(file_path).expanduser().resolve()
+            if not _path_is_within(real, Path(_ARIA2_DOWNLOAD_DIR).expanduser().resolve()):
                 return self._json({"error": "forbidden"}, 403)
-            if not os.path.isfile(real):
+            if not real.is_file():
                 return self._json({"error": "file not found"}, 404)
             # Determine content type
-            ext = os.path.splitext(real)[1].lower()
+            ext = real.suffix.lower()
             ct_map = {
                 ".mp4": "video/mp4", ".mkv": "video/x-matroska", ".avi": "video/x-msvideo",
                 ".mov": "video/quicktime", ".webm": "video/webm", ".m4v": "video/mp4",
@@ -32126,7 +33101,7 @@ class CCHandler(BaseHTTPRequestHandler):
                 ".pdf": "application/pdf",
             }
             ct = ct_map.get(ext, "application/octet-stream")
-            fsize = os.path.getsize(real)
+            fsize = real.stat().st_size
             # Support range requests for video streaming
             range_hdr = self.headers.get("Range")
             if range_hdr:
@@ -32143,7 +33118,7 @@ class CCHandler(BaseHTTPRequestHandler):
                     self.send_header("Content-Length", str(length))
                     self.send_header("Accept-Ranges", "bytes")
                     self.end_headers()
-                    with open(real, "rb") as fp:
+                    with real.open("rb") as fp:
                         fp.seek(start)
                         remaining = length
                         while remaining > 0:
@@ -32158,10 +33133,10 @@ class CCHandler(BaseHTTPRequestHandler):
             self.send_header("Content-Type", ct)
             self.send_header("Content-Length", str(fsize))
             self.send_header("Accept-Ranges", "bytes")
-            fname = os.path.basename(real)
+            fname = real.name
             self.send_header("Content-Disposition", f'inline; filename="{fname}"')
             self.end_headers()
-            with open(real, "rb") as fp:
+            with real.open("rb") as fp:
                 while True:
                     chunk = fp.read(65536)
                     if not chunk:
@@ -32446,12 +33421,11 @@ class CCHandler(BaseHTTPRequestHandler):
 
         # GET /api/release-notes — paginated JSON from docs/release-notes/notes.json
         if method == "GET" and path.startswith("/api/release-notes"):
-            qs = {}
-            if "?" in path:
-                import urllib.parse as _up
-                qs = dict(_up.parse_qsl(path.split("?", 1)[1]))
-            page = int(qs.get("page", "1"))
-            per_page = int(qs.get("per_page", "6"))
+            try:
+                page = max(1, int((qs.get("page") or ["1"])[0]))
+                per_page = max(1, min(100, int((qs.get("per_page") or ["6"])[0])))
+            except (TypeError, ValueError):
+                return self._json({"error": "invalid pagination"}, 400)
             notes_file = Path(__file__).parent / "docs" / "release-notes" / "notes.json"
             if notes_file.exists():
                 all_notes = json.loads(notes_file.read_text())
@@ -32615,7 +33589,7 @@ class CCHandler(BaseHTTPRequestHandler):
                 sub = qs.get("path", [""])[0]
                 target = (work / sub).resolve()
                 # Prevent path traversal
-                if not str(target).startswith(str(work)):
+                if not _path_is_within(target, work):
                     return self._json({"error": "invalid path"}, 400)
                 if target.is_file():
                     try:
@@ -32827,24 +33801,40 @@ class CCHandler(BaseHTTPRequestHandler):
 
         # GET /api/sessions-git — bulk git info for all sessions (avoids 80+ individual requests)
         if method == "GET" and path == "/api/sessions-git":
-            from concurrent.futures import ThreadPoolExecutor
-            sc = _sse_cache["sessions"]
-            sess_list = sc["data"] if sc["data"] is not None else []
-            def _get_git(s):
-                name = s.get("name", "")
-                wd = s.get("dir", "")
-                if not wd:
+            sgc = _sessions_git_cache
+            if sgc["data"] is not None and time.time() - sgc["time"] < _SESSIONS_GIT_CACHE_TTL:
+                return self._json(sgc["data"])
+            if not _sessions_git_cache_lock.acquire(blocking=False):
+                if sgc["data"] is not None:
+                    return self._json(sgc["data"])
+                _sessions_git_cache_lock.acquire()
+                _sessions_git_cache_lock.release()
+                return self._json(sgc["data"] or {})
+            try:
+                if sgc["data"] is not None and time.time() - sgc["time"] < _SESSIONS_GIT_CACHE_TTL:
+                    return self._json(sgc["data"])
+                from concurrent.futures import ThreadPoolExecutor
+                sc = _sse_cache["sessions"]
+                sess_list = sc["data"] if sc["data"] is not None else []
+                def _get_git(s):
+                    name = s.get("name", "")
+                    wd = s.get("dir", "")
+                    if not wd:
+                        return None
+                    info = _git_info(wd)
+                    if info.get("branch"):
+                        return {"name": name, **info}
                     return None
-                info = _git_info(wd)
-                if info.get("branch"):
-                    return {"name": name, **info}
-                return None
-            results = {}
-            with ThreadPoolExecutor(max_workers=4) as pool:
-                for r in pool.map(_get_git, sess_list):
-                    if r:
-                        results[r["name"]] = r
-            return self._json(results)
+                results = {}
+                with ThreadPoolExecutor(max_workers=4) as pool:
+                    for r in pool.map(_get_git, sess_list):
+                        if r:
+                            results[r["name"]] = r
+                sgc["data"] = results
+                sgc["time"] = time.time()
+                return self._json(results)
+            finally:
+                _sessions_git_cache_lock.release()
 
         # GET/POST /api/memory/global
         if path == "/api/memory/global":
@@ -34294,7 +35284,7 @@ class CCHandler(BaseHTTPRequestHandler):
                         (item_id, tag),
                     )
                 db.commit()
-                _sse_cache["board"]["time"] = 0  # invalidate SSE cache
+                _board_changed()  # invalidate SSE cache
                 item = _item_by_id(item_id)
                 _push_ical_bg()
                 if due:
@@ -34319,7 +35309,7 @@ class CCHandler(BaseHTTPRequestHandler):
                     "UPDATE issues SET deleted = ? WHERE status = 'done' AND deleted IS NULL", (now,)
                 )
                 db.commit()
-                _sse_cache["board"]["time"] = 0
+                _board_changed()
                 remaining = db.execute(
                     "SELECT COUNT(*) FROM issues WHERE deleted IS NULL"
                 ).fetchone()[0]
@@ -34373,14 +35363,14 @@ class CCHandler(BaseHTTPRequestHandler):
             if status_m:
                 sid = status_m.group(1)
                 if method == "DELETE":
-                    if sid in ("backlog", "todo", "doing", "review", "done", "discarded"):
+                    if sid in ("backlog", "todo", "doing", "review", "done", "verified", "discarded"):
                         return self._json({"error": "cannot delete built-in status"}, 400)
                     db.execute("DELETE FROM statuses WHERE id = ? AND is_builtin = 0", (sid,))
                     db.execute(
                         "UPDATE issues SET status = 'todo' WHERE status = ? AND deleted IS NULL", (sid,)
                     )
                     db.commit()
-                    _sse_cache["board"]["time"] = 0
+                    _board_changed()
                     return self._json({"ok": True})
                 if method == "PATCH":
                     body = self._read_body()
@@ -34402,7 +35392,7 @@ class CCHandler(BaseHTTPRequestHandler):
                     (tag,),
                 ).fetchall()
                 total = len(rows)
-                done = sum(1 for r in rows if r["status"] in ("done", "discarded"))
+                done = sum(1 for r in rows if r["status"] in ("done", "verified", "discarded"))
                 return self._json({"tag": tag, "total": total, "done": done, "complete": total > 0 and done == total})
 
             # POST /api/board/<id>/claim — atomic task claim for multi-agent coordination
@@ -34435,7 +35425,7 @@ class CCHandler(BaseHTTPRequestHandler):
                 db.commit()
                 if cur.rowcount == 0:
                     return self._json({"error": "claim failed — taken by another session"}, 409)
-                _sse_cache["board"]["time"] = 0
+                _board_changed()
                 return self._json(_item_by_id(bid))
 
             # PATCH/DELETE /api/board/<id>
@@ -34456,6 +35446,29 @@ class CCHandler(BaseHTTPRequestHandler):
                         "SELECT session, status, owner_type FROM issues WHERE id = ?", (bid,)
                     ).fetchone()
                     prior_session = prior["session"] if prior else None
+                    # Verify-gate: 'verified' means the work is committed & deployed, so block
+                    # the transition while the owning session's tree is dirty. The orchestrator
+                    # (or anyone) can override with {"force": true} if the dirt is unrelated to
+                    # this task — judgment stays with the caller; amux just enforces the default.
+                    if (body.get("status") == "verified" and prior and prior["status"] != "verified"
+                            and not body.get("force")):
+                        eff_session = body.get("session") if "session" in body else prior_session
+                        wd = _session_work_dir(eff_session) if eff_session else None
+                        if wd:
+                            dirty = _session_dirty_files(eff_session, wd)
+                            # Don't block on dirt we can't attribute: if a peer is
+                            # actively working the same checkout, the uncommitted
+                            # files may be theirs, not this task's.
+                            if dirty and _checkout_busy_cotenant(eff_session, wd):
+                                dirty = []
+                            if dirty:
+                                return self._json({
+                                    "error": "session has uncommitted changes; commit before "
+                                             "verifying, or pass force=true if unrelated to this task",
+                                    "session": eff_session,
+                                    "dirty_count": len(dirty),
+                                    "dirty_files": dirty[:20],
+                                }, 409)
                     set_clauses, params = [], []
                     for k in ("title", "desc", "status", "session", "due", "due_time", "owner_type", "pinned", "pos"):
                         if k in body:
@@ -34484,7 +35497,7 @@ class CCHandler(BaseHTTPRequestHandler):
                                     (bid, tag),
                                 )
                     db.commit()
-                    _sse_cache["board"]["time"] = 0
+                    _board_changed()
                     _push_ical_bg()
                     updated_item = _item_by_id(bid)
                     _gcal_sync_bg(bid, title=updated_item.get("title", ""),
@@ -34505,7 +35518,7 @@ class CCHandler(BaseHTTPRequestHandler):
                     now = int(time.time())
                     db.execute("UPDATE issues SET deleted = ? WHERE id = ?", (now, bid))
                     db.commit()
-                    _sse_cache["board"]["time"] = 0
+                    _board_changed()
                     _push_ical_bg()
                     _gcal_sync_bg(bid, deleted=True)
                     return self._json({"ok": True, "deleted": bid})
@@ -34583,6 +35596,9 @@ class CCHandler(BaseHTTPRequestHandler):
                     "watch_timeout": int(data.get("watch_timeout") or 120),
                     "done_pattern": data.get("done_pattern") or None,
                     "done_action": data.get("done_action") or "disable",
+                    "trigger_on": (data.get("trigger_on") or "").strip() or None,
+                    "trigger_cooldown": int(data.get("trigger_cooldown") or 120),
+                    "trigger_sessions": (data.get("trigger_sessions") or "").strip() or None,
                     "created": now_ts, "updated": now_ts, "deleted": None,
                 }
                 # compute next_run — prefer schedule_expr if provided
@@ -34595,15 +35611,16 @@ class CCHandler(BaseHTTPRequestHandler):
                 db.execute(
                     """INSERT INTO schedules (id,title,session,command,kind,sched_type,recurrence,
                        run_at,next_run,last_run,enabled,run_count,schedule_expr,
-                       watch,watch_timeout,done_pattern,done_action,
+                       watch,watch_timeout,done_pattern,done_action,trigger_on,trigger_cooldown,trigger_sessions,
                        created,updated,deleted)
-                       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                     (sched["id"], sched["title"], sched["session"], sched["command"], sched["kind"],
                      sched["sched_type"], sched["recurrence"], sched["run_at"],
                      sched["next_run"], sched["last_run"], sched["enabled"],
                      sched["run_count"], sched["schedule_expr"],
                      sched["watch"], sched["watch_timeout"],
                      sched["done_pattern"], sched["done_action"],
+                     sched["trigger_on"], sched["trigger_cooldown"], sched["trigger_sessions"],
                      sched["created"], sched["updated"], sched["deleted"])
                 )
                 db.commit()
@@ -34660,7 +35677,7 @@ class CCHandler(BaseHTTPRequestHandler):
                 sched = _sched_row_to_dict(row, cols)
                 body = self._read_body()
                 for k in ("title","session","command","kind","sched_type","recurrence","run_at","enabled","schedule_expr",
-                          "watch","watch_timeout","done_pattern","done_action","notify"):
+                          "watch","watch_timeout","done_pattern","done_action","notify","trigger_on","trigger_cooldown","trigger_sessions"):
                     if k in body:
                         sched[k] = body[k]
                 expr = (sched.get("schedule_expr") or "").strip()
@@ -34670,10 +35687,12 @@ class CCHandler(BaseHTTPRequestHandler):
                 else:
                     sched["next_run"] = _next_run_dt(sched) or sched.get("run_at", "")
                 sched["updated"] = int(_time.time())
+                _trig = (sched.get("trigger_on") or "").strip() or None
+                _trig_sess = (sched.get("trigger_sessions") or "").strip() or None
                 db.execute(
                     """UPDATE schedules SET title=?,session=?,command=?,kind=?,sched_type=?,recurrence=?,
                        run_at=?,next_run=?,enabled=?,schedule_expr=?,
-                       watch=?,watch_timeout=?,done_pattern=?,done_action=?,notify=?,
+                       watch=?,watch_timeout=?,done_pattern=?,done_action=?,notify=?,trigger_on=?,trigger_cooldown=?,trigger_sessions=?,
                        updated=? WHERE id=?""",
                     (sched["title"], sched["session"], sched["command"], sched.get("kind") or "tmux",
                      sched["sched_type"],
@@ -34682,6 +35701,7 @@ class CCHandler(BaseHTTPRequestHandler):
                      int(sched.get("watch") or 0), int(sched.get("watch_timeout") or 120),
                      sched.get("done_pattern"), sched.get("done_action") or "disable",
                      int(sched.get("notify", 1)),
+                     _trig, int(sched.get("trigger_cooldown") or 120), _trig_sess,
                      sched["updated"], sched_id)
                 )
                 db.commit()
@@ -35047,6 +36067,11 @@ class CCHandler(BaseHTTPRequestHandler):
             provider = body.get("provider", "").strip().lower()
             if provider and provider in _SESSION_PROVIDERS:
                 cfg["CC_PROVIDER"] = provider
+            if provider == "iterm2":
+                iterm2_sid = body.get("iterm2_session_id", "").strip()
+                if not iterm2_sid:
+                    return self._json({"error": "iterm2_session_id required for iterm2 provider"}, 400)
+                cfg["CC_ITERM2_SESSION_ID"] = iterm2_sid
             mcp = body.get("mcp", "").strip().lower()
             if mcp and mcp == "chrome":
                 cfg["CC_MCP"] = mcp
@@ -35066,6 +36091,10 @@ class CCHandler(BaseHTTPRequestHandler):
             return self._json(resp)
 
         # GET /api/sessions/self?session=<name> — convenience for a session to look itself up
+        if method == "GET" and path == "/api/iterm2/sessions":
+            panes = _iterm2_list_panes()
+            return self._json({"panes": panes})
+
         if method == "GET" and path == "/api/sessions/self":
             sname = qs.get("session", [None])[0] or self.headers.get("X-Amux-Session", "")
             if not sname:
@@ -35950,6 +36979,25 @@ return "not_found"
                 return self._json({"ok": True, "model": model})
 
         # ── Settings env (ANTHROPIC_API_KEY etc.) ─────────────────────────────
+        if path == "/api/settings/commit-guard":
+            if method == "GET":
+                return self._json({"enabled": _commit_guard_enabled()})
+            if method == "PATCH":
+                body = self._read_body()
+                enabled = bool(body.get("enabled", True))
+                val = "1" if enabled else "0"
+                lines = _server_env_file.read_text().splitlines() if _server_env_file.exists() else []
+                found = False
+                for i, line in enumerate(lines):
+                    if line.startswith("AMUX_COMMIT_GUARD=") or line.startswith("AMUX_COMMIT_GUARD ="):
+                        lines[i] = f"AMUX_COMMIT_GUARD={val}"; found = True; break
+                if not found:
+                    lines.append(f"AMUX_COMMIT_GUARD={val}")
+                _server_env_file.parent.mkdir(parents=True, exist_ok=True)
+                _server_env_file.write_text("\n".join(lines) + "\n")
+                os.environ["AMUX_COMMIT_GUARD"] = val  # live effect
+                return self._json({"ok": True, "enabled": enabled})
+
         if path == "/api/settings/env":
             _allowed_env_keys = {"ANTHROPIC_API_KEY", "OPENAI_API_KEY", "AMUX_PUSHOVER_TOKEN", "AMUX_PUSHOVER_USER"}
             if method == "GET":
@@ -36871,12 +37919,12 @@ p{{color:#888;margin:12px 0 28px;font-size:0.9rem;line-height:1.5}}
 
             # GET /api/browser/pw-profiles — list Playwright auth profiles
             if method == "GET" and path == "/api/browser/pw-profiles":
-                pw_dir = Path.home() / ".amux" / "playwright-auth" / "profiles"
+                pw_dir = CC_HOME / "playwright-auth" / "profiles"
                 profiles = set()
                 if pw_dir.is_dir():
                     profiles = {p.name for p in pw_dir.iterdir() if p.is_dir()}
                 # Also include default profile
-                default_dir = Path.home() / ".amux" / "playwright-auth" / "profile"
+                default_dir = CC_HOME / "playwright-auth" / "profile"
                 if default_dir.is_dir():
                     profiles.add("default")
                 return self._json({"profiles": sorted(profiles)})
@@ -36889,7 +37937,7 @@ p{{color:#888;margin:12px 0 28px;font-size:0.9rem;line-height:1.5}}
                     return self._json({"error": "name required"}, 400)
                 session = body.get("session", "amux")
                 # Save current browser-use session cookies to a Playwright auth profile
-                dest = Path.home() / ".amux" / "playwright-auth" / "profiles" / name
+                dest = CC_HOME / "playwright-auth" / "profiles" / name
                 dest.mkdir(parents=True, exist_ok=True)
                 try:
                     result = _bu_call(["save-cookies", str(dest)], session=session, timeout_s=15)
@@ -36998,6 +38046,20 @@ p{{color:#888;margin:12px 0 28px;font-size:0.9rem;line-height:1.5}}
             if action == "info":
                 info = get_session_info(name)
                 return self._json(info)
+            if action == "instructions":
+                return self._json({"name": name, "instructions": _session_instructions(name)})
+            if action == "dirty":
+                wd = _session_work_dir(name)
+                files = _session_dirty_files(name, wd) if wd else []
+                return self._json({"name": name, "dirty": bool(files),
+                                   "count": len(files), "files": files[:50]})
+            if action == "commit-guard":
+                env_file_cg = CC_SESSIONS / f"{name}.env"
+                cfg_cg = parse_env_file(env_file_cg) if env_file_cg.exists() else {}
+                per_session = cfg_cg.get("AMUX_COMMIT_GUARD_SESSION", "").strip().lower()
+                override = None if per_session == "" else (per_session not in ("0", "false", "off", "no"))
+                return self._json({"name": name, "enabled": _commit_guard_session_enabled(name),
+                                   "global": _commit_guard_enabled(), "override": override})
             if action == "meta":
                 cfg = parse_env_file(env_file)
                 meta = _load_meta(name)
@@ -37217,7 +38279,7 @@ p{{color:#888;margin:12px 0 28px;font-size:0.9rem;line-height:1.5}}
                 text = body.get("text", "")
                 wd = _session_work_dir(name)
                 if wd:
-                    _ensure_memory(name, wd)
+                    threading.Thread(target=_ensure_memory, args=(name, wd), daemon=True).start()
                 # Backup JSONL transcript before /compact so we can revert
                 if text.strip().startswith("/compact"):
                     threading.Thread(target=backup_session_jsonl, args=(name, "pre_compact"), daemon=True).start()
@@ -37229,6 +38291,25 @@ p{{color:#888;margin:12px 0 28px;font-size:0.9rem;line-height:1.5}}
                 # 409 = session exists but is not running (user-caused, not a server error)
                 code = 200 if ok else (409 if msg == "not running" else 500)
                 return self._json({"ok": ok, "message": msg}, code)
+            if action == "instructions":
+                # Set the per-session standing instruction and/or apply it now.
+                # Body: {"instructions": "<text>"} to save, {"apply": true} to send.
+                body = self._read_body()
+                saved = False
+                if "instructions" in body:
+                    _update_meta(name, instructions=(body.get("instructions") or "").strip())
+                    saved = True
+                applied = False
+                if body.get("apply"):
+                    instr = _session_instructions(name)
+                    if instr:
+                        if is_running(name):
+                            send_text(name, instr)
+                        else:
+                            threading.Thread(target=_send_after_ready, args=(name, instr, 60), daemon=True).start()
+                        applied = True
+                return self._json({"ok": True, "instructions": _session_instructions(name),
+                                   "saved": saved, "applied": applied})
             if action == "keys":
                 body = self._read_body()
                 keys = body.get("keys", "")
@@ -37488,6 +38569,14 @@ p{{color:#888;margin:12px 0 28px;font-size:0.9rem;line-height:1.5}}
             return self._json({"error": "not found"}, 404)
 
         if method == "PATCH":
+            if action == "commit-guard":
+                body = self._read_body()
+                # enabled: true/false sets per-session override; null clears it (follow global)
+                raw = body.get("enabled")
+                override = None if raw is None else bool(raw)
+                _set_commit_guard_session(name, override)
+                return self._json({"ok": True, "enabled": _commit_guard_session_enabled(name),
+                                   "global": _commit_guard_enabled(), "override": override})
             if action == "config":
                 body = self._read_body()
                 if not isinstance(body, dict):
@@ -38191,7 +39280,7 @@ def _db_maintenance():
         extra = ""
         if archived:
             extra += f", archived {archived} done board tasks"
-            _sse_cache["board"]["time"] = 0
+            _board_changed()
         if purged:
             extra += f", purged {purged} old deleted tasks"
         slog(f"[cleanup] database maintenance: WAL checkpoint + optimize{extra}")
