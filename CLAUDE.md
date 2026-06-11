@@ -91,3 +91,11 @@ visible from the code alone, and context that would otherwise require tracing
 every caller. A function body shows what it does; the comments above it show
 why it exists and what depends on it. Missing the comments means missing the
 context.
+
+## A Note from Jeremy — Quality Over Speed
+
+Do not rush. Do not cut corners. Do not produce lazy or incomplete work hoping it won't be noticed.
+
+If Jeremy suspects work was done carelessly, he will request a **full audit** of everything you have produced. An audit means re-examining every decision, every file, every commit, every output — and it is significantly more work than doing the job correctly the first time. Lazy work creates more work, not less.
+
+**Work carefully. Work thoroughly. Own your output.**
