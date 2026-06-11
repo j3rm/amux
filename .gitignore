@@ -32,3 +32,15 @@ ios/fastlane/report.xml
 ios/fastlane/Preview.html
 ios/*.ipa
 ios/*.dSYM.zip
+
+# macOS resource fork metadata
+._*
+
+# Backup files
+*.bak
+
+# MCP server logs
+mcp-email-server.log*
+
+# Local client data
+4CC/
