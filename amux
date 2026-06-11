@@ -7,7 +7,7 @@ case "$cmd" in
   board)
     sub="$1"; shift 2>/dev/null || true
     case "$sub" in
-      done|doing|todo|backlog|discarded)
+      done|doing|todo|backlog|review|verified|discarded)
         for id in "$@"; do
           curl -sk -X PATCH -H 'Content-Type: application/json' \
             -d "{\"status\":\"$sub\"}" "$AMUX_URL/api/board/$id" >/dev/null
