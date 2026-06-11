@@ -27935,6 +27935,8 @@ async function saveCommitGuard(enabled) {
       if (st) st.textContent = enabled ? 'On — sessions are nudged to commit on idle' : 'Off';
       showToast('Commit guard ' + (enabled ? 'enabled' : 'disabled'));
     } else if (st) { st.textContent = 'Save failed'; }
+  } catch(e) { if (st) st.textContent = 'Error: ' + e.message; }
+}
 
 // ── Pushover ───────────────────────────────────────────────────────────────────
 async function loadPushoverKeys() {
