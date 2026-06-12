@@ -3770,6 +3770,10 @@ def _init_db():
         "ALTER TABLE graph_nodes ADD COLUMN source_path TEXT NOT NULL DEFAULT ''",
         "ALTER TABLE issues ADD COLUMN gcal_event_id TEXT",
         "ALTER TABLE issues ADD COLUMN pos REAL NOT NULL DEFAULT 0",
+        # org partitions the board between agent fleets (RTG/Ember/Cypra/...).
+        # Set from the assigned session's CC_ORG at create/assign; filterable
+        # via GET /api/board?org=X so each org's Dispatch only sees its own items.
+        "ALTER TABLE issues ADD COLUMN org TEXT",
         "ALTER TABLE issues ADD COLUMN notified INTEGER NOT NULL DEFAULT 0",
         "ALTER TABLE schedules ADD COLUMN kind TEXT NOT NULL DEFAULT 'tmux'",
         "ALTER TABLE schedules ADD COLUMN notify INTEGER NOT NULL DEFAULT 1",
@@ -4366,16 +4370,41 @@ _DEFAULT_STATUSES = [
 ]
 
 
-def _load_board(done_limit: int = 100) -> list:
+def _session_org(session_name: str | None) -> str | None:
+    """The org a session belongs to, from CC_ORG in its env file.
+
+    Orgs partition the board between agent fleets — each org's Dispatch only
+    routes/audits its own items (ruled by Jeremy 2026-06-12 after Ember
+    auditors audited an RTG item). Explicit env var, no name heuristics:
+    set CC_ORG in the session's env file or the session contributes no org."""
+    if not session_name:
+        return None
+    try:
+        cfg = parse_env_file(CC_SESSIONS / f"{session_name}.env")
+        return (cfg.get("CC_ORG") or "").strip() or None
+    except Exception:
+        return None
+
+
+def _load_board(done_limit: int = 100, org: str | None = None) -> list:
     """Load non-deleted issues from SQLite, with tags joined.
 
     To keep payloads manageable, only the most recent `done_limit` items in
     terminal statuses (done/verified/discarded) are returned.  Pass done_limit=0 for
     unlimited (all items).
-    """
+
+    org filters to one fleet's items: org='RTG' returns items whose org is
+    exactly RTG; org='none' returns unpartitioned items (org IS NULL).
+    No org param = everything (dashboard view)."""
     db = get_db()
+    org_clause, org_params = "", []
+    if org == "none":
+        org_clause = " AND i.org IS NULL"
+    elif org:
+        org_clause = " AND i.org = ?"
+        org_params = [org]
     _COLS = """i.id, i.title, i.desc, i.status, i.session, i.creator,
-               i.due, i.due_time, i.created, i.updated, i.owner_type,
+               i.due, i.due_time, i.created, i.updated, i.owner_type, i.org,
                COALESCE(i.pinned, 0) AS pinned,
                COALESCE(i.pos, 0) AS pos,
                GROUP_CONCAT(t.tag) AS tags_csv"""
@@ -4384,25 +4413,26 @@ def _load_board(done_limit: int = 100) -> list:
         rows = db.execute(
             f"""SELECT {_COLS}
                 FROM issues i LEFT JOIN issue_tags t ON t.issue_id = i.id
-                WHERE i.deleted IS NULL AND i.status NOT IN ('done','verified','discarded')
+                WHERE i.deleted IS NULL AND i.status NOT IN ('done','verified','discarded'){org_clause}
                 GROUP BY i.id
               UNION ALL
               SELECT * FROM (
                 SELECT {_COLS}
                 FROM issues i LEFT JOIN issue_tags t ON t.issue_id = i.id
-                WHERE i.deleted IS NULL AND i.status IN ('done','verified','discarded')
+                WHERE i.deleted IS NULL AND i.status IN ('done','verified','discarded'){org_clause}
                 GROUP BY i.id
                 ORDER BY i.updated DESC
                 LIMIT ?
               )""",
-            (done_limit,),
+            (*org_params, *org_params, done_limit),
         ).fetchall()
     else:
         rows = db.execute(
             f"""SELECT {_COLS}
                 FROM issues i LEFT JOIN issue_tags t ON t.issue_id = i.id
-                WHERE i.deleted IS NULL
+                WHERE i.deleted IS NULL{org_clause}
                 GROUP BY i.id""",
+            org_params,
         ).fetchall()
     # Sort in Python: pinned first, then by pos, then by updated
     result = []
@@ -35244,9 +35274,11 @@ class CCHandler(BaseHTTPRequestHandler):
 
             # GET /api/board — list non-deleted issues
             # ?done_limit=N  limits returned done/discarded items (default 100, 0=all)
+            # ?org=X  only items of one fleet (org='none' for unpartitioned items)
             if method == "GET" and path == "/api/board":
                 done_limit = int(qs.get("done_limit", ["100"])[0])
-                return self._json(_load_board(done_limit=done_limit))
+                org = qs.get("org", [None])[0]
+                return self._json(_load_board(done_limit=done_limit, org=org))
 
             # POST /api/board — create issue
             if method == "POST" and path == "/api/board":
@@ -35267,6 +35299,8 @@ class CCHandler(BaseHTTPRequestHandler):
                 owner_type = body.get("owner_type", "agent" if session else "human")
                 if owner_type not in ("human", "agent"):
                     owner_type = "human"
+                # Org: explicit param wins; else derive from assignee, else creator session.
+                org = (body.get("org") or "").strip() or _session_org(session) or _session_org(creator)
                 # Place new card at top of its column: pos = (min existing pos) - 1
                 min_pos_row = db.execute(
                     "SELECT COALESCE(MIN(NULLIF(pos, 0)), 0) AS m FROM issues WHERE status = ? AND deleted IS NULL",
@@ -35274,9 +35308,9 @@ class CCHandler(BaseHTTPRequestHandler):
                 ).fetchone()
                 new_pos = (min_pos_row["m"] if min_pos_row else 0) - 1024.0
                 db.execute(
-                    """INSERT INTO issues (id, title, desc, status, session, creator, due, due_time, created, updated, owner_type, pos)
-                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-                    (item_id, title, desc, status, session or None, creator, due, due_time, now, now, owner_type, new_pos),
+                    """INSERT INTO issues (id, title, desc, status, session, creator, due, due_time, created, updated, owner_type, pos, org)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    (item_id, title, desc, status, session or None, creator, due, due_time, now, now, owner_type, new_pos, org),
                 )
                 for tag in tags:
                     db.execute(
@@ -35425,6 +35459,14 @@ class CCHandler(BaseHTTPRequestHandler):
                 db.commit()
                 if cur.rowcount == 0:
                     return self._json({"error": "claim failed — taken by another session"}, 409)
+                # First claim partitions an un-orged item to the claimer's fleet
+                claim_org = _session_org(session_name)
+                if claim_org:
+                    db.execute(
+                        "UPDATE issues SET org = ? WHERE id = ? AND org IS NULL",
+                        (claim_org, bid),
+                    )
+                    db.commit()
                 _board_changed()
                 return self._json(_item_by_id(bid))
 
@@ -35470,14 +35512,26 @@ class CCHandler(BaseHTTPRequestHandler):
                                     "dirty_files": dirty[:20],
                                 }, 409)
                     set_clauses, params = [], []
-                    for k in ("title", "desc", "status", "session", "due", "due_time", "owner_type", "pinned", "pos"):
+                    for k in ("title", "desc", "status", "session", "due", "due_time", "owner_type", "pinned", "pos", "org"):
                         if k in body:
                             set_clauses.append(f"{k} = ?")
                             v = body[k]
-                            params.append(None if v == "" and k in ("session", "due", "due_time") else v)
+                            params.append(None if v == "" and k in ("session", "due", "due_time", "org") else v)
                     if "creator" in body:
                         set_clauses.append("creator = ?")
                         params.append(body["creator"])
+                    # First assignment sets the org if it was never partitioned.
+                    # Org does NOT follow later reassignments — work belongs to the
+                    # org that owns it even if an outside session executes a step.
+                    if "org" not in body and "session" in body and body.get("session"):
+                        prior_org = db.execute(
+                            "SELECT org FROM issues WHERE id = ?", (bid,)
+                        ).fetchone()
+                        if prior_org and prior_org["org"] is None:
+                            derived = _session_org(body["session"])
+                            if derived:
+                                set_clauses.append("org = ?")
+                                params.append(derived)
                     # If session is being changed, reset notified so the new assignee gets pinged
                     if "session" in body and (body.get("session") or None) != prior_session:
                         set_clauses.append("notified = 0")
