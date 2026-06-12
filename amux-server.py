@@ -35605,6 +35605,9 @@ class CCHandler(BaseHTTPRequestHandler):
                     "trigger_on": (data.get("trigger_on") or "").strip() or None,
                     "trigger_cooldown": int(data.get("trigger_cooldown") or 120),
                     "trigger_sessions": (data.get("trigger_sessions") or "").strip() or None,
+                    # Event-triggered schedules fire on every matching event —
+                    # default their run-notifications off to avoid feed spam.
+                    "notify": int(data.get("notify", 0 if (data.get("trigger_on") or "").strip() else 1)),
                     "created": now_ts, "updated": now_ts, "deleted": None,
                 }
                 # compute next_run — prefer schedule_expr if provided
@@ -35618,8 +35621,8 @@ class CCHandler(BaseHTTPRequestHandler):
                     """INSERT INTO schedules (id,title,session,command,kind,sched_type,recurrence,
                        run_at,next_run,last_run,enabled,run_count,schedule_expr,
                        watch,watch_timeout,done_pattern,done_action,trigger_on,trigger_cooldown,trigger_sessions,
-                       created,updated,deleted)
-                       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                       notify,created,updated,deleted)
+                       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                     (sched["id"], sched["title"], sched["session"], sched["command"], sched["kind"],
                      sched["sched_type"], sched["recurrence"], sched["run_at"],
                      sched["next_run"], sched["last_run"], sched["enabled"],
@@ -35627,7 +35630,7 @@ class CCHandler(BaseHTTPRequestHandler):
                      sched["watch"], sched["watch_timeout"],
                      sched["done_pattern"], sched["done_action"],
                      sched["trigger_on"], sched["trigger_cooldown"], sched["trigger_sessions"],
-                     sched["created"], sched["updated"], sched["deleted"])
+                     sched["notify"], sched["created"], sched["updated"], sched["deleted"])
                 )
                 db.commit()
                 self._json(sched, 201)
