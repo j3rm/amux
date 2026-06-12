@@ -32949,7 +32949,11 @@ class ResilientHTTPSServer(ThreadingHTTPServer):
     """
     daemon_threads = True
     allow_reuse_address = True
-    allow_reuse_port = True
+    # allow_reuse_port must stay False: with SO_REUSEPORT a second server
+    # instance binds the same port silently and runs a duplicate scheduler
+    # (every schedule fired twice, 2026-05/06). A second instance must die
+    # at bind time with EADDRINUSE instead.
+    allow_reuse_port = False
     ssl_ctx = None  # Set after creation; None = plain HTTP
 
     def process_request_thread(self, request, client_address):
@@ -39844,7 +39848,7 @@ def main():
             class IPv4HTTPServer(HTTPServer):
                 address_family = socket.AF_INET
                 allow_reuse_address = True
-                allow_reuse_port = True
+                allow_reuse_port = False  # see ResilientHTTPSServer — no silent double-bind
             for _att in range(10):
                 try:
                     IPv4HTTPServer((_host, port + 1), H).serve_forever()
