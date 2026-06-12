@@ -4264,53 +4264,47 @@ def _session_board_issue_id(session_name: str) -> str | None:
 
 
 def _complete_session_board_issue(session_name: str):
-    """Move a session's active board issues to done.
+    """DISABLED 2026-06-12 (incident: fabricated completions).
 
-    Skips tasks with gh:* tags — those are owned by the SessionEnd hook
-    (board-gh-sync.py) which has gh CLI access for posting GH comments.
-    Also skips tasks in 'review' status (awaiting PR review, not abandoned).
-    """
-    try:
-        db = get_db()
-        rows = db.execute(
-            "SELECT i.id FROM issues i "
-            "WHERE i.session=? AND i.deleted IS NULL "
-            "AND i.status NOT IN ('done','verified','discarded','review') "
-            "ORDER BY i.created DESC",
-            (session_name,)
-        ).fetchall()
-        if not rows:
-            return
-        now = int(time.time())
-        for row in rows:
-            # Skip gh-linked tasks — the SessionEnd hook handles those
-            gh_tag = db.execute(
-                "SELECT 1 FROM issue_tags WHERE issue_id=? AND tag LIKE 'gh:%' LIMIT 1",
-                (row["id"],)
-            ).fetchone()
-            if gh_tag:
-                continue
-            _append_board_log(row["id"], "Session completed")
-            db.execute("UPDATE issues SET status='done', updated=? WHERE id=?", (now, row["id"]))
-        db.commit()
-        _board_changed()
-    except Exception:
-        pass
+    This used to move ALL of a session's open board items to 'done' whenever
+    the session went idle or exited. An idle transition is NOT evidence of
+    work — it marked never-touched items done (RA-514/516/517/518/520, RR-311,
+    AW-1 had zero corresponding commits), and combined with auto-pickup it
+    formed a loop that churned the whole queue to fictional 'done'.
+
+    Rule now: status only changes when an agent (or Jeremy) records a real
+    deliverable — a commit, a verdict, a note — by PATCHing the item itself.
+    Sessions idling with open items are handled by the watchdog/commit-guard,
+    not by silent completion. Call sites left intact; this is a no-op."""
+    return
 
 
 def _pickup_next_board_task(session_name: str):
     """Pick up the next queued (todo) board task for this session.
     Called after a session completes its current task and goes idle.
-    Moves the task to 'doing' and sends the title+desc to the session."""
+    Moves the task to 'doing' and sends the title+desc to the session.
+
+    Guardrail (2026-06-12): items that declare sequencing or a hold are NOT
+    auto-pickable — 'SEQUENCE AFTER', 'BLOCKED', 'ON HOLD', 'DO NOT AUTO',
+    'TRUE-STATE' in title/desc means a human or orchestrator must release it
+    explicitly. Auto-pickup previously dispatched dependency-ordered tasks
+    out of order (RR-311) and re-dispatched items reset with true-state notes."""
     try:
         time.sleep(3)
         db = get_db()
-        row = db.execute(
+        rows = db.execute(
             "SELECT id, title, desc FROM issues "
             "WHERE session=? AND status='todo' AND deleted IS NULL "
-            "ORDER BY created ASC LIMIT 1",
+            "ORDER BY created ASC",
             (session_name,)
-        ).fetchone()
+        ).fetchall()
+        row = None
+        _hold = re.compile(r'SEQUENCE\s+AFTER|BLOCKED|ON\s+HOLD|DO\s+NOT\s+AUTO|TRUE-STATE', re.I)
+        for r in rows:
+            if _hold.search(f"{r['title']} {r['desc'] or ''}"):
+                continue
+            row = r
+            break
         if not row:
             return
         item_id, title, desc = row["id"], row["title"], row["desc"] or ""
