@@ -6,11 +6,14 @@
 # can list, peek, and message sessions running on another box.
 #
 # Config (env or ~/.amux/remote.env):
-#   AMUX_URL    base URL of the remote server, e.g. https://desktop.tailnet.ts.net:8822
-#   AMUX_TOKEN  auth token from the remote's ~/.amux/auth_token
+#   AMUX_URL       base URL of the remote server, e.g. https://100.108.219.90:8822
+#   AMUX_TOKEN     auth token from the remote's ~/.amux/auth_token
+#   AMUX_SSH_HOST  SSH hostname for `attach` (defaults to host extracted from AMUX_URL)
+#   AMUX_SSH_USER  SSH user for `attach` (defaults to current $USER)
 #
 # Usage:
 #   amux-remote ls                     list sessions
+#   amux-remote attach <name>          SSH into the remote and attach to the tmux session
 #   amux-remote peek <name> [lines]    print a session's recent output (default 80)
 #   amux-remote send <name> <text...>  send text/prompt to a session
 #   amux-remote start <name>           start a session
@@ -114,16 +117,45 @@ cmd_curl() {
   api GET "$path" "$@"
 }
 
+# Derive SSH host from AMUX_URL (strip scheme + port)
+_ssh_host() {
+  local host="${AMUX_SSH_HOST:-}"
+  if [[ -z "$host" ]]; then
+    host=$(python3 -c "
+import sys, re
+u = '${AMUX_URL}'.strip()
+m = re.match(r'https?://([^:/?#]+)', u)
+print(m.group(1) if m else '')
+")
+  fi
+  [[ -n "$host" ]] || die "could not derive SSH host from AMUX_URL='${AMUX_URL:-}' — set AMUX_SSH_HOST in $REMOTE_ENV"
+  echo "$host"
+}
+
+cmd_attach() {
+  require_config
+  local name="${1:-}"
+  [[ -n "$name" ]] || die "usage: amux-remote attach <name>"
+  local host; host=$(_ssh_host)
+  local user="${AMUX_SSH_USER:-$USER}"
+  local tname="amux-${name}"
+  echo "${DIM}→ ssh ${user}@${host} — tmux attach-session -t ${tname}${RESET}"
+  exec ssh "${user}@${host}" -t "tmux attach-session -t '${tname}' || (echo 'Session ${tname} not found. Running sessions:' && tmux ls 2>/dev/null; exit 1)"
+}
+
 usage() {
   cat <<EOF
 ${BOLD}amux-remote${RESET} — drive a remote amux server over its REST API
 
-${BOLD}Config${RESET} (env or ~/.amux/remote.env):
-  AMUX_URL    ${DIM}e.g. https://desktop.tailnet.ts.net:8822${RESET}
-  AMUX_TOKEN  ${DIM}from the remote's ~/.amux/auth_token${RESET}
+${BOLD}Config${RESET} (env or ${REMOTE_ENV}):
+  AMUX_URL       ${DIM}e.g. https://100.108.219.90:8822${RESET}
+  AMUX_TOKEN     ${DIM}from the remote's ~/.amux/auth_token${RESET}
+  AMUX_SSH_HOST  ${DIM}SSH host for attach (default: host from AMUX_URL)${RESET}
+  AMUX_SSH_USER  ${DIM}SSH user for attach (default: \$USER)${RESET}
 
 ${BOLD}Commands${RESET}
   ${CYAN}ls${RESET}                      list sessions
+  ${CYAN}attach${RESET} <name>           SSH into remote and attach to the tmux session
   ${CYAN}peek${RESET} <name> [lines]     print recent output (default 80)
   ${CYAN}send${RESET} <name> <text...>   send text/prompt to a session
   ${CYAN}start${RESET} <name>            start a session
@@ -136,14 +168,15 @@ EOF
 
 cmd="${1:-}"; shift || true
 case "$cmd" in
-  ls|list)    cmd_ls "$@" ;;
-  peek)       cmd_peek "$@" ;;
-  send)       cmd_send "$@" ;;
-  start)      cmd_simple_post start "$@" ;;
-  stop)       cmd_simple_post stop "$@" ;;
-  info|meta)  cmd_info "$@" ;;
-  curl)       cmd_curl "$@" ;;
-  url)        require_config; echo "$AMUX_URL" ;;
+  ls|list)       cmd_ls "$@" ;;
+  attach|a)      cmd_attach "$@" ;;
+  peek)          cmd_peek "$@" ;;
+  send)          cmd_send "$@" ;;
+  start)         cmd_simple_post start "$@" ;;
+  stop)          cmd_simple_post stop "$@" ;;
+  info|meta)     cmd_info "$@" ;;
+  curl)          cmd_curl "$@" ;;
+  url)           require_config; echo "$AMUX_URL" ;;
   ""|help|-h|--help) usage ;;
-  *)          die "unknown command: $cmd (try: amux-remote help)" ;;
+  *)             die "unknown command: $cmd (try: amux-remote help)" ;;
 esac

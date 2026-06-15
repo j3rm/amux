@@ -2391,6 +2391,8 @@ def _at_shell_prompt(clean_output: str) -> bool:
     return False
 
 
+_snapshot_running = False
+
 def _snapshot_all_sessions():
     """Capture scrollback for health checks on all running sessions.
 
@@ -2404,6 +2406,16 @@ def _snapshot_all_sessions():
     4. Auto-restart: if CC_AUTO_CONTINUE=1 and Claude has exited to a shell prompt,
        restart it automatically (handles context-limit exits mid-task).
     """
+    global _snapshot_running
+    if _snapshot_running:
+        return
+    _snapshot_running = True
+    try:
+        _snapshot_all_sessions_inner()
+    finally:
+        _snapshot_running = False
+
+def _snapshot_all_sessions_inner():
     # Fetch running tmux sessions once to avoid spawning a subprocess per session
     running_sessions = set()
     try:
@@ -2424,7 +2436,7 @@ def _snapshot_all_sessions():
         if tmux_name(name) not in running_sessions:
             continue
         try:
-            output = tmux_capture(name, 5000)
+            output = tmux_capture(name, 500)
             if not output:
                 continue
 
@@ -5565,14 +5577,16 @@ def _detect_claude_status(raw_output: str) -> str:
             status_bar = ls.lower()
             break
 
-    # "esc to interrupt" (may be truncated to "esc to" or "esc t…") → active
-    # Scan the last few lines directly instead of gating on status_bar detection:
-    # in background-tasks mode the "esc to interrupt · ctrl+t to hide tasks" line
-    # REPLACES the ⏵⏵/bypass-permissions status bar, so status_bar will be empty
-    # even though Claude is actively working.
-    for l in lines[-5:]:
-        if re.search(r"esc t", l.lower()):
-            return "active"
+    # "esc to interrupt" → active, BUT only when there is no standard status bar.
+    # In background-tasks mode the "esc to interrupt · ctrl+t to hide tasks" line
+    # REPLACES the ⏵⏵/bypass-permissions bar (status_bar is empty) even though
+    # Claude is working. When a normal status bar IS present, "esc to interrupt"
+    # appears there at ALL times (even at idle), so we skip this check and let
+    # the spinner scan below determine the real state.
+    if not status_bar:
+        for l in lines[-5:]:
+            if re.search(r"esc t", l.lower()):
+                return "active"
 
     # ── 2. Scan last 12 lines bottom-up for the most recent signal ──
     for l in reversed(lines[-12:]):
@@ -8355,7 +8369,8 @@ def _email_sync() -> None:
     slog(f"[email] syncing lookback={lookback_seconds//60}min")
     messages = _mail_fetch_messages(lookback_seconds)
     if messages is None:
-        return  # timed out — don't update last_synced so next run retries with same window
+        _email_set_synced(now_ts)  # advance past the window to break timeout spirals
+        return
     for msg in messages:
         # Use message-id as dedup key; fall back to subject+date hash
         msg_id = msg["msg_id"] or f"{msg['subject']}|{msg['date']}"
@@ -18813,13 +18828,18 @@ async function refreshPeek() {
     if (_sendingSnapshot && newHTML !== _sendingSnapshot) clearSendingIndicator();
     lastPeekHTML = newHTML;
     const hasSearch = peekSearchQuery.trim().length > 0;
-    applyPeekSearch(hasSearch);
+    // When user has scrolled up, skip DOM update to avoid fidgeting the view.
+    // Buffer in lastPeekHTML and flush when they resume.
+    if (!_peekScrollLocked || hasSearch) {
+      applyPeekSearch(hasSearch);
+    }
     if (!_peekScrollLocked && atBottom && !hasSearch) {
       body.scrollTop = body.scrollHeight;
       _hideScrollLockBadge(body);
     } else if (_peekScrollLocked) {
       _showScrollLockBadge(body, () => {
         _peekScrollLocked = false;
+        applyPeekSearch(false);
         body.scrollTop = body.scrollHeight;
         _hideScrollLockBadge(body);
       });
@@ -23528,7 +23548,7 @@ function switchView(view) {
     if (te) te.classList.toggle('active', view === _svNames[i]);
   }
   if (view === 'calendar') { fetchBoard().then(() => { _fcInit(); }); }
-  if (view === 'torrents') _torrentLoad();
+  if (view === 'torrents') _torrentLoad(); else _torrentStopTimer();
   if (view === 'terminal') _termInit();
   if (view === 'graph') _graphInit();
   if (view === 'crm') { _crmDirty = false; _crmLoad(); _crmApplySidebarState(); } // always refresh on tab switch
@@ -26170,6 +26190,7 @@ function enterGridMode() {
     view.style.top = (rect.bottom + marginBottom) + 'px';
   }
   view.classList.add('active');
+  _torrentStopTimer();
   // Mark Grid tab as active, deactivate others
   ['sessions','board','calendar','scheduler','files','logs','email','notes','crm'].forEach(t => document.getElementById('tab-' + t)?.classList.remove('active'));
   document.getElementById('tab-grid').classList.add('active');
