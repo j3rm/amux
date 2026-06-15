@@ -15505,6 +15505,29 @@ async function fetchSessions() {
   }
 }
 
+// ── Display-status hysteresis ("sticky working") ─────────────────────────
+// The raw server status flips active↔idle the instant a spinner frame is
+// missed between tool calls, so sessions whack-a-mole between the Working and
+// Idle groups. We hold a session in "working" for a grace window after it was
+// last seen active, so brief gaps (thinking, between tool calls) don't bounce
+// it. The raw s.status is left untouched — the server-side watchdog,
+// auto-continue, and idle-event logic still read the real status.
+const _stickyActiveAt = {};            // session name -> last time seen active (ms)
+const STICKY_ACTIVE_MS = 60000;        // keep showing "working" up to 60s past last spinner
+function displayStatus(s) {
+  if (!s || !s.running) return 'stopped';
+  if (s.status === 'active') { _stickyActiveAt[s.name] = Date.now(); return 'active'; }
+  if (s.status === 'waiting') { delete _stickyActiveAt[s.name]; return 'waiting'; }  // needs-input is immediate, never sticky over it
+  const t = _stickyActiveAt[s.name];              // s.status is idle / '' here
+  if (t && (Date.now() - t) < STICKY_ACTIVE_MS) return 'active';
+  if (t) delete _stickyActiveAt[s.name];          // window expired — let it settle to idle
+  return 'idle';
+}
+// True while at least one session is being held in sticky-working past its raw idle.
+function _hasStickyPending() {
+  return sessions.some(s => s.running && s.status !== 'active' && _stickyActiveAt[s.name]);
+}
+
 // ═══════ RENDERING ═══════
 function updatePeekStatus() {
   const el = document.getElementById('peek-session-status');
@@ -15512,9 +15535,10 @@ function updatePeekStatus() {
   const s = sessions.find(s => s.name === peekSession);
   if (!s) { el.innerHTML = ''; return; }
   let badge = '';
-  if (s.status === 'active')  badge = '<span class="status-badge active">working</span>';
-  else if (s.status === 'waiting') badge = '<span class="status-badge waiting">needs input</span>';
-  else if (s.status === 'idle')    badge = '<span class="status-badge idle">idle</span>';
+  const ds = displayStatus(s);
+  if (ds === 'active')  badge = '<span class="status-badge active">working</span>';
+  else if (ds === 'waiting') badge = '<span class="status-badge waiting">needs input</span>';
+  else if (ds === 'idle')    badge = '<span class="status-badge idle">idle</span>';
   else if (!s.running)             badge = '<span class="status-badge" style="background:rgba(255,255,255,0.06);color:var(--dim);border:1px solid var(--border);">stopped</span>';
   if (s.rate_limited_until) {
     badge += `<span class="status-badge rate-limited" style="margin-left:6px;">Rate-limited until ${_fmtClockTime(s.rate_limited_until)}</span>`;
@@ -15716,9 +15740,9 @@ function render() {
         </div>
         </div>
         ${(s.status || s.tokens || s.last_activity || s.rate_limited_until || !online) ? `<div class="card-header-meta">
-          ${s.status === 'active' ? '<span class="status-badge active">working</span>' : ''}
-          ${s.status === 'waiting' ? '<span class="status-badge waiting">needs input</span>' : ''}
-          ${s.status === 'idle' ? '<span class="status-badge idle">idle</span>' : ''}
+          ${displayStatus(s) === 'active' ? '<span class="status-badge active">working</span>' : ''}
+          ${displayStatus(s) === 'waiting' ? '<span class="status-badge waiting">needs input</span>' : ''}
+          ${displayStatus(s) === 'idle' ? '<span class="status-badge idle">idle</span>' : ''}
           ${s.rate_limited_until ? `<span class="status-badge rate-limited" title="Rate-limited — auto-resume at ${_fmtClockTime(s.rate_limited_until)}">Rate-limited until ${_fmtClockTime(s.rate_limited_until)}</span>` : ''}
           ${s.steering && s.steering.length ? `<span class="status-badge steering" title="${s.steering.length} steering message${s.steering.length>1?'s':''} queued">${s.steering.length} queued</span>` : ''}
           ${s.tokens ? `<span class="token-count">${fmtTokens(s.tokens)}</span>` : ''}
@@ -15803,10 +15827,11 @@ function render() {
     ];
     const buckets = { active: [], waiting: [], idle: [], stopped: [] };
     filtered.forEach(s => {
-      if (!s.running)              buckets.stopped.push(s);
-      else if (s.status === 'active')  buckets.active.push(s);
-      else if (s.status === 'waiting') buckets.waiting.push(s);
-      else                             buckets.idle.push(s);
+      const ds = displayStatus(s);   // sticky-working: avoids active↔idle group whack-a-mole
+      if (!s.running)            buckets.stopped.push(s);
+      else if (ds === 'active')  buckets.active.push(s);
+      else if (ds === 'waiting') buckets.waiting.push(s);
+      else                       buckets.idle.push(s);
     });
     // Sort within each bucket: alpha (pinned → name) or pinned → last activity
     for (const key of Object.keys(buckets)) {
@@ -27139,6 +27164,10 @@ window.addEventListener('online',    () => _onClientResume('online'));
 // Periodic stale-watchdog — only fires when visible, so it's cheap on phones.
 setInterval(() => {
   if (document.hidden) return;
+  // Expire "sticky working" deterministically: SSE only re-renders on payload
+  // change, so a quiet session could otherwise linger in Working past its
+  // window. Re-render while any sticky hold is pending so it settles to Idle.
+  if (_hasStickyPending()) render();
   if (_sseFallback) return;
   if (_sseLooksStale()) _forceSseReconnect('watchdog stale ' + Math.round((Date.now() - _lastDataTime)/1000) + 's');
 }, 5000);
