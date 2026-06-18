@@ -7,6 +7,11 @@ Single-file project: everything lives in `amux-server.py` (Python server + inlin
 - `amux-server.py` — the server + dashboard (single file)
 - `mcp.json` — centralized MCP server config (shared by local and cloud)
 - `cloud/` — GCP VM provisioning (Terraform + setup script)
+- `wiki/` — **fork documentation** (durable, survives disk/memory loss): features
+  added vs upstream, the multi-agent orchestration architecture, changelog-vs-main,
+  and the operations runbook. Start at `wiki/Home.md`. The orchestration system
+  lives mostly outside this file (agent role files + schedule prompts) — the wiki
+  is its only durable record.
 
 ## Workflow
 
