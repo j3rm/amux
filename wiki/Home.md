@@ -36,6 +36,7 @@ HTML/CSS/JS). This fork keeps that single-file design and adds:
 | [Orchestration-Architecture](Orchestration-Architecture.md) | The agent star, watchdog, dual-audit, org partitioning, schedule prompts. Lives outside the code — capture it here. |
 | [Changelog-vs-Main](Changelog-vs-Main.md) | Commit-grouped divergence from upstream `main`, each with the *why*. |
 | [Operations](Operations.md) | Supervision (systemd), deploy, hot-reload, backup, the Zoho skills library, incident history. |
+| [Remote-Agent-Doorbell](Remote-Agent-Doorbell.md) | Zero-token doorbell for remote agents (Windows/Mac) that live outside amux tmux — background board poller + terminal injector. Contributed by RTG-VS2017. |
 
 ## Relationship to upstream
 
