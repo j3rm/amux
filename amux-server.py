@@ -18361,7 +18361,7 @@ function openPeek(name, opts) {
       const ago = Math.floor((Date.now() - cached.time) / 60000);
       document.getElementById('peek-status').textContent = 'Cached ' + (ago < 1 ? 'just now' : ago + 'm ago');
       const body = document.getElementById('peek-body');
-      body.scrollTop = body.scrollHeight;
+      _peekScrollToBottom(body);
     }
   });
   refreshPeek();
@@ -18805,9 +18805,20 @@ function highlightPrompts(html) {
 
 let peekSelecting = false;
 let _peekScrollLocked = false;
+// (B) Set true immediately before any PROGRAMMATIC peek scroll so the scroll
+// handler can ignore it and not mis-latch the lock (mobile reflow/momentum
+// otherwise trips _isScrolledToBottom=false on our own auto-scroll-to-bottom).
+let _peekProgrammaticScroll = false;
+function _peekScrollToBottom(body) {
+  if (!body) return;
+  _peekProgrammaticScroll = true;
+  body.scrollTop = body.scrollHeight;
+}
 
+// (D) 80px is more forgiving than 40 for touch momentum / rubber-band scroll,
+// so normal mobile scrolling reliably re-enables live updates.
 function _isScrolledToBottom(el, threshold) {
-  return el.scrollHeight - el.scrollTop - el.clientHeight < (threshold || 40);
+  return el.scrollHeight - el.scrollTop - el.clientHeight < (threshold || 80);
 }
 
 function _showScrollLockBadge(scrollEl, onClickResume) {
@@ -18859,13 +18870,13 @@ async function refreshPeek() {
       applyPeekSearch(hasSearch);
     }
     if (!_peekScrollLocked && atBottom && !hasSearch) {
-      body.scrollTop = body.scrollHeight;
+      _peekScrollToBottom(body);
       _hideScrollLockBadge(body);
     } else if (_peekScrollLocked) {
       _showScrollLockBadge(body, () => {
         _peekScrollLocked = false;
         applyPeekSearch(false);
-        body.scrollTop = body.scrollHeight;
+        _peekScrollToBottom(body);
         _hideScrollLockBadge(body);
       });
     }
@@ -22662,8 +22673,16 @@ function peekCheckSelection() {
 document.getElementById('peek-body').addEventListener('mousedown', () => { peekSelecting = true; clearTimeout(peekSelectTimer); });
 document.getElementById('peek-body').addEventListener('touchstart', () => { peekSelecting = true; clearTimeout(peekSelectTimer); }, {passive: true});
 document.getElementById('peek-body').addEventListener('scroll', function() {
+  // (B) Ignore our own programmatic scroll-to-bottom — only USER gestures latch.
+  if (_peekProgrammaticScroll) { _peekProgrammaticScroll = false; return; }
   if (_isScrolledToBottom(this)) {
-    _peekScrollLocked = false;
+    // (C) On returning to the bottom, flush any content buffered while locked
+    // so the conversation updates immediately instead of on the next poll tick.
+    if (_peekScrollLocked) {
+      _peekScrollLocked = false;
+      applyPeekSearch(peekSearchQuery.trim().length > 0);
+      _peekScrollToBottom(this);
+    }
     _hideScrollLockBadge(this);
   } else {
     _peekScrollLocked = true;
@@ -27151,6 +27170,14 @@ function _onClientResume(reason) {
   // Always pull fresh state — cheap and the user expects up-to-date data.
   if (_lastDataTime && Date.now() - _lastDataTime > _SSE_REFRESH_MS) {
     _resyncEverything();
+  }
+  // (A) The peek conversation can sit behind a latched scroll-lock after the OS
+  // backgrounds the app — which is why a reboot/force-refresh was the only fix.
+  // On resume, release the lock and re-render so foregrounding refreshes it.
+  if (peekSession) {
+    _peekScrollLocked = false;
+    _hideScrollLockBadge(document.getElementById('peek-body'));
+    refreshPeek();
   }
   // If the SSE connection looks dead (zombie after iOS background), bounce it.
   if (!_sseFallback && (_sseLooksStale() || !_sse)) {
