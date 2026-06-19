@@ -5059,21 +5059,26 @@ def _pickup_next_board_task(session_name: str):
 
 def _notify_session_of_task(session_name: str, item_id: str, title: str):
     """Push a one-line task pickup notice into the target session's tmux pane.
-    Idempotent per (session, item_id): we mark `notified=1` on the issue row so
-    re-PATCHes (e.g. tag edits) don't re-notify. Runs in a background thread so
-    the API call returns immediately even if the target session takes a moment.
-    Best-effort: silently swallows errors (session might not be running yet)."""
+    Idempotent per (session, item_id): we atomically flip the issue's `notified`
+    flag 0→1 so concurrent triggers (POST create vs. PATCH reassign/tag edit)
+    notify at most once. Runs in a background thread so the API call returns
+    immediately even if the target session takes a moment. Best-effort: silently
+    swallows errors (session might not be running yet)."""
     def _run():
         try:
             db = get_db()
-            row = db.execute(
-                "SELECT notified FROM issues WHERE id=?", (item_id,)
-            ).fetchone()
-            if row and row["notified"]:
-                return  # already notified
-            # Mark first to win the race against concurrent PATCHes
-            db.execute("UPDATE issues SET notified=1 WHERE id=?", (item_id,))
+            # Atomic compare-and-swap: only flip notified 0→1. The notified
+            # check in the WHERE closes the TOCTOU window the previous
+            # SELECT-then-UPDATE left open under concurrent triggers.
+            # rowcount==0 means another caller already notified — lose the race.
+            cur = db.execute(
+                "UPDATE issues SET notified=1 "
+                "WHERE id=? AND notified=0",
+                (item_id,),
+            )
             db.commit()
+            if cur.rowcount == 0:
+                return  # someone else already notified
             text = (
                 f"New board task assigned: {item_id} — {title[:120]}. "
                 f"Run `amux board claim {item_id}` to take it, or check `amux board` for context."
