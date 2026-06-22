@@ -7445,6 +7445,108 @@ def _set_commit_guard_session(name: str, enabled: bool | None):
     _write_env(env_file, cfg)
 
 
+# ── Task guard: nudge sessions to keep the board reflecting their work ──
+_task_guard_nudged: dict[str, bool] = {}  # session -> nudged this idle episode (re-armed when active)
+
+
+def _task_guard_enabled() -> bool:
+    """Global on/off for the idle task-guard (persisted as AMUX_TASK_GUARD in
+    ~/.amux/server.env). Default OFF — opt-in, since it can nudge any session
+    that idles without a tracked board issue."""
+    return os.environ.get("AMUX_TASK_GUARD", "0").strip().lower() in ("1", "true", "on", "yes")
+
+
+def _task_guard_session_enabled(name: str) -> bool:
+    """Per-session override for the task-guard; falls back to the global toggle."""
+    env_file = CC_SESSIONS / f"{name}.env"
+    if env_file.exists():
+        val = parse_env_file(env_file).get("AMUX_TASK_GUARD_SESSION", "").strip().lower()
+        if val in ("0", "false", "off", "no"):
+            return False
+        if val in ("1", "true", "on", "yes"):
+            return True
+    return _task_guard_enabled()
+
+
+def _set_task_guard_session(name: str, enabled: bool | None):
+    """Write (or clear) the per-session task-guard override in the session .env."""
+    env_file = CC_SESSIONS / f"{name}.env"
+    cfg = parse_env_file(env_file) if env_file.exists() else {}
+    if enabled is None:
+        cfg.pop("AMUX_TASK_GUARD_SESSION", None)
+    else:
+        cfg["AMUX_TASK_GUARD_SESSION"] = "1" if enabled else "0"
+    _write_env(env_file, cfg)
+
+
+def _session_has_doing_issue(name: str) -> bool:
+    """True if this session has a board issue currently in 'doing'."""
+    try:
+        row = get_db().execute(
+            "SELECT 1 FROM issues WHERE session=? AND status='doing' AND deleted IS NULL LIMIT 1",
+            (name,)
+        ).fetchone()
+        return bool(row)
+    except Exception:
+        return False
+
+
+def _board_digest(session_name: str = "") -> str:
+    """Startup-only board snapshot: what's actively in flight (all sessions)
+    + this session's own queued TODOs. Skips done/verified — too verbose."""
+    try:
+        rows = get_db().execute(
+            "SELECT session, title, status FROM issues "
+            "WHERE deleted IS NULL AND status IN ('doing','todo') "
+            "ORDER BY updated DESC"
+        ).fetchall()
+    except Exception:
+        return ""
+    doing = []
+    my_todo = []
+    for r in rows:
+        s = r["status"]
+        sess = r["session"] or "-"
+        if s == "doing" and len(doing) < 8:
+            doing.append(f"  [{sess}] {r['title']}")
+        elif s == "todo" and sess == session_name and len(my_todo) < 6:
+            my_todo.append(f"  {r['title']}")
+    parts = []
+    if doing:
+        parts.append("DOING (in progress across all sessions):\n" + "\n".join(doing))
+    if my_todo:
+        parts.append(f"YOUR TODO (queued for {session_name}):\n" + "\n".join(my_todo))
+    return "\n\n".join(parts)
+
+
+def _task_guard(name: str) -> bool:
+    """When a session goes idle with NO board issue tracked as 'doing', it likely
+    did untracked work. Nudge it once per idle episode to record its task(s) on
+    the board (re-armed when the session next goes active). Sessions that follow
+    the task-ledger rule keep an issue in 'doing' and are never nudged. Returns
+    True iff it sent a nudge this cycle."""
+    if not _task_guard_session_enabled(name):
+        return False
+    try:
+        if _task_guard_nudged.get(name):
+            return False
+        if _session_has_doing_issue(name):
+            return False  # already tracking — _complete_session_board_issue will close it
+        _task_guard_nudged[name] = True
+        msg = ("You went idle but have no board issue tracked as 'doing'. If you just did "
+               "real work, record it on the board now so every session stays aware — create "
+               "an issue for your session and set its status:\n"
+               "  amux board add \"<what you did>\"   # then: amux board done ITEM_ID\n")
+        if is_running(name):
+            send_text(name, msg)
+        _push_alert("untracked_task", name, "idle with no tracked board issue — nudged to log it")
+        slog(f"[task-guard] {name}: nudged (no doing issue)")
+        return True
+    except Exception as e:
+        slog(f"[task-guard] {name}: {e}")
+        return False
+
+
 def _commit_guard(name: str) -> bool:
     """When a session goes idle, if it left uncommitted work, nudge it once per
     dirty episode to commit (re-armed once the tree goes clean). amux only detects
@@ -9443,9 +9545,19 @@ def start_session(name: str, extra_flags: str = "", _skip_conv_id: bool = False)
             # Re-send this session's standing instruction once it's booted and ready,
             # so directives survive restarts/compaction (closed-loop autonomy config).
             _instr = _session_instructions(name)
-            if _instr:
-                threading.Thread(target=_send_after_ready, args=(name, _instr, 60),
-                                 daemon=True, name=f"instr-{name}").start()
+            _digest = _board_digest(name) if _task_guard_enabled() else ""
+            if _instr or _digest:
+                def _send_boot_briefing(sname=name, instr=_instr, digest=_digest):
+                    if instr:
+                        _send_after_ready(sname, instr, 60)
+                    if digest:
+                        if instr:
+                            time.sleep(1.0)  # space the two sends out
+                        _send_after_ready(
+                            sname,
+                            "Board snapshot (startup):\n\n" + digest, 60)
+                threading.Thread(target=_send_boot_briefing, daemon=True,
+                                 name=f"boot-{name}").start()
             return True, "started"
         except subprocess.CalledProcessError as e:
             return False, e.stderr.decode(errors="replace")
@@ -14453,6 +14565,8 @@ setTimeout(function(){var f=document.getElementById('js-fallback');if(f&&f.style
         <div class="card-menu-item" onclick="event.stopPropagation();closeAddMenu();openCreate()"><span class="mi">&#x2795;</span> New session</div>
         <div class="card-menu-item" onclick="event.stopPropagation();closeAddMenu();openConnect()"><span class="mi">&#x1F517;</span> Connect tmux</div>
         <div class="card-menu-item" onclick="event.stopPropagation();closeAddMenu();openConnectIterm2()"><span class="mi">&#x1F5A5;</span> Connect iTerm2 pane</div>
+        <div class="card-menu-sep"></div>
+        <div class="card-menu-item" onclick="event.stopPropagation();closeAddMenu();openBulkActions()"><span class="mi">&#x26A1;</span> Bulk actions</div>
       </div>
     </div>
     <div class="settings-wrap">
@@ -16241,6 +16355,17 @@ setTimeout(function(){var f=document.getElementById('js-fallback');if(f&&f.style
   </div>
 </div>
 
+<!-- Bulk actions modal -->
+<div id="bulk-actions-overlay" class="modal-backdrop" onclick="if(event.target===this)closeBulkActions()">
+  <div class="modal-box" style="max-width:480px;text-align:left;">
+    <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:16px;">
+      <div style="font-size:1.05rem;font-weight:700;">Bulk Actions</div>
+      <button class="btn" style="padding:4px 10px;font-size:0.8rem;" onclick="closeBulkActions()">&#x2715;</button>
+    </div>
+    <div id="bulk-actions-body"></div>
+  </div>
+</div>
+
 <!-- Skills modal -->
 <div id="skills-modal" class="overlay" style="z-index:200;" onclick="if(event.target===this)closeSkills()">
   <div style="display:flex;flex-direction:column;height:100%;max-width:600px;margin:0 auto;width:100%;">
@@ -16895,6 +17020,55 @@ function showAlert(msg) {
     btns.innerHTML = `<button class="btn primary" onclick="_modalClose(true)">OK</button>`;
     document.getElementById('modal-backdrop').classList.add('open');
   });
+}
+
+// ── Bulk actions modal ──
+const BULK_RATE_LIMIT_PATTERN = 'API Error: Server is temporarily limiting requests';
+function openBulkActions() {
+  const matched = sessions.filter(s => {
+    const lines = s.preview_lines || [];
+    return lines.some(l => l.includes(BULK_RATE_LIMIT_PATTERN));
+  });
+  const body = document.getElementById('bulk-actions-body');
+  let html = '';
+  if (matched.length) {
+    html += `<div style="padding:12px 14px;border:1px solid var(--border);border-radius:10px;margin-bottom:10px;">`;
+    html += `<div style="font-weight:600;font-size:0.9rem;margin-bottom:8px;">Send "continue" to rate-limited sessions</div>`;
+    html += `<div style="font-size:0.8rem;color:var(--dim);margin-bottom:12px;">${matched.length} session${matched.length>1?'s':''} stuck on API rate limit error:</div>`;
+    html += `<div style="display:flex;flex-direction:column;gap:4px;margin-bottom:14px;max-height:200px;overflow-y:auto;">`;
+    matched.forEach(s => {
+      html += `<div style="display:flex;align-items:center;gap:8px;font-size:0.82rem;padding:4px 8px;border-radius:6px;background:rgba(255,255,255,0.04);"><span style="color:var(--accent);">&#x25CF;</span> ${esc(s.name)}</div>`;
+    });
+    html += `</div>`;
+    html += `<button class="btn primary" style="width:100%;" onclick="bulkSendContinue()">Send "continue" to ${matched.length} session${matched.length>1?'s':''}</button>`;
+    html += `</div>`;
+  } else {
+    html += `<div style="padding:20px 0;text-align:center;color:var(--dim);font-size:0.88rem;">No rate-limited sessions found.</div>`;
+  }
+  body.innerHTML = html;
+  document.getElementById('bulk-actions-overlay').classList.add('open');
+}
+function closeBulkActions() {
+  document.getElementById('bulk-actions-overlay').classList.remove('open');
+}
+async function bulkSendContinue() {
+  const matched = sessions.filter(s => {
+    const lines = s.preview_lines || [];
+    return lines.some(l => l.includes(BULK_RATE_LIMIT_PATTERN));
+  });
+  if (!matched.length) { closeBulkActions(); return; }
+  closeBulkActions();
+  let sent = 0;
+  for (const s of matched) {
+    try {
+      await fetch(API + '/api/sessions/' + encodeURIComponent(s.name) + '/send', {
+        method: 'POST', headers: {'Content-Type':'application/json'},
+        body: JSON.stringify({text: 'continue'})
+      });
+      sent++;
+    } catch(e) {}
+  }
+  showToast(`Sent "continue" to ${sent} session${sent>1?'s':''}`);
 }
 
 async function showSessionInfo(name) {
