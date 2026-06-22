@@ -5173,7 +5173,12 @@ def _load_board(done_limit: int = 100, org: str | None = None) -> list:
                COALESCE(i.pos, 0) AS pos,
                GROUP_CONCAT(t.tag) AS tags_csv"""
     if done_limit > 0:
-        # Active items (unlimited) UNION most recent done/verified/discarded
+        # Active items (unlimited), plus the most recent terminal items. `verified`
+        # gets its OWN quota separate from done/discarded — otherwise the flood of
+        # `done` items (thousands) crowds verified out of a shared limit entirely,
+        # making prod-confirmed work invisible in the UI. Verified is the valuable
+        # confirmed set, so give it a generous floor.
+        verified_limit = max(done_limit, 300)
         rows = db.execute(
             f"""SELECT {_COLS}
                 FROM issues i LEFT JOIN issue_tags t ON t.issue_id = i.id
@@ -5183,12 +5188,21 @@ def _load_board(done_limit: int = 100, org: str | None = None) -> list:
               SELECT * FROM (
                 SELECT {_COLS}
                 FROM issues i LEFT JOIN issue_tags t ON t.issue_id = i.id
-                WHERE i.deleted IS NULL AND i.status IN ('done','verified','discarded'){org_clause}
+                WHERE i.deleted IS NULL AND i.status = 'verified'{org_clause}
+                GROUP BY i.id
+                ORDER BY i.updated DESC
+                LIMIT ?
+              )
+              UNION ALL
+              SELECT * FROM (
+                SELECT {_COLS}
+                FROM issues i LEFT JOIN issue_tags t ON t.issue_id = i.id
+                WHERE i.deleted IS NULL AND i.status IN ('done','discarded'){org_clause}
                 GROUP BY i.id
                 ORDER BY i.updated DESC
                 LIMIT ?
               )""",
-            (*org_params, *org_params, done_limit),
+            (*org_params, *org_params, verified_limit, *org_params, done_limit),
         ).fetchall()
     else:
         rows = db.execute(
