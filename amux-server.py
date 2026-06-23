@@ -2183,12 +2183,20 @@ def _rate_limit_loop():
 
 
 def _push_alert(alert_type: str, session: str, message: str):
-    """Enqueue an alert to be streamed to all SSE clients."""
+    """Enqueue an alert to be streamed to all SSE clients.
+
+    Pushover blast is suppressed for alert types listed in
+    AMUX_PUSHOVER_MUTED_ALERTS (CSV, set in ~/.amux/server.env). The SSE
+    event is always emitted so the dashboard still sees it — only the phone
+    push is filtered."""
     global _sse_alerts
     with _sse_alert_lock:
         _sse_alerts.append({"type": alert_type, "session": session, "message": message, "ts": int(time.time())})
         if len(_sse_alerts) > 50:
             _sse_alerts = _sse_alerts[-50:]
+    muted = {t.strip() for t in os.environ.get("AMUX_PUSHOVER_MUTED_ALERTS", "").split(",") if t.strip()}
+    if alert_type in muted:
+        return
     _send_pushover(f"amux — {alert_type}", message)
 
 
