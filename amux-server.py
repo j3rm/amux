@@ -6032,13 +6032,31 @@ def _try_route_rd(rd_id: str, rd_title: str, rd_desc: str, rd_org: str | None, d
 # Codex/Opus48/RTG-Research already use consistently. If a writer omits the
 # marker, the hook short-circuits (no auto-action; manual flow continues).
 
-_WORK_ITEM_PREFIXES = ("RA", "RP", "RM")  # the target prefixes both hooks act on
+# Prefixes that are NEVER valid targets — control-plane items (escalations,
+# routing directives, audit items, system items). Anything else is a candidate
+# work-item target. Negative-list approach lets the extractor work across orgs
+# without enumerating worker prefixes per-org (Ember alone uses
+# ECI/EMBER/EAAC/EO/EF/ED/EAC and more, depending on session naming).
+_CONTROL_PLANE_PREFIXES = frozenset({
+    "RR", "ER",          # *-Research adjudication escalations
+    "RD", "ED",          # *-Dispatch routing directives (Dispatch retired but ids persist)
+    "RAC", "RAO",        # RTG-Audit-Codex / RTG-Audit-Opus48 audit items
+    "AH", "AW",          # amux-helper / AMUX-Watchdog items
+})
+# Note: EAC-/EAO- aren't blanket excluded — Ember-Audit-Codex AND
+# EmberCRM_API_Core both produce 'EAC' from _prefix_from_session, so the
+# prefix alone is ambiguous. Disambiguation happens at the target-lookup
+# stage via the item's session field, not here.
+
 # VERDICT marker: must be at the START OF LINE (re.MULTILINE) so paragraph-
 # embedded quotes of other people's verdicts don't accidentally trigger.
 # When multiple matches exist, the caller takes the LAST one — because the
 # author's summary verdict comes AFTER any analysis prose or quoted excerpts.
 _VERDICT_RE = re.compile(r'^[ \t]*VERDICT\s*:\s*(PASS-WITH-WARNINGS|PASS|FAIL)\b', re.IGNORECASE | re.MULTILINE)
-_TARGET_ID_RE = re.compile(r'\b(' + "|".join(_WORK_ITEM_PREFIXES) + r')-(\d+)\b')
+
+# Permissive id-shape pattern: any uppercase-or-digit prefix + dash + digits.
+# Callers must filter out control-plane prefixes themselves.
+_ANY_ID_RE = re.compile(r'\b([A-Z][A-Z0-9]*)-(\d+)\b')
 
 
 def _is_research_session(session: str) -> bool:
@@ -6071,17 +6089,38 @@ def _extract_verdict(desc: str) -> str:
     return matches[-1].upper() if matches else ""
 
 
-def _extract_target_id(text: str, exclude_id: str = "") -> str:
-    """Return the first work-item id (RA-/RP-/RM-) found in text, or ''.
-    `exclude_id` lets a caller skip self-references when the calling item's
-    own id might appear in its own title/desc."""
-    if not text:
-        return ""
-    for m in _TARGET_ID_RE.finditer(text):
-        tid = f"{m.group(1)}-{m.group(2)}"
-        if tid != exclude_id:
+def _extract_target_id(text: str, exclude_id: str = "", title_text: str = "") -> str:
+    """Return the first work-item id found in `text`, or ''.
+
+    Prefers `title_text` over `text` when given — the audit/adjudication title
+    convention is 'AUDIT <TARGET>: ...' or 'ESCALATE <TARGET>: ...' / 'ESC-
+    <TARGET>: ...', so the target is unambiguously the first id in the title.
+    The desc body often quotes other ids (cross-refs to prior audits, related
+    work items) so title-first beats desc-first reliability.
+
+    Control-plane prefixes (RR/ER/RD/ED/RAC/RAO/AH/AW) are skipped — they're
+    never valid targets. Note: EAC-/EAO- aren't blanket-skipped because Ember
+    has a prefix collision (Ember-Audit-Codex audits AND EmberCRM_API_Core
+    workers both produce EAC). If those collide in practice the caller can
+    disambiguate via target-lookup."""
+    def _scan(s: str) -> str:
+        if not s:
+            return ""
+        for m in _ANY_ID_RE.finditer(s):
+            prefix, num = m.group(1), m.group(2)
+            tid = f"{prefix}-{num}"
+            if tid == exclude_id:
+                continue
+            if prefix in _CONTROL_PLANE_PREFIXES:
+                continue
             return tid
-    return ""
+        return ""
+    # Prefer title (short, deterministic) over desc (noisy with cross-refs)
+    if title_text:
+        t = _scan(title_text)
+        if t:
+            return t
+    return _scan(text)
 
 
 def _auto_apply_adjudication(rr_item: dict, db) -> dict | None:
@@ -6100,8 +6139,9 @@ def _auto_apply_adjudication(rr_item: dict, db) -> dict | None:
     if not verdict:
         return None
     target_id = _extract_target_id(
-        (rr_item.get("title", "") or "") + "\n" + desc,
+        desc,
         exclude_id=rid,
+        title_text=(rr_item.get("title", "") or ""),
     )
     if not target_id:
         return None
@@ -6152,8 +6192,9 @@ def _auto_verify_from_audit_pair(audit_item: dict, db) -> dict | None:
     if not my_verdict:
         return None
     target_id = _extract_target_id(
-        (audit_item.get("title", "") or "") + "\n" + (audit_item.get("desc", "") or ""),
+        audit_item.get("desc", "") or "",
         exclude_id=aid,
+        title_text=(audit_item.get("title", "") or ""),
     )
     if not target_id:
         return None
