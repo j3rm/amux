@@ -5880,16 +5880,20 @@ _SERVER_ROUTED_MARKER = "[server-routed"
 
 
 def _try_route_rd(rd_id: str, rd_title: str, rd_desc: str, rd_org: str | None, db) -> dict | None:
-    """Hook fired after an RD-* item is POSTed. Parses ROUTE_TO and mints the
-    child worker task if conditions are met. Returns a dict describing the
-    cascade if it acted, or None.
+    """Hook fired after a routing-directive item is POSTed. Parses ROUTE_TO
+    and mints the child worker task if conditions are met. Returns a dict
+    describing the cascade if it acted, or None.
+
+    Trigger is desc-based (ROUTE_TO presence) rather than id-prefix-based so
+    this works for any org's routing-directive naming convention — RTG RD-*,
+    Ember ED-*, future orgs. The hook is invoked unconditionally from POST
+    /api/board; if the desc has no ROUTE_TO line, the function silently
+    short-circuits.
 
     Idempotent: skips if `[server-routed` already in desc.
     Silent: returns None on missing ROUTE_TO (no error, no mint).
     Defensive: returns None on invalid session or self-route attempts.
     """
-    if not rd_id.startswith("RD-"):
-        return None
     if not rd_desc:
         return None
     if _SERVER_ROUTED_MARKER in rd_desc:
@@ -6029,18 +6033,42 @@ def _try_route_rd(rd_id: str, rd_title: str, rd_desc: str, rd_org: str | None, d
 # marker, the hook short-circuits (no auto-action; manual flow continues).
 
 _WORK_ITEM_PREFIXES = ("RA", "RP", "RM")  # the target prefixes both hooks act on
-_VERDICT_RE = re.compile(r'VERDICT\s*:\s*(PASS-WITH-WARNINGS|PASS|FAIL)\b', re.IGNORECASE)
+# VERDICT marker: must be at the START OF LINE (re.MULTILINE) so paragraph-
+# embedded quotes of other people's verdicts don't accidentally trigger.
+# When multiple matches exist, the caller takes the LAST one — because the
+# author's summary verdict comes AFTER any analysis prose or quoted excerpts.
+_VERDICT_RE = re.compile(r'^[ \t]*VERDICT\s*:\s*(PASS-WITH-WARNINGS|PASS|FAIL)\b', re.IGNORECASE | re.MULTILINE)
 _TARGET_ID_RE = re.compile(r'\b(' + "|".join(_WORK_ITEM_PREFIXES) + r')-(\d+)\b')
+
+
+def _is_research_session(session: str) -> bool:
+    """True if the session is one of the *-Research adjudicators (RTG-Research,
+    Ember-Research, etc.). Session-based detection lets the C3 hook work
+    across orgs without depending on item-id prefix conventions, which collide
+    across orgs (e.g. Ember EAC- is both auditor items AND EmberCRM_API_Core
+    worker items)."""
+    if not session:
+        return False
+    return session.endswith("-Research")
+
+
+def _is_audit_session(session: str) -> bool:
+    """True if the session is one of the *-Audit-* auditors (RTG-Audit-Codex,
+    RTG-Audit-Opus48, Ember-Audit-Codex, Ember-Audit-Opus48, etc.)."""
+    if not session:
+        return False
+    return "-Audit-" in session
 
 
 def _extract_verdict(desc: str) -> str:
     """Return 'PASS' / 'PASS-WITH-WARNINGS' / 'FAIL' from a VERDICT marker, or ''.
-    Only the explicit marker counts — substring scans for bare 'FAIL' or 'PASS'
-    are too noisy in audit prose."""
+    Marker must be at start-of-line (so paragraph-embedded quotes don't fire).
+    When multiple markers exist, the LAST one wins — author's summary verdict
+    typically follows any quoted analysis."""
     if not desc:
         return ""
-    m = _VERDICT_RE.search(desc)
-    return m.group(1).upper() if m else ""
+    matches = _VERDICT_RE.findall(desc)
+    return matches[-1].upper() if matches else ""
 
 
 def _extract_target_id(text: str, exclude_id: str = "") -> str:
@@ -6057,11 +6085,15 @@ def _extract_target_id(text: str, exclude_id: str = "") -> str:
 
 
 def _auto_apply_adjudication(rr_item: dict, db) -> dict | None:
-    """C3. Called after an RR-* item is PATCHed. If the item carries a verdict
-    in its desc, apply the verdict to the target work item.
-    Returns a dict describing the cascaded action, or None."""
+    """C3. Called after a *-Research-assigned item is PATCHed. If the item
+    carries a verdict in its desc, apply the verdict to the target work item.
+    Returns a dict describing the cascaded action, or None.
+
+    Session-based detection (not prefix-based) so this works for any
+    *-Research session (RTG-Research RR-*, Ember-Research ER-*, etc.)
+    without per-org id-prefix configuration."""
     rid = rr_item.get("id", "")
-    if not rid.startswith("RR-"):
+    if not _is_research_session(rr_item.get("session", "")):
         return None
     desc = rr_item.get("desc", "") or ""
     verdict = _extract_verdict(desc)
@@ -6100,11 +6132,18 @@ def _auto_apply_adjudication(rr_item: dict, db) -> dict | None:
 
 
 def _auto_verify_from_audit_pair(audit_item: dict, db) -> dict | None:
-    """C4. Called after a RAC-* or RAO-* item is PATCHed. If both audit items
-    targeting the same target have closed with verdicts, apply: both ACCEPT
-    → verified, both FAIL → doing. Mixed verdicts → leave for escalation."""
+    """C4. Called after an audit item (assigned to a *-Audit-* session) is
+    PATCHed. If both audit items targeting the same target have closed with
+    verdicts, apply: both ACCEPT → verified, both FAIL → doing. Mixed
+    verdicts → leave for escalation.
+
+    Session-based detection (not prefix-based) so this works for any audit
+    session across orgs (RTG-Audit-*, Ember-Audit-*). The cross-org prefix
+    collisions (Ember EAC- is shared with EmberCRM_API_Core worker items)
+    are avoided entirely by checking session field, not id prefix."""
     aid = audit_item.get("id", "")
-    if not (aid.startswith("RAC-") or aid.startswith("RAO-")):
+    my_session = audit_item.get("session", "")
+    if not _is_audit_session(my_session):
         return None
     # Audit must be in a closed-ish state to count.
     if audit_item.get("status") not in ("done", "verified", "review"):
@@ -6124,16 +6163,21 @@ def _auto_verify_from_audit_pair(audit_item: dict, db) -> dict | None:
     ).fetchone()
     if not target or target["status"] != "review":
         return None
-    # Find the OTHER audit (RAC if I'm RAO, RAO if I'm RAC). Look only at the
-    # most-recent matching non-discarded item — older closed audits for the
-    # same target are from earlier review rounds and don't count.
-    other_prefix = "RAO" if aid.startswith("RAC") else "RAC"
+    # Find the OTHER audit — same target, same org's OTHER auditor.
+    # The two auditors in any org pair as (-Audit-Codex) and (-Audit-Opus48).
+    # Derive the sibling session by swapping that suffix.
+    if my_session.endswith("-Audit-Codex"):
+        other_session = my_session[:-len("-Audit-Codex")] + "-Audit-Opus48"
+    elif my_session.endswith("-Audit-Opus48"):
+        other_session = my_session[:-len("-Audit-Opus48")] + "-Audit-Codex"
+    else:
+        return None  # unknown auditor session shape
     other = db.execute(
         "SELECT id, status, desc FROM issues "
-        "WHERE id LIKE ? AND deleted IS NULL AND status != 'discarded' "
+        "WHERE session = ? AND deleted IS NULL AND status != 'discarded' "
         "  AND (title LIKE ? OR desc LIKE ?) "
         "ORDER BY created DESC LIMIT 1",
-        (f"{other_prefix}-%", f"%{target_id}%", f"%{target_id}%"),
+        (other_session, f"%{target_id}%", f"%{target_id}%"),
     ).fetchone()
     if not other or other["status"] not in ("done", "verified", "review"):
         return None
@@ -35817,15 +35861,15 @@ class CCHandler(BaseHTTPRequestHandler):
                 desc = body.get("desc", "").strip()
                 tags = [t for t in body.get("tags", []) if t]
 
-                # ── Escalation-mint gate (RD-89, 2026-06-24): every RR-* POST
-                # gets a server-enforced 24h cooldown per target plus a
+                # ── Escalation-mint gate (RD-89, 2026-06-24): every escalation
+                # POST gets a server-enforced 24h cooldown per target plus a
                 # target-status guard. The same logic was tried in the Dispatch
                 # prompt earlier but Haiku wasn't reliably applying it, so it
-                # moves here where it CAN'T be skipped. Triggered by prefix
-                # alone — anyone trying to mint an RR-* (any dispatcher or
-                # any future research-target session) gets the gate. Full spec
-                # lives in the rtg-follow-up-gate amux note.
-                if prefix == "RR":
+                # moves here where it CAN'T be skipped. Trigger is SESSION-
+                # based (assignee is a *-Research session) so it works for any
+                # org — RTG-Research RR-*, Ember-Research ER-*, future orgs.
+                # Full spec lives in the rtg-follow-up-gate amux note.
+                if _is_research_session(session):
                     # Extract the FIRST target id mentioned in title or desc.
                     # Targets are work-item ids: RA-/RP-/RAC-/RAO-/RM-/RD-/AW-/AH- etc.
                     combined = f"{title}\n{desc}"
@@ -35852,11 +35896,16 @@ class CCHandler(BaseHTTPRequestHandler):
                                         "error": "escalation-gate: target marked VOID",
                                         "target": target_id,
                                     }, 409)
-                        # (c) 24h cooldown across non-discarded RR-* items
+                        # (c) 24h cooldown across non-discarded escalation items
+                        # — items assigned to ANY *-Research session in the
+                        # same cooldown window that reference this target.
+                        # Session-based rather than id-prefix-based so it
+                        # covers ER-* (Ember-Research) the same as RR-* (RTG-
+                        # Research) without per-org configuration.
                         cooldown_secs = 86400
                         prior = db.execute(
                             "SELECT id, created FROM issues "
-                            "WHERE id LIKE 'RR-%' AND deleted IS NULL "
+                            "WHERE session LIKE '%-Research' AND deleted IS NULL "
                             "  AND status != 'discarded' "
                             "  AND created > ? "
                             "  AND (title LIKE ? OR desc LIKE ?)"
@@ -35894,17 +35943,19 @@ class CCHandler(BaseHTTPRequestHandler):
                         (item_id, tag),
                     )
                 db.commit()
-                # ── RD-* routing hook (Dispatch retirement, 2026-06-24). Fires
-                # ONLY on POST (not PATCH). If the new item is an RD-* with a
-                # ROUTE_TO line, mint the worker child task and mark the RD
-                # done before we read back the response item. The hook is
-                # idempotent (skips if `[server-routed` already in desc).
+                # ── Routing-directive hook (Dispatch retirement, 2026-06-24).
+                # Fires ONLY on POST (not PATCH). If the new item's desc has
+                # a ROUTE_TO line, mint the worker child task and mark this
+                # item done before we read back the response. Triggered by
+                # desc content, not id prefix, so RTG RD-* and Ember ED-*
+                # (and any future org's routing prefix) all work without
+                # per-org configuration. Idempotent: skips if [server-routed
+                # already in desc.
                 routing_cascade = None
-                if item_id.startswith("RD-"):
-                    try:
-                        routing_cascade = _try_route_rd(item_id, title, desc, org, db)
-                    except Exception as _re:
-                        slog(f"[route-rd] {item_id}: hook error: {_re}")
+                try:
+                    routing_cascade = _try_route_rd(item_id, title, desc, org, db)
+                except Exception as _re:
+                    slog(f"[route-rd] {item_id}: hook error: {_re}")
                 _board_changed()  # invalidate SSE cache
                 item = _item_by_id(item_id)
                 _push_ical_bg()
