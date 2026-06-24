@@ -37,6 +37,7 @@ HTML/CSS/JS). This fork keeps that single-file design and adds:
 | [Changelog-vs-Main](Changelog-vs-Main.md) | Commit-grouped divergence from upstream `main`, each with the *why*. |
 | [Operations](Operations.md) | Supervision (systemd), deploy, hot-reload, backup, the Zoho skills library, incident history. |
 | [Remote-Agent-Doorbell](Remote-Agent-Doorbell.md) | Zero-token doorbell for remote agents (Windows/Mac) that live outside amux tmux — background board poller + terminal injector. Contributed by RTG-VS2017. |
+| [Server-Hooks-And-Scripts](Server-Hooks-And-Scripts.md) | Substrate features added 2026-06-24: C3/C4 cascade hooks, escalation gate, RD routing hook, watchdog script, silently-dead detector, context-exhaustion auto-restart. Retires AMUX-Watchdog, RTG-Dispatch, Ember-Dispatch agents. |
 
 ## Relationship to upstream
 
