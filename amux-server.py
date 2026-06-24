@@ -5794,6 +5794,160 @@ _session_prev_status: dict[str, str] = {}  # track status changes for board auto
 _commit_guard_nudged: dict[str, bool] = {}  # session -> nudged this dirty episode (re-armed when clean)
 
 
+# ── Auto-apply hooks for adjudications and audit pairs (RTG-Research's C3/C4,
+# 2026-06-24) ────────────────────────────────────────────────────────────────
+#
+# C3 — adjudication-already-applied: when an RR-* escalation item is PATCHed
+# with a VERDICT (RTG-Research closing an adjudication), the server auto-PATCHes
+# the target item to verified (PASS/PASS-WITH-WARNINGS) or doing (FAIL).
+#
+# C4 — audit-pair-complete-triggers-verify: when both audit items (RAC + RAO
+# targeting the same target) have closed with verdicts, the server auto-PATCHes
+# the target: both ACCEPT → verified, both FAIL → doing. Mixed verdicts leave
+# the pair for the escalation path (gated by the RR-* cooldown in board POST).
+#
+# Both hooks rely on the conventional verdict marker "VERDICT: <PASS|
+# PASS-WITH-WARNINGS|FAIL>" at or near the start of the item desc — the format
+# Codex/Opus48/RTG-Research already use consistently. If a writer omits the
+# marker, the hook short-circuits (no auto-action; manual flow continues).
+
+_WORK_ITEM_PREFIXES = ("RA", "RP", "RM")  # the target prefixes both hooks act on
+_VERDICT_RE = re.compile(r'VERDICT\s*:\s*(PASS-WITH-WARNINGS|PASS|FAIL)\b', re.IGNORECASE)
+_TARGET_ID_RE = re.compile(r'\b(' + "|".join(_WORK_ITEM_PREFIXES) + r')-(\d+)\b')
+
+
+def _extract_verdict(desc: str) -> str:
+    """Return 'PASS' / 'PASS-WITH-WARNINGS' / 'FAIL' from a VERDICT marker, or ''.
+    Only the explicit marker counts — substring scans for bare 'FAIL' or 'PASS'
+    are too noisy in audit prose."""
+    if not desc:
+        return ""
+    m = _VERDICT_RE.search(desc)
+    return m.group(1).upper() if m else ""
+
+
+def _extract_target_id(text: str, exclude_id: str = "") -> str:
+    """Return the first work-item id (RA-/RP-/RM-) found in text, or ''.
+    `exclude_id` lets a caller skip self-references when the calling item's
+    own id might appear in its own title/desc."""
+    if not text:
+        return ""
+    for m in _TARGET_ID_RE.finditer(text):
+        tid = f"{m.group(1)}-{m.group(2)}"
+        if tid != exclude_id:
+            return tid
+    return ""
+
+
+def _auto_apply_adjudication(rr_item: dict, db) -> dict | None:
+    """C3. Called after an RR-* item is PATCHed. If the item carries a verdict
+    in its desc, apply the verdict to the target work item.
+    Returns a dict describing the cascaded action, or None."""
+    rid = rr_item.get("id", "")
+    if not rid.startswith("RR-"):
+        return None
+    desc = rr_item.get("desc", "") or ""
+    verdict = _extract_verdict(desc)
+    if not verdict:
+        return None
+    target_id = _extract_target_id(
+        (rr_item.get("title", "") or "") + "\n" + desc,
+        exclude_id=rid,
+    )
+    if not target_id:
+        return None
+    target = db.execute(
+        "SELECT id, status, desc FROM issues WHERE id = ? AND deleted IS NULL",
+        (target_id,),
+    ).fetchone()
+    if not target:
+        return None
+    # Only act on in-flight targets — never overwrite a settled state.
+    if target["status"] not in ("review", "doing"):
+        return None
+    new_status = "verified" if verdict in ("PASS", "PASS-WITH-WARNINGS") else "doing"
+    if target["status"] == new_status:
+        return None  # already there, nothing to do
+    now = int(time.time())
+    stamp = time.strftime("%Y-%m-%d %H:%M", time.localtime())
+    note = f"\n\n[auto-applied {stamp} by C3: {rid} adjudicated {verdict} → {new_status}]"
+    new_desc = (target["desc"] or "") + note
+    db.execute(
+        "UPDATE issues SET status = ?, desc = ?, updated = ? WHERE id = ?",
+        (new_status, new_desc, now, target_id),
+    )
+    db.commit()
+    _board_changed()
+    return {"action": "auto-applied", "rr": rid, "target": target_id,
+            "verdict": verdict, "new_status": new_status}
+
+
+def _auto_verify_from_audit_pair(audit_item: dict, db) -> dict | None:
+    """C4. Called after a RAC-* or RAO-* item is PATCHed. If both audit items
+    targeting the same target have closed with verdicts, apply: both ACCEPT
+    → verified, both FAIL → doing. Mixed verdicts → leave for escalation."""
+    aid = audit_item.get("id", "")
+    if not (aid.startswith("RAC-") or aid.startswith("RAO-")):
+        return None
+    # Audit must be in a closed-ish state to count.
+    if audit_item.get("status") not in ("done", "verified", "review"):
+        return None
+    my_verdict = _extract_verdict(audit_item.get("desc", "") or "")
+    if not my_verdict:
+        return None
+    target_id = _extract_target_id(
+        (audit_item.get("title", "") or "") + "\n" + (audit_item.get("desc", "") or ""),
+        exclude_id=aid,
+    )
+    if not target_id:
+        return None
+    target = db.execute(
+        "SELECT id, status, desc FROM issues WHERE id = ? AND deleted IS NULL",
+        (target_id,),
+    ).fetchone()
+    if not target or target["status"] != "review":
+        return None
+    # Find the OTHER audit (RAC if I'm RAO, RAO if I'm RAC). Look only at the
+    # most-recent matching non-discarded item — older closed audits for the
+    # same target are from earlier review rounds and don't count.
+    other_prefix = "RAO" if aid.startswith("RAC") else "RAC"
+    other = db.execute(
+        "SELECT id, status, desc FROM issues "
+        "WHERE id LIKE ? AND deleted IS NULL AND status != 'discarded' "
+        "  AND (title LIKE ? OR desc LIKE ?) "
+        "ORDER BY created DESC LIMIT 1",
+        (f"{other_prefix}-%", f"%{target_id}%", f"%{target_id}%"),
+    ).fetchone()
+    if not other or other["status"] not in ("done", "verified", "review"):
+        return None
+    their_verdict = _extract_verdict(other["desc"] or "")
+    if not their_verdict:
+        return None
+    accept = {"PASS", "PASS-WITH-WARNINGS"}
+    if my_verdict in accept and their_verdict in accept:
+        new_status = "verified"
+    elif my_verdict == "FAIL" and their_verdict == "FAIL":
+        new_status = "doing"
+    else:
+        return None  # mixed → escalation path (gated by RR-* mint guard)
+    if target["status"] == new_status:
+        return None
+    now = int(time.time())
+    stamp = time.strftime("%Y-%m-%d %H:%M", time.localtime())
+    note = (f"\n\n[auto-applied {stamp} by C4: pair complete "
+            f"({aid}={my_verdict}, {other['id']}={their_verdict}) → {new_status}]")
+    new_desc = (target["desc"] or "") + note
+    db.execute(
+        "UPDATE issues SET status = ?, desc = ?, updated = ? WHERE id = ?",
+        (new_status, new_desc, now, target_id),
+    )
+    db.commit()
+    _board_changed()
+    return {"action": "auto-applied", "audits": [aid, other["id"]],
+            "verdicts": [my_verdict, their_verdict],
+            "target": target_id, "new_status": new_status}
+
+
 def _session_dirty_files(name: str, work_dir: str) -> list:
     """Uncommitted/untracked files this session owns. Scoped to its working dir,
     and — for a session whose cwd is a monorepo root — excludes subdirectories that
@@ -35771,6 +35925,18 @@ class CCHandler(BaseHTTPRequestHandler):
                             and updated_item.get("owner_type") == "agent"
                             and updated_item.get("status") in ("todo", "backlog")):
                         _notify_session_of_task(new_session, bid, updated_item.get("title", ""))
+                    # C3: auto-apply adjudication verdicts on RR-* items.
+                    # C4: auto-verify targets when an audit pair (RAC + RAO) closes.
+                    # Hook only runs when the PATCH changed desc or status — cheap.
+                    try:
+                        cascaded = (_auto_apply_adjudication(updated_item, db)
+                                    or _auto_verify_from_audit_pair(updated_item, db))
+                    except Exception as _ce:
+                        slog(f"[C3/C4] {bid}: hook error: {_ce}")
+                        cascaded = None
+                    if cascaded:
+                        slog(f"[C3/C4] {cascaded}")
+                        updated_item["_cascaded"] = cascaded
                     return self._json(updated_item)
 
                 if method == "DELETE":
