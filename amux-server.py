@@ -3143,6 +3143,19 @@ def _rate_limit_auto_respond():
             if not raw:
                 continue
             clean = _STRIP_ANSI.sub("", raw)
+            existing = _session_auto_actions.get(name)
+            # An actively-generating session is, by definition, NOT rate-limited.
+            # Clear any stale/false flag (e.g. the weekly-limit phrase printed by
+            # a tool or sitting in scrollback) so the badge stops contradicting
+            # the live "working" status.
+            if _detect_claude_status(raw) == "active":
+                if existing and (existing.get("rate_limit_reset_at")
+                                 or existing.get("rate_limit_weekly")):
+                    existing.pop("rate_limit_reset_at", None)
+                    existing.pop("rate_limit_reset_at_fallback", None)
+                    existing.pop("rate_limit_weekly", None)
+                    slog(f"[rate-limit] session={name} active — cleared stale rate-limit flag")
+                continue
             matched_idx = -1
             for i, (pattern, response) in enumerate(_RATE_LIMIT_PROMPTS):
                 if pattern.search(clean):
@@ -3152,8 +3165,22 @@ def _rate_limit_auto_respond():
                     break
             # Weekly/usage-cap banner has no menu to answer — detect it on its own
             # so we still record the reset time (badges, bulk actions, auto-resume).
-            is_weekly = matched_idx < 0 and bool(_WEEKLY_LIMIT_RE.search(clean))
+            # Only match it on the LIVE screen (bottom ~30 lines): the phrase often
+            # appears in scrollback or tool output (e.g. an API echoing another
+            # session's state), which must NOT flag a healthy session.
+            tail = "\n".join(clean.splitlines()[-30:])
+            is_weekly = matched_idx < 0 and bool(_WEEKLY_LIMIT_RE.search(tail))
             if matched_idx < 0 and not is_weekly:
+                # No live rate-limit UI. A real weekly cap keeps its banner on
+                # screen until reset, so a session flagged weekly without a live
+                # banner was a false match — clear it. (5-hour flags park in a
+                # bannerless "waiting for reset" state, so leave those alone.)
+                if existing and existing.get("rate_limit_weekly"):
+                    existing.pop("rate_limit_reset_at", None)
+                    existing.pop("rate_limit_reset_at_fallback", None)
+                    existing.pop("rate_limit_weekly", None)
+                    slog(f"[rate-limit] session={name} weekly banner not on live "
+                         f"screen — cleared stale flag")
                 continue
             if is_weekly:
                 _rate_limit_last_responded[name] = now  # cooldown; nothing to press
