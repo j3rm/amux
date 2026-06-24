@@ -5853,6 +5853,164 @@ _session_prev_status: dict[str, str] = {}  # track status changes for board auto
 _commit_guard_nudged: dict[str, bool] = {}  # session -> nudged this dirty episode (re-armed when clean)
 
 
+# ── Server-side routing hook for RD-* items (Dispatch retirement, 2026-06-24)
+# ─────────────────────────────────────────────────────────────────────────────
+#
+# Replaces the bulk of RTG-Dispatch's responsibilities. When an RD-* item is
+# POSTed with a `ROUTE_TO: <session>` line in the first 200 chars of its desc,
+# the server mints the worker child task and marks the RD done. No agent
+# required for the mechanical routing.
+#
+# Spec (agreed with RTG-Research 2026-06-24):
+#  - ROUTE_TO must appear within the first 200 chars (or first 5 lines).
+#  - Accepts bare or quoted form: `ROUTE_TO: RTG-ActAS` or `ROUTE_TO: "RTG-ActAS"`.
+#  - Missing ROUTE_TO → silently leave the RD alone (the absence signals to
+#    the author that the item was a category error and should have been a
+#    channel/note instead).
+#  - Optional `BLOCKED_BY: <id list>` — if any listed dep is not verified/done,
+#    child starts in `backlog` instead of `todo`.
+#  - Optional `CHILD_TITLE:` and `CHILD_PREFIX:` (default RA) for fine control.
+#  - Idempotent: if the RD desc already contains `server-routed`, hook skips.
+
+_ROUTE_TO_RE = re.compile(r'^[ \t]*ROUTE_TO:\s*"?([A-Za-z0-9_-]+)"?\s*$', re.MULTILINE)
+_BLOCKED_BY_RE = re.compile(r'^[ \t]*BLOCKED_BY:\s*(.+?)\s*$', re.MULTILINE)
+_CHILD_TITLE_RE = re.compile(r'^[ \t]*CHILD_TITLE:\s*(.+?)\s*$', re.MULTILINE)
+_CHILD_PREFIX_RE = re.compile(r'^[ \t]*CHILD_PREFIX:\s*([A-Z]+)\s*$', re.MULTILINE)
+_SERVER_ROUTED_MARKER = "[server-routed"
+
+
+def _try_route_rd(rd_id: str, rd_title: str, rd_desc: str, rd_org: str | None, db) -> dict | None:
+    """Hook fired after an RD-* item is POSTed. Parses ROUTE_TO and mints the
+    child worker task if conditions are met. Returns a dict describing the
+    cascade if it acted, or None.
+
+    Idempotent: skips if `[server-routed` already in desc.
+    Silent: returns None on missing ROUTE_TO (no error, no mint).
+    Defensive: returns None on invalid session or self-route attempts.
+    """
+    if not rd_id.startswith("RD-"):
+        return None
+    if not rd_desc:
+        return None
+    if _SERVER_ROUTED_MARKER in rd_desc:
+        return None
+    # Only scan the FIRST 200 chars / first 5 lines for routing fields, per the
+    # spec. Sugar fields (BLOCKED_BY, CHILD_*) scan the whole desc.
+    head = "\n".join(rd_desc.split("\n", 6)[:5])[:200]
+    m = _ROUTE_TO_RE.search(head)
+    if not m:
+        return None  # silent — author missed it on purpose or made a category error
+    target_session = m.group(1).strip()
+
+    # Validate target session exists (env file presence is the source of truth)
+    env_file = CC_SESSIONS / f"{target_session}.env"
+    if not env_file.exists():
+        _push_alert(
+            "routing_error", rd_id,
+            f"'{rd_id}' ROUTE_TO names unknown session '{target_session}' — RD left untouched",
+        )
+        slog(f"[route-rd] {rd_id}: ROUTE_TO unknown session {target_session!r}")
+        return None
+
+    # Don't self-route: if the RD itself is somehow assigned to the same session
+    # as ROUTE_TO names, that's a config error.
+    me_row = db.execute(
+        "SELECT session FROM issues WHERE id = ? AND deleted IS NULL", (rd_id,),
+    ).fetchone()
+    if me_row and (me_row["session"] or "") == target_session:
+        slog(f"[route-rd] {rd_id}: ROUTE_TO points to same session as the RD itself — skipping")
+        return None
+
+    # Parse BLOCKED_BY (full desc, not just head)
+    blocked_by: list[str] = []
+    bm = _BLOCKED_BY_RE.search(rd_desc)
+    if bm:
+        # Split on whitespace and/or commas, keep ID-shaped tokens
+        for raw in re.split(r'[\s,]+', bm.group(1)):
+            tok = raw.strip().strip(".,;:")
+            if re.match(r'^[A-Z]+-\d+$', tok):
+                blocked_by.append(tok)
+
+    # Determine child status: backlog if any listed dep is not verified/done, else todo
+    child_status = "todo"
+    unmet_deps: list[tuple[str, str]] = []
+    for dep in blocked_by:
+        dep_row = db.execute(
+            "SELECT status FROM issues WHERE id = ? AND deleted IS NULL", (dep,),
+        ).fetchone()
+        if not dep_row:
+            unmet_deps.append((dep, "not-found"))
+        elif dep_row["status"] not in ("verified", "done"):
+            unmet_deps.append((dep, dep_row["status"] or "(no status)"))
+    if unmet_deps:
+        child_status = "backlog"
+
+    # Optional title + prefix overrides
+    child_title = rd_title
+    tm = _CHILD_TITLE_RE.search(rd_desc)
+    if tm:
+        child_title = tm.group(1).strip()
+    child_prefix = "RA"
+    pm = _CHILD_PREFIX_RE.search(rd_desc)
+    if pm:
+        child_prefix = pm.group(1).strip()
+
+    # Mint the child — mirror the POST /api/board insert logic
+    child_id = _next_issue_id(child_prefix)
+    now = int(time.time())
+    # Place new card at top of its column
+    min_pos_row = db.execute(
+        "SELECT COALESCE(MIN(NULLIF(pos, 0)), 0) AS m FROM issues "
+        "WHERE status = ? AND deleted IS NULL",
+        (child_status,),
+    ).fetchone()
+    new_pos = (min_pos_row["m"] if min_pos_row else 0) - 1024.0
+    # The child carries the full RD desc so the worker sees the spec verbatim,
+    # plus a header pointer back to the RD.
+    child_desc = (
+        f"[routed from {rd_id} on {time.strftime('%Y-%m-%d %H:%M', time.localtime(now))}]"
+        + (f" — BLOCKED_BY unmet: {', '.join(f'{d}({s})' for d, s in unmet_deps)}"
+           if unmet_deps else "")
+        + "\n\n" + rd_desc
+    )
+    child_org = rd_org or _session_org(target_session)
+    db.execute(
+        """INSERT INTO issues (id, title, desc, status, session, creator, due, due_time,
+                               created, updated, owner_type, pos, org)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+        (child_id, child_title, child_desc, child_status, target_session,
+         "server-routed", None, None, now, now, "agent", new_pos, child_org),
+    )
+
+    # PATCH the RD: append the server-routed marker + child id to desc, set done
+    marker = (
+        f"\n\n{_SERVER_ROUTED_MARKER} "
+        f"{time.strftime('%Y-%m-%d %H:%M', time.localtime(now))} → child={child_id}"
+        + (f" (child status={child_status} — unmet deps {', '.join(d for d,_ in unmet_deps)})"
+           if unmet_deps else "")
+        + "]"
+    )
+    new_rd_desc = rd_desc + marker
+    db.execute(
+        "UPDATE issues SET status = 'done', desc = ?, updated = ? WHERE id = ?",
+        (new_rd_desc, now, rd_id),
+    )
+    db.commit()
+
+    # Notify the target session (idempotent on the issues.notified flag)
+    if child_status == "todo":
+        _notify_session_of_task(target_session, child_id, child_title)
+
+    return {
+        "action": "routed",
+        "rd": rd_id,
+        "child": child_id,
+        "target": target_session,
+        "child_status": child_status,
+        "unmet_deps": unmet_deps,
+    }
+
+
 # ── Auto-apply hooks for adjudications and audit pairs (RTG-Research's C3/C4,
 # 2026-06-24) ────────────────────────────────────────────────────────────────
 #
@@ -35736,6 +35894,17 @@ class CCHandler(BaseHTTPRequestHandler):
                         (item_id, tag),
                     )
                 db.commit()
+                # ── RD-* routing hook (Dispatch retirement, 2026-06-24). Fires
+                # ONLY on POST (not PATCH). If the new item is an RD-* with a
+                # ROUTE_TO line, mint the worker child task and mark the RD
+                # done before we read back the response item. The hook is
+                # idempotent (skips if `[server-routed` already in desc).
+                routing_cascade = None
+                if item_id.startswith("RD-"):
+                    try:
+                        routing_cascade = _try_route_rd(item_id, title, desc, org, db)
+                    except Exception as _re:
+                        slog(f"[route-rd] {item_id}: hook error: {_re}")
                 _board_changed()  # invalidate SSE cache
                 item = _item_by_id(item_id)
                 _push_ical_bg()
@@ -35749,6 +35918,8 @@ class CCHandler(BaseHTTPRequestHandler):
                         and status in ("todo", "backlog")
                         and creator != session):
                     _notify_session_of_task(session, item_id, title)
+                if routing_cascade:
+                    item["_cascaded"] = routing_cascade
                 return self._json(item, 201)
 
             # POST /api/board/clear-done — soft-delete all done issues
