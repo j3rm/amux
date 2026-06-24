@@ -35445,6 +35445,62 @@ class CCHandler(BaseHTTPRequestHandler):
                 creator = body.get("creator", "")
                 desc = body.get("desc", "").strip()
                 tags = [t for t in body.get("tags", []) if t]
+
+                # ── Escalation-mint gate (RD-89, 2026-06-24): every RR-* POST
+                # gets a server-enforced 24h cooldown per target plus a
+                # target-status guard. The same logic was tried in the Dispatch
+                # prompt earlier but Haiku wasn't reliably applying it, so it
+                # moves here where it CAN'T be skipped. Triggered by prefix
+                # alone — anyone trying to mint an RR-* (any dispatcher or
+                # any future research-target session) gets the gate. Full spec
+                # lives in the rtg-follow-up-gate amux note.
+                if prefix == "RR":
+                    # Extract the FIRST target id mentioned in title or desc.
+                    # Targets are work-item ids: RA-/RP-/RAC-/RAO-/RM-/RD-/AW-/AH- etc.
+                    combined = f"{title}\n{desc}"
+                    m = re.search(r"\b((?:RA|RP|RAC|RAO|RM|RD|AW|AH|RR)-\d+)\b", combined)
+                    if m:
+                        target_id = m.group(1)
+                        # (b) Target-status guard
+                        if target_id != item_id:  # don't gate against self
+                            t_row = db.execute(
+                                "SELECT id, status, title, desc FROM issues "
+                                "WHERE id = ? AND deleted IS NULL",
+                                (target_id,)
+                            ).fetchone()
+                            if t_row:
+                                if t_row["status"] in ("verified", "done", "discarded"):
+                                    return self._json({
+                                        "error": "escalation-gate: target is settled",
+                                        "target": target_id,
+                                        "target_status": t_row["status"],
+                                    }, 409)
+                                t_text = ((t_row["title"] or "") + " " + (t_row["desc"] or "")).upper()
+                                if "VOID" in t_text:
+                                    return self._json({
+                                        "error": "escalation-gate: target marked VOID",
+                                        "target": target_id,
+                                    }, 409)
+                        # (c) 24h cooldown across non-discarded RR-* items
+                        cooldown_secs = 86400
+                        prior = db.execute(
+                            "SELECT id, created FROM issues "
+                            "WHERE id LIKE 'RR-%' AND deleted IS NULL "
+                            "  AND status != 'discarded' "
+                            "  AND created > ? "
+                            "  AND (title LIKE ? OR desc LIKE ?)"
+                            "ORDER BY created DESC LIMIT 1",
+                            (now - cooldown_secs, f"%{target_id}%", f"%{target_id}%")
+                        ).fetchone()
+                        if prior:
+                            age_h = (now - int(prior["created"])) / 3600.0
+                            return self._json({
+                                "error": "escalation-gate: 24h cooldown",
+                                "target": target_id,
+                                "prior_rr": prior["id"],
+                                "prior_age_hours": round(age_h, 1),
+                            }, 409)
+                # ── end escalation-mint gate
                 owner_type = body.get("owner_type", "agent" if session else "human")
                 if owner_type not in ("human", "agent"):
                     owner_type = "human"
