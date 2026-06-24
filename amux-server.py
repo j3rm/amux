@@ -2399,6 +2399,33 @@ def _at_shell_prompt(clean_output: str) -> bool:
     return False
 
 
+def _detect_context_exhaustion(clean_output: str) -> str | None:
+    """Detect Claude Code's terminal banners for context/token-limit exhaustion.
+
+    Both banners mean Claude has exited; the session is dead until restart.
+    Returns the matched banner text if found in the last ~30 lines, else None.
+
+    Banners observed in the wild (2026-06-24, RTG-Dispatch):
+      "CONVERSATION ENDED — TOKEN LIMIT EXCEEDED"
+      "CONTEXT WINDOW EXHAUSTED — PREVIOUS SESSION ENDED"
+    """
+    if not clean_output:
+        return None
+    # Tail-only — older occurrences in scrollback may be from a prior session
+    # whose log streamed through; we only care about the current state.
+    tail = "\n".join(clean_output.splitlines()[-30:])
+    for marker in (
+        "CONVERSATION ENDED — TOKEN LIMIT EXCEEDED",
+        "CONTEXT WINDOW EXHAUSTED — PREVIOUS SESSION ENDED",
+        # Tolerate ASCII hyphen-minus too, in case the UI ever substitutes
+        "CONVERSATION ENDED - TOKEN LIMIT EXCEEDED",
+        "CONTEXT WINDOW EXHAUSTED - PREVIOUS SESSION ENDED",
+    ):
+        if marker in tail:
+            return marker
+    return None
+
+
 _snapshot_running = False
 
 def _snapshot_all_sessions():
@@ -2636,6 +2663,43 @@ def _snapshot_all_sessions_inner():
                             slog(f"[4b] {name}: exception: {e}")
                     else:
                         pass  # rate-limited (restart < 90s ago)
+
+            # ── 4c. Context / token-limit exhaustion — Claude printed the hard-stop banner
+            # "CONVERSATION ENDED — TOKEN LIMIT EXCEEDED" or
+            # "CONTEXT WINDOW EXHAUSTED — PREVIOUS SESSION ENDED" means Claude
+            # has exited and the session is dead until restarted. The session's
+            # next scheduled tick will silently no-op until we restart.
+            #
+            # Push the alert ALWAYS. Auto-restart only when the session explicitly
+            # opts in via CC_AUTO_RESTART_ON_CTX_LIMIT=1 — for stateless schedule
+            # consumers like dispatchers/watchdogs this is safe (each wake is a
+            # fresh prompt). For long-context interactive sessions it would just
+            # blow away the conversation, so default OFF.
+            ctx_banner = _detect_context_exhaustion(clean)
+            if ctx_banner and not actions.get("restarting"):
+                cfg_ctx = parse_env_file(f)
+                last_ctx_alert = actions.get("last_ctx_exhaust_alert", 0)
+                # Throttle to one alert / one restart attempt per 90s per session.
+                if now - last_ctx_alert > 90 and cfg_ctx.get("CC_ARCHIVED") != "1":
+                    actions["last_ctx_exhaust_alert"] = now
+                    _push_alert("context_exhausted", name,
+                                f"'{name}': {ctx_banner} — session is dead until restart")
+                    slog(f"[4c] {name}: context-exhaust banner detected: {ctx_banner}")
+                    if cfg_ctx.get("CC_AUTO_RESTART_ON_CTX_LIMIT") in ("1", "true", "yes"):
+                        actions["restarting"] = True
+                        def _do_ctx_restart(sname=name, _actions=actions, _banner=ctx_banner):
+                            time.sleep(3)
+                            start_session(sname)
+                            for _w in range(30):
+                                time.sleep(1)
+                                _o = tmux_capture(sname, 10)
+                                if _o and _claude_ui_visible(_o):
+                                    break
+                            _actions.pop("restarting", None)
+                            slog(f"[4c] {sname}: restarted after context exhaustion ({_banner})")
+                        threading.Thread(target=_do_ctx_restart, daemon=True).start()
+                        _push_alert("auto_restart", name,
+                                    f"'{name}' auto-restarted after context exhaustion ({ctx_banner[:40]})")
 
             # ── 5. Stale process reaper: restart idle sessions with old Claude processes
             # Claude processes lose their API connection after ~2 days but stay running.
