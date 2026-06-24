@@ -2664,6 +2664,65 @@ def _snapshot_all_sessions_inner():
                     else:
                         pass  # rate-limited (restart < 90s ago)
 
+            # ── 4d. Silently-dead session detector (2026-06-24) ──────────────
+            # Section 4b above catches "Claude exited under tmux shell" via a
+            # pgrep on the SHELL pid, but its conditions (UI-stale heuristic,
+            # _at_shell_prompt match, rate-limit window) let real incidents
+            # slip past. Today's RTG-AzureBackup + RTG-ActCloudPortal cases
+            # both had tmux alive, scrollback noise that wasn't a shell prompt,
+            # and no live claude process — none of the existing detectors
+            # fired and the sessions sat dead for hours.
+            #
+            # This detector is intentionally broader and not status-gated:
+            # for every session whose tmux pane is alive, look for ANY
+            # `claude --name <session>` process. If none for >60s, the session
+            # is silently dead. Push alert always; auto-restart only when
+            # CC_AUTO_CONTINUE=1.
+            if running and not actions.get("restarting") and not actions.get("hibernated"):
+                cfg_d = parse_env_file(f)
+                if cfg_d.get("CC_ARCHIVED") != "1":
+                    last_seen = actions.get("last_claude_pid_seen", now)
+                    try:
+                        r_pg = subprocess.run(
+                            ["pgrep", "-f", f"claude .* --name {name}( |$)"],
+                            capture_output=True, text=True, timeout=5,
+                        )
+                        # If exit 0 with output → claude is alive (refresh last_seen)
+                        # If exit 1 (no match) → claude is dead (don't refresh)
+                        alive = bool(r_pg.stdout.strip())
+                    except Exception:
+                        alive = True  # uncertain → don't flag
+                    if alive:
+                        actions["last_claude_pid_seen"] = now
+                    else:
+                        # Only act if claude has been gone for >60s — debounces
+                        # against the brief window during legitimate auto-restart.
+                        dead_for = now - last_seen
+                        last_alert = actions.get("last_session_dead_alert", 0)
+                        if dead_for > 60 and now - last_alert > 90:
+                            actions["last_session_dead_alert"] = now
+                            _push_alert("session_dead", name,
+                                        f"'{name}' has no claude process for {int(dead_for)}s — "
+                                        f"likely died silently")
+                            slog(f"[4d] {name}: silently dead for {int(dead_for)}s")
+                            if cfg_d.get("CC_AUTO_CONTINUE") in ("1", "true", "yes"):
+                                actions["restarting"] = True
+                                actions["last_auto_restart"] = now
+                                def _do_silent_restart(sname=name, _actions=actions, _gone=int(dead_for)):
+                                    time.sleep(3)
+                                    start_session(sname)
+                                    for _w in range(30):
+                                        time.sleep(1)
+                                        _o = tmux_capture(sname, 10)
+                                        if _o and _claude_ui_visible(_o):
+                                            break
+                                    _actions.pop("restarting", None)
+                                    _actions["last_claude_pid_seen"] = int(time.time())
+                                    slog(f"[4d] {sname}: restarted after {_gone}s silent death")
+                                threading.Thread(target=_do_silent_restart, daemon=True).start()
+                                _push_alert("auto_restart", name,
+                                            f"'{name}' auto-restarted after silent death ({int(dead_for)}s)")
+
             # ── 4c. Context / token-limit exhaustion — Claude printed the hard-stop banner
             # "CONVERSATION ENDED — TOKEN LIMIT EXCEEDED" or
             # "CONTEXT WINDOW EXHAUSTED — PREVIOUS SESSION ENDED" means Claude
