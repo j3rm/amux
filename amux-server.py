@@ -6123,6 +6123,170 @@ def _extract_target_id(text: str, exclude_id: str = "", title_text: str = "") ->
     return _scan(text)
 
 
+def _auto_mint_audit_pair(target_item: dict, db) -> dict | None:
+    """Called when a worker item PATCHes to status=review. Mints a fresh
+    RAC + RAO audit pair targeting the org's auditor sessions.
+
+    Identity:
+      target session → strip first hyphenated word → org prefix.
+      Auditors:  {org}-Audit-Codex  and  {org}-Audit-Opus48
+    The item's `org` field is the more reliable source — use it when set.
+
+    Idempotency / freshness:
+      Skip if a non-discarded audit on EITHER auditor already exists for this
+      target whose created timestamp is newer than the target's `updated`
+      (i.e., its last review-enter). Older audits from prior review rounds
+      do NOT cover the current round and we mint fresh.
+
+    Target eligibility:
+      Only mint for items whose id prefix is NOT a control-plane prefix
+      (RR/ER/RD/ED/RAC/RAO/AH/AW/EAC/EAO when assigned to a -Audit- session).
+      Skip if no `org` is set and no recognizable org prefix in session.
+    """
+    tid = target_item.get("id", "")
+    tprefix = tid.split("-", 1)[0] if "-" in tid else ""
+    # Control-plane prefixes never get audited
+    if tprefix in _CONTROL_PLANE_PREFIXES:
+        return None
+    # Audit items themselves don't get audited (catch the prefix-collision
+    # case: EAC- worker items vs EAC- audit items disambiguate via session)
+    if _is_audit_session(target_item.get("session", "")):
+        return None
+    if _is_research_session(target_item.get("session", "")):
+        return None  # *-Research items are control-plane
+
+    # Org → auditor sessions
+    org = (target_item.get("org") or "").strip()
+    if not org:
+        # Fall back to session prefix (e.g. "RTG-ActAS" → "RTG")
+        s = target_item.get("session") or ""
+        if "-" in s:
+            org = s.split("-", 1)[0]
+    if not org or org in ("amux",):
+        return None  # no auditor pair for org-less or non-audited items
+    codex_session = f"{org}-Audit-Codex"
+    opus_session = f"{org}-Audit-Opus48"
+
+    # Validate both auditor envs exist
+    if not (CC_SESSIONS / f"{codex_session}.env").exists():
+        return None
+    if not (CC_SESSIONS / f"{opus_session}.env").exists():
+        return None
+
+    target_updated = int(target_item.get("updated") or 0)
+
+    def _existing_audit(auditor: str) -> dict | None:
+        # Most-recent non-discarded audit for this target by this auditor
+        return db.execute(
+            "SELECT id, created FROM issues "
+            "WHERE session = ? AND deleted IS NULL AND status != 'discarded' "
+            "  AND title LIKE ? "
+            "ORDER BY created DESC LIMIT 1",
+            (auditor, f"AUDIT {tid}:%"),
+        ).fetchone()
+
+    codex_existing = _existing_audit(codex_session)
+    opus_existing = _existing_audit(opus_session)
+
+    # Freshness rule: skip if an audit on either auditor was created AFTER
+    # this target's last update (i.e., covers the current review round).
+    fresh_threshold = target_updated - 60  # 60s slack to absorb clock skew
+    if codex_existing and int(codex_existing["created"]) >= fresh_threshold:
+        return None
+    if opus_existing and int(opus_existing["created"]) >= fresh_threshold:
+        return None
+
+    # Mint both audits
+    title = f"AUDIT {tid}: {target_item.get('title', '')[:200]}"
+    now = int(time.time())
+    minted = []
+    for auditor in (codex_session, opus_session):
+        # Place new audit at top of its column
+        min_pos = db.execute(
+            "SELECT COALESCE(MIN(NULLIF(pos, 0)), 0) AS m FROM issues "
+            "WHERE status = 'todo' AND deleted IS NULL"
+        ).fetchone()
+        new_pos = (min_pos["m"] if min_pos else 0) - 1024.0
+        # Determine prefix from auditor session
+        prefix = _prefix_from_session(auditor)
+        audit_id = _next_issue_id(prefix)
+        desc = (
+            f"[auto-minted {time.strftime('%Y-%m-%d %H:%M', time.localtime(now))} "
+            f"on {tid} review-enter]"
+        )
+        db.execute(
+            """INSERT INTO issues (id, title, desc, status, session, creator, due, due_time,
+                                   created, updated, owner_type, pos, org)
+               VALUES (?, ?, ?, 'todo', ?, 'server-audit-mint', NULL, NULL, ?, ?, 'agent', ?, ?)""",
+            (audit_id, title, desc, auditor, now, now, new_pos, org),
+        )
+        minted.append(audit_id)
+    db.commit()
+    for audit_id, auditor in zip(minted, (codex_session, opus_session)):
+        _notify_session_of_task(auditor, audit_id, title)
+    return {"action": "audit-minted", "target": tid, "audits": minted,
+            "auditors": [codex_session, opus_session]}
+
+
+def _auto_mint_escalation(target_id: str, org: str, my_audit_id: str,
+                          my_verdict: str, other_audit_id: str, other_verdict: str,
+                          db) -> dict | None:
+    """Called from C4 when an audit pair completes with mixed verdicts (one
+    ACCEPT + one FAIL). Mints an RR-/ER- escalation to the org's *-Research
+    session. The existing server-side escalation-mint gate (in POST handler)
+    catches duplicate attempts in the same 24h window.
+
+    Returns the minted item dict if successful, else None (gate blocked or
+    research session missing)."""
+    if not org:
+        return None
+    research_session = f"{org}-Research"
+    if not (CC_SESSIONS / f"{research_session}.env").exists():
+        return None
+    prefix = _prefix_from_session(research_session)
+    now = int(time.time())
+
+    # Re-run the same escalate-mint guard inline so we don't double-mint.
+    # (The POST-handler gate covers explicit POSTs; this is an internal mint.)
+    prior = db.execute(
+        "SELECT id FROM issues WHERE session LIKE '%-Research' AND deleted IS NULL "
+        "  AND status != 'discarded' AND created > ? "
+        "  AND (title LIKE ? OR desc LIKE ?) "
+        "ORDER BY created DESC LIMIT 1",
+        (now - 86400, f"%{target_id}%", f"%{target_id}%"),
+    ).fetchone()
+    if prior:
+        return {"action": "escalation-skipped-cooldown", "target": target_id,
+                "prior": prior["id"]}
+
+    rr_id = _next_issue_id(prefix)
+    title = f"ESC-{target_id}: split verdict ({my_verdict} vs {other_verdict})"
+    desc = (
+        f"[auto-minted {time.strftime('%Y-%m-%d %H:%M', time.localtime(now))} "
+        f"on audit-pair completion]\n\n"
+        f"Audit pair on {target_id} closed with disagreement:\n"
+        f"  {my_audit_id}: VERDICT: {my_verdict}\n"
+        f"  {other_audit_id}: VERDICT: {other_verdict}\n\n"
+        f"Read both audit reports and adjudicate. Apply C3 by adding a "
+        f"`VERDICT: <PASS|PASS-WITH-WARNINGS|FAIL>` line to your desc when done."
+    )
+    min_pos = db.execute(
+        "SELECT COALESCE(MIN(NULLIF(pos, 0)), 0) AS m FROM issues "
+        "WHERE status = 'todo' AND deleted IS NULL"
+    ).fetchone()
+    new_pos = (min_pos["m"] if min_pos else 0) - 1024.0
+    db.execute(
+        """INSERT INTO issues (id, title, desc, status, session, creator, due, due_time,
+                               created, updated, owner_type, pos, org)
+           VALUES (?, ?, ?, 'todo', ?, 'server-escalation-mint', NULL, NULL, ?, ?, 'agent', ?, ?)""",
+        (rr_id, title, desc, research_session, now, now, new_pos, org),
+    )
+    db.commit()
+    _notify_session_of_task(research_session, rr_id, title)
+    return {"action": "escalation-minted", "rr": rr_id, "target": target_id,
+            "research": research_session}
+
+
 def _auto_apply_adjudication(rr_item: dict, db) -> dict | None:
     """C3. Called after a *-Research-assigned item is PATCHed. If the item
     carries a verdict in its desc, apply the verdict to the target work item.
@@ -6213,12 +6377,17 @@ def _auto_verify_from_audit_pair(audit_item: dict, db) -> dict | None:
         other_session = my_session[:-len("-Audit-Opus48")] + "-Audit-Codex"
     else:
         return None  # unknown auditor session shape
+    # CRITICAL: anchor the title prefix — `LIKE '%target%'` previously matched
+    # cross-target audits whose desc mentioned the target as a cross-reference,
+    # producing wrong pairings (RTG-Research caught RAO-7235 paired with
+    # RAC-7141 for different targets, 2026-06-25). Audit titles are
+    # canonically `AUDIT <target>: <body>` — match the prefix only.
     other = db.execute(
         "SELECT id, status, desc FROM issues "
         "WHERE session = ? AND deleted IS NULL AND status != 'discarded' "
-        "  AND (title LIKE ? OR desc LIKE ?) "
+        "  AND title LIKE ? "
         "ORDER BY created DESC LIMIT 1",
-        (other_session, f"%{target_id}%", f"%{target_id}%"),
+        (other_session, f"AUDIT {target_id}:%"),
     ).fetchone()
     if not other or other["status"] not in ("done", "verified", "review"):
         return None
@@ -6231,7 +6400,16 @@ def _auto_verify_from_audit_pair(audit_item: dict, db) -> dict | None:
     elif my_verdict == "FAIL" and their_verdict == "FAIL":
         new_status = "doing"
     else:
-        return None  # mixed → escalation path (gated by RR-* mint guard)
+        # SPLIT verdict (one ACCEPT, one FAIL). Mint the escalation to the
+        # org's *-Research session for adjudication. Server-side gate
+        # prevents duplicate mints in the same 24h window.
+        return _auto_mint_escalation(
+            target_id=target_id,
+            org=(target["org"] if "org" in target.keys() else None) or _session_org(my_session),
+            my_audit_id=aid, my_verdict=my_verdict,
+            other_audit_id=other["id"], other_verdict=their_verdict,
+            db=db,
+        )
     if target["status"] == new_status:
         return None
     now = int(time.time())
@@ -36247,17 +36425,24 @@ class CCHandler(BaseHTTPRequestHandler):
                             and updated_item.get("owner_type") == "agent"
                             and updated_item.get("status") in ("todo", "backlog")):
                         _notify_session_of_task(new_session, bid, updated_item.get("title", ""))
-                    # C3: auto-apply adjudication verdicts on RR-* items.
-                    # C4: auto-verify targets when an audit pair (RAC + RAO) closes.
-                    # Hook only runs when the PATCH changed desc or status — cheap.
+                    # C3: auto-apply adjudication verdicts on *-Research items.
+                    # C4: auto-verify targets when an audit pair closes.
+                    # Audit-mint: when a worker item PATCHes INTO review (was
+                    # not previously at review), mint the org's audit pair.
                     try:
                         cascaded = (_auto_apply_adjudication(updated_item, db)
                                     or _auto_verify_from_audit_pair(updated_item, db))
+                        # Audit-mint fires on a fresh review transition.
+                        if (updated_item.get("status") == "review"
+                                and prior and prior["status"] != "review"):
+                            minted = _auto_mint_audit_pair(updated_item, db)
+                            if minted:
+                                cascaded = cascaded or minted
                     except Exception as _ce:
-                        slog(f"[C3/C4] {bid}: hook error: {_ce}")
+                        slog(f"[hooks] {bid}: hook error: {_ce}")
                         cascaded = None
                     if cascaded:
-                        slog(f"[C3/C4] {cascaded}")
+                        slog(f"[hooks] {cascaded}")
                         updated_item["_cascaded"] = cascaded
                     return self._json(updated_item)
 
