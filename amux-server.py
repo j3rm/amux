@@ -6123,51 +6123,20 @@ def _extract_target_id(text: str, exclude_id: str = "", title_text: str = "") ->
     return _scan(text)
 
 
-def _auto_mint_audit_pair(target_item: dict, db) -> dict | None:
-    """Called when a worker item PATCHes to status=review. Mints a fresh
-    RAC + RAO audit pair targeting the org's auditor sessions.
-
-    Identity:
-      target session → strip first hyphenated word → org prefix.
-      Auditors:  {org}-Audit-Codex  and  {org}-Audit-Opus48
-    The item's `org` field is the more reliable source — use it when set.
-
-    Idempotency / freshness:
-      Skip if a non-discarded audit on EITHER auditor already exists for this
-      target whose created timestamp is newer than the target's `updated`
-      (i.e., its last review-enter). Older audits from prior review rounds
-      do NOT cover the current round and we mint fresh.
-
-    Target eligibility:
-      Only mint for items whose id prefix is NOT a control-plane prefix
-      (RR/ER/RD/ED/RAC/RAO/AH/AW/EAC/EAO when assigned to a -Audit- session).
-      Skip if no `org` is set and no recognizable org prefix in session.
-    """
+def _mint_audit_pair_unguarded(target_item: dict, db) -> dict | None:
+    """Internal: actually mint the RAC + RAO audit pair, with no build-verify
+    gate. Called both by _auto_mint_audit_pair (after the gate passes) and by
+    _auto_on_build_verify_close (after a build-verify PASSes)."""
     tid = target_item.get("id", "")
-    tprefix = tid.split("-", 1)[0] if "-" in tid else ""
-    # Control-plane prefixes never get audited
-    if tprefix in _CONTROL_PLANE_PREFIXES:
-        return None
-    # Audit items themselves don't get audited (catch the prefix-collision
-    # case: EAC- worker items vs EAC- audit items disambiguate via session)
-    if _is_audit_session(target_item.get("session", "")):
-        return None
-    if _is_research_session(target_item.get("session", "")):
-        return None  # *-Research items are control-plane
-
-    # Org → auditor sessions
     org = (target_item.get("org") or "").strip()
     if not org:
-        # Fall back to session prefix (e.g. "RTG-ActAS" → "RTG")
         s = target_item.get("session") or ""
         if "-" in s:
             org = s.split("-", 1)[0]
     if not org or org in ("amux",):
-        return None  # no auditor pair for org-less or non-audited items
+        return None
     codex_session = f"{org}-Audit-Codex"
     opus_session = f"{org}-Audit-Opus48"
-
-    # Validate both auditor envs exist
     if not (CC_SESSIONS / f"{codex_session}.env").exists():
         return None
     if not (CC_SESSIONS / f"{opus_session}.env").exists():
@@ -6175,39 +6144,31 @@ def _auto_mint_audit_pair(target_item: dict, db) -> dict | None:
 
     target_updated = int(target_item.get("updated") or 0)
 
-    def _existing_audit(auditor: str) -> dict | None:
-        # Most-recent non-discarded audit for this target by this auditor
+    def _existing(auditor: str):
         return db.execute(
             "SELECT id, created FROM issues "
             "WHERE session = ? AND deleted IS NULL AND status != 'discarded' "
-            "  AND title LIKE ? "
-            "ORDER BY created DESC LIMIT 1",
+            "  AND title LIKE ? ORDER BY created DESC LIMIT 1",
             (auditor, f"AUDIT {tid}:%"),
         ).fetchone()
 
-    codex_existing = _existing_audit(codex_session)
-    opus_existing = _existing_audit(opus_session)
-
-    # Freshness rule: skip if an audit on either auditor was created AFTER
-    # this target's last update (i.e., covers the current review round).
-    fresh_threshold = target_updated - 60  # 60s slack to absorb clock skew
+    fresh_threshold = target_updated - 60
+    codex_existing = _existing(codex_session)
+    opus_existing = _existing(opus_session)
     if codex_existing and int(codex_existing["created"]) >= fresh_threshold:
         return None
     if opus_existing and int(opus_existing["created"]) >= fresh_threshold:
         return None
 
-    # Mint both audits
     title = f"AUDIT {tid}: {target_item.get('title', '')[:200]}"
     now = int(time.time())
     minted = []
     for auditor in (codex_session, opus_session):
-        # Place new audit at top of its column
         min_pos = db.execute(
             "SELECT COALESCE(MIN(NULLIF(pos, 0)), 0) AS m FROM issues "
             "WHERE status = 'todo' AND deleted IS NULL"
         ).fetchone()
         new_pos = (min_pos["m"] if min_pos else 0) - 1024.0
-        # Determine prefix from auditor session
         prefix = _prefix_from_session(auditor)
         audit_id = _next_issue_id(prefix)
         desc = (
@@ -6226,6 +6187,154 @@ def _auto_mint_audit_pair(target_item: dict, db) -> dict | None:
         _notify_session_of_task(auditor, audit_id, title)
     return {"action": "audit-minted", "target": tid, "audits": minted,
             "auditors": [codex_session, opus_session]}
+
+
+def _mint_build_verify(target_item: dict, build_gate_session: str, db) -> dict | None:
+    """Internal: mint a BUILD-VERIFY item assigned to the build-gate session.
+    The build-verify session (e.g. RTG-VS2017 remote Windows agent) runs the
+    Framework build and PATCHes the item to status=done with a VERDICT:
+    marker. The close hook then chains the audit-pair mint on PASS or
+    bounces the target on FAIL."""
+    tid = target_item["id"]
+    prefix = _prefix_from_session(build_gate_session) or "RV"
+    bv_id = _next_issue_id(prefix)
+    now = int(time.time())
+    target_title = (target_item.get("title", "") or "")[:140]
+    title = f"BUILD-VERIFY {tid}: {target_title}"
+    desc = (
+        f"[auto-minted {time.strftime('%Y-%m-%d %H:%M', time.localtime(now))} "
+        f"as build-verify precondition for audit pair on {tid}]\n\n"
+        f"Build the source for {tid} on Windows (Framework). PATCH this item to status=done "
+        f"with a VERDICT: <PASS|PASS-WITH-WARNINGS|FAIL> marker in the desc. "
+        f"The dual-audit pair on {tid} will be auto-minted on PASS; on FAIL "
+        f"the target returns to status=doing for the worker to address."
+    )
+    min_pos_row = db.execute(
+        "SELECT COALESCE(MIN(NULLIF(pos, 0)), 0) AS m FROM issues "
+        "WHERE status = 'todo' AND deleted IS NULL"
+    ).fetchone()
+    new_pos = (min_pos_row["m"] if min_pos_row else 0) - 1024.0
+    org = target_item.get("org")
+    db.execute(
+        """INSERT INTO issues (id, title, desc, status, session, creator, due, due_time,
+                               created, updated, owner_type, pos, org)
+           VALUES (?, ?, ?, 'todo', ?, 'server-build-verify-mint', NULL, NULL, ?, ?, 'agent', ?, ?)""",
+        (bv_id, title, desc, build_gate_session, now, now, new_pos, org),
+    )
+    db.commit()
+    _notify_session_of_task(build_gate_session, bv_id, title)
+    return {"action": "build-verify-minted", "build_verify": bv_id,
+            "target": tid, "build_gate": build_gate_session}
+
+
+def _auto_on_build_verify_close(item: dict, db) -> dict | None:
+    """When a BUILD-VERIFY item PATCHes to done/verified with a VERDICT marker,
+    cascade to the original target work item:
+      PASS / PASS-WITH-WARNINGS → mint the audit pair (was held by the gate)
+      FAIL → bounce the target back to status=doing (worker re-takes)
+    Triggered by title prefix `BUILD-VERIFY <target>:` so any agent assigned
+    to the build-gate session can complete one."""
+    title = item.get("title", "") or ""
+    if not title.startswith("BUILD-VERIFY "):
+        return None
+    if item.get("status") not in ("done", "verified"):
+        return None
+    verdict = _extract_verdict(item.get("desc", "") or "")
+    if not verdict:
+        return None
+    m = re.match(r'^BUILD-VERIFY ([A-Z][A-Z0-9]*-\d+)[:\s]', title)
+    if not m:
+        return None
+    target_id = m.group(1)
+    target = db.execute(
+        "SELECT id, status, session, title, desc, org, updated FROM issues "
+        "WHERE id = ? AND deleted IS NULL", (target_id,),
+    ).fetchone()
+    if not target:
+        return None
+    now = int(time.time())
+    if verdict == "FAIL":
+        if target["status"] != "review":
+            return None  # already moved on
+        bounce_note = (
+            f"\n\n[build-verify FAIL — bounced from review {time.strftime('%Y-%m-%d %H:%M', time.localtime(now))} "
+            f"by {item['id']}. See its desc for build errors.]"
+        )
+        new_desc = (target["desc"] or "") + bounce_note
+        db.execute(
+            "UPDATE issues SET status = 'doing', desc = ?, updated = ? WHERE id = ?",
+            (new_desc, now, target_id),
+        )
+        db.commit()
+        _board_changed()
+        return {"action": "build-verify-failed", "target": target_id,
+                "build_verify": item["id"], "verdict": verdict}
+    if verdict in ("PASS", "PASS-WITH-WARNINGS"):
+        # Build passed — mint the audit pair now (skip the build-gate)
+        target_dict = {k: target[k] for k in target.keys()}
+        return _mint_audit_pair_unguarded(target_dict, db)
+    return None
+
+
+def _auto_mint_audit_pair(target_item: dict, db) -> dict | None:
+    """Called when a worker item PATCHes to status=review. Eligibility-checks,
+    then enforces the build-verify gate (if CC_BUILD_GATE is set in the target
+    session's env), then delegates to _mint_audit_pair_unguarded.
+
+    Build-verify gate (Framework workers): when the target session's env has
+    `CC_BUILD_GATE=<bv-session>` set (e.g. RTG-VS2017), check for an existing
+    BUILD-VERIFY item for this target on that session:
+      - PASS / PASS-WITH-WARNINGS → proceed to audit-mint
+      - FAIL → don't mint audits (the build-verify close hook should have
+        already bounced the target to status=doing)
+      - todo/doing (still running) → don't mint, hold
+      - none → mint a BUILD-VERIFY item instead of audit pair. The audit pair
+        gets minted later by _auto_on_build_verify_close on PASS.
+    """
+    tid = target_item.get("id", "")
+    tprefix = tid.split("-", 1)[0] if "-" in tid else ""
+    if tprefix in _CONTROL_PLANE_PREFIXES:
+        return None
+    if _is_audit_session(target_item.get("session", "")):
+        return None
+    if _is_research_session(target_item.get("session", "")):
+        return None
+
+    # Build-verify gate (per-target-session env var)
+    target_session = target_item.get("session") or ""
+    if target_session:
+        env_file = CC_SESSIONS / f"{target_session}.env"
+        if env_file.exists():
+            try:
+                cfg = parse_env_file(env_file)
+            except Exception:
+                cfg = {}
+            build_gate = (cfg.get("CC_BUILD_GATE") or "").strip()
+            if build_gate:
+                if not (CC_SESSIONS / f"{build_gate}.env").exists():
+                    slog(f"[build-gate] {tid}: CC_BUILD_GATE={build_gate!r} but no env file — proceeding without gate")
+                else:
+                    bv = db.execute(
+                        "SELECT id, status, desc FROM issues "
+                        "WHERE title LIKE ? AND session = ? AND deleted IS NULL "
+                        "  AND status != 'discarded' "
+                        "ORDER BY created DESC LIMIT 1",
+                        (f"BUILD-VERIFY {tid}:%", build_gate),
+                    ).fetchone()
+                    if bv:
+                        if bv["status"] in ("todo", "doing"):
+                            return None  # build in flight; hold
+                        if bv["status"] in ("done", "verified"):
+                            verdict = _extract_verdict(bv["desc"] or "")
+                            if verdict in ("PASS", "PASS-WITH-WARNINGS"):
+                                pass  # proceed to audit-mint
+                            else:
+                                return None  # FAIL or no verdict — close hook handles
+                    else:
+                        # No BUILD-VERIFY exists; mint one instead of audit pair.
+                        return _mint_build_verify(target_item, build_gate, db)
+
+    return _mint_audit_pair_unguarded(target_item, db)
 
 
 def _auto_mint_escalation(target_id: str, org: str, my_audit_id: str,
@@ -36431,7 +36540,8 @@ class CCHandler(BaseHTTPRequestHandler):
                     # not previously at review), mint the org's audit pair.
                     try:
                         cascaded = (_auto_apply_adjudication(updated_item, db)
-                                    or _auto_verify_from_audit_pair(updated_item, db))
+                                    or _auto_verify_from_audit_pair(updated_item, db)
+                                    or _auto_on_build_verify_close(updated_item, db))
                         # Audit-mint fires on a fresh review transition.
                         if (updated_item.get("status") == "review"
                                 and prior and prior["status"] != "review"):
