@@ -4933,12 +4933,19 @@ def _summarize_task_bg(session_name: str, text: str):
 
 def _auto_create_board_issue(session_name: str, title: str, prompt_text: str):
     """Create or update a board issue for a session task. If the session already has an
-    active (non-done/discarded) issue, update its title instead of creating a duplicate."""
+    active (non-done/discarded) issue, update its title instead of creating a duplicate.
+
+    Only ever repurposes an existing **agent** issue. A session-tagged
+    owner_type='human' item (a commitment/tracker/bet) must never be hijacked —
+    its title overwritten and moved to 'doing' — by the session's auto-labeller;
+    if the session's only active issue is human, we create a fresh agent issue
+    instead. See AMUX-1471 (footgun hit by MO-2029 / MS-921)."""
     try:
         db = get_db()
-        # Check for existing active issue for this session
+        # Check for existing active *agent* issue for this session (never a human tracker)
         existing = db.execute(
             "SELECT id, status FROM issues WHERE session=? AND deleted IS NULL "
+            "AND owner_type='agent' "
             "AND status NOT IN ('done','verified','discarded') ORDER BY created DESC LIMIT 1",
             (session_name,)
         ).fetchone()
@@ -5008,7 +5015,10 @@ def _complete_session_board_issue(session_name: str):
     Rule now: status only changes when an agent (or Jeremy) records a real
     deliverable — a commit, a verdict, a note — by PATCHing the item itself.
     Sessions idling with open items are handled by the watchdog/commit-guard,
-    not by silent completion. Call sites left intact; this is a no-op."""
+    not by silent completion. Call sites left intact; this is a no-op.
+
+    Note: upstream's 6b07347 tried to restore this but for owner_type='agent'
+    only. We keep the full disable — Jeremy's 2026-06-12 rule is stronger."""
     return
 
 
@@ -5021,13 +5031,18 @@ def _pickup_next_board_task(session_name: str):
     auto-pickable — 'SEQUENCE AFTER', 'BLOCKED', 'ON HOLD', 'DO NOT AUTO',
     'TRUE-STATE' in title/desc means a human or orchestrator must release it
     explicitly. Auto-pickup previously dispatched dependency-ordered tasks
-    out of order (RR-311) and re-dispatched items reset with true-state notes."""
+    out of order (RR-311) and re-dispatched items reset with true-state notes.
+
+    Guardrail (upstream 6b07347): only auto-runs owner_type='agent' tasks.
+    A session-tagged human commitment/tracker must never be silently executed
+    by the agent — it's a thing the human owns, queued to the session only
+    for visibility. See AMUX-1471 (MO-2029 / MS-921)."""
     try:
         time.sleep(3)
         db = get_db()
         rows = db.execute(
             "SELECT id, title, desc FROM issues "
-            "WHERE session=? AND status='todo' AND deleted IS NULL "
+            "WHERE session=? AND status='todo' AND owner_type='agent' AND deleted IS NULL "
             "ORDER BY created ASC",
             (session_name,)
         ).fetchall()
