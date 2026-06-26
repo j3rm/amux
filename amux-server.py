@@ -1928,6 +1928,148 @@ def load_session_log(session: str, tail_bytes: int = 0) -> str:
     return ""
 
 
+def _session_jsonl_path(name: str):
+    """Newest Claude Code JSONL conversation file for a session's working dir,
+    or None. This is the authoritative, complete transcript (never torn like the
+    alt-screen snapshot log)."""
+    env_file = CC_SESSIONS / f"{name}.env"
+    if not env_file.exists():
+        return None
+    try:
+        cfg = parse_env_file(env_file)
+    except Exception:
+        return None
+    wd = (cfg.get("CC_DIR") or "").strip()
+    if not wd:
+        return None
+    try:
+        resolved = str(Path(wd).expanduser().resolve())
+        project_dir = CLAUDE_HOME / "projects" / resolved.replace("/", "-")
+        if not project_dir.is_dir():
+            return None
+        files = sorted(project_dir.glob("*.jsonl"),
+                       key=lambda f: f.stat().st_mtime, reverse=True)
+        return files[0] if files else None
+    except Exception:
+        return None
+
+
+def _tool_brief(name: str, inp) -> str:
+    """A short one-line argument summary for a tool_use block."""
+    if not isinstance(inp, dict):
+        return ""
+    for k in ("command", "file_path", "path", "pattern", "query", "url",
+              "prompt", "description", "old_string"):
+        v = inp.get(k)
+        if isinstance(v, str) and v.strip():
+            v = v.replace("\n", " ").strip()
+            return v[:90] + ("…" if len(v) > 90 else "")
+    return ""
+
+
+def _tool_result_text(content) -> str:
+    if content is None:
+        return ""
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        parts = []
+        for x in content:
+            if isinstance(x, dict) and x.get("type") == "text":
+                parts.append(x.get("text", ""))
+            elif isinstance(x, str):
+                parts.append(x)
+        return "\n".join(parts)
+    return str(content)
+
+
+def _render_session_transcript(name: str, max_chars: int = 40000) -> str:
+    """Render a session's JSONL conversation as clean ANSI-colored text for the
+    peek Transcript tab — the gap-free, never-torn alternative to the alt-screen
+    snapshot history. Returns the tail (last max_chars)."""
+    path = _session_jsonl_path(name)
+    if not path:
+        return ""
+    # Read only the tail of the file — JSONL entries are much larger than their
+    # rendered form, so 5x max_chars (min 5MB) is a safe overread estimate.
+    # This avoids loading 50+ MB files into memory on every peek poll.
+    max_read = max(max_chars * 5, 5_000_000)
+    out: list[str] = []
+    for o in _iter_jsonl_tail(path, max_bytes=max_read):
+        if o.get("type") not in ("user", "assistant"):
+            continue
+        msg = o.get("message")
+        if not isinstance(msg, dict):
+            continue
+        role = msg.get("role")
+        content = msg.get("content")
+        if isinstance(content, str):
+            blocks = [{"type": "text", "text": content}]
+        elif isinstance(content, list):
+            blocks = content
+        else:
+            continue
+        for b in blocks:
+            if not isinstance(b, dict):
+                continue
+            bt = b.get("type")
+            if bt == "text":
+                txt = (b.get("text") or "").strip()
+                if not txt:
+                    continue
+                if role == "user":
+                    out.append("\x1b[1m\x1b[38;5;220m❯ " + txt.replace("\n", "\n  ") + "\x1b[0m")
+                else:
+                    out.append("\x1b[38;5;252m" + txt + "\x1b[0m")
+                out.append("")
+            elif bt == "tool_use":
+                nm = b.get("name", "tool")
+                arg = _tool_brief(nm, b.get("input"))
+                out.append("\x1b[38;5;39m⏺ " + str(nm) + "\x1b[0m"
+                           + ("\x1b[38;5;246m " + arg + "\x1b[0m" if arg else ""))
+            elif bt == "tool_result":
+                s = _tool_result_text(b.get("content")).strip().replace("\n", " ")
+                if s:
+                    if len(s) > 220:
+                        s = s[:220] + "…"
+                    out.append("\x1b[38;5;240m  ⎿ " + s + "\x1b[0m")
+    text = "\n".join(out).strip("\n")
+    if len(text) > max_chars:
+        text = text[-max_chars:]
+        nl = text.find("\n")
+        if nl > 0:
+            text = text[nl + 1:]
+    return text
+
+
+_healing_logs: set = set()  # sessions whose log is being rebuilt right now
+
+
+def _heal_log_from_transcript(name: str):
+    """One-time repair: replace a torn pre-stable-frame alt-screen log with a
+    clean tail rendered from the authoritative JSONL transcript. No-op if the
+    session has no JSONL or a heal for it is already in flight. The full history
+    always remains available via the Transcript tab; we keep only a ~2MB tail in
+    the log since the peek only ever displays the last 64KB."""
+    if name in _healing_logs:
+        return
+    _healing_logs.add(name)
+    try:
+        clean = _render_session_transcript(name, max_chars=2_000_000)
+        if not clean.strip():
+            return  # no JSONL (e.g. non-Claude session) — leave the log as-is
+        header = ("=== history rebuilt from clean JSONL transcript "
+                  "(full history in the Transcript tab) ===\n\n")
+        data = (header + clean).rstrip() + "\n"
+        lp = _log_path(name)
+        CC_LOGS.mkdir(parents=True, exist_ok=True)
+        lp.write_bytes(data.encode("utf-8", errors="replace"))
+    except Exception:
+        pass
+    finally:
+        _healing_logs.discard(name)
+
+
 # Tracks last JSONL backup mtime per session to avoid redundant copies
 _last_jsonl_backup: dict[str, float] = {}
 
