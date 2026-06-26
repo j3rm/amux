@@ -1727,16 +1727,57 @@ def tmux_capture(session: str, lines: int = 500) -> str:
         return ""
 
 
-def _tmux_capture_batch(sessions: list, lines: int = 30) -> dict:
+def _tmux_alt_screen(session: str) -> bool:
+    """True if the pane is in the alternate screen buffer (TUI mode, e.g. Claude
+    Code). The alt buffer has NO scrollback, so capture-pane only ever returns
+    the visible window — peek must fall back to the saved log for history."""
+    iterm2_id = _session_iterm2_id(session)
+    if iterm2_id:
+        return False
+    try:
+        r = subprocess.run(
+            ["tmux", "display-message", "-t", tmux_target(session), "-p", "#{alternate_on}"],
+            capture_output=True, text=True, timeout=5,
+        )
+        return r.stdout.strip() == "1"
+    except Exception:
+        return False
+
+
+_capture_cache: dict[str, tuple[int, str]] = {}  # session -> (activity_ts, output)
+
+
+def _tmux_capture_batch(sessions: list, lines: int = 30,
+                        activity: dict | None = None) -> dict:
     """Capture pane output for multiple sessions in parallel using threads.
-    Returns {session_name: output_str}."""
+    Returns {session_name: output_str}.
+
+    When *activity* is provided (from _tmux_info_map()), sessions whose
+    tmux activity timestamp hasn't changed since the last capture are served
+    from _capture_cache, avoiding a subprocess fork per unchanged session.
+    """
     if not sessions:
         return {}
-    from concurrent.futures import ThreadPoolExecutor
-    def _cap(name):
-        return name, tmux_capture(name, lines)
-    with ThreadPoolExecutor(max_workers=min(len(sessions), 16)) as pool:
-        return dict(pool.map(_cap, sessions))
+    result = {}
+    need_capture = []
+    for name in sessions:
+        if activity:
+            act_ts = activity.get(tmux_name(name), {}).get("activity", 0)
+            cached = _capture_cache.get(name)
+            if cached and cached[0] == act_ts:
+                result[name] = cached[1]
+                continue
+        need_capture.append(name)
+    if need_capture:
+        from concurrent.futures import ThreadPoolExecutor
+        def _cap(name):
+            return name, tmux_capture(name, lines)
+        with ThreadPoolExecutor(max_workers=min(len(need_capture), 16)) as pool:
+            for name, output in pool.map(_cap, need_capture):
+                act_ts = activity.get(tmux_name(name), {}).get("activity", 0) if activity else 0
+                _capture_cache[name] = (act_ts, output)
+                result[name] = output
+    return result
 
 
 # ── iTerm2 integration (AppleScript via osascript) ────────────────────────────
@@ -1907,6 +1948,175 @@ def save_session_log(session: str, content: str, force: bool = False):
                 f.write(data)
     except Exception:
         pass
+
+
+def _alt_conv_lines(capture: str) -> tuple[list[str], list[str]]:
+    """Split a Claude Code alt-screen capture into the conversation portion,
+    trimming the trailing TUI chrome (spinner + task list, separator bars, the
+    prompt box and the status bar, plus trailing blanks). Returns
+    (orig_lines, plain_lines) for just the conversation — the chrome is volatile
+    and re-drawn every capture, so it must not be accumulated into history."""
+    orig = capture.splitlines()
+    plain = [_STRIP_ANSI.sub("", l) for l in orig]
+    n = len(orig)
+    lo = max(0, n - 22)
+    cut = n
+    # If a spinner line (… ellipsis) sits in the bottom region, chrome begins at
+    # the run of blank lines just above it (spinner + task list + footer below).
+    for i in range(n - 1, lo - 1, -1):
+        if "…" in plain[i]:
+            j = i
+            while j - 1 >= 0 and plain[j - 1].strip() == "":
+                j -= 1
+            cut = j
+            break
+    else:
+        # Idle (no spinner): trim trailing separator bars / prompt / status / blanks.
+        for i in range(n - 1, lo - 1, -1):
+            p = plain[i].strip()
+            bar_ct = sum(1 for c in p if c in "─━—-=")
+            is_bar = len(p) >= 8 and (all(c in "─━—-=· " for c in p)
+                                      or bar_ct >= len(p) * 0.5)
+            if (p == "" or is_bar or "bypass permissions on" in p
+                    or "for shortcuts" in p or p.startswith("❯")):
+                cut = i
+            else:
+                break
+    while cut > 0 and plain[cut - 1].strip() == "":
+        cut -= 1
+    return orig[:cut], plain[:cut]
+
+
+def save_alt_capture(name: str, capture: str):
+    """Append only the genuinely-new conversation lines from an alt-screen
+    capture to the session log. Claude Code's alt buffer redraws the same
+    viewport in place, so naively appending each capture stacks ~30 near-
+    identical snapshots (repeated status bars, boot messages, 77% dupes). This
+    trims the TUI chrome and de-duplicates the overlap with what's already
+    saved, keeping the log a clean linear transcript. Throttled like
+    save_session_log."""
+    if not capture.strip():
+        return
+    now = time.monotonic()
+    last = _last_log_save.get(name, 0)
+    if now - last < _LOG_SAVE_INTERVAL:
+        return
+    # Only persist a STABLE frame. Capturing a redrawing alt-screen mid-stream
+    # yields torn text (dropped chars/spaces) that can't be de-duplicated. Take
+    # a couple of fresh captures a beat apart; if the pane is still changing,
+    # bail WITHOUT bumping the throttle so the next poll retries once it settles.
+    f1 = tmux_capture(name, 300)
+    if not f1:
+        return
+    time.sleep(0.18)
+    f2 = tmux_capture(name, 300)
+    if not f2 or _STRIP_ANSI.sub("", f1) != _STRIP_ANSI.sub("", f2):
+        return  # still rendering — wait for a quiet frame
+    capture = f2
+    conv_orig, conv_plain = _alt_conv_lines(capture)
+    cnp = [p.rstrip() for p in conv_plain]
+    if not any(p.strip() for p in cnp):
+        return
+    lp = _log_path(name)
+    existing_tail = ""
+    if lp.exists():
+        try:
+            size = lp.stat().st_size
+            with lp.open("rb") as f:
+                if size > 32_768:
+                    f.seek(size - 32_768)
+                existing_tail = f.read().decode("utf-8", errors="replace")
+        except Exception:
+            existing_tail = ""
+    # Collapse blank runs in both sides before comparing — the log has already
+    # been collapsed, but the alt-screen capture hasn't, so line counts diverge.
+    def _collapse_lines(lines, orig_lines=None):
+        out, out_orig = [], []
+        blank = 0
+        for i, l in enumerate(lines):
+            if l.strip() == "":
+                blank += 1
+                if blank <= 1:
+                    out.append(l)
+                    if orig_lines is not None:
+                        out_orig.append(orig_lines[i])
+            else:
+                blank = 0
+                out.append(l)
+                if orig_lines is not None:
+                    out_orig.append(orig_lines[i])
+        return (out, out_orig) if orig_lines is not None else (out, None)
+    cnp, conv_orig_c = _collapse_lines(cnp, conv_orig)
+    tailp_raw = [_STRIP_ANSI.sub("", l).rstrip() for l in existing_tail.splitlines()]
+    tailp, _ = _collapse_lines(tailp_raw)
+    # Longest prefix of the new conversation that already exists as a contiguous
+    # block in the recent tail → append only the lines after it.
+    k = 0
+    maxk = min(len(cnp), 80)
+    for cand in range(maxk, 0, -1):
+        block = cnp[:cand]
+        for st in range(len(tailp) - cand, -1, -1):
+            if tailp[st:st + cand] == block:
+                k = cand
+                break
+        if k:
+            break
+    new_lines = conv_orig_c[k:]
+    _last_log_save[name] = now
+    if not any(_STRIP_ANSI.sub("", l).strip() for l in new_lines):
+        return  # nothing new since last save
+    CC_LOGS.mkdir(parents=True, exist_ok=True)
+    # Collapse the alt-screen's big empty band (input box anchored at the bottom)
+    # so the log stays a tight transcript instead of accumulating blank gaps.
+    chunk = (_collapse_blank_runs("\n".join(new_lines)) + "\n").encode("utf-8", errors="replace")
+    try:
+        existing_size = lp.stat().st_size if lp.exists() else 0
+        if existing_size + len(chunk) > MAX_LOG_BYTES:
+            existing = lp.read_bytes() if lp.exists() else b""
+            lp.write_bytes((existing + chunk)[-MAX_LOG_BYTES:])
+        else:
+            with lp.open("ab") as f:
+                f.write(chunk)
+    except Exception:
+        pass
+
+
+# Raw cursor-move / hide-cursor escapes — the fingerprint of pre-stable-frame
+# alt-screen garbage (captured TUI redraws). Clean logs and clean transcript
+# renders use only colour SGR codes (…m) and have effectively zero of these.
+_CURSOR_MOVE_RE = re.compile(r'\x1b\[(?:\d+;\d+H|\?25[lh]|\d+[ABCD]|H)')
+
+
+def _log_looks_torn(text: str) -> bool:
+    """True if a saved-log chunk is dense with raw cursor-move escapes — i.e. it
+    predates the stable-frame saver and is torn TUI-redraw spam rather than a
+    clean linear transcript."""
+    if not text:
+        return False
+    n = len(text)
+    if n < 2000:
+        return False
+    c = len(_CURSOR_MOVE_RE.findall(text))
+    return c >= 20 and (c / (n / 1024)) >= 2.0
+
+
+def _collapse_blank_runs(text: str, keep: int = 1) -> str:
+    """Collapse runs of blank lines down to `keep`. Claude Code's alt-screen
+    anchors its input box at the bottom of the terminal, so a short conversation
+    leaves a big empty band between the content and the prompt that capture-pane
+    records verbatim — that band reads as 'funky whitespace' in the peek. Blank
+    detection is ANSI-aware (a line of only colour codes counts as blank)."""
+    out: list[str] = []
+    blanks = 0
+    for ln in text.split("\n"):
+        if _STRIP_ANSI.sub("", ln).strip() == "":
+            blanks += 1
+            if blanks <= keep:
+                out.append("")
+        else:
+            blanks = 0
+            out.append(ln)
+    return "\n".join(out)
 
 
 def load_session_log(session: str, tail_bytes: int = 0) -> str:
@@ -8113,7 +8323,7 @@ def list_sessions() -> list:
     # Pre-compute which sessions are running and batch-capture their panes
     env_files = [f for f in sorted(CC_SESSIONS.glob("*.env")) if not _is_session_blocked(f.stem)]
     running_names = [f.stem for f in env_files if tmux_name(f.stem) in tmux_info]
-    captures = _tmux_capture_batch(running_names, 30) if running_names else {}
+    captures = _tmux_capture_batch(running_names, 30, activity=tmux_info) if running_names else {}
     # Token cache is refreshed by background job (_refresh_token_cache via scheduler)
     # Batch-load "doing" board tasks per session for task_name display
     try:
@@ -9284,7 +9494,11 @@ def _capture_log_tail_for_reload(name: str, reason: str) -> bool:
         safe_reason = reason.replace("\n", " ").strip() or "session swap"
         ts = time.strftime("%Y-%m-%dT%H:%M:%S")
         marker = f"\n\n=== Captured before {safe_reason}: {ts} ===\n\n".encode()
-        chunks.append(marker + captured)
+        cap_text = captured.decode("utf-8", errors="replace")
+        if _tmux_alt_screen(name):
+            conv_orig, _ = _alt_conv_lines(cap_text)
+            cap_text = _collapse_blank_runs("\n".join(conv_orig))
+        chunks.append(marker + cap_text.encode("utf-8", errors="replace"))
 
     if not chunks:
         return False
