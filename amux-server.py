@@ -6315,13 +6315,28 @@ def _auto_mint_audit_pair(target_item: dict, db) -> dict | None:
                     slog(f"[build-gate] {tid}: CC_BUILD_GATE={build_gate!r} but no env file — proceeding without gate")
                 else:
                     bv = db.execute(
-                        "SELECT id, status, desc FROM issues "
+                        "SELECT id, status, desc, created FROM issues "
                         "WHERE title LIKE ? AND session = ? AND deleted IS NULL "
                         "  AND status != 'discarded' "
                         "ORDER BY created DESC LIMIT 1",
                         (f"BUILD-VERIFY {tid}:%", build_gate),
                     ).fetchone()
                     if bv:
+                        # Freshness rule: a BUILD-VERIFY only covers the
+                        # commit it was minted against. The target's `updated`
+                        # bumps on every review-PATCH, so if BV was minted
+                        # BEFORE the target's last update, the target has
+                        # likely re-shipped (post-FAIL re-take, new commit)
+                        # and the old BV is stale. Mint a fresh one.
+                        # RTG-Research caught this 2026-06-27 on RA-651: the
+                        # gate considered RV-10 (V1 commit) as satisfying V3.
+                        target_updated = int(target_item.get("updated") or 0)
+                        bv_created = int(bv["created"])
+                        if bv_created < target_updated - 60:
+                            slog(f"[build-gate] {tid}: BV {bv['id']} stale "
+                                 f"(created {bv_created} < target.updated-60 {target_updated-60}) "
+                                 f"— minting fresh BV")
+                            return _mint_build_verify(target_item, build_gate, db)
                         if bv["status"] in ("todo", "doing"):
                             return None  # build in flight; hold
                         if bv["status"] in ("done", "verified"):
