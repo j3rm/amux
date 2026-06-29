@@ -25,7 +25,11 @@ import urllib.request
 
 AMUX_URL = os.environ.get("AMUX_URL", "https://localhost:8822")
 NUDGE_TEXT = "You have pending board items — check your board and pick up assigned work now."
-ACTIVE_STATUSES = {"todo", "doing"}
+# Only nudge for `todo` — items NOT yet claimed by anyone. `doing` means the
+# agent has already claimed and is working or waiting on something external
+# (a child task, a build, a peer); nudging there pesters an agent who is
+# legitimately mid-task. (2026-06-29: Jeremy's call after agents complained.)
+ACTIVE_STATUSES = {"todo"}
 
 _ctx = ssl.create_default_context()
 _ctx.check_hostname = False
