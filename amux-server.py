@@ -10555,6 +10555,12 @@ _gmail_pending: dict = {}
 
 _GMAIL_REDIRECT_URI = "http://localhost:8822/api/gmail/callback"
 
+# Google often returns a SUPERSET of the requested scopes (e.g. previously-granted
+# gmail.readonly/compose, or openid alongside userinfo.email). oauthlib treats a
+# changed scope set as an error and aborts token exchange with a 500. Relaxing
+# this lets fetch_token accept the granted superset — standard for Gmail OAuth.
+os.environ.setdefault("OAUTHLIB_RELAX_TOKEN_SCOPE", "1")
+
 def _gmail_client_config() -> dict | None:
     """Load OAuth client config from ~/.amux/gmail-oauth-client.json."""
     custom = CC_HOME / "gmail-oauth-client.json"
