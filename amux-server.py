@@ -2869,6 +2869,17 @@ _WEEKLY_LIMIT_RE = re.compile(
     re.IGNORECASE,
 )
 
+# The newer session-limit banner — also menu-less, but the 5-hour window
+# (resets same-day at a wall-clock time) rather than the weekly cap. Phrased
+# "You've hit your session limit · resets 9:50am (America/New_York)". Without
+# this, such sessions never get a reset time recorded, so they stay invisible
+# to the badge/bulk-actions/auto-resume path. Classified as NON-weekly so it
+# lands in the transient ("Rate-limited until") bucket, not the weekly one.
+_SESSION_LIMIT_RE = re.compile(
+    r"(?:you'?ve\s+)?(?:hit|reached)\s+your\s+session\s+limit",
+    re.IGNORECASE,
+)
+
 # Permissive fallback: any bare HH:MM (optionally with AM/PM) in the
 # scrollback when none of the labeled patterns above match. Real-world
 # Claude Code rendering wraps lines and may push the "resets" label off
@@ -3150,10 +3161,12 @@ def _rate_limit_auto_respond():
             # the live "working" status.
             if _detect_claude_status(raw) == "active":
                 if existing and (existing.get("rate_limit_reset_at")
-                                 or existing.get("rate_limit_weekly")):
+                                 or existing.get("rate_limit_weekly")
+                                 or existing.get("rate_limit_banner")):
                     existing.pop("rate_limit_reset_at", None)
                     existing.pop("rate_limit_reset_at_fallback", None)
                     existing.pop("rate_limit_weekly", None)
+                    existing.pop("rate_limit_banner", None)
                     slog(f"[rate-limit] session={name} active — cleared stale rate-limit flag")
                 continue
             matched_idx = -1
@@ -3170,22 +3183,30 @@ def _rate_limit_auto_respond():
             # session's state), which must NOT flag a healthy session.
             tail = "\n".join(clean.splitlines()[-30:])
             is_weekly = matched_idx < 0 and bool(_WEEKLY_LIMIT_RE.search(tail))
-            if matched_idx < 0 and not is_weekly:
-                # No live rate-limit UI. A real weekly cap keeps its banner on
-                # screen until reset, so a session flagged weekly without a live
-                # banner was a false match — clear it. (5-hour flags park in a
-                # bannerless "waiting for reset" state, so leave those alone.)
-                if existing and existing.get("rate_limit_weekly"):
+            is_session_banner = (matched_idx < 0 and not is_weekly
+                                 and bool(_SESSION_LIMIT_RE.search(tail)))
+            # Both weekly and session-limit banners are menu-less and keep their
+            # banner on screen until reset — group them as "banner" limits.
+            is_banner = is_weekly or is_session_banner
+            if matched_idx < 0 and not is_banner:
+                # No live rate-limit UI. A real banner cap keeps its banner on
+                # screen until reset, so a session flagged from a banner without a
+                # live banner was a false match — clear it. (5-hour menu flags park
+                # in a bannerless "waiting for reset" state, so leave those alone.)
+                if existing and (existing.get("rate_limit_weekly")
+                                 or existing.get("rate_limit_banner")):
                     existing.pop("rate_limit_reset_at", None)
                     existing.pop("rate_limit_reset_at_fallback", None)
                     existing.pop("rate_limit_weekly", None)
-                    slog(f"[rate-limit] session={name} weekly banner not on live "
+                    existing.pop("rate_limit_banner", None)
+                    slog(f"[rate-limit] session={name} limit banner not on live "
                          f"screen — cleared stale flag")
                 continue
-            if is_weekly:
+            if is_banner:
                 _rate_limit_last_responded[name] = now  # cooldown; nothing to press
             actions = _session_auto_actions.setdefault(name, {})
             actions["rate_limit_weekly"] = is_weekly
+            actions["rate_limit_banner"] = is_banner
             parsed_reset = _parse_rate_limit_reset(clean, now=now)
             actions["rate_limit_last_event_ts"] = int(now)
             if parsed_reset:
@@ -3196,12 +3217,12 @@ def _rate_limit_auto_respond():
                      f"reset_at={reset_at}")
             else:
                 # Couldn't parse a reset time. Apply a safety fallback so
-                # auto-resume still has a target. For the 5-hour prompt, 5 min is
-                # safe (real windows are 1h+). For the WEEKLY cap, a 5-min retry
-                # would just re-hit the cap in a loop, so fall back to 6h — far
-                # enough to avoid churn, and the banner re-detection will refine
-                # it once a parseable reset is on screen.
-                reset_at = int(now + (6 * 3600 if is_weekly else 300))
+                # auto-resume still has a target. For the 5-hour menu prompt, 5 min
+                # is safe (real windows are 1h+). For a banner cap (weekly or
+                # session), a 5-min retry would just re-hit the cap in a loop, so
+                # fall back to 6h — far enough to avoid churn, and the banner
+                # re-detection will refine it once a parseable reset is on screen.
+                reset_at = int(now + (6 * 3600 if is_banner else 300))
                 actions["rate_limit_reset_at"] = reset_at
                 actions["rate_limit_reset_at_fallback"] = True
                 # Log a sanitized snippet so future debugging can see
@@ -46098,6 +46119,21 @@ def _run_selftests() -> int:
     check("weekly banner not triggered by transient rate-limit",
           not _WEEKLY_LIMIT_RE.search(
               "Server is temporarily limiting requests (not your usage limit) · Rate limited"))
+    # Session-limit banner detector — the menu-less 5-hour cap. Must be caught
+    # by its own regex (NOT the weekly one) so it records a reset time and shows
+    # up in badges/bulk-actions/auto-resume as a transient (non-weekly) limit.
+    check("session banner detected",
+          bool(_SESSION_LIMIT_RE.search(
+              "You've hit your session limit · resets 9:50am (America/New_York)")))
+    check("session banner not classified as weekly",
+          not _WEEKLY_LIMIT_RE.search(
+              "You've hit your session limit · resets 9:50am (America/New_York)"))
+    check("session banner parses its same-day reset time",
+          _parse_rate_limit_reset(
+              "You've hit your session limit · resets 9:50am", now=ref_ts)
+          == int(_dt.datetime(2026, 5, 11, 9, 50).timestamp()))
+    check("session regex not triggered by the 95%-used heads-up",
+          not _SESSION_LIMIT_RE.search("You've used 95% of your session limit · resets 14:30"))
 
     # Malformed input
     check("malformed input returns None",
