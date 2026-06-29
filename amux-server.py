@@ -3169,9 +3169,18 @@ def _rate_limit_auto_respond():
                     existing.pop("rate_limit_banner", None)
                     slog(f"[rate-limit] session={name} active — cleared stale rate-limit flag")
                 continue
+            # The interactive /rate-limit-options menu is always rendered LIVE at
+            # the bottom of the screen, so match it against the tail only — never
+            # the full 300-line capture. Scanning the whole capture for the menu
+            # phrase false-matches on stale scrollback (a selftest fixture, a doc,
+            # or a session discussing rate limits) and then presses "1" into a
+            # healthy session. The reset-TIME parse below still scans full `clean`
+            # (the reset line can sit ~10-20 lines above the menu); only the
+            # decision to press a key requires a live menu render.
+            tail = "\n".join(clean.splitlines()[-30:])
             matched_idx = -1
             for i, (pattern, response) in enumerate(_RATE_LIMIT_PROMPTS):
-                if pattern.search(clean):
+                if pattern.search(tail):
                     send_text(name, response)
                     _rate_limit_last_responded[name] = now
                     matched_idx = i
@@ -3181,7 +3190,6 @@ def _rate_limit_auto_respond():
             # Only match it on the LIVE screen (bottom ~30 lines): the phrase often
             # appears in scrollback or tool output (e.g. an API echoing another
             # session's state), which must NOT flag a healthy session.
-            tail = "\n".join(clean.splitlines()[-30:])
             is_weekly = matched_idx < 0 and bool(_WEEKLY_LIMIT_RE.search(tail))
             is_session_banner = (matched_idx < 0 and not is_weekly
                                  and bool(_SESSION_LIMIT_RE.search(tail)))
@@ -46055,6 +46063,32 @@ def _run_selftests() -> int:
           not pat.search("/usage    Show plan usage and rate limits"))
     check("does not match the bare phrase without a '1.' menu prefix",
           not pat.search("the system will stop and wait for limit to reset later"))
+
+    # Live-tail-only menu match (the keystroke-injection guard). The watchdog
+    # presses "1" only when the menu is rendered LIVE at the bottom, so it
+    # matches the pattern against the last-30-lines tail, not the full capture.
+    # Replicate that exact tail slice here.
+    def _tail30(text):
+        return "\n".join(text.splitlines()[-30:])
+    # (a) Live menu at the bottom of a long capture → tail matches → press.
+    live_menu = (
+        "\n".join(f"prior output line {i}" for i in range(60)) + "\n"
+        + positive
+    )
+    check("live menu in the tail still matches (press fires)",
+          bool(pat.search(_tail30(live_menu))))
+    # (b) Menu phrase buried >30 lines up (e.g. a selftest fixture or a session
+    #     discussing rate limits), with unrelated output filling the tail. The
+    #     OLD full-capture scan would false-match and press "1" into a healthy
+    #     session; the tail-only match must NOT.
+    buried_menu = (
+        positive
+        + "\n".join(f"- deploy summary / unrelated line {i}" for i in range(40))
+    )
+    check("menu phrase buried above the tail does NOT match (no false press)",
+          not pat.search(_tail30(buried_menu)))
+    check("...but the full capture still contains it (proves the tail is the guard)",
+          bool(pat.search(buried_menu)))
 
     # ── 2. _parse_rate_limit_reset across all three formats ──────────────
     print("reset-time parser:")
