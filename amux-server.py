@@ -4604,6 +4604,7 @@ def _item_by_id(bid: str) -> dict | None:
     row = db.execute(
         """SELECT i.id, i.title, i.desc, i.status, i.session, i.creator,
                   i.due, i.due_time, i.created, i.updated, i.owner_type,
+                  i.org,
                   COALESCE(i.pinned, 0) AS pinned,
                   COALESCE(i.pos, 0) AS pos,
                   GROUP_CONCAT(t.tag) AS tags_csv
@@ -6214,7 +6215,17 @@ def _mint_build_verify(target_item: dict, build_gate_session: str, db) -> dict |
         "WHERE status = 'todo' AND deleted IS NULL"
     ).fetchone()
     new_pos = (min_pos_row["m"] if min_pos_row else 0) - 1024.0
-    org = target_item.get("org")
+    # Org fallback chain: target's explicit org → derive from target session
+    # prefix → derive from creator session prefix. Avoids NULL org when the
+    # caller passes a dict missing the org key (which used to bite us before
+    # _item_by_id was patched to SELECT i.org).
+    org = (target_item.get("org") or "").strip()
+    if not org:
+        ts = target_item.get("session") or ""
+        if "-" in ts:
+            org = ts.split("-", 1)[0]
+    if not org:
+        org = _session_org(target_item.get("creator", "")) or None
     db.execute(
         """INSERT INTO issues (id, title, desc, status, session, creator, due, due_time,
                                created, updated, owner_type, pos, org)
@@ -6434,7 +6445,7 @@ def _auto_apply_adjudication(rr_item: dict, db) -> dict | None:
     if not target_id:
         return None
     target = db.execute(
-        "SELECT id, status, desc FROM issues WHERE id = ? AND deleted IS NULL",
+        "SELECT id, status, desc, session, org FROM issues WHERE id = ? AND deleted IS NULL",
         (target_id,),
     ).fetchone()
     if not target:
@@ -6487,7 +6498,7 @@ def _auto_verify_from_audit_pair(audit_item: dict, db) -> dict | None:
     if not target_id:
         return None
     target = db.execute(
-        "SELECT id, status, desc FROM issues WHERE id = ? AND deleted IS NULL",
+        "SELECT id, status, desc, session, org FROM issues WHERE id = ? AND deleted IS NULL",
         (target_id,),
     ).fetchone()
     if not target or target["status"] != "review":
