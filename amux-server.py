@@ -3252,6 +3252,25 @@ CREATE TABLE IF NOT EXISTS tasks (
     updated     INTEGER NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_tasks_session ON tasks(session);
+-- Agent-to-human question queue. Agents POST {title, body, blocking};
+-- Jeremy answers once in the dashboard's Questions tab. Answer is either
+-- injected into the asking session's terminal (blocking) or posted as a
+-- board item back to that session (non-blocking).
+CREATE TABLE IF NOT EXISTS questions (
+    id            TEXT PRIMARY KEY,
+    from_session  TEXT NOT NULL,
+    title         TEXT NOT NULL,
+    body          TEXT NOT NULL DEFAULT '',
+    blocking      INTEGER NOT NULL DEFAULT 0,
+    status        TEXT NOT NULL DEFAULT 'open',  -- open | answered | discarded
+    answer        TEXT NOT NULL DEFAULT '',
+    created       INTEGER NOT NULL,
+    updated       INTEGER NOT NULL,
+    answered_at   INTEGER
+);
+CREATE INDEX IF NOT EXISTS idx_questions_status  ON questions(status);
+CREATE INDEX IF NOT EXISTS idx_questions_session ON questions(from_session);
+CREATE INDEX IF NOT EXISTS idx_questions_created ON questions(created);
 CREATE TABLE IF NOT EXISTS schedules (
     id          TEXT PRIMARY KEY,
     title       TEXT NOT NULL,
@@ -13640,6 +13659,7 @@ setTimeout(function(){var f=document.getElementById('js-fallback');if(f&&f.style
 <div class="tab-bar">
   <button id="tab-sessions" class="active" onclick="switchView('sessions')">Sessions</button>
   <button id="tab-board" onclick="switchView('board')">Board</button>
+  <button id="tab-questions" onclick="switchView('questions')">Questions <span id="tab-questions-count" style="display:none;background:#e11;color:#fff;border-radius:10px;padding:1px 7px;font-size:0.7rem;margin-left:3px;">0</span></button>
   <button id="tab-calendar" onclick="switchView('calendar')">Calendar</button>
   <button id="tab-scheduler" onclick="switchView('scheduler')">Scheduler</button>
   <button id="tab-files" onclick="switchView('files')">Files</button>
@@ -13877,6 +13897,15 @@ setTimeout(function(){var f=document.getElementById('js-fallback');if(f&&f.style
   </div>
 </div>
 
+
+<!-- Questions view: agent-to-human question queue -->
+<div id="questions-view" style="display:none;flex-direction:column;overflow:auto;padding:12px 16px;">
+  <div style="display:flex;align-items:center;gap:12px;margin-bottom:8px;">
+    <h2 style="margin:0;font-size:1.1rem;">Questions from agents</h2>
+    <span style="color:var(--muted);font-size:0.8rem;">Blocking = agent halted, waiting for your reply. Non-blocking = agent kept working; answer lands on their board.</span>
+  </div>
+  <div id="questions-list"></div>
+</div>
 
 <!-- Notes view -->
 <div id="notes-view" style="display:none;flex-direction:row;overflow:hidden;">
@@ -24453,9 +24482,9 @@ function _chromeSave() {
 function switchView(view) {
   if (document.getElementById('grid-view').classList.contains('active')) exitGridMode();
   activeView = view;
-  const _svIds = ['session','board','calendar','scheduler','files','logs','notes','crm','map','metrics','torrents','terminal','browser','graph','journal','habits','repos'];
-  const _svNames = ['sessions','board','calendar','scheduler','files','logs','notes','crm','map','metrics','torrents','terminal','browser','graph','journal','habits','repos'];
-  const _svDisplay = ['','','flex','','flex','flex','flex','flex','flex','flex','flex','flex','','flex','flex','flex','flex'];
+  const _svIds = ['session','board','questions','calendar','scheduler','files','logs','notes','crm','map','metrics','torrents','terminal','browser','graph','journal','habits','repos'];
+  const _svNames = ['sessions','board','questions','calendar','scheduler','files','logs','notes','crm','map','metrics','torrents','terminal','browser','graph','journal','habits','repos'];
+  const _svDisplay = ['','','flex','flex','','flex','flex','flex','flex','flex','flex','flex','flex','','flex','flex','flex','flex'];
   for (let i = 0; i < _svIds.length; i++) {
     const ve = document.getElementById(_svIds[i] + '-view');
     if (ve) ve.style.display = view === _svNames[i] ? (_svDisplay[i] || '') : 'none';
@@ -24491,12 +24520,109 @@ function switchView(view) {
     fetchBoard();
     // Only poll if SSE is not active (SSE pushes board updates)
     if (_sseFallback && !boardTimer) boardTimer = setInterval(fetchBoard, 5000);
+  } else if (view === 'questions') {
+    _questionsLoad();
+    if (!_questionsTimer) _questionsTimer = setInterval(_questionsLoad, 5000);
   } else if (view === 'scheduler') {
     Promise.all([fetchSchedules(), fetchSchedulerRuns()]).then(() => renderScheduler());
   } else {
     if (boardTimer) { clearInterval(boardTimer); boardTimer = null; }
   }
+  if (view !== 'questions' && _questionsTimer) { clearInterval(_questionsTimer); _questionsTimer = null; }
 }
+
+// ── Questions tab (agent-to-human) ───────────────────────────────────────────
+let _questionsTimer = null;
+let _questionsCache = [];
+async function _questionsLoad() {
+  try {
+    const r = await fetch(API + '/api/questions');
+    if (!r.ok) return;
+    _questionsCache = await r.json();
+    _questionsRender();
+    _questionsUpdateBadge();
+  } catch(e) { /* silent */ }
+}
+function _questionsUpdateBadge() {
+  const open = _questionsCache.filter(q => q.status === 'open').length;
+  const b = document.getElementById('tab-questions-count');
+  if (!b) return;
+  b.textContent = String(open);
+  b.style.display = open > 0 ? '' : 'none';
+}
+function _qEsc(s) { return String(s || '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
+function _qFmtTime(ts) {
+  if (!ts) return '';
+  const d = new Date(ts * 1000);
+  return d.toLocaleString();
+}
+function _questionsRender() {
+  const root = document.getElementById('questions-list');
+  if (!root) return;
+  const open = _questionsCache.filter(q => q.status === 'open');
+  const closed = _questionsCache.filter(q => q.status !== 'open').slice(0, 20);
+  let html = '';
+  if (open.length === 0) {
+    html += '<div style="padding:24px;text-align:center;color:var(--muted);font-size:0.9rem;">No pending questions. Agents post here when they need your input.</div>';
+  }
+  for (const q of open) {
+    const isBlocking = q.blocking === 1;
+    const badgeColor = isBlocking ? '#e11' : '#666';
+    const badgeText = isBlocking ? 'BLOCKING' : 'non-blocking';
+    html += `<div class="q-card" style="border:1px solid var(--border);border-radius:8px;margin:8px 0;padding:12px 14px;background:var(--card-bg,#111);">
+      <div style="display:flex;align-items:center;gap:8px;font-size:0.75rem;color:var(--muted);margin-bottom:6px;">
+        <span style="background:${badgeColor};color:#fff;padding:2px 8px;border-radius:4px;font-weight:600;">${badgeText}</span>
+        <span style="font-weight:600;color:var(--fg);">${_qEsc(q.id)}</span>
+        <span>from <b>${_qEsc(q.from_session)}</b></span>
+        <span>&middot;</span>
+        <span>${_qFmtTime(q.created)}</span>
+      </div>
+      <div style="font-weight:600;font-size:1rem;margin-bottom:6px;">${_qEsc(q.title)}</div>
+      ${q.body ? `<div style="white-space:pre-wrap;font-size:0.9rem;margin-bottom:10px;color:var(--fg);opacity:0.9;">${_qEsc(q.body)}</div>` : ''}
+      <textarea id="q-answer-${_qEsc(q.id)}" placeholder="Your answer..." style="width:100%;min-height:70px;padding:8px;border:1px solid var(--border);border-radius:6px;background:var(--card-bg,#0a0a0a);color:var(--fg);font-family:inherit;font-size:0.9rem;resize:vertical;box-sizing:border-box;"></textarea>
+      <div style="margin-top:8px;display:flex;gap:8px;">
+        <button class="btn" onclick="_questionsAnswer('${_qEsc(q.id)}')">Send answer</button>
+        <button class="btn" style="opacity:0.6;" onclick="_questionsDiscard('${_qEsc(q.id)}')">Discard</button>
+      </div>
+    </div>`;
+  }
+  if (closed.length > 0) {
+    html += '<div style="margin-top:24px;color:var(--muted);font-size:0.8rem;text-transform:uppercase;letter-spacing:0.05em;">Recent</div>';
+    for (const q of closed) {
+      const stColor = q.status === 'answered' ? '#4a4' : '#777';
+      html += `<div style="border:1px solid var(--border);border-radius:6px;margin:6px 0;padding:8px 12px;opacity:0.75;font-size:0.85rem;">
+        <div style="display:flex;align-items:center;gap:8px;">
+          <span style="background:${stColor};color:#fff;padding:1px 6px;border-radius:3px;font-size:0.65rem;">${_qEsc(q.status)}</span>
+          <span style="font-weight:600;">${_qEsc(q.id)}</span>
+          <span>${_qEsc(q.from_session)}</span>
+          <span style="color:var(--muted);font-size:0.75rem;">${_qFmtTime(q.answered_at || q.updated)}</span>
+        </div>
+        <div style="margin-top:4px;">${_qEsc(q.title)}</div>
+        ${q.answer ? `<div style="margin-top:4px;padding:6px 8px;background:var(--card-bg,#0a0a0a);border-left:3px solid ${stColor};white-space:pre-wrap;">${_qEsc(q.answer)}</div>` : ''}
+      </div>`;
+    }
+  }
+  root.innerHTML = html;
+}
+async function _questionsAnswer(qid) {
+  const ta = document.getElementById('q-answer-' + qid);
+  const answer = (ta && ta.value || '').trim();
+  if (!answer) { alert('Please type an answer first.'); return; }
+  const r = await fetch(API + '/api/questions/' + encodeURIComponent(qid), {
+    method: 'PATCH',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({answer}),
+  });
+  if (r.ok) { _questionsLoad(); }
+  else { alert('Answer failed: ' + r.status); }
+}
+async function _questionsDiscard(qid) {
+  if (!confirm('Discard ' + qid + '?')) return;
+  await fetch(API + '/api/questions/' + encodeURIComponent(qid), {method: 'DELETE'});
+  _questionsLoad();
+}
+// Fire an initial load on page start so the tab badge shows any open questions.
+setTimeout(() => { _questionsLoad(); }, 500);
 
 // ── Habits tab ───────────────────────────────────────────────────────────────
 let _habits = [];
@@ -34848,6 +34974,126 @@ class CCHandler(BaseHTTPRequestHandler):
                     CC_HABITS.write_text(json.dumps(body))
                     return self._json({"ok": True})
                 return self._error(400, "expected array")
+
+        # Agent-to-human Questions API (/api/questions)
+        # Agents POST {title, body, blocking} — Jeremy answers once in the
+        # Questions tab, server routes the answer back:
+        #   blocking=1  → send_text() into the asking session's terminal
+        #   blocking=0  → POST board item back to the asking session
+        # See MEMORY.md "Asking Jeremy a question" section for agent-side use.
+        if path == "/api/questions" or path.startswith("/api/questions/"):
+            db = get_db()
+            if method == "GET" and path == "/api/questions":
+                status_filter = qs.get("status", [None])[0]
+                sql = "SELECT * FROM questions"
+                params: list = []
+                if status_filter:
+                    sql += " WHERE status = ?"
+                    params.append(status_filter)
+                sql += " ORDER BY created DESC"
+                rows = db.execute(sql, params).fetchall()
+                return self._json([dict(r) for r in rows])
+            if method == "POST" and path == "/api/questions":
+                body = self._read_body()
+                title = (body.get("title") or "").strip()
+                if not title:
+                    return self._json({"error": "missing title"}, 400)
+                from_session = (body.get("from_session")
+                                or self.headers.get("X-Amux-Session")
+                                or "").strip()
+                if not from_session:
+                    return self._json({"error": "missing from_session (pass in body or X-Amux-Session header)"}, 400)
+                qbody = (body.get("body") or "").strip()
+                blocking = 1 if body.get("blocking") else 0
+                qid = _next_issue_id("Q")
+                now = int(time.time())
+                db.execute(
+                    "INSERT INTO questions (id, from_session, title, body, blocking, status, created, updated) "
+                    "VALUES (?, ?, ?, ?, ?, 'open', ?, ?)",
+                    (qid, from_session, title, qbody, blocking, now, now),
+                )
+                db.commit()
+                _send_pushover(
+                    f"Question from {from_session}",
+                    f"{qid}: {title[:120]}" + ("  (BLOCKING)" if blocking else ""),
+                )
+                row = db.execute("SELECT * FROM questions WHERE id = ?", (qid,)).fetchone()
+                return self._json(dict(row), 201)
+            m_q = re.match(r"^/api/questions/([A-Za-z0-9-]+)$", path)
+            if m_q:
+                qid = m_q.group(1)
+                row = db.execute("SELECT * FROM questions WHERE id = ?", (qid,)).fetchone()
+                if not row:
+                    return self._json({"error": "not found"}, 404)
+                if method == "GET":
+                    return self._json(dict(row))
+                if method == "PATCH":
+                    body = self._read_body()
+                    answer = (body.get("answer") or "").strip()
+                    new_status = body.get("status")
+                    now = int(time.time())
+                    if answer:
+                        db.execute(
+                            "UPDATE questions SET answer = ?, status = 'answered', "
+                            "answered_at = ?, updated = ? WHERE id = ?",
+                            (answer, now, now, qid),
+                        )
+                        db.commit()
+                        # Route the answer back to the asking session.
+                        target = row["from_session"]
+                        original_title = row["title"]
+                        if row["blocking"]:
+                            # Agent stopped and is waiting — inject via terminal.
+                            injected = (
+                                f"[Answer to {qid}: {original_title}]\n\n"
+                                f"{answer}\n\n"
+                                f"(Answered by Jeremy at {time.strftime('%H:%M', time.localtime(now))}. "
+                                f"Resume the task you were on.)"
+                            )
+                            try:
+                                send_text(target, injected)
+                            except Exception as _e:
+                                slog(f"[questions] {qid}: send_text failed: {_e}")
+                        else:
+                            # Non-blocking — POST a board item back to the asker.
+                            board_desc = (
+                                f"Answer to your question **{qid}**: _{original_title}_\n\n"
+                                f"{answer}\n\n"
+                                f"---\n"
+                                f"Original question body:\n\n{row['body'] or '(no body)'}"
+                            )
+                            board_id = _next_issue_id(_prefix_from_session(target))
+                            db.execute(
+                                "INSERT INTO issues (id, title, desc, status, session, creator, "
+                                "  created, updated, owner_type) "
+                                "VALUES (?, ?, ?, 'todo', ?, 'questions', ?, ?, 'agent')",
+                                (board_id, f"Answer to {qid}: {original_title[:80]}",
+                                 board_desc, target, now, now),
+                            )
+                            db.commit()
+                            _board_changed()
+                            try:
+                                _notify_session_of_task(target, board_id,
+                                                        f"Answer to {qid}: {original_title[:80]}")
+                            except Exception:
+                                pass
+                        return self._json(dict(db.execute(
+                            "SELECT * FROM questions WHERE id = ?", (qid,)).fetchone()))
+                    if new_status in ("open", "answered", "discarded"):
+                        db.execute(
+                            "UPDATE questions SET status = ?, updated = ? WHERE id = ?",
+                            (new_status, now, qid),
+                        )
+                        db.commit()
+                        return self._json(dict(db.execute(
+                            "SELECT * FROM questions WHERE id = ?", (qid,)).fetchone()))
+                    return self._json({"error": "PATCH requires 'answer' or valid 'status'"}, 400)
+                if method == "DELETE":
+                    db.execute("UPDATE questions SET status = 'discarded', updated = ? "
+                               "WHERE id = ?", (int(time.time()), qid))
+                    db.commit()
+                    return self._json({"ok": True, "id": qid})
+            return self._json({"error": "method not allowed"}, 405)
 
         # Notifications API (/api/notifications)
         if path == "/api/notifications":
