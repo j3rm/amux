@@ -6383,12 +6383,15 @@ def _auto_mint_escalation(target_id: str, org: str, my_audit_id: str,
 
     # Re-run the same escalate-mint guard inline so we don't double-mint.
     # (The POST-handler gate covers explicit POSTs; this is an internal mint.)
+    # Match TITLE only — desc bodies often contain cross-references to other
+    # target ids that would false-positive as prior escalations. Aligns with
+    # the same fix in the POST-handler gate (2026-07-01).
     prior = db.execute(
         "SELECT id FROM issues WHERE session LIKE '%-Research' AND deleted IS NULL "
         "  AND status != 'discarded' AND created > ? "
-        "  AND (title LIKE ? OR desc LIKE ?) "
+        "  AND title LIKE ? "
         "ORDER BY created DESC LIMIT 1",
-        (now - 86400, f"%{target_id}%", f"%{target_id}%"),
+        (now - 86400, f"%{target_id}%"),
     ).fetchone()
     if prior:
         return {"action": "escalation-skipped-cooldown", "target": target_id,
@@ -36226,10 +36229,13 @@ class CCHandler(BaseHTTPRequestHandler):
                 # org — RTG-Research RR-*, Ember-Research ER-*, future orgs.
                 # Full spec lives in the rtg-follow-up-gate amux note.
                 if _is_research_session(session):
-                    # Extract the FIRST target id mentioned in title or desc.
-                    # Targets are work-item ids: RA-/RP-/RAC-/RAO-/RM-/RD-/AW-/AH- etc.
-                    combined = f"{title}\n{desc}"
-                    m = re.search(r"\b((?:RA|RP|RAC|RAO|RM|RD|AW|AH|RR)-\d+)\b", combined)
+                    # Extract the target id — prefer TITLE (short, deterministic;
+                    # convention is "ESCALATE <target>:" or "Re-take of <target>")
+                    # then fall back to desc. Prevents cross-references in desc
+                    # bodies from being mis-identified as the escalation target.
+                    m = re.search(r"\b((?:RA|RP|RAC|RAO|RM|RD|AW|AH|RR)-\d+)\b", title or "")
+                    if not m:
+                        m = re.search(r"\b((?:RA|RP|RAC|RAO|RM|RD|AW|AH|RR)-\d+)\b", desc or "")
                     if m:
                         target_id = m.group(1)
                         # (b) Target-status guard
@@ -36252,21 +36258,24 @@ class CCHandler(BaseHTTPRequestHandler):
                                         "error": "escalation-gate: target marked VOID",
                                         "target": target_id,
                                     }, 409)
-                        # (c) 24h cooldown across non-discarded escalation items
-                        # — items assigned to ANY *-Research session in the
-                        # same cooldown window that reference this target.
-                        # Session-based rather than id-prefix-based so it
-                        # covers ER-* (Ember-Research) the same as RR-* (RTG-
-                        # Research) without per-org configuration.
+                        # (c) 24h cooldown across non-discarded escalation items.
+                        # Match only on TITLE — desc bodies routinely mention
+                        # other target ids as cross-refs/coordination context
+                        # and would false-positive if we matched desc too.
+                        # RTG-Research caught this 2026-07-01 on RA-663: RR-476
+                        # (for RA-664) mentioned RA-663 in coordination context
+                        # and was mis-tagged as a prior escalation of RA-663.
+                        # Session-based (LIKE '%-Research') so it covers RR-*
+                        # (RTG) and ER-* (Ember) and any future org uniformly.
                         cooldown_secs = 86400
                         prior = db.execute(
                             "SELECT id, created FROM issues "
                             "WHERE session LIKE '%-Research' AND deleted IS NULL "
                             "  AND status != 'discarded' "
                             "  AND created > ? "
-                            "  AND (title LIKE ? OR desc LIKE ?)"
+                            "  AND title LIKE ? "
                             "ORDER BY created DESC LIMIT 1",
-                            (now - cooldown_secs, f"%{target_id}%", f"%{target_id}%")
+                            (now - cooldown_secs, f"%{target_id}%")
                         ).fetchone()
                         if prior:
                             age_h = (now - int(prior["created"])) / 3600.0
