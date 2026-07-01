@@ -24534,13 +24534,24 @@ function switchView(view) {
 // ── Questions tab (agent-to-human) ───────────────────────────────────────────
 let _questionsTimer = null;
 let _questionsCache = [];
+let _questionsLastSig = '';
+function _questionsSig(list) {
+  // Signature that changes only when something visible would change —
+  // adding/removing/status-flipping a question. In-progress typing must
+  // NOT trigger a re-render (that wipes the textarea).
+  return list.map(q => q.id + ':' + q.status + ':' + q.updated + ':' + (q.answered_at || 0)).join('|');
+}
 async function _questionsLoad() {
   try {
     const r = await fetch(API + '/api/questions');
     if (!r.ok) return;
-    _questionsCache = await r.json();
-    _questionsRender();
+    const next = await r.json();
+    const sig = _questionsSig(next);
+    _questionsCache = next;
     _questionsUpdateBadge();
+    if (sig === _questionsLastSig) return;   // no visible change → don't clobber DOM
+    _questionsLastSig = sig;
+    _questionsRender();
   } catch(e) { /* silent */ }
 }
 function _questionsUpdateBadge() {
@@ -24559,6 +24570,12 @@ function _qFmtTime(ts) {
 function _questionsRender() {
   const root = document.getElementById('questions-list');
   if (!root) return;
+  // Snapshot any in-progress typing before we blow away the DOM.
+  const drafts = {};
+  root.querySelectorAll('textarea[id^="q-answer-"]').forEach(ta => {
+    if (ta.value) drafts[ta.id] = ta.value;
+  });
+  const focusedId = (document.activeElement && document.activeElement.id) || '';
   const open = _questionsCache.filter(q => q.status === 'open');
   const closed = _questionsCache.filter(q => q.status !== 'open').slice(0, 20);
   let html = '';
@@ -24603,6 +24620,15 @@ function _questionsRender() {
     }
   }
   root.innerHTML = html;
+  // Restore in-progress typing that survived a re-render.
+  for (const [id, val] of Object.entries(drafts)) {
+    const ta = document.getElementById(id);
+    if (ta) ta.value = val;
+  }
+  if (focusedId) {
+    const el = document.getElementById(focusedId);
+    if (el && el.focus) el.focus();
+  }
 }
 async function _questionsAnswer(qid) {
   const ta = document.getElementById('q-answer-' + qid);
