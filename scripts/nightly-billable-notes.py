@@ -145,9 +145,9 @@ to surface what you did with enough evidence for Cypra to reconcile.
    Please PATCH the SOURCE_ITEM (my nightly writeup task, id above) with one
    of these outcome codes so I know how it was resolved:
      - `LOGGED — Zoho log ID <id>`                — hours logged in Zoho Projects
-     - `STAGED — added to billing ledger backlog` — no Zoho project yet
-     - `SKIPPED — duplicate of existing log <id>` — overlap detected
-     - `NEEDS JEREMY INPUT — <reason>`            — needs human decision
+     - `STAGED — <reason>`                        — held pending (no Zoho project, etc.)
+     - `NEEDS REVIEW — <reason>`                  — needs human eyes
+     - `SKIPPED — <reason>`                       — dropped (duplicate of log <id>, etc.)
    ```
 
 5. **PATCH THIS ITEM to status=`doing`** (NOT done) with a short note:
@@ -163,16 +163,40 @@ to surface what you did with enough evidence for Cypra to reconcile.
      Jeremy as pending ("Nightly writeup for {date} still awaiting Cypra
      confirmation").
    - `done` with `LOGGED — Zoho log ID X`: nothing further; billed.
-   - `done` with `STAGED — ...`: nothing further; sitting in ledger backlog.
-   - `done` with `SKIPPED — duplicate of existing log <id>`: nothing
-     further; overlap correctly detected.
-   - `done` with `NEEDS JEREMY INPUT — <reason>`: read the reason and
-     surface to Jeremy on next engagement.
+   - `done` with `STAGED — ...`: nothing further; sitting in the queue.
+   - `done` with `SKIPPED — ...`: nothing further; dropped (usually a
+     detected overlap).
+   - `done` with `NEEDS REVIEW — <reason>`: read the reason and surface
+     to Jeremy on next engagement.
 
 ## If you did no billable work for {client} in the last 24 hours
 
-This is the ONE case you self-close: PATCH this item to `done` with desc:
-`No billable work today.` No need to post anything to Cypra.
+You STILL post a nightly note to Cypra. Silence is never assumed to mean
+"nothing to bill" — a missing note is treated as a broken pipeline, not a
+zero-hour day. Use this shape:
+
+```
+title:   Nightly billable notes: {client} — {date}
+session: Cypra-PAA
+status:  todo
+desc:
+    CLIENT: {client}
+    DATE: {date}
+    SOURCE_SESSION: {session}
+    SOURCE_ITEM: <THIS item's board id>
+
+    TASKS: (none)
+    TOTAL: 0h — no billable activity
+
+    Reason: <one line — e.g. "no client engagement today", "client on hold",
+    "waiting on Jeremy for scope", "only substrate/system work today">
+
+    Please PATCH the SOURCE_ITEM with `LOGGED — 0h no activity` (or one of
+    the other outcome codes if you disagree).
+```
+
+Then PATCH THIS ITEM to `doing` as usual and wait for Cypra to close it.
+Do NOT self-close.
 
 ## Rules
 
