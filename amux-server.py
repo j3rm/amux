@@ -3991,6 +3991,22 @@ def _init_db():
         # Phase 2: threading. parent_id references the Q this follow-up
         # belongs to; empty for root questions.
         "ALTER TABLE questions ADD COLUMN parent_id TEXT NOT NULL DEFAULT ''",
+        # Phase 3: question sets — an agent can post a batch of N questions
+        # rendered as one dialog card in the dashboard, mirroring Claude
+        # Code's AskUserQuestion. `set_id` groups the batch (empty for
+        # legacy single questions). `kind` = 'text' (free-form) or 'choice'
+        # (radio/checkbox from `options` JSON, with an implicit 'Other' free
+        # text). `multi_select` allows N-of-M answers on a choice question.
+        # `position` orders the questions within a set.
+        "ALTER TABLE questions ADD COLUMN set_id TEXT NOT NULL DEFAULT ''",
+        "ALTER TABLE questions ADD COLUMN kind TEXT NOT NULL DEFAULT 'text'",
+        "ALTER TABLE questions ADD COLUMN options TEXT NOT NULL DEFAULT ''",
+        "ALTER TABLE questions ADD COLUMN multi_select INTEGER NOT NULL DEFAULT 0",
+        "ALTER TABLE questions ADD COLUMN position INTEGER NOT NULL DEFAULT 0",
+        # Inbox star/pin — flag a thread so it stays at the top of the list
+        # even after new activity arrives elsewhere. Only meaningful on the
+        # root question of a thread; follow-ups inherit visibility from root.
+        "ALTER TABLE questions ADD COLUMN starred INTEGER NOT NULL DEFAULT 0",
         # These indexes are here (not in CREATE TABLE) because to_session is
         # ALTER-added on pre-existing DBs; the CREATE TABLE branch skips
         # entirely when the table already exists, leaving the columns absent
@@ -3998,6 +4014,7 @@ def _init_db():
         "CREATE INDEX IF NOT EXISTS idx_questions_from   ON questions(from_session)",
         "CREATE INDEX IF NOT EXISTS idx_questions_to     ON questions(to_session)",
         "CREATE INDEX IF NOT EXISTS idx_questions_parent ON questions(parent_id)",
+        "CREATE INDEX IF NOT EXISTS idx_questions_set    ON questions(set_id)",
     ]:
         try:
             db.execute(migration)
@@ -4578,6 +4595,110 @@ def _notify_session_of_task(session_name: str, item_id: str, title: str):
         except Exception:
             pass
     threading.Thread(target=_run, daemon=True).start()
+
+
+def _load_question_set(set_id: str, db) -> list:
+    """Return every question in a set, ordered by position, with options
+    parsed from JSON so callers don't have to. Empty list if the set does
+    not exist."""
+    rows = db.execute(
+        "SELECT * FROM questions WHERE set_id = ? ORDER BY position, created",
+        (set_id,),
+    ).fetchall()
+    out = []
+    for r in rows:
+        d = dict(r)
+        try:
+            d["options"] = json.loads(d.get("options") or "[]")
+        except Exception:
+            d["options"] = []
+        # Choice answers are stored as JSON in `answer` — decode for callers.
+        # Text answers stay as plain strings.
+        if d.get("kind") == "choice" and d.get("answer"):
+            try:
+                d["answer_parsed"] = json.loads(d["answer"])
+            except Exception:
+                d["answer_parsed"] = None
+        out.append(d)
+    return out
+
+
+def _question_set_deliver_if_complete(set_id: str, db) -> None:
+    """When every question in a set is answered, hand the full batch back to
+    the asking agent (or Pushover-ping Jeremy if the direction is reversed).
+    Block-and-batch delivery — nothing goes to the agent until the whole set
+    is done, matching Claude Code's AskUserQuestion contract. Idempotent: if
+    the set was already delivered we skip (guarded by a marker in the first
+    question's `answer` prefix — see below)."""
+    qs_rows = _load_question_set(set_id, db)
+    if not qs_rows:
+        return
+    if not all(q["status"] in ("answered", "discarded") for q in qs_rows):
+        return
+    # Idempotency: mark the set as delivered by writing a note into the FIRST
+    # question's row. We use a separate column? No — reuse `answered_at` on
+    # a side-channel: create a `deliveries` set in memory instead so we don't
+    # bloat schema. In-process dedup is fine because delivery is triggered
+    # only from PATCH handlers on this process; the set completes once.
+    if set_id in _question_set_delivered:
+        return
+    _question_set_delivered.add(set_id)
+    first = qs_rows[0]
+    from_session = first["from_session"]
+    to_session = first["to_session"]
+    blocking = first["blocking"]
+    # Agent → Jeremy is the delivery path Jeremy asked for. If the reverse
+    # (Jeremy asked an agent a batch) is ever wired up, mirror the fresh-mint
+    # notify pattern.
+    if not from_session:
+        return  # nothing to deliver to
+    lines = [f"[Answers to {set_id}]", ""]
+    for i, q in enumerate(qs_rows, 1):
+        lines.append(f"Q{i}. {q['title']}")
+        if q["status"] == "discarded":
+            lines.append("A: (skipped)")
+        elif q["kind"] == "choice":
+            parsed = q.get("answer_parsed") or {}
+            selected = parsed.get("selected") or []
+            other = (parsed.get("other") or "").strip()
+            pieces = list(selected)
+            if other:
+                pieces.append(f"Other: {other}")
+            lines.append("A: " + (", ".join(pieces) if pieces else "(no selection)"))
+        else:
+            lines.append("A: " + (q["answer"] or "").strip())
+        lines.append("")
+    payload = "\n".join(lines).rstrip()
+    now = int(time.time())
+    if blocking:
+        try:
+            send_text(from_session, payload)
+        except Exception as e:
+            slog(f"[qset] {set_id}: send_text failed: {e}")
+    else:
+        board_id = _next_issue_id(_prefix_from_session(from_session))
+        try:
+            db.execute(
+                "INSERT INTO issues (id, title, desc, status, session, creator, "
+                "  created, updated, owner_type) "
+                "VALUES (?, ?, ?, 'todo', ?, 'questions', ?, ?, 'agent')",
+                (board_id,
+                 f"Answers to decision dialog {set_id}",
+                 payload, from_session, now, now),
+            )
+            db.commit()
+            _board_changed()
+            _notify_session_of_task(from_session, board_id,
+                                    f"Answers to decision dialog {set_id}")
+        except Exception as e:
+            slog(f"[qset] {set_id}: board insert failed: {e}")
+
+
+# In-process guard: once a set has been delivered, we don't re-deliver on
+# any subsequent PATCH (e.g. Jeremy edits an answer post-hoc). Cleared on
+# process restart — that's fine, a re-delivery after a restart is
+# vanishingly unlikely (would require the set to still be open at restart).
+_question_set_delivered: set[str] = set()
 
 
 def _notify_session_of_retake(session_name: str, item_id: str, title: str,
@@ -24654,15 +24775,25 @@ function switchView(view) {
   if (view !== 'questions' && _questionsTimer) { clearInterval(_questionsTimer); _questionsTimer = null; }
 }
 
-// ── Questions tab (bidirectional agent↔human) ───────────────────────────────
+// ── Questions tab (bidirectional agent↔human inbox) ─────────────────────────
+// Threads render as a flat inbox list, one row per thread, sorted starred-
+// first then by most-recent activity. Click a row to expand the whole chain
+// oldest→newest. Choice-kind questions render as an inline AskUserQuestion
+// dialog inside the expanded view. Expanded state is persisted per thread
+// in localStorage so a page reload doesn't collapse everything you were
+// looking at.
 let _questionsTimer = null;
 let _questionsCache = [];
 let _questionsLastSig = '';
+let _qExpanded = new Set(JSON.parse(localStorage.getItem('amux.qExpanded') || '[]'));
+function _qExpandedSave() {
+  try { localStorage.setItem('amux.qExpanded', JSON.stringify([..._qExpanded])); } catch(e) {}
+}
 function _questionsSig(list) {
   // Signature changes only when something visible would change — status,
-  // answer content, read flag, threading, or a new question. In-progress
-  // typing must NOT trigger a re-render (that wipes the textarea).
-  return list.map(q => q.id + ':' + q.status + ':' + q.read + ':' + q.updated + ':' + (q.answered_at || 0) + ':' + (q.answer || '').length + ':' + (q.parent_id || '')).join('|');
+  // answer content, read flag, threading, star, or a new question. In-progress
+  // typing must NOT trigger a re-render (that wipes textareas).
+  return list.map(q => q.id + ':' + q.status + ':' + q.read + ':' + (q.starred || 0) + ':' + q.updated + ':' + (q.answered_at || 0) + ':' + (q.answer || '').length + ':' + (q.parent_id || '') + ':' + (q.set_id || '') + ':' + (q.kind || '')).join('|');
 }
 // "active" = still demanding attention. Includes:
 //   - open (no answer yet)
@@ -24672,6 +24803,88 @@ function _qIsActive(q) {
   if (q.status === 'discarded') return false;
   if (q.status === 'answered' && q.read) return false;
   return true;
+}
+// Group rows into threads. A thread is either:
+//   - a set (all rows sharing set_id) — rendered as one AskUserQuestion node
+//   - a parent-child chain (root Q + descendants via parent_id)
+// The threadKey uniquely names a thread so we can look up expansion state,
+// group rendering, and sort the inbox.
+function _qThreadKey(q, byId) {
+  if (q.set_id) return 'set:' + q.set_id;
+  let cur = q, guard = 0;
+  while (cur.parent_id && byId.has(cur.parent_id) && guard++ < 50) cur = byId.get(cur.parent_id);
+  return 'q:' + cur.id;
+}
+// Build {threadKey → [rows]}, each row list sorted for display (sets by
+// position, chains by created).
+function _qGroupThreads(list) {
+  const byId = new Map(list.map(q => [q.id, q]));
+  const groups = new Map();
+  for (const q of list) {
+    const k = _qThreadKey(q, byId);
+    if (!groups.has(k)) groups.set(k, []);
+    groups.get(k).push(q);
+  }
+  for (const [k, rows] of groups) {
+    rows.sort((a, b) => {
+      if (a.set_id && b.set_id && a.set_id === b.set_id) return a.position - b.position;
+      return a.created - b.created;
+    });
+  }
+  return groups;
+}
+// Last-activity timestamp for sorting the inbox.
+function _qThreadUpdated(rows) {
+  return rows.reduce((mx, r) => Math.max(mx, r.updated || 0, r.answered_at || 0), 0);
+}
+// Thread state used for the row's tint + status pill.
+//   waiting-you  = last unanswered message is agent → Jeremy, or a set is pending Jeremy's answers (green)
+//   on-ice       = latest state is that Jeremy responded and the agent hasn't followed up yet (blue)
+//   closed       = every node is answered+read or discarded (grey)
+function _qThreadState(rows) {
+  const active = rows.filter(_qIsActive);
+  if (active.length === 0) return 'closed';
+  // If any active row is agent → Jeremy in {open, working, answered-unread}, we're waiting on Jeremy.
+  for (const q of active) {
+    const forJeremy = !!(q.from_session && !q.to_session);
+    if (forJeremy && (q.status === 'open' || q.status === 'working')) return 'waiting-you';
+    if (forJeremy && q.status === 'answered' && !q.read) return 'waiting-you';
+  }
+  // Otherwise the latest activity is Jeremy → agent or Jeremy answered — on ice.
+  return 'on-ice';
+}
+function _qThreadStarred(rows) {
+  // Star lives on the anchor (the earliest row).
+  return rows.length > 0 && (rows[0].starred || 0) === 1;
+}
+function _qThreadTitle(rows) {
+  // Prefer the set anchor's title, then the root Q's title.
+  const anchor = rows[0];
+  if (anchor.set_id) return anchor.title || 'Decision dialog';
+  return anchor.title || '(untitled)';
+}
+function _qThreadLatestPreview(rows) {
+  const newest = rows.reduce((a, b) => ((b.updated || 0) > (a.updated || 0) ? b : a), rows[0]);
+  const dir = _qDir(newest);
+  const st = _qStateBadge(newest);
+  return {
+    dir: dir.label,
+    stateText: st.text,
+    stateColor: st.color,
+    title: newest.title || '',
+    ts: newest.updated || newest.created,
+  };
+}
+function _qThreadAnchorId(rows) {
+  // Star + reactivate PATCH against this id.
+  return rows[0].id;
+}
+function _qThreadTintColors(state) {
+  // Row background + border tint per state. Keep contrast subtle so long
+  // lists don't strobe.
+  if (state === 'waiting-you') return {bg: 'rgba(74,170,74,0.10)',  border: '#4a4', pill: '#4a4', label: 'waiting on you'};
+  if (state === 'on-ice')      return {bg: 'rgba(72,138,255,0.10)', border: '#48a', pill: '#48a', label: 'on ice'};
+  return                              {bg: 'transparent',           border: 'var(--border)', pill: '#666', label: 'closed'};
 }
 async function _questionsLoad() {
   try {
@@ -24714,113 +24927,317 @@ function _qStateBadge(q) {
 function _questionsRender() {
   const root = document.getElementById('questions-list');
   if (!root) return;
+  // Preserve any in-flight typing before we blow away the DOM.
   const drafts = {};
-  root.querySelectorAll('textarea[id^="q-answer-"]').forEach(ta => {
-    if (ta.value) drafts[ta.id] = ta.value;
+  root.querySelectorAll('textarea[id^="q-answer-"], input[id^="q-other-"]').forEach(el => {
+    if (el.value) drafts[el.id] = el.value;
+  });
+  const checked = {};
+  root.querySelectorAll('input[type="radio"]:checked, input[type="checkbox"]:checked').forEach(el => {
+    if (el.name && el.value) checked[el.name + '::' + el.value] = true;
   });
   const focusedId = (document.activeElement && document.activeElement.id) || '';
-  // Build a tree by parent_id. A "thread" is (root + all descendants that
-  // pass through it). We render one card group per thread when the root is
-  // active OR any descendant is active.
-  const byParent = new Map();
-  for (const q of _questionsCache) {
-    const key = q.parent_id || '';
-    if (!byParent.has(key)) byParent.set(key, []);
-    byParent.get(key).push(q);
-  }
-  const byId = new Map(_questionsCache.map(q => [q.id, q]));
-  function threadIsActive(root) {
-    // active if any node in the subtree is active
-    const stack = [root];
-    while (stack.length) {
-      const n = stack.pop();
-      if (_qIsActive(n)) return true;
-      for (const c of (byParent.get(n.id) || [])) stack.push(c);
-    }
-    return false;
-  }
-  const roots = (byParent.get('') || []).slice().sort((a, b) => b.created - a.created);
-  const activeThreads = roots.filter(threadIsActive);
-  const recentThreads = roots.filter(r => !threadIsActive(r)).slice(0, 20);
+
+  const groups = _qGroupThreads(_questionsCache);
+  // Build one entry per thread with metadata for sorting + rendering.
+  const threads = [...groups.entries()].map(([key, rows]) => ({
+    key, rows,
+    updated: _qThreadUpdated(rows),
+    state:   _qThreadState(rows),
+    starred: _qThreadStarred(rows),
+  }));
+  // Starred first; within each group, most-recently-updated first.
+  threads.sort((a, b) => (b.starred - a.starred) || (b.updated - a.updated));
+
+  // Split into "active" and "closed" so closed threads don't drown the top of
+  // the inbox. Starred closed threads still surface at the top of Closed.
+  const active = threads.filter(t => t.state !== 'closed');
+  const closed = threads.filter(t => t.state === 'closed').slice(0, 20);
+
   let html = '';
-  if (activeThreads.length === 0) {
-    html += '<div style="padding:24px;text-align:center;color:var(--muted);font-size:0.9rem;">No active questions. Ask an agent above, or wait for agents to post.</div>';
+  html += `<div style="display:flex;justify-content:space-between;align-items:center;margin:0 0 10px 0;">
+    <div style="font-size:0.75rem;color:var(--muted);text-transform:uppercase;letter-spacing:0.05em;">
+      Inbox &middot; ${active.length} active${closed.length ? ' &middot; ' + closed.length + ' closed' : ''}
+    </div>
+    <div>
+      <button class="btn" style="font-size:0.75rem;padding:3px 8px;opacity:0.7;" onclick="_qExpandAll()">Expand all</button>
+      <button class="btn" style="font-size:0.75rem;padding:3px 8px;opacity:0.7;" onclick="_qCollapseAll()">Collapse all</button>
+    </div>
+  </div>`;
+
+  if (active.length === 0 && closed.length === 0) {
+    html += '<div style="padding:24px;text-align:center;color:var(--muted);font-size:0.9rem;">Inbox empty. Ask an agent above, or wait for agents to post.</div>';
   }
-  // Recurse renders a single Q + its children indented.
-  function renderQ(q, depth) {
-    const dir = _qDir(q);
-    const st = _qStateBadge(q);
-    const isBlocking = q.blocking === 1;
-    const forJeremy = dir.forJeremy;
-    const canAnswer = forJeremy && (q.status === 'open' || q.status === 'working');
-    const canMarkRead = q.status === 'answered' && !q.read;
-    // Follow-up allowed on answered questions (Jeremy can follow up to
-    // agent-answered Qs; agents can follow up to Jeremy-answered Qs).
-    const canFollowUp = q.status === 'answered';
-    const borderColor = q.status === 'working' ? '#c60'
-      : (q.status === 'answered' && !q.read) ? '#4a4'
-      : (isBlocking ? '#e11' : 'var(--border)');
-    const indent = depth > 0 ? `margin-left:${depth * 16}px;border-left:3px solid var(--border);` : '';
-    const followUpBadge = q.parent_id ? `<span style="background:#456;color:#fff;padding:1px 6px;border-radius:3px;font-size:0.65rem;">follow-up of ${_qEsc(q.parent_id)}</span>` : '';
-    html += `<div class="q-card" style="border:1px solid ${borderColor};border-radius:8px;margin:8px 0;padding:12px 14px;background:var(--card-bg,#111);${indent}">
-      <div style="display:flex;align-items:center;gap:8px;font-size:0.75rem;color:var(--muted);margin-bottom:6px;flex-wrap:wrap;">
-        <span style="background:${st.color};color:#fff;padding:2px 8px;border-radius:4px;font-weight:600;text-transform:uppercase;letter-spacing:0.02em;">${st.text}</span>
-        ${isBlocking ? '<span style="background:#e11;color:#fff;padding:2px 8px;border-radius:4px;font-weight:600;">BLOCKING</span>' : ''}
-        ${followUpBadge}
-        <span style="font-weight:600;color:var(--fg);">${_qEsc(q.id)}</span>
-        <span>${_qEsc(dir.label)}</span>
-        <span>&middot;</span>
-        <span>${_qFmtTime(q.created)}</span>
-      </div>
-      <div style="font-weight:600;font-size:1rem;margin-bottom:6px;">${_qEsc(q.title)}</div>
-      ${q.body ? `<div style="white-space:pre-wrap;font-size:0.9rem;margin-bottom:10px;color:var(--fg);opacity:0.9;">${_qEsc(q.body)}</div>` : ''}
-      ${q.answer ? `<div style="margin-top:4px;margin-bottom:10px;padding:8px 10px;background:var(--card-bg,#0a0a0a);border-left:3px solid ${st.color};white-space:pre-wrap;font-size:0.9rem;">
-        <div style="font-size:0.7rem;color:var(--muted);text-transform:uppercase;letter-spacing:0.05em;margin-bottom:4px;">${q.status === 'working' ? 'Partial answer (still working)' : 'Answer'}</div>
-        ${_qEsc(q.answer)}
-      </div>` : ''}
-      ${canAnswer ? `<textarea id="q-answer-${_qEsc(q.id)}" placeholder="Your answer..." style="width:100%;min-height:70px;padding:8px;border:1px solid var(--border);border-radius:6px;background:var(--card-bg,#0a0a0a);color:var(--fg);font-family:inherit;font-size:0.9rem;resize:vertical;box-sizing:border-box;"></textarea>` : ''}
-      <div style="margin-top:8px;display:flex;gap:8px;flex-wrap:wrap;">
-        ${canAnswer ? `<button class="btn" onclick="_questionsAnswer('${_qEsc(q.id)}')">Send answer</button>` : ''}
-        ${canMarkRead ? `<button class="btn" onclick="_questionsMarkRead('${_qEsc(q.id)}')">Mark Read</button>` : ''}
-        ${canFollowUp ? `<button class="btn" onclick="_questionsFollowUp('${_qEsc(q.id)}')">Follow up</button>` : ''}
-        <button class="btn" style="opacity:0.6;" onclick="_questionsDiscard('${_qEsc(q.id)}')">Discard</button>
-      </div>
-    </div>`;
-    // Render children (follow-ups) indented under this Q.
-    const kids = (byParent.get(q.id) || []).slice().sort((a, b) => a.created - b.created);
-    for (const c of kids) renderQ(c, depth + 1);
+
+  for (const t of active) html += _qRenderRow(t);
+  if (closed.length) {
+    html += '<div style="margin:18px 0 4px 0;color:var(--muted);font-size:0.75rem;text-transform:uppercase;letter-spacing:0.05em;">Closed</div>';
+    for (const t of closed) html += _qRenderRow(t, true);
   }
-  for (const rt of activeThreads) renderQ(rt, 0);
-  if (recentThreads.length > 0) {
-    html += '<div style="margin-top:24px;color:var(--muted);font-size:0.8rem;text-transform:uppercase;letter-spacing:0.05em;">Recent</div>';
-    function renderRecent(q, depth) {
-      const st = _qStateBadge(q);
-      const dir = _qDir(q);
-      const indent = depth > 0 ? `margin-left:${depth * 16}px;border-left:3px solid var(--border);padding-left:12px;` : '';
-      html += `<div style="border:1px solid var(--border);border-radius:6px;margin:6px 0;padding:8px 12px;opacity:0.75;font-size:0.85rem;${indent}">
-        <div style="display:flex;align-items:center;gap:8px;">
-          <span style="background:${st.color};color:#fff;padding:1px 6px;border-radius:3px;font-size:0.65rem;">${st.text}</span>
-          <span style="font-weight:600;">${_qEsc(q.id)}</span>
-          <span>${_qEsc(dir.label)}</span>
-          <span style="color:var(--muted);font-size:0.75rem;">${_qFmtTime(q.answered_at || q.updated)}</span>
-        </div>
-        <div style="margin-top:4px;">${_qEsc(q.title)}</div>
-        ${q.answer ? `<div style="margin-top:4px;padding:6px 8px;background:var(--card-bg,#0a0a0a);border-left:3px solid ${st.color};white-space:pre-wrap;">${_qEsc(q.answer)}</div>` : ''}
-      </div>`;
-      const kids = (byParent.get(q.id) || []).slice().sort((a, b) => a.created - b.created);
-      for (const c of kids) renderRecent(c, depth + 1);
-    }
-    for (const rt of recentThreads) renderRecent(rt, 0);
-  }
+
   root.innerHTML = html;
+  // Restore drafts + selections
   for (const [id, val] of Object.entries(drafts)) {
-    const ta = document.getElementById(id);
-    if (ta) ta.value = val;
+    const el = document.getElementById(id);
+    if (el) el.value = val;
   }
+  root.querySelectorAll('input[type="radio"], input[type="checkbox"]').forEach(el => {
+    if (checked[el.name + '::' + el.value]) el.checked = true;
+  });
   if (focusedId) {
     const el = document.getElementById(focusedId);
     if (el && el.focus) el.focus();
   }
+}
+function _qRenderRow(t, muted) {
+  const anchor = t.rows[0];
+  const preview = _qThreadLatestPreview(t.rows);
+  const tint = _qThreadTintColors(t.state);
+  const expanded = _qExpanded.has(t.key);
+  const anyBlocking = t.rows.some(r => r.blocking === 1);
+  const star = t.starred ? '★' : '☆';
+  const starColor = t.starred ? '#f0c02a' : 'var(--muted)';
+  const chev = expanded ? '▾' : '▸';
+  const kEsc = _qEsc(t.key);
+  const anchorId = _qEsc(anchor.id);
+  const rowStyle = `border:1px solid ${tint.border};background:${tint.bg};border-radius:8px;margin:6px 0;${muted ? 'opacity:0.65;' : ''}`;
+  let html = `<div class="q-thread" data-key="${kEsc}" style="${rowStyle}">
+    <div style="display:flex;align-items:center;gap:10px;padding:10px 12px;cursor:pointer;" onclick="_qToggle('${kEsc}')">
+      <span style="font-size:1.1rem;color:${starColor};cursor:pointer;user-select:none;" title="${t.starred ? 'Unstar' : 'Star (keep at top)'}" onclick="event.stopPropagation();_qStarToggle('${anchorId}', ${t.starred ? 'false' : 'true'})">${star}</span>
+      <span style="width:12px;color:var(--muted);font-size:0.9rem;">${chev}</span>
+      <span style="background:${tint.pill};color:#fff;padding:2px 8px;border-radius:4px;font-size:0.65rem;font-weight:600;text-transform:uppercase;letter-spacing:0.03em;white-space:nowrap;">${tint.label}</span>
+      ${anyBlocking ? '<span style="background:#e11;color:#fff;padding:2px 8px;border-radius:4px;font-size:0.65rem;font-weight:600;">BLOCKING</span>' : ''}
+      <span style="font-weight:600;font-size:0.85rem;color:var(--fg);white-space:nowrap;">${_qEsc(anchor.id)}${anchor.set_id ? ' · set ' + _qEsc(anchor.set_id) : ''}</span>
+      <span style="flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:0.9rem;">${_qEsc(_qThreadTitle(t.rows))}</span>
+      <span style="font-size:0.7rem;color:var(--muted);white-space:nowrap;" title="${_qEsc(preview.dir)}">${_qFmtTime(preview.ts)}</span>
+    </div>`;
+  if (expanded) html += _qRenderChain(t);
+  html += '</div>';
+  return html;
+}
+function _qRenderChain(t) {
+  let html = '<div style="border-top:1px solid var(--border);padding:12px 14px;">';
+  // Sets get a single AskUserQuestion dialog card covering all N questions.
+  const setRows = t.rows.filter(r => r.set_id);
+  const chainRows = t.rows.filter(r => !r.set_id);
+  if (setRows.length) {
+    html += _qRenderSet(setRows);
+  }
+  for (const q of chainRows) html += _qRenderQ(q);
+  // Thread-level actions (follow up, reactivate).
+  const anchor = t.rows[0];
+  const anchorEsc = _qEsc(anchor.id);
+  const anyOpen = t.rows.some(_qIsActive);
+  html += `<div style="margin-top:10px;padding-top:10px;border-top:1px dashed var(--border);display:flex;gap:8px;flex-wrap:wrap;">
+    <button class="btn" onclick="_questionsFollowUp('${anchorEsc}')" title="Add a follow-up question in this thread">Follow up</button>
+    ${!anyOpen ? `<button class="btn" onclick="_qReactivate('${anchorEsc}')" title="Bring this thread back into the active inbox">Reactivate</button>` : ''}
+    <button class="btn" style="opacity:0.6;" onclick="_qDiscardThread('${_qEsc(t.key)}')">Discard thread</button>
+  </div></div>`;
+  return html;
+}
+function _qRenderQ(q) {
+  const dir = _qDir(q);
+  const st = _qStateBadge(q);
+  const forJeremy = dir.forJeremy;
+  const canAnswer = forJeremy && (q.status === 'open' || q.status === 'working');
+  const canMarkRead = q.status === 'answered' && !q.read;
+  const qidEsc = _qEsc(q.id);
+  let html = `<div style="margin:0 0 12px 0;">
+    <div style="display:flex;align-items:baseline;gap:8px;font-size:0.7rem;color:var(--muted);margin-bottom:4px;flex-wrap:wrap;">
+      <span style="background:${st.color};color:#fff;padding:1px 6px;border-radius:3px;font-weight:600;text-transform:uppercase;letter-spacing:0.03em;">${st.text}</span>
+      <span style="font-weight:600;color:var(--fg);">${qidEsc}</span>
+      <span>${_qEsc(dir.label)}</span>
+      <span>&middot;</span>
+      <span>${_qFmtTime(q.created)}</span>
+    </div>
+    <div style="font-weight:600;font-size:0.95rem;margin-bottom:4px;">${_qEsc(q.title)}</div>
+    ${q.body ? `<div style="white-space:pre-wrap;font-size:0.88rem;color:var(--fg);opacity:0.88;margin-bottom:8px;">${_qEsc(q.body)}</div>` : ''}`;
+  if (q.kind === 'choice' && !canAnswer) {
+    html += _qRenderChoiceReadonly(q);
+  } else if (q.kind === 'choice' && canAnswer) {
+    html += _qRenderChoiceInput(q);
+  } else if (q.answer) {
+    html += `<div style="margin-top:4px;margin-bottom:6px;padding:8px 10px;background:var(--card-bg,#0a0a0a);border-left:3px solid ${st.color};white-space:pre-wrap;font-size:0.88rem;">
+      <div style="font-size:0.65rem;color:var(--muted);text-transform:uppercase;letter-spacing:0.05em;margin-bottom:4px;">${q.status === 'working' ? 'Partial answer (still working)' : 'Answer'}</div>
+      ${_qEsc(q.answer)}
+    </div>`;
+  }
+  if (canAnswer && q.kind !== 'choice') {
+    html += `<textarea id="q-answer-${qidEsc}" placeholder="Your answer..." style="width:100%;min-height:60px;padding:8px;border:1px solid var(--border);border-radius:6px;background:var(--card-bg,#0a0a0a);color:var(--fg);font-family:inherit;font-size:0.88rem;resize:vertical;box-sizing:border-box;"></textarea>
+      <div style="margin-top:6px;display:flex;gap:6px;flex-wrap:wrap;">
+        <button class="btn" onclick="_questionsAnswer('${qidEsc}')">Send answer</button>
+      </div>`;
+  }
+  if (canMarkRead) {
+    html += `<div style="margin-top:6px;"><button class="btn" style="opacity:0.75;font-size:0.78rem;padding:3px 8px;" onclick="_questionsMarkRead('${qidEsc}')">Mark Read</button></div>`;
+  }
+  html += '</div>';
+  return html;
+}
+function _qRenderSet(rows) {
+  // Renders a whole set as one AskUserQuestion-style dialog. Every question
+  // in the set gets its own choice input, and a single "Submit all" button
+  // sends the answers to each unanswered question sequentially.
+  const anchor = rows[0];
+  const forJeremy = !!(anchor.from_session && !anchor.to_session);
+  const allDone = rows.every(r => r.status === 'answered' || r.status === 'discarded');
+  const setIdEsc = _qEsc(anchor.set_id);
+  let html = `<div style="border:1px solid var(--border);border-radius:8px;padding:12px 14px;margin-bottom:12px;background:var(--card-bg,#0a0a0a);">
+    <div style="font-size:0.7rem;color:var(--muted);text-transform:uppercase;letter-spacing:0.05em;margin-bottom:6px;">
+      Decision dialog · ${rows.length} question${rows.length === 1 ? '' : 's'} · from ${_qEsc(anchor.from_session || 'you')}
+    </div>`;
+  rows.forEach((q, i) => {
+    const qidEsc = _qEsc(q.id);
+    html += `<div style="margin-bottom:14px;padding-bottom:12px;${i < rows.length - 1 ? 'border-bottom:1px dashed var(--border);' : ''}">
+      <div style="font-weight:600;font-size:0.92rem;margin-bottom:4px;">Q${i + 1}. ${_qEsc(q.title)}</div>
+      ${q.body ? `<div style="font-size:0.85rem;opacity:0.85;margin-bottom:8px;white-space:pre-wrap;">${_qEsc(q.body)}</div>` : ''}
+      ${q.kind === 'choice'
+        ? (q.status === 'answered' ? _qRenderChoiceReadonly(q) : _qRenderChoiceInput(q))
+        : (q.status === 'answered'
+            ? `<div style="padding:6px 8px;background:var(--card-bg,#0a0a0a);border-left:3px solid #4a4;font-size:0.85rem;white-space:pre-wrap;">${_qEsc(q.answer)}</div>`
+            : (forJeremy
+                ? `<textarea id="q-answer-${qidEsc}" placeholder="Your answer..." style="width:100%;min-height:50px;padding:6px 8px;border:1px solid var(--border);border-radius:5px;background:var(--card-bg,#111);color:var(--fg);font-family:inherit;font-size:0.85rem;resize:vertical;box-sizing:border-box;"></textarea>`
+                : '<div style="font-size:0.8rem;color:var(--muted);">Awaiting answer.</div>'))}
+    </div>`;
+  });
+  if (forJeremy && !allDone) {
+    html += `<div style="display:flex;gap:8px;flex-wrap:wrap;">
+      <button class="btn" onclick="_qSubmitSet('${setIdEsc}')">Submit all</button>
+    </div>`;
+  }
+  html += '</div>';
+  return html;
+}
+function _qRenderChoiceInput(q) {
+  const qidEsc = _qEsc(q.id);
+  const inputType = q.multi_select ? 'checkbox' : 'radio';
+  const name = 'q-choice-' + qidEsc;
+  let opts = [];
+  try { opts = JSON.parse(q.options || '[]'); } catch(e) { opts = []; }
+  let html = '<div style="display:flex;flex-direction:column;gap:6px;margin-bottom:6px;">';
+  for (const o of opts) {
+    const val = _qEsc(o.label || '');
+    html += `<label style="display:flex;align-items:flex-start;gap:8px;font-size:0.88rem;cursor:pointer;padding:4px 6px;border-radius:4px;">
+      <input type="${inputType}" name="${name}" value="${val}" style="margin-top:3px;">
+      <span><span style="font-weight:500;">${val}</span>${o.description ? `<div style="font-size:0.78rem;color:var(--muted);">${_qEsc(o.description)}</div>` : ''}</span>
+    </label>`;
+  }
+  // Implicit "Other" free-text option, always available.
+  html += `<label style="display:flex;align-items:center;gap:8px;font-size:0.88rem;padding:4px 6px;border-radius:4px;">
+    <input type="${inputType}" name="${name}" value="__other__" style="margin-top:0;">
+    <span>Other:</span>
+    <input type="text" id="q-other-${qidEsc}" placeholder="Type a custom answer" style="flex:1;padding:4px 6px;border:1px solid var(--border);border-radius:4px;background:var(--card-bg,#0a0a0a);color:var(--fg);font-size:0.85rem;">
+  </label>`;
+  html += '</div>';
+  // Not shown in set-render, but standalone-choice needs its own send button.
+  if (!q.set_id) {
+    html += `<div style="display:flex;gap:6px;flex-wrap:wrap;"><button class="btn" onclick="_qSubmitChoice('${qidEsc}')">Send</button></div>`;
+  }
+  return html;
+}
+function _qRenderChoiceReadonly(q) {
+  let parsed = {selected: [], other: ''};
+  try { parsed = JSON.parse(q.answer || '{}'); } catch(e) {}
+  const parts = [...(parsed.selected || [])];
+  if ((parsed.other || '').trim()) parts.push('Other: ' + parsed.other.trim());
+  return `<div style="padding:6px 8px;background:var(--card-bg,#0a0a0a);border-left:3px solid #4a4;font-size:0.85rem;">${_qEsc(parts.join(', ') || '(no selection)')}</div>`;
+}
+async function _qSubmitChoice(qid) {
+  const q = _questionsCache.find(x => x.id === qid);
+  if (!q) return;
+  const {selected, other} = _qCollectChoice(qid, q.multi_select);
+  if (!selected.length && !other) { alert('Pick an option or type an Other answer.'); return; }
+  const r = await fetch(API + '/api/questions/' + encodeURIComponent(qid), {
+    method: 'PATCH',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({choices: selected, other}),
+  });
+  if (!r.ok) alert('Send failed: ' + r.status + ' — ' + await r.text());
+  _questionsLoad();
+}
+async function _qSubmitSet(setId) {
+  const setRows = _questionsCache.filter(q => q.set_id === setId && q.status !== 'answered' && q.status !== 'discarded');
+  const failures = [];
+  for (const q of setRows) {
+    let body;
+    if (q.kind === 'choice') {
+      const {selected, other} = _qCollectChoice(q.id, q.multi_select);
+      if (!selected.length && !other) { failures.push(q.id + ' (missing)'); continue; }
+      body = {choices: selected, other};
+    } else {
+      const ta = document.getElementById('q-answer-' + q.id);
+      const answer = ((ta && ta.value) || '').trim();
+      if (!answer) { failures.push(q.id + ' (missing)'); continue; }
+      body = {answer};
+    }
+    const r = await fetch(API + '/api/questions/' + encodeURIComponent(q.id), {
+      method: 'PATCH',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify(body),
+    });
+    if (!r.ok) failures.push(q.id + ' (' + r.status + ')');
+  }
+  if (failures.length) alert('Some answers did not submit:\n' + failures.join('\n'));
+  _questionsLoad();
+}
+function _qCollectChoice(qid, multi) {
+  const qidEsc = qid;
+  const name = 'q-choice-' + qidEsc;
+  const nodes = document.querySelectorAll('input[name="' + name + '"]:checked');
+  const selected = [];
+  let otherPicked = false;
+  nodes.forEach(n => {
+    if (n.value === '__other__') otherPicked = true;
+    else selected.push(n.value);
+  });
+  const otherInput = document.getElementById('q-other-' + qidEsc);
+  const other = otherPicked ? ((otherInput && otherInput.value) || '').trim() : '';
+  return {selected: multi ? selected : selected.slice(0, 1), other};
+}
+function _qToggle(key) {
+  if (_qExpanded.has(key)) _qExpanded.delete(key);
+  else _qExpanded.add(key);
+  _qExpandedSave();
+  _questionsRender();
+}
+function _qExpandAll() {
+  for (const [key] of _qGroupThreads(_questionsCache)) _qExpanded.add(key);
+  _qExpandedSave();
+  _questionsRender();
+}
+function _qCollapseAll() {
+  _qExpanded.clear();
+  _qExpandedSave();
+  _questionsRender();
+}
+async function _qStarToggle(qid, on) {
+  await fetch(API + '/api/questions/' + encodeURIComponent(qid), {
+    method: 'PATCH',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({starred: on === true || on === 'true'}),
+  });
+  _questionsLoad();
+}
+async function _qReactivate(qid) {
+  // Flip read=false on the anchor. Read is what pushes a thread to Closed;
+  // clearing it lifts the thread back into Active.
+  await fetch(API + '/api/questions/' + encodeURIComponent(qid), {
+    method: 'PATCH',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({read: false}),
+  });
+  _qExpanded.add('q:' + qid);  // open it so the user can follow up
+  _qExpandedSave();
+  _questionsLoad();
+}
+async function _qDiscardThread(key) {
+  if (!confirm('Discard this whole thread?')) return;
+  const groups = _qGroupThreads(_questionsCache);
+  const rows = groups.get(key) || [];
+  for (const q of rows) {
+    await fetch(API + '/api/questions/' + encodeURIComponent(q.id), {method: 'DELETE'});
+  }
+  _questionsLoad();
 }
 async function _questionsAnswer(qid) {
   const ta = document.getElementById('q-answer-' + qid);
@@ -35283,6 +35700,120 @@ class CCHandler(BaseHTTPRequestHandler):
         # See MEMORY.md and the `asking-jeremy-questions` note for use.
         if path == "/api/questions" or path.startswith("/api/questions/"):
             db = get_db()
+            # ── Question sets (Phase 3) ────────────────────────────────────
+            # A "set" is a batch of N questions rendered as one dashboard
+            # dialog card, mirroring Claude Code's AskUserQuestion. The agent
+            # posts the whole batch, polls the set until every question has
+            # been answered, then receives the answers back as one payload
+            # (block-and-batch — never streams partial). Choice questions
+            # implicitly get an "Other…" free-text option so Jeremy can
+            # override the presented list.
+            if method == "POST" and path == "/api/questions/sets":
+                body = self._read_body()
+                set_title = (body.get("title") or "").strip()
+                from_session = (body.get("from_session")
+                                or self.headers.get("X-Amux-Session")
+                                or "").strip()
+                to_session = (body.get("to_session") or "").strip()
+                # Same contract as single Q: exactly one endpoint carries a
+                # session — the other is '' (meaning Jeremy).
+                if not from_session and not to_session:
+                    return self._json({"error": "must specify either from_session (agent asking) or to_session (human asking)"}, 400)
+                blocking = 1 if body.get("blocking") else 0
+                questions = body.get("questions") or []
+                if not isinstance(questions, list) or not questions:
+                    return self._json({"error": "questions must be a non-empty array"}, 400)
+                if len(questions) > 10:
+                    return self._json({"error": "at most 10 questions per set"}, 400)
+                # Validate every entry before we insert anything.
+                clean_qs = []
+                for i, q in enumerate(questions):
+                    qt = (q.get("title") or "").strip()
+                    if not qt:
+                        return self._json({"error": f"questions[{i}].title required"}, 400)
+                    qk = (q.get("kind") or "text").strip().lower()
+                    if qk not in ("text", "choice"):
+                        return self._json({"error": f"questions[{i}].kind must be 'text' or 'choice'"}, 400)
+                    qopts = q.get("options") or []
+                    if qk == "choice":
+                        if not isinstance(qopts, list) or len(qopts) < 2:
+                            return self._json({"error": f"questions[{i}] choice needs >=2 options"}, 400)
+                        if len(qopts) > 6:
+                            return self._json({"error": f"questions[{i}] max 6 options"}, 400)
+                        # Normalize to [{label, description?}] shape
+                        norm = []
+                        for j, o in enumerate(qopts):
+                            if isinstance(o, str):
+                                norm.append({"label": o})
+                            elif isinstance(o, dict) and (o.get("label") or "").strip():
+                                norm.append({"label": o["label"].strip(),
+                                             "description": (o.get("description") or "").strip()})
+                            else:
+                                return self._json({"error": f"questions[{i}].options[{j}] needs a label"}, 400)
+                        qopts = norm
+                    else:
+                        qopts = []
+                    clean_qs.append({
+                        "title": qt,
+                        "body": (q.get("body") or "").strip(),
+                        "kind": qk,
+                        "options": qopts,
+                        "multi_select": 1 if q.get("multi_select") or q.get("multiSelect") else 0,
+                    })
+                set_id = _next_issue_id("QS")
+                now = int(time.time())
+                qids = []
+                for pos, q in enumerate(clean_qs):
+                    qid = _next_issue_id("Q")
+                    qids.append(qid)
+                    db.execute(
+                        "INSERT INTO questions (id, from_session, to_session, title, body, "
+                        "  blocking, status, parent_id, set_id, kind, options, multi_select, "
+                        "  position, created, updated) "
+                        "VALUES (?, ?, ?, ?, ?, ?, 'open', '', ?, ?, ?, ?, ?, ?, ?)",
+                        (qid, from_session, to_session, q["title"], q["body"],
+                         blocking, set_id, q["kind"], json.dumps(q["options"]),
+                         q["multi_select"], pos, now, now),
+                    )
+                db.commit()
+                # Notify Jeremy that a decision dialog is waiting (agent → Jeremy
+                # is the only currently-supported direction for sets; the human →
+                # agent branch would need a distinct rendering on the agent side
+                # and no one has asked for it yet).
+                if not to_session and from_session:
+                    _send_pushover(
+                        f"Decision dialog from {from_session}"
+                        + ("  (BLOCKING)" if blocking else ""),
+                        f"{set_id}: {set_title or (str(len(qids)) + ' questions')}",
+                        priority=1 if blocking else 0,
+                    )
+                return self._json({
+                    "set_id": set_id,
+                    "title": set_title,
+                    "from_session": from_session,
+                    "to_session": to_session,
+                    "blocking": blocking,
+                    "question_ids": qids,
+                    "questions": _load_question_set(set_id, db),
+                    "all_answered": False,
+                }, 201)
+            m_set = re.match(r"^/api/questions/sets/([A-Za-z0-9-]+)$", path)
+            if m_set:
+                set_id = m_set.group(1)
+                if method == "GET":
+                    qs_rows = _load_question_set(set_id, db)
+                    if not qs_rows:
+                        return self._json({"error": "not found"}, 404)
+                    all_ans = all(q["status"] in ("answered", "discarded") for q in qs_rows)
+                    first = qs_rows[0]
+                    return self._json({
+                        "set_id": set_id,
+                        "from_session": first["from_session"],
+                        "to_session": first["to_session"],
+                        "blocking": first["blocking"],
+                        "all_answered": all_ans,
+                        "questions": qs_rows,
+                    })
             if method == "GET" and path == "/api/questions":
                 status_filter = qs.get("status", [None])[0]
                 sql = "SELECT * FROM questions"
@@ -35424,6 +35955,32 @@ class CCHandler(BaseHTTPRequestHandler):
                     new_status = body.get("status")
                     partial = bool(body.get("partial"))
                     mark_read = body.get("read")
+                    # Choice answer: {choices: ["A","B"], other: "..."} — stored
+                    # as JSON in the `answer` column, distinguished from text
+                    # answers by the row's `kind == 'choice'`. Empty selection +
+                    # empty other is treated as no answer.
+                    choices = body.get("choices")
+                    other_text = (body.get("other") or "").strip()
+                    if choices is not None or other_text:
+                        if row["kind"] != "choice":
+                            return self._json({"error": "choices only valid on kind='choice' questions"}, 400)
+                        if choices is None:
+                            choices = []
+                        if not isinstance(choices, list):
+                            return self._json({"error": "choices must be a list"}, 400)
+                        # Validate every choice appears in the row's options.
+                        try:
+                            allowed = {o.get("label") for o in json.loads(row["options"] or "[]")}
+                        except Exception:
+                            allowed = set()
+                        for c in choices:
+                            if c not in allowed:
+                                return self._json({"error": f"choice {c!r} is not one of the presented options"}, 400)
+                        if not row["multi_select"] and len(choices) > 1:
+                            return self._json({"error": "this question is single-select"}, 400)
+                        if not choices and not other_text:
+                            return self._json({"error": "provide at least one choice or an 'other' text"}, 400)
+                        answer = json.dumps({"selected": choices, "other": other_text})
                     now = int(time.time())
                     if answer:
                         # An answer is being posted (or accumulated).
@@ -35450,7 +36007,14 @@ class CCHandler(BaseHTTPRequestHandler):
                         )
                         db.commit()
                         original_title = row["title"]
-                        if agent_target and target_status == "answered":
+                        # Questions that belong to a set defer delivery until
+                        # every question in the set is answered — the batched
+                        # payload is emitted by _question_set_deliver_if_complete
+                        # (block-and-batch, matches AskUserQuestion contract).
+                        in_set = (row["set_id"] or "").strip()
+                        if in_set and target_status == "answered":
+                            _question_set_deliver_if_complete(in_set, db)
+                        elif agent_target and target_status == "answered":
                             # Route Jeremy's final answer back to the asking agent.
                             if row["blocking"]:
                                 injected = (
@@ -35500,6 +36064,14 @@ class CCHandler(BaseHTTPRequestHandler):
                         db.execute(
                             "UPDATE questions SET read = ?, updated = ? WHERE id = ?",
                             (1 if mark_read else 0, now, qid),
+                        )
+                        db.commit()
+                        return self._json(dict(db.execute(
+                            "SELECT * FROM questions WHERE id = ?", (qid,)).fetchone()))
+                    if "starred" in body:
+                        db.execute(
+                            "UPDATE questions SET starred = ?, updated = ? WHERE id = ?",
+                            (1 if body["starred"] else 0, now, qid),
                         )
                         db.commit()
                         return self._json(dict(db.execute(
