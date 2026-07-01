@@ -13882,7 +13882,7 @@ setTimeout(function(){var f=document.getElementById('js-fallback');if(f&&f.style
 <div class="tab-bar">
   <button id="tab-sessions" class="active" onclick="switchView('sessions')">Sessions</button>
   <button id="tab-board" onclick="switchView('board')">Board</button>
-  <button id="tab-questions" onclick="switchView('questions')">Questions <span id="tab-questions-count" style="display:none;background:#e11;color:#fff;border-radius:10px;padding:1px 7px;font-size:0.7rem;margin-left:3px;">0</span></button>
+  <button id="tab-inbox" onclick="switchView('inbox')">Inbox <span id="tab-inbox-count" style="display:none;background:#e11;color:#fff;border-radius:10px;padding:1px 7px;font-size:0.7rem;margin-left:3px;">0</span></button>
   <button id="tab-calendar" onclick="switchView('calendar')">Calendar</button>
   <button id="tab-scheduler" onclick="switchView('scheduler')">Scheduler</button>
   <button id="tab-files" onclick="switchView('files')">Files</button>
@@ -14121,14 +14121,14 @@ setTimeout(function(){var f=document.getElementById('js-fallback');if(f&&f.style
 </div>
 
 
-<!-- Questions view: bidirectional agent↔human question queue -->
-<div id="questions-view" style="display:none;flex-direction:column;overflow:auto;padding:12px 16px;">
+<!-- Inbox view: bidirectional agent↔human inbox (formerly "Questions"). -->
+<div id="inbox-view" style="display:none;flex-direction:column;overflow:auto;padding:12px 16px;">
   <div style="display:flex;align-items:center;gap:12px;margin-bottom:8px;flex-wrap:wrap;">
-    <h2 style="margin:0;font-size:1.1rem;">Questions</h2>
+    <h2 style="margin:0;font-size:1.1rem;">Inbox</h2>
     <button class="btn" onclick="_questionsOpenAsk()">+ Ask an agent</button>
-    <span style="color:var(--muted);font-size:0.8rem;">Blocking = wait for reply. Answered questions stay here until you mark Read.</span>
+    <span style="color:var(--muted);font-size:0.8rem;">Threads stay here until you mark Read or Discard. Star to pin at top.</span>
   </div>
-  <div id="questions-list"></div>
+  <div id="inbox-list"></div>
 </div>
 <!-- Ask-agent modal -->
 <div id="q-ask-modal" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,0.55);z-index:1000;justify-content:center;align-items:center;padding:20px;" onclick="if(event.target===this)_questionsCloseAsk()">
@@ -24726,8 +24726,8 @@ function _chromeSave() {
 function switchView(view) {
   if (document.getElementById('grid-view').classList.contains('active')) exitGridMode();
   activeView = view;
-  const _svIds = ['session','board','questions','calendar','scheduler','files','logs','notes','crm','map','metrics','torrents','terminal','browser','graph','journal','habits','repos'];
-  const _svNames = ['sessions','board','questions','calendar','scheduler','files','logs','notes','crm','map','metrics','torrents','terminal','browser','graph','journal','habits','repos'];
+  const _svIds = ['session','board','inbox','calendar','scheduler','files','logs','notes','crm','map','metrics','torrents','terminal','browser','graph','journal','habits','repos'];
+  const _svNames = ['sessions','board','inbox','calendar','scheduler','files','logs','notes','crm','map','metrics','torrents','terminal','browser','graph','journal','habits','repos'];
   const _svDisplay = ['','','flex','flex','','flex','flex','flex','flex','flex','flex','flex','flex','','flex','flex','flex','flex'];
   for (let i = 0; i < _svIds.length; i++) {
     const ve = document.getElementById(_svIds[i] + '-view');
@@ -24764,7 +24764,7 @@ function switchView(view) {
     fetchBoard();
     // Only poll if SSE is not active (SSE pushes board updates)
     if (_sseFallback && !boardTimer) boardTimer = setInterval(fetchBoard, 5000);
-  } else if (view === 'questions') {
+  } else if (view === 'inbox') {
     _questionsLoad();
     if (!_questionsTimer) _questionsTimer = setInterval(_questionsLoad, 5000);
   } else if (view === 'scheduler') {
@@ -24772,7 +24772,7 @@ function switchView(view) {
   } else {
     if (boardTimer) { clearInterval(boardTimer); boardTimer = null; }
   }
-  if (view !== 'questions' && _questionsTimer) { clearInterval(_questionsTimer); _questionsTimer = null; }
+  if (view !== 'inbox' && _questionsTimer) { clearInterval(_questionsTimer); _questionsTimer = null; }
 }
 
 // ── Questions tab (bidirectional agent↔human inbox) ─────────────────────────
@@ -24888,7 +24888,7 @@ function _qThreadTintColors(state) {
 }
 async function _questionsLoad() {
   try {
-    const r = await fetch(API + '/api/questions');
+    const r = await fetch(API + '/api/inbox');
     if (!r.ok) return;
     const next = await r.json();
     const sig = _questionsSig(next);
@@ -24901,7 +24901,7 @@ async function _questionsLoad() {
 }
 function _questionsUpdateBadge() {
   const active = _questionsCache.filter(_qIsActive).length;
-  const b = document.getElementById('tab-questions-count');
+  const b = document.getElementById('tab-inbox-count');
   if (!b) return;
   b.textContent = String(active);
   b.style.display = active > 0 ? '' : 'none';
@@ -24925,7 +24925,7 @@ function _qStateBadge(q) {
   return {text: 'open', color: '#48a'};
 }
 function _questionsRender() {
-  const root = document.getElementById('questions-list');
+  const root = document.getElementById('inbox-list');
   if (!root) return;
   // Preserve any in-flight typing before we blow away the DOM.
   const drafts = {};
@@ -25016,7 +25016,17 @@ function _qRenderRow(t, muted) {
   return html;
 }
 function _qRenderChain(t) {
-  let html = '<div style="border-top:1px solid var(--border);padding:12px 14px;">';
+  const anchor = t.rows[0];
+  const anchorEsc = _qEsc(anchor.id);
+  const anyOpen = t.rows.some(_qIsActive);
+  // Thread-level actions live at the TOP of the expanded panel so a long
+  // chain doesn't force scrolling just to reactivate or follow up.
+  let html = `<div style="border-top:1px solid var(--border);padding:10px 14px;">
+    <div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:10px;padding-bottom:10px;border-bottom:1px dashed var(--border);">
+      <button class="btn" onclick="_questionsFollowUp('${anchorEsc}')" title="Add a follow-up question in this thread">Follow up</button>
+      ${!anyOpen ? `<button class="btn" onclick="_qReactivate('${anchorEsc}')" title="Bring this thread back into the active inbox">Reactivate</button>` : ''}
+      <button class="btn" style="opacity:0.6;" onclick="_qDiscardThread('${_qEsc(t.key)}')">Discard thread</button>
+    </div>`;
   // Sets get a single AskUserQuestion dialog card covering all N questions.
   const setRows = t.rows.filter(r => r.set_id);
   const chainRows = t.rows.filter(r => !r.set_id);
@@ -25024,15 +25034,7 @@ function _qRenderChain(t) {
     html += _qRenderSet(setRows);
   }
   for (const q of chainRows) html += _qRenderQ(q);
-  // Thread-level actions (follow up, reactivate).
-  const anchor = t.rows[0];
-  const anchorEsc = _qEsc(anchor.id);
-  const anyOpen = t.rows.some(_qIsActive);
-  html += `<div style="margin-top:10px;padding-top:10px;border-top:1px dashed var(--border);display:flex;gap:8px;flex-wrap:wrap;">
-    <button class="btn" onclick="_questionsFollowUp('${anchorEsc}')" title="Add a follow-up question in this thread">Follow up</button>
-    ${!anyOpen ? `<button class="btn" onclick="_qReactivate('${anchorEsc}')" title="Bring this thread back into the active inbox">Reactivate</button>` : ''}
-    <button class="btn" style="opacity:0.6;" onclick="_qDiscardThread('${_qEsc(t.key)}')">Discard thread</button>
-  </div></div>`;
+  html += '</div>';
   return html;
 }
 function _qRenderQ(q) {
@@ -25147,7 +25149,7 @@ async function _qSubmitChoice(qid) {
   if (!q) return;
   const {selected, other} = _qCollectChoice(qid, q.multi_select);
   if (!selected.length && !other) { alert('Pick an option or type an Other answer.'); return; }
-  const r = await fetch(API + '/api/questions/' + encodeURIComponent(qid), {
+  const r = await fetch(API + '/api/inbox/' + encodeURIComponent(qid), {
     method: 'PATCH',
     headers: {'Content-Type': 'application/json'},
     body: JSON.stringify({choices: selected, other}),
@@ -25170,7 +25172,7 @@ async function _qSubmitSet(setId) {
       if (!answer) { failures.push(q.id + ' (missing)'); continue; }
       body = {answer};
     }
-    const r = await fetch(API + '/api/questions/' + encodeURIComponent(q.id), {
+    const r = await fetch(API + '/api/inbox/' + encodeURIComponent(q.id), {
       method: 'PATCH',
       headers: {'Content-Type': 'application/json'},
       body: JSON.stringify(body),
@@ -25211,7 +25213,7 @@ function _qCollapseAll() {
   _questionsRender();
 }
 async function _qStarToggle(qid, on) {
-  await fetch(API + '/api/questions/' + encodeURIComponent(qid), {
+  await fetch(API + '/api/inbox/' + encodeURIComponent(qid), {
     method: 'PATCH',
     headers: {'Content-Type': 'application/json'},
     body: JSON.stringify({starred: on === true || on === 'true'}),
@@ -25221,7 +25223,7 @@ async function _qStarToggle(qid, on) {
 async function _qReactivate(qid) {
   // Flip read=false on the anchor. Read is what pushes a thread to Closed;
   // clearing it lifts the thread back into Active.
-  await fetch(API + '/api/questions/' + encodeURIComponent(qid), {
+  await fetch(API + '/api/inbox/' + encodeURIComponent(qid), {
     method: 'PATCH',
     headers: {'Content-Type': 'application/json'},
     body: JSON.stringify({read: false}),
@@ -25235,7 +25237,7 @@ async function _qDiscardThread(key) {
   const groups = _qGroupThreads(_questionsCache);
   const rows = groups.get(key) || [];
   for (const q of rows) {
-    await fetch(API + '/api/questions/' + encodeURIComponent(q.id), {method: 'DELETE'});
+    await fetch(API + '/api/inbox/' + encodeURIComponent(q.id), {method: 'DELETE'});
   }
   _questionsLoad();
 }
@@ -25243,7 +25245,7 @@ async function _questionsAnswer(qid) {
   const ta = document.getElementById('q-answer-' + qid);
   const answer = (ta && ta.value || '').trim();
   if (!answer) { alert('Please type an answer first.'); return; }
-  const r = await fetch(API + '/api/questions/' + encodeURIComponent(qid), {
+  const r = await fetch(API + '/api/inbox/' + encodeURIComponent(qid), {
     method: 'PATCH',
     headers: {'Content-Type': 'application/json'},
     body: JSON.stringify({answer}),
@@ -25252,7 +25254,7 @@ async function _questionsAnswer(qid) {
   else { alert('Answer failed: ' + r.status); }
 }
 async function _questionsMarkRead(qid) {
-  const r = await fetch(API + '/api/questions/' + encodeURIComponent(qid), {
+  const r = await fetch(API + '/api/inbox/' + encodeURIComponent(qid), {
     method: 'PATCH',
     headers: {'Content-Type': 'application/json'},
     body: JSON.stringify({read: true}),
@@ -25261,7 +25263,7 @@ async function _questionsMarkRead(qid) {
 }
 async function _questionsDiscard(qid) {
   if (!confirm('Discard ' + qid + '?')) return;
-  await fetch(API + '/api/questions/' + encodeURIComponent(qid), {method: 'DELETE'});
+  await fetch(API + '/api/inbox/' + encodeURIComponent(qid), {method: 'DELETE'});
   _questionsLoad();
 }
 // ── Ask-an-agent modal ──
@@ -25319,7 +25321,7 @@ async function _questionsSubmitAsk() {
   if (!title) { alert('Title required.'); return; }
   const payload = {to_session: target, title, body: qbody, blocking};
   if (_questionsAskParentId) payload.parent_id = _questionsAskParentId;
-  const r = await fetch(API + '/api/questions', {
+  const r = await fetch(API + '/api/inbox', {
     method: 'POST',
     headers: {'Content-Type': 'application/json'},
     body: JSON.stringify(payload),
@@ -35698,7 +35700,15 @@ class CCHandler(BaseHTTPRequestHandler):
         # PATCH {read: true}.
         #
         # See MEMORY.md and the `asking-jeremy-questions` note for use.
-        if path == "/api/questions" or path.startswith("/api/questions/"):
+        # /api/inbox is the canonical name as of 2026-07-01. /api/questions is
+        # kept as a silent alias so any agent mid-flow (an in-flight PATCH to
+        # answer a still-open thread) doesn't break. Callers should prefer
+        # /api/inbox; the internal handler code below still keys off the
+        # /api/questions form after normalization.
+        if (path == "/api/questions" or path.startswith("/api/questions/")
+                or path == "/api/inbox" or path.startswith("/api/inbox/")):
+            if path.startswith("/api/inbox"):
+                path = "/api/questions" + path[len("/api/inbox"):]
             db = get_db()
             # ── Question sets (Phase 3) ────────────────────────────────────
             # A "set" is a batch of N questions rendered as one dashboard
