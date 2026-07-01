@@ -24779,12 +24779,15 @@ async function _questionsOpenAsk(opts) {
   try {
     const r = await fetch(API + '/api/sessions');
     const sessions = await r.json();
+    // Online = not archived AND status is 'active' or 'idle'. Archived agents
+    // (retired watchdog, remote workers, etc.) can't answer even if their tmux
+    // pane still exists. Empty-status agents are ambiguous — treat as offline.
     const optionsHtml = sessions
-      .filter(s => s.status !== 'archived' && s.name !== 'amux-helper')
+      .filter(s => !s.archived && (s.status === 'active' || s.status === 'idle') && s.name !== 'amux-helper')
       .sort((a,b) => a.name.localeCompare(b.name))
       .map(s => `<option value="${_qEsc(s.name)}">${_qEsc(s.name)}${s.desc ? ' — ' + _qEsc(s.desc.slice(0,50)) : ''}</option>`)
       .join('');
-    sel.innerHTML = optionsHtml || '<option value="">(no sessions)</option>';
+    sel.innerHTML = optionsHtml || '<option value="">(no online sessions)</option>';
   } catch(e) { sel.innerHTML = '<option value="">(failed to load)</option>'; }
   // If following up, preselect the parent's target session where possible.
   if (_questionsAskParentId) {
