@@ -3,15 +3,27 @@
 
 Fires from SCHED-N at 23:30 daily. Enumerates every CD-*.env session (skipping
 archived), and POSTs a board item to each one telling the agent to package
-its last-24h work as a billable-notes writeup, send it to Cypra-PAA, and
-post a self-follow-up to verify Cypra actually created the notes.
+its last-24h work as a *provisional* billable-notes writeup, send it to
+Cypra-PAA with evidence per item, and leave its OWN item in `doing` until
+Cypra PATCHes it back with one of four outcome codes.
 
 Deterministic; zero LLM tokens. The agents do their per-client work when they
 next wake (nudged by the 15-min watchdog if idle).
 
-The billable-writeup instructions live in a template below so all CD-* agents
-receive an identical procedure and Cypra receives a consistent format that's
-easy to parse into Zoho Projects billable notes.
+Intake protocol (documented in the template and communicated to Cypra-PAA):
+
+- The CD-* agent's writeup includes per-item evidence (commit hash / file
+  mtime / transcript excerpt) so Cypra can dedup against existing Zoho logs.
+- The CD-* agent's own nightly item stays in `doing` — NOT `done` — until
+  Cypra closes it with one of:
+    LOGGED — Zoho log ID <id>
+    STAGED — added to billing ledger backlog
+    SKIPPED — duplicate of existing log <id>
+    NEEDS JEREMY INPUT — <reason>
+  This prevents the item from being pruned before Cypra reviews it (2026-07-01
+  AH-9 feedback from Cypra-PAA).
+- The Cypra-facing item's desc includes SOURCE_ITEM: <CD-* nightly item id>
+  so Cypra knows which item to PATCH the outcome back to.
 """
 
 import json
@@ -66,15 +78,16 @@ def _cd_sessions() -> list[tuple[str, dict]]:
 
 TASK_TEMPLATE = """NIGHTLY BILLABLE-NOTES WRITEUP for {date}
 
-Auto-posted by the nightly billable-notes dispatcher. Review your work for
-this client in the last 24 hours and package it for Cypra-PAA to log as
-billable notes in Zoho Projects.
+Auto-posted by the nightly billable-notes dispatcher. Package your last-24h
+work for this client as a PROVISIONAL billable-notes writeup. Cypra-PAA will
+dedup against existing Zoho logs before anything gets billed — you just need
+to surface what you did with enough evidence for Cypra to reconcile.
 
 ## What to do
 
-1. **Figure out what you did.** Sources:
+1. **Figure out what you did in the last 24 hours.** Sources:
    - `git log --since='24 hours ago'` in your client repos under $CLIENT_ROOT
-   - The board — items assigned to you that you PATCHed to done, review, or
+   - Board items assigned to you that you PATCHed to done, review, or
      verified in the last 24h. Query:
        curl -sk $AMUX_URL/api/board | python3 -c "
        import json,sys,os,time
@@ -86,24 +99,30 @@ billable notes in Zoho Projects.
    - Any amux notes you wrote today.
    - Your own memory of what the client asked and what you delivered.
 
-2. **For each meaningful task, decide:**
-   - A one-line description in **client-facing language** (no AI / model /
-     API-internals talk — the client is going to see this).
-   - Time in hours or minutes (your best estimate — if you don't have exact
-     timings, be conservative and round up to the nearest 15 min).
-   - Whether it was billable (default yes; skip pure system/substrate
-     housekeeping).
+2. **Package each meaningful task with EVIDENCE.** For each:
+   - **Description** in client-facing language (no AI / model / API-internals
+     talk — the client will see this rendered as a Zoho Projects note).
+   - **Time** in hours (your best estimate — round UP to nearest 15 min if
+     unsure).
+   - **Evidence**: at least one of `commit=<sha>`, `mtime=<file>`,
+     `transcript=<one-line excerpt>`, or `board=<item-id>`. Evidence is
+     REQUIRED per item — Cypra cannot dedup without it.
+   - Skip pure system/substrate housekeeping.
 
-3. **Post ONE new board item assigned to `Cypra-PAA`** with the exact shape
-   below. Do NOT send this via channel or /send — the board queue keeps it
-   organized and prevents cross-agent interruption.
+3. **If you already know an existing Zoho log covers some of this work**
+   (e.g. Jeremy manually logged 4h earlier that day), note it. Add
+   `EXISTING_LOG_HINT: <log id or description>` to the desc so Cypra can
+   dedup faster. Don't guess — only include if you actually know.
+
+4. **Post ONE board item to `Cypra-PAA`** with this exact shape. Do NOT
+   channel or /send — the board queue keeps intake organized.
 
    ```
-   title:  Billable notes: {client} — {date}
+   title:   Nightly billable notes: {client} — {date}
    session: Cypra-PAA
-   status: todo
-   org:    (leave unset — Cypra-PAA has its own routing)
-   desc:   [use the CLIENT/DATE/TASKS/TOTAL format below]
+   status:  todo
+   org:     (leave unset — Cypra-PAA has its own routing)
+   desc:    [use the CLIENT/DATE/SOURCE/PROJECT/TASKS/TOTAL format below]
    ```
 
    Desc format (copy-paste and fill in):
@@ -112,61 +131,70 @@ billable notes in Zoho Projects.
    CLIENT: {client}
    DATE: {date}
    SOURCE_SESSION: {session}
-   PROJECT_HINT: (project name in Zoho Projects, or best guess)
+   SOURCE_ITEM: <THIS item's board id — the nightly writeup task assigned to you>
+   PROJECT_HINT: (Zoho Projects project name, or best guess)
+   EXISTING_LOG_HINT: (only if you actually know a manual log already exists)
 
    TASKS:
-   - [1.5h] <one-line client-facing description>
-   - [0.5h] <one-line client-facing description>
-   - [2h]   <one-line client-facing description>
+   - [1.5h] <client-facing description>  (evidence: commit=abc1234)
+   - [0.5h] <client-facing description>  (evidence: mtime=path/to/file, transcript="quoted line")
+   - [2h]   <client-facing description>  (evidence: board=AH-42)
 
-   TOTAL: <N>h billable
+   TOTAL: <N>h provisional (Cypra will dedup against existing Zoho logs)
 
-   Please create Zoho Projects billable notes for these tasks. Reply on this
-   board item by PATCHing with status=done and desc containing either:
-     CREATED: <comma-separated Zoho Projects note IDs>
-   or
-     BLOCKED: <one-line reason and what you need>
+   Please PATCH the SOURCE_ITEM (my nightly writeup task, id above) with one
+   of these outcome codes so I know how it was resolved:
+     - `LOGGED — Zoho log ID <id>`                — hours logged in Zoho Projects
+     - `STAGED — added to billing ledger backlog` — no Zoho project yet
+     - `SKIPPED — duplicate of existing log <id>` — overlap detected
+     - `NEEDS JEREMY INPUT — <reason>`            — needs human decision
    ```
 
-4. **Post a SECOND board item assigned to yourself** as a follow-up to
-   verify Cypra actually processed your notes. Shape:
-
+5. **PATCH THIS ITEM to status=`doing`** (NOT done) with a short note:
    ```
-   title:  Verify Cypra billable-note creation for {date}
-   session: {session}
-   status: todo
-   desc:   Check whether Cypra-PAA PATCHed board item <the-cypra-item-id-you-got-back-in-step-3>
-           to done with CREATED: <note ids>. If not done or BLOCKED: within 24h,
-           surface this pending task to Jeremy on next engagement — do NOT let it
-           silently sit.
+   Posted to Cypra as <cypra-item-id>. Awaiting confirmation.
    ```
 
-5. **PATCH THIS ITEM to status=done** with a short summary in desc:
-   ```
-   Posted billable notes to Cypra as <cypra-item-id>. Follow-up on <followup-item-id>.
-   ```
+   Leave it in `doing` — Cypra will PATCH it to done with one of the four
+   outcome codes above. This is what closes the loop. Do NOT self-close.
+
+6. **On your next engagement, check this item's status:**
+   - Still `doing`: Cypra hasn't processed yet. If >24h old, surface to
+     Jeremy as pending ("Nightly writeup for {date} still awaiting Cypra
+     confirmation").
+   - `done` with `LOGGED — Zoho log ID X`: nothing further; billed.
+   - `done` with `STAGED — ...`: nothing further; sitting in ledger backlog.
+   - `done` with `SKIPPED — duplicate of existing log <id>`: nothing
+     further; overlap correctly detected.
+   - `done` with `NEEDS JEREMY INPUT — <reason>`: read the reason and
+     surface to Jeremy on next engagement.
 
 ## If you did no billable work for {client} in the last 24 hours
 
-Still PATCH this item to done with desc: `No billable work today.` No need
-to post anything to Cypra or a self-follow-up.
+This is the ONE case you self-close: PATCH this item to `done` with desc:
+`No billable work today.` No need to post anything to Cypra.
 
 ## Rules
 
-- Board items only. Do NOT channel or /send Cypra — that interrupts. Board
-  is queue-based and lets Cypra process each writeup in order.
-- Client-facing language. Skip AI / model / API-internals talk. Cypra is
-  going to render these into Zoho Projects notes the client can read.
-- Round conservatively on time. If you don't remember exactly, round UP to
-  the nearest 15 minutes per task.
-- One writeup per client per day. If you have work across multiple projects
-  for the same client, group into one billable-notes item, one project hint
-  per line if needed.
+- **Provisional hours.** Your writeup is best-estimate + evidence; Cypra
+  reconciles against existing Zoho logs. If in doubt, list the work — better
+  Cypra dedups a duplicate than misses a real hour.
+- **Evidence per item is required.** Without it Cypra cannot dedup and will
+  bounce your submission back for detail. Commit hash / file mtime /
+  transcript excerpt / board id — one of these per task, minimum.
+- **Board items only.** Do NOT channel or /send Cypra — board keeps intake
+  queued and prevents cross-agent interruption.
+- **Client-facing language.** Skip AI/model/API-internals talk. Cypra
+  renders these into Zoho Projects notes the client can read.
+- **Round conservatively.** If you don't remember exactly, round UP to
+  nearest 15 min per task.
+- **Don't self-close.** Leaving your item in `doing` is what keeps it
+  visible to Cypra — self-closing risks the item being pruned before Cypra
+  reviews it.
 """
 
 
 def main() -> int:
-    yesterday = (date.today() - timedelta(days=1)).isoformat()  # yesterday's date
     today = date.today().isoformat()
     sessions = _cd_sessions()
     if not sessions:
@@ -175,8 +203,6 @@ def main() -> int:
 
     posted = []
     errors = []
-    # Use today's date so the writeup is "for today's work" from the CD-*
-    # perspective; the item lands at 23:30 which is close enough.
     for name, cfg in sessions:
         client = cfg.get("CC_DESC", "").split(" — ")[0].strip() or name.removeprefix("CD-")
         body = {
