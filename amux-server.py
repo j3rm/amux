@@ -3953,12 +3953,16 @@ def _init_db():
         # Questions (agent↔human) — Phase 1: bidirectional, partial answers, read flag.
         "ALTER TABLE questions ADD COLUMN to_session TEXT NOT NULL DEFAULT ''",
         "ALTER TABLE questions ADD COLUMN read INTEGER NOT NULL DEFAULT 0",
+        # Phase 2: threading. parent_id references the Q this follow-up
+        # belongs to; empty for root questions.
+        "ALTER TABLE questions ADD COLUMN parent_id TEXT NOT NULL DEFAULT ''",
         # These indexes are here (not in CREATE TABLE) because to_session is
         # ALTER-added on pre-existing DBs; the CREATE TABLE branch skips
         # entirely when the table already exists, leaving the columns absent
         # until this migration runs.
-        "CREATE INDEX IF NOT EXISTS idx_questions_from ON questions(from_session)",
-        "CREATE INDEX IF NOT EXISTS idx_questions_to   ON questions(to_session)",
+        "CREATE INDEX IF NOT EXISTS idx_questions_from   ON questions(from_session)",
+        "CREATE INDEX IF NOT EXISTS idx_questions_to     ON questions(to_session)",
+        "CREATE INDEX IF NOT EXISTS idx_questions_parent ON questions(parent_id)",
     ]:
         try:
             db.execute(migration)
@@ -13930,7 +13934,7 @@ setTimeout(function(){var f=document.getElementById('js-fallback');if(f&&f.style
 <!-- Ask-agent modal -->
 <div id="q-ask-modal" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,0.55);z-index:1000;justify-content:center;align-items:center;padding:20px;" onclick="if(event.target===this)_questionsCloseAsk()">
   <div style="background:var(--card-bg,#111);border:1px solid var(--border);border-radius:8px;padding:16px 18px;max-width:640px;width:100%;">
-    <div style="font-weight:600;font-size:1.05rem;margin-bottom:10px;">Ask an agent</div>
+    <div id="q-ask-header" style="font-weight:600;font-size:1.05rem;margin-bottom:10px;">Ask an agent</div>
     <label style="display:block;font-size:0.75rem;color:var(--muted);margin-bottom:2px;">Target session</label>
     <select id="q-ask-target" style="width:100%;padding:6px 8px;margin-bottom:10px;border:1px solid var(--border);border-radius:5px;background:var(--card-bg,#0a0a0a);color:var(--fg);"></select>
     <label style="display:block;font-size:0.75rem;color:var(--muted);margin-bottom:2px;">Title (one line)</label>
@@ -24578,9 +24582,9 @@ let _questionsCache = [];
 let _questionsLastSig = '';
 function _questionsSig(list) {
   // Signature changes only when something visible would change — status,
-  // answer content, read flag, or a new question. In-progress typing must
-  // NOT trigger a re-render (that wipes the textarea).
-  return list.map(q => q.id + ':' + q.status + ':' + q.read + ':' + q.updated + ':' + (q.answered_at || 0) + ':' + (q.answer || '').length).join('|');
+  // answer content, read flag, threading, or a new question. In-progress
+  // typing must NOT trigger a re-render (that wipes the textarea).
+  return list.map(q => q.id + ':' + q.status + ':' + q.read + ':' + q.updated + ':' + (q.answered_at || 0) + ':' + (q.answer || '').length + ':' + (q.parent_id || '')).join('|');
 }
 // "active" = still demanding attention. Includes:
 //   - open (no answer yet)
@@ -24637,27 +24641,54 @@ function _questionsRender() {
     if (ta.value) drafts[ta.id] = ta.value;
   });
   const focusedId = (document.activeElement && document.activeElement.id) || '';
-  const active = _questionsCache.filter(_qIsActive);
-  const recent = _questionsCache.filter(q => !_qIsActive(q)).slice(0, 20);
+  // Build a tree by parent_id. A "thread" is (root + all descendants that
+  // pass through it). We render one card group per thread when the root is
+  // active OR any descendant is active.
+  const byParent = new Map();
+  for (const q of _questionsCache) {
+    const key = q.parent_id || '';
+    if (!byParent.has(key)) byParent.set(key, []);
+    byParent.get(key).push(q);
+  }
+  const byId = new Map(_questionsCache.map(q => [q.id, q]));
+  function threadIsActive(root) {
+    // active if any node in the subtree is active
+    const stack = [root];
+    while (stack.length) {
+      const n = stack.pop();
+      if (_qIsActive(n)) return true;
+      for (const c of (byParent.get(n.id) || [])) stack.push(c);
+    }
+    return false;
+  }
+  const roots = (byParent.get('') || []).slice().sort((a, b) => b.created - a.created);
+  const activeThreads = roots.filter(threadIsActive);
+  const recentThreads = roots.filter(r => !threadIsActive(r)).slice(0, 20);
   let html = '';
-  if (active.length === 0) {
+  if (activeThreads.length === 0) {
     html += '<div style="padding:24px;text-align:center;color:var(--muted);font-size:0.9rem;">No active questions. Ask an agent above, or wait for agents to post.</div>';
   }
-  for (const q of active) {
+  // Recurse renders a single Q + its children indented.
+  function renderQ(q, depth) {
     const dir = _qDir(q);
     const st = _qStateBadge(q);
     const isBlocking = q.blocking === 1;
     const forJeremy = dir.forJeremy;
     const canAnswer = forJeremy && (q.status === 'open' || q.status === 'working');
     const canMarkRead = q.status === 'answered' && !q.read;
-    // Card border color reflects state:
+    // Follow-up allowed on answered questions (Jeremy can follow up to
+    // agent-answered Qs; agents can follow up to Jeremy-answered Qs).
+    const canFollowUp = q.status === 'answered';
     const borderColor = q.status === 'working' ? '#c60'
       : (q.status === 'answered' && !q.read) ? '#4a4'
       : (isBlocking ? '#e11' : 'var(--border)');
-    html += `<div class="q-card" style="border:1px solid ${borderColor};border-radius:8px;margin:8px 0;padding:12px 14px;background:var(--card-bg,#111);">
+    const indent = depth > 0 ? `margin-left:${depth * 16}px;border-left:3px solid var(--border);` : '';
+    const followUpBadge = q.parent_id ? `<span style="background:#456;color:#fff;padding:1px 6px;border-radius:3px;font-size:0.65rem;">follow-up of ${_qEsc(q.parent_id)}</span>` : '';
+    html += `<div class="q-card" style="border:1px solid ${borderColor};border-radius:8px;margin:8px 0;padding:12px 14px;background:var(--card-bg,#111);${indent}">
       <div style="display:flex;align-items:center;gap:8px;font-size:0.75rem;color:var(--muted);margin-bottom:6px;flex-wrap:wrap;">
         <span style="background:${st.color};color:#fff;padding:2px 8px;border-radius:4px;font-weight:600;text-transform:uppercase;letter-spacing:0.02em;">${st.text}</span>
         ${isBlocking ? '<span style="background:#e11;color:#fff;padding:2px 8px;border-radius:4px;font-weight:600;">BLOCKING</span>' : ''}
+        ${followUpBadge}
         <span style="font-weight:600;color:var(--fg);">${_qEsc(q.id)}</span>
         <span>${_qEsc(dir.label)}</span>
         <span>&middot;</span>
@@ -24673,16 +24704,22 @@ function _questionsRender() {
       <div style="margin-top:8px;display:flex;gap:8px;flex-wrap:wrap;">
         ${canAnswer ? `<button class="btn" onclick="_questionsAnswer('${_qEsc(q.id)}')">Send answer</button>` : ''}
         ${canMarkRead ? `<button class="btn" onclick="_questionsMarkRead('${_qEsc(q.id)}')">Mark Read</button>` : ''}
+        ${canFollowUp ? `<button class="btn" onclick="_questionsFollowUp('${_qEsc(q.id)}')">Follow up</button>` : ''}
         <button class="btn" style="opacity:0.6;" onclick="_questionsDiscard('${_qEsc(q.id)}')">Discard</button>
       </div>
     </div>`;
+    // Render children (follow-ups) indented under this Q.
+    const kids = (byParent.get(q.id) || []).slice().sort((a, b) => a.created - b.created);
+    for (const c of kids) renderQ(c, depth + 1);
   }
-  if (recent.length > 0) {
+  for (const rt of activeThreads) renderQ(rt, 0);
+  if (recentThreads.length > 0) {
     html += '<div style="margin-top:24px;color:var(--muted);font-size:0.8rem;text-transform:uppercase;letter-spacing:0.05em;">Recent</div>';
-    for (const q of recent) {
+    function renderRecent(q, depth) {
       const st = _qStateBadge(q);
       const dir = _qDir(q);
-      html += `<div style="border:1px solid var(--border);border-radius:6px;margin:6px 0;padding:8px 12px;opacity:0.75;font-size:0.85rem;">
+      const indent = depth > 0 ? `margin-left:${depth * 16}px;border-left:3px solid var(--border);padding-left:12px;` : '';
+      html += `<div style="border:1px solid var(--border);border-radius:6px;margin:6px 0;padding:8px 12px;opacity:0.75;font-size:0.85rem;${indent}">
         <div style="display:flex;align-items:center;gap:8px;">
           <span style="background:${st.color};color:#fff;padding:1px 6px;border-radius:3px;font-size:0.65rem;">${st.text}</span>
           <span style="font-weight:600;">${_qEsc(q.id)}</span>
@@ -24692,7 +24729,10 @@ function _questionsRender() {
         <div style="margin-top:4px;">${_qEsc(q.title)}</div>
         ${q.answer ? `<div style="margin-top:4px;padding:6px 8px;background:var(--card-bg,#0a0a0a);border-left:3px solid ${st.color};white-space:pre-wrap;">${_qEsc(q.answer)}</div>` : ''}
       </div>`;
+      const kids = (byParent.get(q.id) || []).slice().sort((a, b) => a.created - b.created);
+      for (const c of kids) renderRecent(c, depth + 1);
     }
+    for (const rt of recentThreads) renderRecent(rt, 0);
   }
   root.innerHTML = html;
   for (const [id, val] of Object.entries(drafts)) {
@@ -24730,27 +24770,47 @@ async function _questionsDiscard(qid) {
   _questionsLoad();
 }
 // ── Ask-an-agent modal ──
-async function _questionsOpenAsk() {
+let _questionsAskParentId = '';   // set to Q-N when opened via Follow up
+async function _questionsOpenAsk(opts) {
+  opts = opts || {};
+  _questionsAskParentId = opts.parentId || '';
   const sel = document.getElementById('q-ask-target');
   sel.innerHTML = '<option value="">(loading...)</option>';
   try {
     const r = await fetch(API + '/api/sessions');
     const sessions = await r.json();
-    const opts = sessions
+    const optionsHtml = sessions
       .filter(s => s.status !== 'archived' && s.name !== 'amux-helper')
       .sort((a,b) => a.name.localeCompare(b.name))
       .map(s => `<option value="${_qEsc(s.name)}">${_qEsc(s.name)}${s.desc ? ' — ' + _qEsc(s.desc.slice(0,50)) : ''}</option>`)
       .join('');
-    sel.innerHTML = opts || '<option value="">(no sessions)</option>';
+    sel.innerHTML = optionsHtml || '<option value="">(no sessions)</option>';
   } catch(e) { sel.innerHTML = '<option value="">(failed to load)</option>'; }
+  // If following up, preselect the parent's target session where possible.
+  if (_questionsAskParentId) {
+    const parent = _questionsCache.find(q => q.id === _questionsAskParentId);
+    if (parent) {
+      const preselect = parent.to_session || parent.from_session;
+      if (preselect) {
+        for (const opt of sel.options) { if (opt.value === preselect) { sel.value = preselect; break; } }
+      }
+    }
+  }
   document.getElementById('q-ask-title').value = '';
   document.getElementById('q-ask-body').value = '';
   document.getElementById('q-ask-blocking').checked = false;
+  // Update modal header + optional parent chip
+  const hdr = document.getElementById('q-ask-header');
+  if (hdr) hdr.textContent = _questionsAskParentId ? `Follow up on ${_questionsAskParentId}` : 'Ask an agent';
   document.getElementById('q-ask-modal').style.display = 'flex';
   setTimeout(() => document.getElementById('q-ask-title').focus(), 50);
 }
+function _questionsFollowUp(parentId) {
+  _questionsOpenAsk({parentId});
+}
 function _questionsCloseAsk() {
   document.getElementById('q-ask-modal').style.display = 'none';
+  _questionsAskParentId = '';
 }
 async function _questionsSubmitAsk() {
   const target = document.getElementById('q-ask-target').value;
@@ -24759,10 +24819,12 @@ async function _questionsSubmitAsk() {
   const blocking = document.getElementById('q-ask-blocking').checked;
   if (!target) { alert('Pick a target session.'); return; }
   if (!title) { alert('Title required.'); return; }
+  const payload = {to_session: target, title, body: qbody, blocking};
+  if (_questionsAskParentId) payload.parent_id = _questionsAskParentId;
   const r = await fetch(API + '/api/questions', {
     method: 'POST',
     headers: {'Content-Type': 'application/json'},
-    body: JSON.stringify({to_session: target, title, body: qbody, blocking}),
+    body: JSON.stringify(payload),
   });
   if (r.ok) { _questionsCloseAsk(); _questionsLoad(); }
   else {
@@ -35159,19 +35221,41 @@ class CCHandler(BaseHTTPRequestHandler):
                                 or self.headers.get("X-Amux-Session")
                                 or "").strip()
                 to_session = (body.get("to_session") or "").strip()
+                parent_id = (body.get("parent_id") or "").strip()
                 # Exactly one of from/to must be an actual session; the other
                 # is '' (meaning "Jeremy"). If both empty, it's ambiguous.
                 if not from_session and not to_session:
                     return self._json({"error": "must specify either from_session (agent asking) or to_session (human asking)"}, 400)
+                # Phase 2 threading: if parent_id given, validate the ancestor
+                # exists and inherit its participants (routing endpoints) if the
+                # caller omitted them.
+                thread = []
+                if parent_id:
+                    p = db.execute("SELECT * FROM questions WHERE id = ?", (parent_id,)).fetchone()
+                    if not p:
+                        return self._json({"error": f"parent_id {parent_id} not found"}, 404)
+                    # Walk the chain root→...→parent so the agent sees the full
+                    # conversation order. Guard against pathological loops.
+                    seen = set()
+                    cur = p
+                    chain = []
+                    while cur and cur["id"] not in seen:
+                        seen.add(cur["id"])
+                        chain.append(cur)
+                        pid = cur["parent_id"] if "parent_id" in cur.keys() else ""
+                        if not pid:
+                            break
+                        cur = db.execute("SELECT * FROM questions WHERE id = ?", (pid,)).fetchone()
+                    thread = list(reversed(chain))
                 qbody = (body.get("body") or "").strip()
                 blocking = 1 if body.get("blocking") else 0
                 qid = _next_issue_id("Q")
                 now = int(time.time())
                 db.execute(
                     "INSERT INTO questions (id, from_session, to_session, title, body, "
-                    "  blocking, status, created, updated) "
-                    "VALUES (?, ?, ?, ?, ?, ?, 'open', ?, ?)",
-                    (qid, from_session, to_session, title, qbody, blocking, now, now),
+                    "  blocking, status, parent_id, created, updated) "
+                    "VALUES (?, ?, ?, ?, ?, ?, 'open', ?, ?, ?)",
+                    (qid, from_session, to_session, title, qbody, blocking, parent_id, now, now),
                 )
                 db.commit()
                 # Routing on POST:
@@ -35192,8 +35276,27 @@ class CCHandler(BaseHTTPRequestHandler):
                 else:
                     # Jeremy → agent
                     q_title = f"Question {qid} from Jeremy: {title[:80]}"
+                    # If this is a follow-up, include the ancestor Q+A chain so
+                    # the agent has full context (Phase 2 threading).
+                    thread_block = ""
+                    if thread:
+                        lines = ["**Thread history** (oldest first):", ""]
+                        for i, t in enumerate(thread, 1):
+                            asker = t["from_session"] or "Jeremy"
+                            answerer = t["to_session"] or "Jeremy"
+                            lines.append(f"{i}. **{t['id']}** ({asker} → {answerer}): _{t['title']}_")
+                            if t["body"]:
+                                lines.append(f"   {t['body']}")
+                            if t["answer"]:
+                                stat = t["status"]
+                                lines.append(f"   → **{stat} answer:** {t['answer']}")
+                            lines.append("")
+                        lines.append("---")
+                        lines.append("")
+                        thread_block = "\n".join(lines)
                     q_desc = (
                         f"Jeremy is asking you a question via the Questions tab.\n\n"
+                        f"{thread_block}"
                         f"**{title}**\n\n{qbody or '(no body)'}\n\n"
                         f"---\n"
                         f"When you have an answer (or partial), reply:\n\n"
@@ -35203,6 +35306,7 @@ class CCHandler(BaseHTTPRequestHandler):
                         f"Use `partial: true` if you're still working on it (marks\n"
                         f"the question as 'working'; you can PATCH again with the\n"
                         f"final answer). Omit `partial` or set false when done."
+                        + (f"\n\nThis is a follow-up to {parent_id} — thread history above." if parent_id else "")
                     )
                     if blocking:
                         try:
