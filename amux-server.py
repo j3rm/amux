@@ -2382,6 +2382,21 @@ def _at_resume_picker(clean_output: str) -> bool:
                 "⌕" in clean_output)  # ⌕ search icon in the picker
 
 
+def _at_feedback_prompt(clean_output: str) -> bool:
+    """Return True if Claude Code's end-of-session feedback modal is showing.
+
+    Blocks the terminal on '1: Bad  2: Fine  3: Good  0: Dismiss' — auto_continue
+    can't type into it because it's a UI modal, not a text prompt. Symptom seen
+    on RTG-ActCloudPortal (2026-07-01, ~45min silent stall). We auto-dismiss
+    with '0' from the session-status sweep so headless workers don't get stuck.
+    """
+    if not clean_output:
+        return False
+    tail = "\n".join(clean_output.splitlines()[-15:])
+    return ("How is Claude doing this session?" in tail
+            and "0: Dismiss" in tail)
+
+
 def _at_shell_prompt(clean_output: str) -> bool:
     """Return True if the terminal looks like a bare shell prompt (no Claude UI)."""
     if _claude_ui_visible(clean_output):
@@ -2535,6 +2550,26 @@ def _snapshot_all_sessions_inner():
                             f"Auto-compacted '{name}' — corrupted image in context")
             elif not _img_corrupt_error:
                 actions.pop("img_corrupt_compacted", None)
+
+            # ── 1d. Reactive: Claude Code end-of-session feedback modal ─────
+            # "How is Claude doing this session? 1: Bad 2: Fine 3: Good 0: Dismiss"
+            # blocks the terminal for headless worker sessions — auto_continue
+            # can't type into a UI modal. Any auto_continue session that hits
+            # this modal is stuck until a human presses 0.
+            # Fix: for CC_AUTO_CONTINUE=1 sessions, send "0" to dismiss.
+            # Rate-limited to once per 60s to prevent runaway keystrokes if
+            # the detector false-positives.
+            if (_at_feedback_prompt(clean)
+                    and now - actions.get("last_feedback_dismiss", 0) > 60):
+                cfg_fb = parse_env_file(f)
+                if (cfg_fb.get("CC_AUTO_CONTINUE") in ("1", "true", "yes")
+                        and cfg_fb.get("CC_ARCHIVED") != "1"):
+                    actions["last_feedback_dismiss"] = now
+                    try:
+                        send_text(name, "0")
+                        slog(f"[feedback-dismiss] {name}: auto-dismissed feedback modal")
+                    except Exception:
+                        pass
 
             # ── 2. Reactive: thinking-block corruption → restart + replay ───
             if ("redacted_thinking" in clean and
@@ -4545,6 +4580,32 @@ def _notify_session_of_task(session_name: str, item_id: str, title: str):
     threading.Thread(target=_run, daemon=True).start()
 
 
+def _notify_session_of_retake(session_name: str, item_id: str, title: str,
+                              verdict: str, source_id: str, source: str):
+    """Push a re-take notice into the target session's tmux pane after C3
+    (adjudication) or C4 (audit-pair FAIL/FAIL) flips a target back to
+    'doing'. Distinct from _notify_session_of_task because the target row's
+    notified=1 flag from the original mint would suppress the fresh-mint
+    helper — re-takes reuse the same board id. Best-effort background thread.
+
+    Motivation: RTG-Research 2026-07-01 — a re-take on RA-668 sat silent for
+    45min because the worker relied on polling to see the review->doing flip.
+    """
+    def _run():
+        try:
+            text = (
+                f"Re-take: {item_id} — {(title or '')[:120]} flipped back to "
+                f"doing ({source} {source_id}: {verdict}). Check `amux board "
+                f"show {item_id}` for the adjudication note when you're ready."
+            )
+            send_text(session_name, text)
+            slog(f"[retake-nudge] {session_name}: notified re-take of {item_id} "
+                 f"({source}={source_id}, verdict={verdict})")
+        except Exception:
+            pass
+    threading.Thread(target=_run, daemon=True).start()
+
+
 _DEFAULT_STATUSES = [
     {"id": "backlog",   "label": "Backlog"},
     {"id": "todo",      "label": "To Do"},
@@ -6491,7 +6552,7 @@ def _auto_apply_adjudication(rr_item: dict, db) -> dict | None:
     if not target_id:
         return None
     target = db.execute(
-        "SELECT id, status, desc, session, org FROM issues WHERE id = ? AND deleted IS NULL",
+        "SELECT id, title, status, desc, session, org FROM issues WHERE id = ? AND deleted IS NULL",
         (target_id,),
     ).fetchone()
     if not target:
@@ -6512,6 +6573,14 @@ def _auto_apply_adjudication(rr_item: dict, db) -> dict | None:
     )
     db.commit()
     _board_changed()
+    # Re-take nudge: FAIL adjudication flipping the target back to 'doing'
+    # is a fresh-work event for the assigned worker — mirror the fresh-mint
+    # notification so it doesn't have to poll to notice. Fresh mint's
+    # notified=1 flag would suppress _notify_session_of_task, so use the
+    # dedicated retake helper.
+    if new_status == "doing" and target["session"]:
+        _notify_session_of_retake(target["session"], target_id,
+                                  target["title"] or "", verdict, rid, "C3")
     return {"action": "auto-applied", "rr": rid, "target": target_id,
             "verdict": verdict, "new_status": new_status}
 
@@ -6544,7 +6613,7 @@ def _auto_verify_from_audit_pair(audit_item: dict, db) -> dict | None:
     if not target_id:
         return None
     target = db.execute(
-        "SELECT id, status, desc, session, org FROM issues WHERE id = ? AND deleted IS NULL",
+        "SELECT id, title, status, desc, session, org FROM issues WHERE id = ? AND deleted IS NULL",
         (target_id,),
     ).fetchone()
     if not target or target["status"] != "review":
@@ -6604,6 +6673,15 @@ def _auto_verify_from_audit_pair(audit_item: dict, db) -> dict | None:
     )
     db.commit()
     _board_changed()
+    # Re-take nudge: FAIL/FAIL audit pair flipping the target back to 'doing'
+    # is a fresh-work event for the assigned worker. Notify the same way C3
+    # does so the worker doesn't have to poll.
+    if new_status == "doing" and target["session"]:
+        pair_verdict = f"{my_verdict}/{their_verdict}"
+        pair_source = f"{aid}+{other['id']}"
+        _notify_session_of_retake(target["session"], target_id,
+                                  target["title"] or "", pair_verdict,
+                                  pair_source, "C4")
     return {"action": "auto-applied", "audits": [aid, other["id"]],
             "verdicts": [my_verdict, their_verdict],
             "target": target_id, "new_status": new_status}
