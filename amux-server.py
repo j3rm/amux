@@ -7820,6 +7820,24 @@ def _shell_quote_flags(s: str) -> str:
         return shlex.quote(s)
 
 
+# CD-* client agents (Zoho client-data sessions) must not use communication
+# MCP servers meant for Cypra/Ember/marketing agents. Injected as
+# --disallowedTools at session launch — see start_session(). If more
+# communication MCP servers get added later, extend this list.
+_CD_MCP_DENY_PATTERNS = (
+    "mcp__gmail__*",
+    "mcp__claude_ai_Gmail__*",
+    "mcp__claude_ai_Google_Calendar__*",
+    "mcp__claude_ai_Google_Drive__*",
+    "mcp__gdocs__*",
+    "mcp__apple-reminders__*",
+    "mcp__smartermail-calendar-j3software__*",
+    "mcp__smartermail-calendar-nwddi__*",
+    "mcp__smartermail-calendar-rtgroup__*",
+)
+_CD_MCP_DENY_ARG = " ".join(shlex.quote(p) for p in _CD_MCP_DENY_PATTERNS)
+
+
 def _get_default_model() -> str:
     """Return the default model from defaults.env, or 'sonnet' as fallback.
 
@@ -8131,6 +8149,11 @@ def start_session(name: str, extra_flags: str = "", _skip_conv_id: bool = False)
                 mcp_chrome = mcp_dir / "mcp-chrome.json"
                 if mcp_chrome.exists():
                     cmd += f" --mcp-config {shlex.quote(str(mcp_chrome))}"
+            # CD-* client agents are Zoho-only. Deny communication MCP tools
+            # (Gmail, Google Calendar/Drive, Apple Reminders/Calendar,
+            # SmarterMail) meant for Cypra/Ember/marketing agents.
+            if name.startswith("CD-"):
+                cmd += " --disallowedTools " + _CD_MCP_DENY_ARG
             # Default to sonnet if no --model specified anywhere
             if "--model" not in cmd:
                 cmd += " --model sonnet"
@@ -8376,6 +8399,8 @@ def start_session(name: str, extra_flags: str = "", _skip_conv_id: bool = False)
                         mcp_chrome = mcp_dir / "mcp-chrome.json"
                         if mcp_chrome.exists():
                             cmd_fresh += f" --mcp-config {shlex.quote(str(mcp_chrome))}"
+                    if name.startswith("CD-"):
+                        cmd_fresh += " --disallowedTools " + _CD_MCP_DENY_ARG
                     if "--model" not in cmd_fresh:
                         cmd_fresh += " --model sonnet"
                     subprocess.run(["tmux", "send-keys", "-t", tmux_target(name), "-l", cmd_fresh],
