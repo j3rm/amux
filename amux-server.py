@@ -24918,9 +24918,11 @@ function _qThreadAnchorId(rows) {
 function _qThreadTintColors(state) {
   // Row background + border tint per state. Keep contrast subtle so long
   // lists don't strobe — only 'needs-you' should feel loud.
-  if (state === 'needs-you')  return {bg: 'rgba(214,138,64,0.14)', border: '#c88240', pill: '#c67326', label: 'needs you'};
-  if (state === 'with-agent') return {bg: 'transparent',           border: '#3a4550', pill: '#567',    label: 'with agent'};
-  return                             {bg: 'transparent',           border: 'var(--border)', pill: '#666', label: 'closed'};
+  if (state === 'needs-you')  return {bg: 'rgba(214,138,64,0.14)', border: '#c88240',       pill: '#c67326', label: 'needs you'};
+  // Passive: no pill (see _qRenderRow) + plain border → the row visually
+  // recedes so a full inbox of with-agent rows doesn't look like a to-do list.
+  if (state === 'with-agent') return {bg: 'transparent',           border: 'var(--border)', pill: '',        label: ''};
+  return                             {bg: 'transparent',           border: 'var(--border)', pill: '#666',    label: 'closed'};
 }
 async function _questionsLoad() {
   try {
@@ -25049,7 +25051,7 @@ function _qRenderRow(t, muted) {
     <div style="display:flex;align-items:center;gap:10px;padding:10px 12px;cursor:pointer;" onclick="_qToggle('${kEsc}')">
       <span style="font-size:1.1rem;color:${starColor};cursor:pointer;user-select:none;" title="${t.starred ? 'Unstar' : 'Star (keep at top)'}" onclick="event.stopPropagation();_qStarToggle('${anchorId}', ${t.starred ? 'false' : 'true'})">${star}</span>
       <span style="width:12px;color:var(--muted);font-size:0.9rem;">${chev}</span>
-      <span style="background:${tint.pill};color:#fff;padding:2px 8px;border-radius:4px;font-size:0.65rem;font-weight:600;text-transform:uppercase;letter-spacing:0.03em;white-space:nowrap;">${tint.label}</span>
+      ${t.state === 'with-agent' ? '' : `<span style="background:${tint.pill};color:#fff;padding:2px 8px;border-radius:4px;font-size:0.65rem;font-weight:600;text-transform:uppercase;letter-spacing:0.03em;white-space:nowrap;">${tint.label}</span>`}
       ${anyBlocking ? '<span style="background:#e11;color:#fff;padding:2px 8px;border-radius:4px;font-size:0.65rem;font-weight:600;">BLOCKING</span>' : ''}
       <span style="font-weight:600;font-size:0.85rem;color:var(--fg);white-space:nowrap;">${_qEsc(anchor.id)}${anchor.set_id ? ' · set ' + _qEsc(anchor.set_id) : ''}</span>
       <span style="flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:0.9rem;">${_qEsc(_qThreadTitle(t.rows))}</span>
