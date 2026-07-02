@@ -24789,6 +24789,35 @@ let _qExpanded = new Set(JSON.parse(localStorage.getItem('amux.qExpanded') || '[
 function _qExpandedSave() {
   try { localStorage.setItem('amux.qExpanded', JSON.stringify([..._qExpanded])); } catch(e) {}
 }
+// Per-message expand state. When a message is answered AND read, it collapses
+// to a one-line preview inside the chain so long threads stay skimmable — the
+// user can still click any collapsed message to see the full body + answer.
+let _qMsgExpanded = new Set(JSON.parse(localStorage.getItem('amux.qMsgExpanded') || '[]'));
+function _qMsgExpandedSave() {
+  try { localStorage.setItem('amux.qMsgExpanded', JSON.stringify([..._qMsgExpanded])); } catch(e) {}
+}
+function _qMsgToggle(qid) {
+  // Handles the two-default case: an answered+read message defaults to
+  // collapsed, everything else defaults to expanded. We store overrides:
+  //   `qid`     → force expanded  (used when overriding a collapsed default)
+  //   `!qid`    → force collapsed (used when overriding an expanded default)
+  // Toggle clears any prior override then records the new one only if it
+  // differs from the default.
+  const q = _questionsCache.find(x => x.id === qid);
+  if (!q) return;
+  const collapsedByDefault = (q.status === 'answered' && q.read === 1);
+  const currentlyExpanded = _qMsgExpanded.has(qid) ? true
+                          : _qMsgExpanded.has('!' + qid) ? false
+                          : !collapsedByDefault;
+  _qMsgExpanded.delete(qid);
+  _qMsgExpanded.delete('!' + qid);
+  const nextExpanded = !currentlyExpanded;
+  if (nextExpanded !== !collapsedByDefault) {
+    _qMsgExpanded.add(nextExpanded ? qid : '!' + qid);
+  }
+  _qMsgExpandedSave();
+  _questionsRender();
+}
 function _questionsSig(list) {
   // Signature changes only when something visible would change — status,
   // answer content, read flag, threading, star, or a new question. In-progress
@@ -24837,21 +24866,28 @@ function _qGroupThreads(list) {
 function _qThreadUpdated(rows) {
   return rows.reduce((mx, r) => Math.max(mx, r.updated || 0, r.answered_at || 0), 0);
 }
-// Thread state used for the row's tint + status pill.
-//   waiting-you  = last unanswered message is agent → Jeremy, or a set is pending Jeremy's answers (green)
-//   on-ice       = latest state is that Jeremy responded and the agent hasn't followed up yet (blue)
-//   closed       = every node is answered+read or discarded (grey)
+// Thread state, driven by the NEWEST active row in the chain — that's what
+// controls whether the thread demands attention right now.
+//   needs-you   = the newest active row is answered-unread (someone replied,
+//                 you haven't ack'd) OR agent asked and you haven't answered.
+//                 Orange tint — this is where the action lives.
+//   with-agent  = newest active row is Jeremy → agent still open/working.
+//                 Muted tint — the agent has it; nothing for you to do.
+//   closed      = every row is discarded or answered+read. Grey.
 function _qThreadState(rows) {
   const active = rows.filter(_qIsActive);
   if (active.length === 0) return 'closed';
-  // If any active row is agent → Jeremy in {open, working, answered-unread}, we're waiting on Jeremy.
-  for (const q of active) {
-    const forJeremy = !!(q.from_session && !q.to_session);
-    if (forJeremy && (q.status === 'open' || q.status === 'working')) return 'waiting-you';
-    if (forJeremy && q.status === 'answered' && !q.read) return 'waiting-you';
-  }
-  // Otherwise the latest activity is Jeremy → agent or Jeremy answered — on ice.
-  return 'on-ice';
+  // Newest first — later activity wins.
+  const byNewest = active.slice().sort((a, b) => (b.updated || 0) - (a.updated || 0));
+  const q = byNewest[0];
+  // Any answered-but-unread message means Jeremy hasn't seen the reply yet —
+  // regardless of direction, this row is what he'd want to act on.
+  if (q.status === 'answered' && !q.read) return 'needs-you';
+  // Agent asked Jeremy and it's still open/working → Jeremy owes the answer.
+  const forJeremy = !!(q.from_session && !q.to_session);
+  if (forJeremy && (q.status === 'open' || q.status === 'working')) return 'needs-you';
+  // Otherwise Jeremy asked the agent and the agent is thinking.
+  return 'with-agent';
 }
 function _qThreadStarred(rows) {
   // Star lives on the anchor (the earliest row).
@@ -24881,10 +24917,10 @@ function _qThreadAnchorId(rows) {
 }
 function _qThreadTintColors(state) {
   // Row background + border tint per state. Keep contrast subtle so long
-  // lists don't strobe.
-  if (state === 'waiting-you') return {bg: 'rgba(74,170,74,0.10)',  border: '#4a4', pill: '#4a4', label: 'waiting on you'};
-  if (state === 'on-ice')      return {bg: 'rgba(72,138,255,0.10)', border: '#48a', pill: '#48a', label: 'on ice'};
-  return                              {bg: 'transparent',           border: 'var(--border)', pill: '#666', label: 'closed'};
+  // lists don't strobe — only 'needs-you' should feel loud.
+  if (state === 'needs-you')  return {bg: 'rgba(214,138,64,0.14)', border: '#c88240', pill: '#c67326', label: 'needs you'};
+  if (state === 'with-agent') return {bg: 'transparent',           border: '#3a4550', pill: '#567',    label: 'with agent'};
+  return                             {bg: 'transparent',           border: 'var(--border)', pill: '#666', label: 'closed'};
 }
 async function _questionsLoad() {
   try {
@@ -24900,11 +24936,19 @@ async function _questionsLoad() {
   } catch(e) { /* silent */ }
 }
 function _questionsUpdateBadge() {
-  const active = _questionsCache.filter(_qIsActive).length;
+  // Badge counts THREADS in a non-closed state, not individual questions —
+  // otherwise a chain with 5 follow-ups inflates the number and mismatches
+  // the inbox view. Only 'needs-you' threads drive the red badge; 'with-
+  // agent' is passive (you have nothing to do) so it doesn't count.
+  const groups = _qGroupThreads(_questionsCache);
+  let needsYou = 0;
+  for (const [, rows] of groups) {
+    if (_qThreadState(rows) === 'needs-you') needsYou++;
+  }
   const b = document.getElementById('tab-inbox-count');
   if (!b) return;
-  b.textContent = String(active);
-  b.style.display = active > 0 ? '' : 'none';
+  b.textContent = String(needsYou);
+  b.style.display = needsYou > 0 ? '' : 'none';
 }
 function _qEsc(s) { return String(s || '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
 function _qFmtTime(ts) {
@@ -25033,7 +25077,10 @@ function _qRenderChain(t) {
   if (setRows.length) {
     html += _qRenderSet(setRows);
   }
-  for (const q of chainRows) html += _qRenderQ(q);
+  // Newest first — the message you probably want is at the top of the
+  // expanded panel, not buried at the bottom after a long thread history.
+  const orderedChain = chainRows.slice().reverse();
+  for (const q of orderedChain) html += _qRenderQ(q);
   html += '</div>';
   return html;
 }
@@ -25044,16 +25091,26 @@ function _qRenderQ(q) {
   const canAnswer = forJeremy && (q.status === 'open' || q.status === 'working');
   const canMarkRead = q.status === 'answered' && !q.read;
   const qidEsc = _qEsc(q.id);
-  let html = `<div style="margin:0 0 12px 0;">
-    <div style="display:flex;align-items:baseline;gap:8px;font-size:0.7rem;color:var(--muted);margin-bottom:4px;flex-wrap:wrap;">
+  // Auto-collapse messages the user has already acknowledged. They can
+  // click the header row to expand the individual message if they need to
+  // re-read it. Collapsed state is per-message and lives in _qMsgExpanded.
+  const isCollapsedByDefault = (q.status === 'answered' && q.read === 1);
+  const expanded = _qMsgExpanded.has(q.id) ? true
+                  : _qMsgExpanded.has('!' + q.id) ? false
+                  : !isCollapsedByDefault;
+  const chev = expanded ? '▾' : '▸';
+  let html = `<div style="margin:0 0 10px 0;border:1px solid var(--border);border-radius:6px;">
+    <div style="display:flex;align-items:baseline;gap:8px;padding:6px 10px;cursor:pointer;font-size:0.75rem;color:var(--muted);flex-wrap:wrap;" onclick="_qMsgToggle('${qidEsc}')">
+      <span style="width:12px;color:var(--muted);">${chev}</span>
       <span style="background:${st.color};color:#fff;padding:1px 6px;border-radius:3px;font-weight:600;text-transform:uppercase;letter-spacing:0.03em;">${st.text}</span>
       <span style="font-weight:600;color:var(--fg);">${qidEsc}</span>
       <span>${_qEsc(dir.label)}</span>
-      <span>&middot;</span>
-      <span>${_qFmtTime(q.created)}</span>
-    </div>
-    <div style="font-weight:600;font-size:0.95rem;margin-bottom:4px;">${_qEsc(q.title)}</div>
-    ${q.body ? `<div style="white-space:pre-wrap;font-size:0.88rem;color:var(--fg);opacity:0.88;margin-bottom:8px;">${_qEsc(q.body)}</div>` : ''}`;
+      <span style="flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--fg);font-weight:500;">${_qEsc(q.title)}</span>
+      <span>${_qFmtTime(q.updated || q.created)}</span>
+    </div>`;
+  if (!expanded) { html += '</div>'; return html; }
+  html += `<div style="padding:0 12px 10px 12px;">`;
+  if (q.body) html += `<div style="white-space:pre-wrap;font-size:0.88rem;color:var(--fg);opacity:0.88;margin-bottom:8px;">${_qEsc(q.body)}</div>`;
   if (q.kind === 'choice' && !canAnswer) {
     html += _qRenderChoiceReadonly(q);
   } else if (q.kind === 'choice' && canAnswer) {
@@ -25073,7 +25130,7 @@ function _qRenderQ(q) {
   if (canMarkRead) {
     html += `<div style="margin-top:6px;"><button class="btn" style="opacity:0.75;font-size:0.78rem;padding:3px 8px;" onclick="_questionsMarkRead('${qidEsc}')">Mark Read</button></div>`;
   }
-  html += '</div>';
+  html += '</div></div>';
   return html;
 }
 function _qRenderSet(rows) {
