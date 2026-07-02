@@ -14122,6 +14122,15 @@ setTimeout(function(){var f=document.getElementById('js-fallback');if(f&&f.style
 
 
 <!-- Inbox view: bidirectional agent↔human inbox (formerly "Questions"). -->
+<style>
+  /* Mobile: give the title the row's spare width — full timestamps eat
+     ~30% and force titles to truncate at ~5 chars. Under 600px we drop
+     the timestamp entirely (still there on desktop). */
+  @media (max-width: 600px) {
+    #inbox-list .q-row-time { display: none; }
+    #inbox-list .q-row-title { font-size: 0.95rem; }
+  }
+</style>
 <div id="inbox-view" style="display:none;flex-direction:column;overflow:auto;padding:12px 16px;">
   <div style="display:flex;align-items:center;gap:12px;margin-bottom:8px;flex-wrap:wrap;">
     <h2 style="margin:0;font-size:1.1rem;">Inbox</h2>
@@ -25062,8 +25071,8 @@ function _qRenderRow(t, muted) {
       <span style="background:${tint.pill};color:#fff;padding:2px 8px;border-radius:4px;font-size:0.65rem;font-weight:600;text-transform:uppercase;letter-spacing:0.03em;white-space:nowrap;">${tint.label}</span>
       ${anyBlocking ? '<span style="background:#e11;color:#fff;padding:2px 8px;border-radius:4px;font-size:0.65rem;font-weight:600;">BLOCKING</span>' : ''}
       <span style="font-weight:600;font-size:0.85rem;color:var(--fg);white-space:nowrap;">${_qEsc(anchor.id)}${anchor.set_id ? ' · set ' + _qEsc(anchor.set_id) : ''}</span>
-      <span style="flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:0.9rem;">${_qEsc(_qThreadTitle(t.rows))}</span>
-      <span style="font-size:0.7rem;color:var(--muted);white-space:nowrap;" title="${_qEsc(preview.dir)}">${_qFmtTime(preview.ts)}</span>
+      <span class="q-row-title" style="flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:0.9rem;">${_qEsc(_qThreadTitle(t.rows))}</span>
+      <span class="q-row-time" style="font-size:0.7rem;color:var(--muted);white-space:nowrap;" title="${_qEsc(preview.dir)}">${_qFmtTime(preview.ts)}</span>
     </div>`;
   if (expanded) html += _qRenderChain(t);
   html += '</div>';
