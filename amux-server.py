@@ -24868,11 +24868,12 @@ function _qThreadUpdated(rows) {
 }
 // Thread state, driven by the NEWEST active row in the chain — that's what
 // controls whether the thread demands attention right now.
-//   needs-you   = the newest active row is answered-unread (someone replied,
-//                 you haven't ack'd) OR agent asked and you haven't answered.
-//                 Orange tint — this is where the action lives.
-//   with-agent  = newest active row is Jeremy → agent still open/working.
-//                 Muted tint — the agent has it; nothing for you to do.
+//   needs-you   = newest active row is answered-unread OR agent asked and
+//                 you haven't responded. Orange — this is where the action is.
+//   working     = you asked an agent and it PATCHed a partial answer. Green
+//                 — the agent has actively picked it up and is working now.
+//   with-agent  = you asked an agent and there is no activity yet (still
+//                 open, no partial). Blue border — parked with the agent.
 //   closed      = every row is discarded or answered+read. Grey.
 function _qThreadState(rows) {
   const active = rows.filter(_qIsActive);
@@ -24880,13 +24881,16 @@ function _qThreadState(rows) {
   // Newest first — later activity wins.
   const byNewest = active.slice().sort((a, b) => (b.updated || 0) - (a.updated || 0));
   const q = byNewest[0];
+  const forJeremy = !!(q.from_session && !q.to_session);
   // Any answered-but-unread message means Jeremy hasn't seen the reply yet —
   // regardless of direction, this row is what he'd want to act on.
   if (q.status === 'answered' && !q.read) return 'needs-you';
   // Agent asked Jeremy and it's still open/working → Jeremy owes the answer.
-  const forJeremy = !!(q.from_session && !q.to_session);
   if (forJeremy && (q.status === 'open' || q.status === 'working')) return 'needs-you';
-  // Otherwise Jeremy asked the agent and the agent is thinking.
+  // Jeremy asked agent and the agent has PATCHed a partial ('working') —
+  // signal green so Jeremy can see the agent has picked it up.
+  if (!forJeremy && q.status === 'working') return 'working';
+  // Otherwise Jeremy asked the agent and it's sitting in the agent's queue.
   return 'with-agent';
 }
 function _qThreadStarred(rows) {
@@ -24919,9 +24923,13 @@ function _qThreadTintColors(state) {
   // Row background + border tint per state. Keep contrast subtle so long
   // lists don't strobe — only 'needs-you' should feel loud.
   if (state === 'needs-you')  return {bg: 'rgba(214,138,64,0.14)', border: '#c88240',       pill: '#c67326', label: 'needs you'};
-  // Passive: no pill (see _qRenderRow) + plain border → the row visually
-  // recedes so a full inbox of with-agent rows doesn't look like a to-do list.
-  if (state === 'with-agent') return {bg: 'transparent',           border: 'var(--border)', pill: '',        label: ''};
+  // Working = agent has partial-answered and is actively on it. Green pill +
+  // green border wrap so Jeremy can see which threads have real motion.
+  if (state === 'working')    return {bg: 'rgba(74,170,74,0.10)',  border: '#4a4',          pill: '#3e8f3e', label: 'working'};
+  // With agent = parked in agent's queue, no motion yet. Blue border wraps
+  // the row so Jeremy can pick these out among the closed noise, but no
+  // background tint — passive, not urgent.
+  if (state === 'with-agent') return {bg: 'transparent',           border: '#3d6a99',       pill: '#3d6a99', label: 'with agent'};
   return                             {bg: 'transparent',           border: 'var(--border)', pill: '#666',    label: 'closed'};
 }
 async function _questionsLoad() {
@@ -25051,7 +25059,7 @@ function _qRenderRow(t, muted) {
     <div style="display:flex;align-items:center;gap:10px;padding:10px 12px;cursor:pointer;" onclick="_qToggle('${kEsc}')">
       <span style="font-size:1.1rem;color:${starColor};cursor:pointer;user-select:none;" title="${t.starred ? 'Unstar' : 'Star (keep at top)'}" onclick="event.stopPropagation();_qStarToggle('${anchorId}', ${t.starred ? 'false' : 'true'})">${star}</span>
       <span style="width:12px;color:var(--muted);font-size:0.9rem;">${chev}</span>
-      ${t.state === 'with-agent' ? '' : `<span style="background:${tint.pill};color:#fff;padding:2px 8px;border-radius:4px;font-size:0.65rem;font-weight:600;text-transform:uppercase;letter-spacing:0.03em;white-space:nowrap;">${tint.label}</span>`}
+      <span style="background:${tint.pill};color:#fff;padding:2px 8px;border-radius:4px;font-size:0.65rem;font-weight:600;text-transform:uppercase;letter-spacing:0.03em;white-space:nowrap;">${tint.label}</span>
       ${anyBlocking ? '<span style="background:#e11;color:#fff;padding:2px 8px;border-radius:4px;font-size:0.65rem;font-weight:600;">BLOCKING</span>' : ''}
       <span style="font-weight:600;font-size:0.85rem;color:var(--fg);white-space:nowrap;">${_qEsc(anchor.id)}${anchor.set_id ? ' · set ' + _qEsc(anchor.set_id) : ''}</span>
       <span style="flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:0.9rem;">${_qEsc(_qThreadTitle(t.rows))}</span>
