@@ -5004,21 +5004,24 @@ def _session_board_issue_id(session_name: str) -> str | None:
 
 
 def _complete_session_board_issue(session_name: str):
-    """DISABLED 2026-06-12 (incident: fabricated completions).
+    """DISABLED — permanently a no-op.
 
-    This used to move ALL of a session's open board items to 'done' whenever
-    the session went idle or exited. An idle transition is NOT evidence of
-    work — it marked never-touched items done (RA-514/516/517/518/520, RR-311,
-    AW-1 had zero corresponding commits), and combined with auto-pickup it
-    formed a loop that churned the whole queue to fictional 'done'.
+    Original (2026-06-12): this used to move a session's open board items to
+    'done' whenever the session went idle or exited. An idle transition is NOT
+    evidence of work — it marked never-touched items done (RA-514/516/517/518/
+    520, RR-311, AW-1 had zero corresponding commits) and, combined with
+    auto-pickup, formed a loop that churned the whole queue to fictional 'done'.
 
-    Rule now: status only changes when an agent (or Jeremy) records a real
-    deliverable — a commit, a verdict, a note — by PATCHing the item itself.
-    Sessions idling with open items are handled by the watchdog/commit-guard,
-    not by silent completion. Call sites left intact; this is a no-op.
+    Reinforced (upstream e2447bb, 2026-07-02, BACKE-2459/2461/2462): a session
+    goes idle after every turn and can be stopped mid-task. A false 'done' can
+    make someone skip a live prod step (BACKE-2462 was a scheduled prod-quiesce
+    change).
 
-    Note: upstream's 6b07347 tried to restore this but for owner_type='agent'
-    only. We keep the full disable — Jeremy's 2026-06-12 rule is stronger."""
+    Rule: 'done' must be a deliberate act by whoever did the work, never an
+    automatic side effect. Status only changes when an agent or Jeremy PATCHes
+    the item itself. Sessions idling with open items are handled by the
+    watchdog/commit-guard, not by silent completion. All existing callers are
+    intentionally left as harmless no-ops."""
     return
 
 
