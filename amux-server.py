@@ -24897,8 +24897,15 @@ function _qThreadState(rows) {
   // Agent asked Jeremy and it's still open/working → Jeremy owes the answer.
   if (forJeremy && (q.status === 'open' || q.status === 'working')) return 'needs-you';
   // Jeremy asked agent and the agent has PATCHed a partial ('working') —
-  // signal green so Jeremy can see the agent has picked it up.
-  if (!forJeremy && q.status === 'working') return 'working';
+  // signal green so Jeremy can see the agent has picked it up. Heuristic:
+  // if the tail of the partial answer contains '?', the agent likely asked
+  // Jeremy something and forgot to flip status. Surface as needs-you so
+  // it's not lost in the working pile. (A reaper on the server nudges the
+  // agent to correct the status separately — see _inbox_stale_working_reaper.)
+  if (!forJeremy && q.status === 'working') {
+    const tail = (q.answer || '').slice(-300);
+    return tail.includes('?') ? 'needs-you' : 'working';
+  }
   // Otherwise Jeremy asked the agent and it's sitting in the agent's queue.
   return 'with-agent';
 }
@@ -41518,6 +41525,86 @@ def _board_watcher_clear_nudged():
         pass
 
 
+# ── Inbox stale-working reaper ─────────────────────────────────────────
+# Agents sometimes PATCH a question with `partial: true` when what they
+# actually mean is "I'm sending you something, need input from you before
+# continuing." That leaves the row stuck in 'working' (green in the inbox)
+# forever with no motion. Every 5 minutes this job scans for such rows and
+# posts a board item asking the agent to either PATCH again (still working),
+# PATCH final (waiting on Jeremy → flips to answered → shows NEEDS YOU), or
+# PATCH the actual final answer. No auto-flip — the row stays exactly where
+# it is until the agent PATCHes.
+_inbox_reaper_last: dict[str, int] = {}
+_INBOX_WORKING_THRESHOLD_SECS = 15 * 60   # nudge after 15 min stale
+_INBOX_REAPER_NUDGE_GAP_SECS  = 30 * 60   # don't re-nudge inside 30 min
+
+def _inbox_stale_working_reaper():
+    try:
+        db = get_db()
+        now = int(time.time())
+        rows = db.execute(
+            "SELECT id, title, updated, from_session, to_session "
+            "  FROM questions "
+            " WHERE status = 'working' "
+            "   AND (from_session IS NULL OR from_session = '') "
+            "   AND to_session IS NOT NULL AND to_session != '' "
+            "   AND updated < ?",
+            (now - _INBOX_WORKING_THRESHOLD_SECS,),
+        ).fetchall()
+        for r in rows:
+            qid = r["id"]
+            last = _inbox_reaper_last.get(qid, 0)
+            if now - last < _INBOX_REAPER_NUDGE_GAP_SECS:
+                continue
+            _inbox_reaper_last[qid] = now
+            agent = r["to_session"]
+            age_min = (now - int(r["updated"])) // 60
+            title = f"Stale inbox 'working': {qid} — {(r['title'] or '')[:60]}"
+            desc = (
+                f"Inbox question **{qid}** ({r['title']}) has been in "
+                f"`working` state for {age_min} min with no follow-up PATCH.\n\n"
+                f"Pick the branch that matches reality:\n\n"
+                f"1. **Still actively computing** — PATCH `partial: true` "
+                f"again to reset the timer:\n\n"
+                f"       curl -sk -X PATCH -H 'Content-Type: application/json' \\\n"
+                f"         -d '{{\"answer\":\"...\", \"partial\": true}}' \\\n"
+                f"         $AMUX_URL/api/inbox/{qid}\n\n"
+                f"2. **Waiting on Jeremy** (you asked him something in the "
+                f"partial answer) — PATCH the same message body with "
+                f"`partial: false`. This moves it to `answered` and shows "
+                f"up as NEEDS YOU on his side:\n\n"
+                f"       curl -sk -X PATCH -H 'Content-Type: application/json' \\\n"
+                f"         -d '{{\"answer\":\"<current message>\", \"partial\": false}}' \\\n"
+                f"         $AMUX_URL/api/inbox/{qid}\n\n"
+                f"3. **Done** — PATCH the final answer (partial omitted):\n\n"
+                f"       curl -sk -X PATCH -H 'Content-Type: application/json' \\\n"
+                f"         -d '{{\"answer\":\"<final>\"}}' \\\n"
+                f"         $AMUX_URL/api/inbox/{qid}\n\n"
+                f"Convention: `working` means you're actively computing and "
+                f"will PATCH again soon. If you need input from Jeremy, that "
+                f"is not `working` — it is `answered` waiting for his reply."
+            )
+            board_id = _next_issue_id(_prefix_from_session(agent))
+            try:
+                db.execute(
+                    "INSERT INTO issues (id, title, desc, status, session, "
+                    "  creator, created, updated, owner_type) "
+                    "VALUES (?, ?, ?, 'todo', ?, 'inbox-reaper', ?, ?, 'agent')",
+                    (board_id, title, desc, agent, now, now),
+                )
+                db.commit()
+                _board_changed()
+                try:
+                    _notify_session_of_task(agent, board_id, title)
+                except Exception:
+                    pass
+                slog(f"[inbox-reaper] nudged {agent} about stale {qid} ({age_min}m)")
+            except Exception as e:
+                slog(f"[inbox-reaper] {qid}: board insert failed: {e}")
+    except Exception as e:
+        slog(f"[inbox-reaper] error: {e}")
+
+
 def _cleanup_tmp():
     """Prune stale Claude Code sandbox files from /private/tmp to prevent disk full."""
     tmp_dir = Path(f"/private/tmp/claude-{os.getuid()}")
@@ -42302,6 +42389,7 @@ def main():
     schedule_job(_repos_scan,            interval=60,                   name="repos_scan",    initial_delay=5)
     schedule_job(_board_watcher,         interval=30,                   name="board_watcher", initial_delay=30)
     schedule_job(_board_watcher_clear_nudged, interval=60,             name="board_watcher_gc", initial_delay=60)
+    schedule_job(_inbox_stale_working_reaper, interval=300,           name="inbox_stale_working", initial_delay=120)
     schedule_job(_evict_stale_caches,    interval=300,                  name="cache_evict", initial_delay=60)
     schedule_job(_cleanup_tmp,           interval=1800,                 name="tmp_cleanup", initial_delay=60)
     schedule_job(_auto_archive_idle,     interval=3600,                 name="auto_archive", initial_delay=300)
