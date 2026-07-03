@@ -973,6 +973,7 @@ _sse_alerts: list = []           # ring buffer of alert dicts pushed to all SSE 
 _notes_version: int = 0             # bumped on any notes write; triggers SSE invalidation
 _crm_version: int = 0               # bumped on any CRM write; triggers SSE invalidation
 _journal_version: int = 0           # bumped on any journal write; triggers SSE invalidation
+_threads_version: int = 0           # bumped on any threads/messages write; triggers SSE invalidation
 _sse_alert_lock = threading.Lock()
 _send_locks: dict = {}          # per-session locks for serializing send_text/send_keys
 _send_locks_lock = threading.Lock()  # protects _send_locks dict itself
@@ -24878,7 +24879,8 @@ function switchView(view) {
     if (!_questionsTimer) _questionsTimer = setInterval(_questionsLoad, 5000);
   } else if (view === 'threads') {
     _threadsLoad();
-    if (!_threadsTimer) _threadsTimer = setInterval(_threadsLoad, 5000);
+    // SSE pushes threads updates; only poll when the stream is dead.
+    if (_sseFallback && !_threadsTimer) _threadsTimer = setInterval(_threadsLoad, 5000);
   } else if (view === 'scheduler') {
     Promise.all([fetchSchedules(), fetchSchedulerRuns()]).then(() => renderScheduler());
   } else {
@@ -29474,6 +29476,9 @@ function connectSSE() {
             else _crmDirty = true;
           } else if (key === 'journal') {
             if (activeView === 'journal') _journalLoad();
+          } else if (key === 'threads') {
+            // Always refresh — even off-tab, so the tab badge count stays live.
+            _threadsLoad();
           }
         }
       } else if (msg.type === 'ping') {
@@ -35679,6 +35684,7 @@ class CCHandler(BaseHTTPRequestHandler):
         last_notes_version = _notes_version
         last_crm_version   = _crm_version
         last_journal_version = _journal_version
+        last_threads_version = _threads_version
 
         try:
             while True:
@@ -35754,6 +35760,9 @@ class CCHandler(BaseHTTPRequestHandler):
                 if _journal_version != last_journal_version:
                     last_journal_version = _journal_version
                     invalidated.append("journal")
+                if _threads_version != last_threads_version:
+                    last_threads_version = _threads_version
+                    invalidated.append("threads")
                 if invalidated:
                     self.wfile.write(f"data: {json.dumps({'type': 'invalidate', 'keys': invalidated})}\n\n".encode())
                     self.wfile.flush()
@@ -36789,6 +36798,12 @@ class CCHandler(BaseHTTPRequestHandler):
                 or path == "/api/messages" or path.startswith("/api/messages/")):
             db = get_db()
 
+            def _bump_threads_version():
+                # Bumps the SSE watermark so connected clients get an
+                # invalidate('threads') event within ~2s of any write.
+                global _threads_version
+                _threads_version += 1
+
             def _thread_to_dict(t_row, msgs=None):
                 d = dict(t_row)
                 if msgs is None:
@@ -36934,6 +36949,7 @@ class CCHandler(BaseHTTPRequestHandler):
                     (mid, tid, from_session, to_session, mbody, blocking, now, now),
                 )
                 db.commit()
+                _bump_threads_version()
                 thread_row = db.execute("SELECT * FROM threads WHERE id = ?", (tid,)).fetchone()
                 msg_row = db.execute("SELECT * FROM messages WHERE id = ?", (mid,)).fetchone()
                 # no_deliver=true skips notification — used by Move-to-Threads
@@ -36967,12 +36983,14 @@ class CCHandler(BaseHTTPRequestHandler):
                         db.execute("UPDATE threads SET discarded = 1, updated = ? WHERE id = ?",
                                    (now, tid))
                     db.commit()
+                    _bump_threads_version()
                     thread_row = db.execute("SELECT * FROM threads WHERE id = ?", (tid,)).fetchone()
                     return self._json(_thread_to_dict(thread_row))
                 if method == "DELETE":
                     db.execute("UPDATE threads SET discarded = 1, updated = ? WHERE id = ?",
                                (int(time.time()), tid))
                     db.commit()
+                    _bump_threads_version()
                     return self._json({"ok": True, "id": tid})
                 return self._json({"error": "method not allowed"}, 405)
 
@@ -37023,6 +37041,7 @@ class CCHandler(BaseHTTPRequestHandler):
                 )
                 db.execute("UPDATE threads SET updated = ? WHERE id = ?", (now, tid))
                 db.commit()
+                _bump_threads_version()
                 msg_row = db.execute("SELECT * FROM messages WHERE id = ?", (mid,)).fetchone()
                 # Only 'complete' messages get delivered — 'working' means the
                 # sender is still writing; deliver on the flip in PATCH.
@@ -37077,12 +37096,14 @@ class CCHandler(BaseHTTPRequestHandler):
                                    "WHERE id = ?", (now, mid))
                     if not delivered:
                         db.commit()
+                    _bump_threads_version()
                     msg_row = db.execute("SELECT * FROM messages WHERE id = ?", (mid,)).fetchone()
                     return self._json(dict(msg_row))
                 if method == "DELETE":
                     db.execute("UPDATE messages SET status = 'discarded', updated = ? "
                                "WHERE id = ?", (int(time.time()), mid))
                     db.commit()
+                    _bump_threads_version()
                     return self._json({"ok": True, "id": mid})
                 return self._json({"error": "method not allowed"}, 405)
 
