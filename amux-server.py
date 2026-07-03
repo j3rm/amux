@@ -13934,6 +13934,7 @@ setTimeout(function(){var f=document.getElementById('js-fallback');if(f&&f.style
   <button id="tab-sessions" class="active" onclick="switchView('sessions')">Sessions</button>
   <button id="tab-board" onclick="switchView('board')">Board</button>
   <button id="tab-inbox" onclick="switchView('inbox')">Inbox <span id="tab-inbox-count" style="display:none;background:#e11;color:#fff;border-radius:10px;padding:1px 7px;font-size:0.7rem;margin-left:3px;">0</span></button>
+  <button id="tab-threads" onclick="switchView('threads')">Threads <span id="tab-threads-count" style="display:none;background:#e11;color:#fff;border-radius:10px;padding:1px 7px;font-size:0.7rem;margin-left:3px;">0</span></button>
   <button id="tab-calendar" onclick="switchView('calendar')">Calendar</button>
   <button id="tab-scheduler" onclick="switchView('scheduler')">Scheduler</button>
   <button id="tab-files" onclick="switchView('files')">Files</button>
@@ -14207,6 +14208,47 @@ setTimeout(function(){var f=document.getElementById('js-fallback');if(f&&f.style
     <div style="display:flex;gap:8px;justify-content:flex-end;">
       <button class="btn" style="opacity:0.7;" onclick="_questionsCloseAsk()">Cancel</button>
       <button class="btn" onclick="_questionsSubmitAsk()">Send</button>
+    </div>
+  </div>
+</div>
+
+<!-- Threads view (Phase 1 of successor to Inbox). Every entry is a message
+     inside a thread; per-message Reply button targets a specific message. -->
+<style>
+  @media (max-width: 600px) {
+    #threads-list .t-row-time { display: none; }
+    #threads-list .t-row-title { font-size: 0.95rem; }
+  }
+</style>
+<div id="threads-view" style="display:none;flex-direction:column;overflow:auto;padding:12px 16px;">
+  <div style="display:flex;align-items:center;gap:12px;margin-bottom:8px;flex-wrap:wrap;">
+    <h2 style="margin:0;font-size:1.1rem;">Threads</h2>
+    <button class="btn" onclick="_threadsOpenNew()">+ New thread</button>
+    <span style="color:var(--muted);font-size:0.8rem;">Conversations with agents. Every message can be replied to individually. Star to pin at top.</span>
+  </div>
+  <div id="threads-list"></div>
+</div>
+<!-- New-thread modal — also serves as per-message Reply modal via context flag. -->
+<div id="t-new-modal" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,0.55);z-index:1000;justify-content:center;align-items:center;padding:20px;" onclick="if(event.target===this)_threadsCloseNew()">
+  <div style="background:var(--card-bg,#111);border:1px solid var(--border);border-radius:8px;padding:16px 18px;max-width:640px;width:100%;">
+    <div id="t-new-header" style="font-weight:600;font-size:1.05rem;margin-bottom:10px;">New thread</div>
+    <div id="t-new-target-row">
+      <label style="display:block;font-size:0.75rem;color:var(--muted);margin-bottom:2px;">Target session</label>
+      <select id="t-new-target" style="width:100%;padding:6px 8px;margin-bottom:10px;border:1px solid var(--border);border-radius:5px;background:var(--card-bg,#0a0a0a);color:var(--fg);"></select>
+    </div>
+    <div id="t-new-title-row">
+      <label style="display:block;font-size:0.75rem;color:var(--muted);margin-bottom:2px;">Thread title (one line)</label>
+      <input id="t-new-title" type="text" placeholder="What's this conversation about?" style="width:100%;padding:6px 8px;margin-bottom:10px;border:1px solid var(--border);border-radius:5px;background:var(--card-bg,#0a0a0a);color:var(--fg);box-sizing:border-box;">
+    </div>
+    <label style="display:block;font-size:0.75rem;color:var(--muted);margin-bottom:2px;" id="t-new-body-label">Body (message content)</label>
+    <textarea id="t-new-body" placeholder="..." style="width:100%;min-height:120px;padding:6px 8px;margin-bottom:10px;border:1px solid var(--border);border-radius:5px;background:var(--card-bg,#0a0a0a);color:var(--fg);font-family:inherit;box-sizing:border-box;resize:vertical;"></textarea>
+    <label style="display:flex;align-items:center;gap:6px;font-size:0.85rem;margin-bottom:12px;">
+      <input id="t-new-blocking" type="checkbox">
+      Blocking (inject into agent's terminal — interrupts current work)
+    </label>
+    <div style="display:flex;gap:8px;justify-content:flex-end;">
+      <button class="btn" style="opacity:0.7;" onclick="_threadsCloseNew()">Cancel</button>
+      <button class="btn" onclick="_threadsSubmitNew()">Send</button>
     </div>
   </div>
 </div>
@@ -24786,9 +24828,9 @@ function _chromeSave() {
 function switchView(view) {
   if (document.getElementById('grid-view').classList.contains('active')) exitGridMode();
   activeView = view;
-  const _svIds = ['session','board','inbox','calendar','scheduler','files','logs','notes','crm','map','metrics','torrents','terminal','browser','graph','journal','habits','repos'];
-  const _svNames = ['sessions','board','inbox','calendar','scheduler','files','logs','notes','crm','map','metrics','torrents','terminal','browser','graph','journal','habits','repos'];
-  const _svDisplay = ['','','flex','flex','','flex','flex','flex','flex','flex','flex','flex','flex','','flex','flex','flex','flex'];
+  const _svIds = ['session','board','inbox','threads','calendar','scheduler','files','logs','notes','crm','map','metrics','torrents','terminal','browser','graph','journal','habits','repos'];
+  const _svNames = ['sessions','board','inbox','threads','calendar','scheduler','files','logs','notes','crm','map','metrics','torrents','terminal','browser','graph','journal','habits','repos'];
+  const _svDisplay = ['','','flex','flex','flex','','flex','flex','flex','flex','flex','flex','flex','flex','','flex','flex','flex','flex'];
   for (let i = 0; i < _svIds.length; i++) {
     const ve = document.getElementById(_svIds[i] + '-view');
     if (ve) ve.style.display = view === _svNames[i] ? (_svDisplay[i] || '') : 'none';
@@ -24827,12 +24869,16 @@ function switchView(view) {
   } else if (view === 'inbox') {
     _questionsLoad();
     if (!_questionsTimer) _questionsTimer = setInterval(_questionsLoad, 5000);
+  } else if (view === 'threads') {
+    _threadsLoad();
+    if (!_threadsTimer) _threadsTimer = setInterval(_threadsLoad, 5000);
   } else if (view === 'scheduler') {
     Promise.all([fetchSchedules(), fetchSchedulerRuns()]).then(() => renderScheduler());
   } else {
     if (boardTimer) { clearInterval(boardTimer); boardTimer = null; }
   }
   if (view !== 'inbox' && _questionsTimer) { clearInterval(_questionsTimer); _questionsTimer = null; }
+  if (view !== 'threads' && _threadsTimer) { clearInterval(_threadsTimer); _threadsTimer = null; }
 }
 
 // ── Questions tab (bidirectional agent↔human inbox) ─────────────────────────
@@ -25468,6 +25514,285 @@ async function _questionsSubmitAsk() {
 }
 // Fire an initial load on page start so the tab badge shows any open questions.
 setTimeout(() => { _questionsLoad(); }, 500);
+
+// ── Threads tab (successor to Inbox) ────────────────────────────────────────
+// Conversations with agents, modeled as (thread, [messages]). Every message
+// has a Reply button that targets that specific message via parent_id. The
+// renderer is flat for now — parent_id is preserved on the server so we can
+// add indented reply chains later without a data migration.
+let _threadsTimer = null;
+let _threadsCache = [];
+let _threadsLastSig = '';
+let _tExpanded = new Set(JSON.parse(localStorage.getItem('amux.tExpanded') || '[]'));
+function _tExpandedSave() {
+  try { localStorage.setItem('amux.tExpanded', JSON.stringify([..._tExpanded])); } catch(e) {}
+}
+// Per-message collapse state — a settled message auto-collapses after read,
+// like the Inbox; user can force-expand by clicking the header.
+let _tMsgExpanded = new Set();
+function _tMsgToggle(mid) {
+  if (_tMsgExpanded.has(mid))       { _tMsgExpanded.delete(mid); _tMsgExpanded.add('!'+mid); }
+  else if (_tMsgExpanded.has('!'+mid)) { _tMsgExpanded.delete('!'+mid); _tMsgExpanded.add(mid); }
+  else                              { _tMsgExpanded.add('!'+mid); }
+  _threadsRender();
+}
+function _tToggle(tid) {
+  if (_tExpanded.has(tid)) _tExpanded.delete(tid); else _tExpanded.add(tid);
+  _tExpandedSave();
+  _threadsRender();
+}
+const _tEsc = _qEsc;
+const _tFmtTime = _qFmtTime;
+// Signature — cheap change detector; re-render only when content changes.
+function _threadsSig(list) {
+  return list.map(t => t.id + ':' + t.starred + ':' + t.updated + ':' + t.messages.length +
+    ':' + t.messages.map(m => m.id + ',' + m.status + ',' + m.read + ',' + (m.body || '').length + ',' + m.updated).join('|')
+  ).join('~');
+}
+// Thread state — computed from newest complete message and any working ones.
+//   working    → any message is still being written (green pill)
+//   needs-you  → newest complete message is TO Jeremy AND unread (red)
+//   with-agent → newest complete message is TO an agent (blue)
+//   settled    → nothing pending on either side (grey)
+function _tThreadState(t) {
+  if (t.messages.some(m => m.status === 'working')) return 'working';
+  const complete = t.messages.filter(m => m.status === 'complete');
+  if (!complete.length) return 'settled';
+  const newest = complete.reduce((a,b) => (a.updated > b.updated ? a : b));
+  if (!newest.to_session && !newest.read) return 'needs-you';
+  if (newest.to_session) return 'with-agent';
+  return 'settled';
+}
+function _tStateTint(state) {
+  if (state === 'needs-you')  return {pill:'#e11', bg:'rgba(238,17,17,0.06)', border:'rgba(238,17,17,0.35)', label:'NEEDS YOU'};
+  if (state === 'working')    return {pill:'#4a4', bg:'rgba(74,170,74,0.06)', border:'rgba(74,170,74,0.35)', label:'WORKING'};
+  if (state === 'with-agent') return {pill:'#468', bg:'rgba(70,120,180,0.06)', border:'rgba(70,120,180,0.35)', label:'WITH AGENT'};
+  return {pill:'#666', bg:'transparent', border:'var(--border)', label:'SETTLED'};
+}
+function _tMsgStateBadge(m) {
+  if (m.status === 'working')  return {text: 'writing', color: '#4a4'};
+  if (m.status === 'discarded') return {text: 'discarded', color: '#666'};
+  if (!m.to_session && !m.read) return {text: 'unread', color: '#e11'}; // to Jeremy, awaiting his read
+  return {text: 'read', color: '#456'};
+}
+function _tMsgDir(m) {
+  // Human-readable "who → who" for a message header.
+  const from = m.from_session || 'Jeremy';
+  const to   = m.to_session   || 'Jeremy';
+  const forJeremy = (!m.to_session && !!m.from_session);
+  return {label: `${from} → ${to}`, forJeremy};
+}
+async function _threadsLoad() {
+  try {
+    const r = await fetch(API + '/api/threads');
+    const list = await r.json();
+    if (!Array.isArray(list)) return;
+    _threadsCache = list;
+    _updateThreadsBadge(list);
+    const sig = _threadsSig(list);
+    if (sig === _threadsLastSig) return;
+    _threadsLastSig = sig;
+    _threadsRender();
+  } catch(e) {}
+}
+function _updateThreadsBadge(list) {
+  // Badge count = messages in any thread that are TO Jeremy and unread.
+  let n = 0;
+  for (const t of list) for (const m of t.messages) {
+    if (!m.to_session && !m.read && m.status === 'complete') n++;
+  }
+  const b = document.getElementById('tab-threads-count');
+  if (!b) return;
+  if (n > 0) { b.textContent = n; b.style.display = ''; }
+  else       { b.style.display = 'none'; }
+}
+function _threadsRender() {
+  const root = document.getElementById('threads-list');
+  if (!root) return;
+  // Preserve reply drafts across re-renders.
+  const drafts = {};
+  root.querySelectorAll('textarea[id^="t-reply-"]').forEach(el => { drafts[el.id] = el.value; });
+  const focused = document.activeElement;
+  const focusedId = focused && focused.id && focused.id.startsWith('t-reply-') ? focused.id : null;
+
+  const list = _threadsCache;
+  if (!list.length) {
+    root.innerHTML = '<div style="padding:24px;text-align:center;color:var(--muted);font-size:0.9rem;">No threads yet. Click <b>+ New thread</b> to start one, or wait for an agent to open one.</div>';
+    return;
+  }
+  let html = '';
+  for (const t of list) html += _tRenderThread(t);
+  root.innerHTML = html;
+  // Restore drafts + focus
+  for (const [id, val] of Object.entries(drafts)) {
+    const el = document.getElementById(id);
+    if (el) el.value = val;
+  }
+  if (focusedId) { const el = document.getElementById(focusedId); if (el && el.focus) el.focus(); }
+}
+function _tRenderThread(t) {
+  const state = _tThreadState(t);
+  const tint = _tStateTint(state);
+  const expanded = _tExpanded.has(t.id);
+  const star = t.starred ? '★' : '☆';
+  const starColor = t.starred ? '#f0c02a' : 'var(--muted)';
+  const chev = expanded ? '▾' : '▸';
+  const anyBlocking = t.messages.some(m => m.blocking === 1 && m.status !== 'discarded');
+  const newestUpdated = t.messages.reduce((mx, m) => Math.max(mx, m.updated || 0), t.updated || 0);
+  const tidEsc = _tEsc(t.id);
+  const rowStyle = `border:1px solid ${tint.border};background:${tint.bg};border-radius:8px;margin:6px 0;`;
+  let html = `<div class="t-thread" style="${rowStyle}">
+    <div style="display:flex;align-items:center;gap:10px;padding:10px 12px;cursor:pointer;" onclick="_tToggle('${tidEsc}')">
+      <span style="font-size:1.1rem;color:${starColor};cursor:pointer;user-select:none;" title="${t.starred ? 'Unstar' : 'Star (keep at top)'}" onclick="event.stopPropagation();_tStarToggle('${tidEsc}', ${t.starred ? 'false' : 'true'})">${star}</span>
+      <span style="width:12px;color:var(--muted);font-size:0.9rem;">${chev}</span>
+      <span style="background:${tint.pill};color:#fff;padding:2px 8px;border-radius:4px;font-size:0.65rem;font-weight:600;text-transform:uppercase;letter-spacing:0.03em;white-space:nowrap;">${tint.label}</span>
+      ${anyBlocking ? '<span style="background:#e11;color:#fff;padding:2px 8px;border-radius:4px;font-size:0.65rem;font-weight:600;">BLOCKING</span>' : ''}
+      <span style="font-weight:600;font-size:0.85rem;color:var(--fg);white-space:nowrap;">${tidEsc}</span>
+      <span class="t-row-title" style="flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:0.9rem;">${_tEsc(t.title)}</span>
+      <span style="font-size:0.7rem;color:var(--muted);white-space:nowrap;">${t.messages.length} msg${t.messages.length===1?'':'s'}</span>
+      <span class="t-row-time" style="font-size:0.7rem;color:var(--muted);white-space:nowrap;">${_tFmtTime(newestUpdated)}</span>
+    </div>`;
+  if (expanded) html += _tRenderMessages(t);
+  html += '</div>';
+  return html;
+}
+function _tRenderMessages(t) {
+  const tidEsc = _tEsc(t.id);
+  let html = `<div style="border-top:1px solid var(--border);padding:10px 14px;">
+    <div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:10px;padding-bottom:10px;border-bottom:1px dashed var(--border);">
+      <button class="btn" style="opacity:0.6;" onclick="_tDiscardThread('${tidEsc}')">Discard thread</button>
+    </div>`;
+  // Oldest → newest for a conversation flow.
+  const msgs = t.messages.slice().sort((a,b) => (a.position - b.position) || (a.created - b.created));
+  for (const m of msgs) html += _tRenderMsg(t, m);
+  html += '</div>';
+  return html;
+}
+function _tRenderMsg(t, m) {
+  const dir = _tMsgDir(m);
+  const st = _tMsgStateBadge(m);
+  const forJeremy = dir.forJeremy;
+  const canMarkRead = m.status === 'complete' && !m.to_session && !m.read;
+  const midEsc = _tEsc(m.id);
+  const tidEsc = _tEsc(t.id);
+  // Auto-collapse messages already read (or that Jeremy sent — no action needed).
+  const collapsedByDefault = (m.status === 'complete' && (!!m.read || !!m.from_session === false));
+  const expanded = _tMsgExpanded.has(m.id) ? true
+                  : _tMsgExpanded.has('!' + m.id) ? false
+                  : !collapsedByDefault;
+  const chev = expanded ? '▾' : '▸';
+  let html = `<div style="margin:0 0 10px 0;border:1px solid var(--border);border-radius:6px;">
+    <div style="display:flex;align-items:baseline;gap:8px;padding:6px 10px;cursor:pointer;font-size:0.75rem;color:var(--muted);flex-wrap:wrap;" onclick="_tMsgToggle('${midEsc}')">
+      <span style="width:12px;color:var(--muted);">${chev}</span>
+      <span style="background:${st.color};color:#fff;padding:1px 6px;border-radius:3px;font-weight:600;text-transform:uppercase;letter-spacing:0.03em;">${st.text}</span>
+      <span style="font-weight:600;color:var(--fg);">${midEsc}</span>
+      <span>${_tEsc(dir.label)}</span>
+      <span style="flex:1;min-width:0;"></span>
+      <span>${_tFmtTime(m.updated || m.created)}</span>
+      <button class="btn" style="padding:2px 8px;font-size:0.72rem;" onclick="event.stopPropagation();_tReplyTo('${tidEsc}','${midEsc}')" title="Reply to this specific message">Reply</button>
+    </div>`;
+  if (!expanded) { html += '</div>'; return html; }
+  html += `<div style="padding:0 12px 10px 12px;">`;
+  if (m.body) html += `<div style="white-space:pre-wrap;font-size:0.88rem;color:var(--fg);opacity:0.92;margin:4px 0 8px 0;">${_tEsc(m.body)}</div>`;
+  if (canMarkRead) {
+    html += `<div style="margin-top:4px;"><button class="btn" style="opacity:0.75;font-size:0.78rem;padding:3px 8px;" onclick="_tMarkRead('${midEsc}')">Mark Read</button></div>`;
+  }
+  html += '</div></div>';
+  return html;
+}
+async function _tStarToggle(tid, starred) {
+  await fetch(API + '/api/threads/' + encodeURIComponent(tid), {
+    method: 'PATCH', headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({starred: !!starred}),
+  });
+  _threadsLoad();
+}
+async function _tDiscardThread(tid) {
+  if (!confirm('Discard thread ' + tid + '?')) return;
+  await fetch(API + '/api/threads/' + encodeURIComponent(tid), {method: 'DELETE'});
+  _threadsLoad();
+}
+async function _tMarkRead(mid) {
+  await fetch(API + '/api/messages/' + encodeURIComponent(mid), {
+    method: 'PATCH', headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({read: true}),
+  });
+  _threadsLoad();
+}
+// ── New-thread / Reply modal ──
+let _tNewCtx = null;   // {mode:'new'} or {mode:'reply', tid, parentMid}
+async function _threadsOpenNew() {
+  _tNewCtx = {mode: 'new'};
+  document.getElementById('t-new-header').textContent = 'New thread';
+  document.getElementById('t-new-target-row').style.display = '';
+  document.getElementById('t-new-title-row').style.display = '';
+  document.getElementById('t-new-body-label').textContent = 'Body (message content)';
+  document.getElementById('t-new-title').value = '';
+  document.getElementById('t-new-body').value = '';
+  document.getElementById('t-new-blocking').checked = false;
+  await _tLoadTargets();
+  document.getElementById('t-new-modal').style.display = 'flex';
+  setTimeout(() => document.getElementById('t-new-title').focus(), 50);
+}
+function _tReplyTo(tid, parentMid) {
+  const t = _threadsCache.find(x => x.id === tid);
+  if (!t) return;
+  _tNewCtx = {mode: 'reply', tid, parentMid};
+  document.getElementById('t-new-header').textContent = `Reply to ${parentMid} in ${tid}`;
+  document.getElementById('t-new-target-row').style.display = 'none';
+  document.getElementById('t-new-title-row').style.display = 'none';
+  document.getElementById('t-new-body-label').textContent = 'Reply';
+  document.getElementById('t-new-title').value = '';
+  document.getElementById('t-new-body').value = '';
+  document.getElementById('t-new-blocking').checked = false;
+  document.getElementById('t-new-modal').style.display = 'flex';
+  setTimeout(() => document.getElementById('t-new-body').focus(), 50);
+}
+async function _tLoadTargets() {
+  const sel = document.getElementById('t-new-target');
+  sel.innerHTML = '<option value="">(loading...)</option>';
+  try {
+    const r = await fetch(API + '/api/sessions');
+    const sessions = await r.json();
+    const optionsHtml = sessions
+      .filter(s => !s.archived && (s.status === 'active' || s.status === 'idle') && s.name !== 'amux-helper')
+      .sort((a,b) => a.name.localeCompare(b.name))
+      .map(s => `<option value="${_tEsc(s.name)}">${_tEsc(s.name)}${s.desc ? ' — ' + _tEsc(s.desc.slice(0,50)) : ''}</option>`)
+      .join('');
+    sel.innerHTML = optionsHtml || '<option value="">(no online sessions)</option>';
+  } catch(e) { sel.innerHTML = '<option value="">(failed to load)</option>'; }
+}
+function _threadsCloseNew() {
+  document.getElementById('t-new-modal').style.display = 'none';
+  _tNewCtx = null;
+}
+async function _threadsSubmitNew() {
+  const body = document.getElementById('t-new-body').value.trim();
+  if (!body) { alert('Body required.'); return; }
+  const blocking = document.getElementById('t-new-blocking').checked;
+  if (_tNewCtx && _tNewCtx.mode === 'reply') {
+    const {tid, parentMid} = _tNewCtx;
+    const r = await fetch(API + '/api/threads/' + encodeURIComponent(tid) + '/messages', {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({body, parent_id: parentMid, blocking}),
+    });
+    if (r.ok) { _threadsCloseNew(); _tExpanded.add(tid); _tExpandedSave(); _threadsLoad(); }
+    else { const t = await r.text(); alert('Reply failed: ' + r.status + ' — ' + t); }
+    return;
+  }
+  const target = document.getElementById('t-new-target').value;
+  const title = document.getElementById('t-new-title').value.trim();
+  if (!target) { alert('Pick a target session.'); return; }
+  if (!title) { alert('Title required.'); return; }
+  const r = await fetch(API + '/api/threads', {
+    method: 'POST', headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({title, body, to_session: target, blocking}),
+  });
+  if (r.ok) { _threadsCloseNew(); _threadsLoad(); }
+  else { const t = await r.text(); alert('Send failed: ' + r.status + ' — ' + t); }
+}
+// Fire an initial load so the tab badge shows unread count on page start.
+setTimeout(() => { _threadsLoad(); }, 500);
 
 // ── Habits tab ───────────────────────────────────────────────────────────────
 let _habits = [];
