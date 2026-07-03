@@ -3786,6 +3786,96 @@ if not cs: print('No contacts yet')
 for c in cs: print(c.get('id',''),c.get('name',''),c.get('company',''))" ;;
       *) echo "amux crm: unknown subcommand: $sub" >&2; exit 1 ;;
     esac ;;
+  threads)
+    sub="$1"; shift 2>/dev/null || true
+    case "$sub" in
+      reply)
+        # amux threads reply <parent_mid> [body]     — final reply
+        # amux threads reply --partial <parent_mid> [body]  — start streaming; prints new M-id
+        # Body can come from $2 or from stdin (piping).
+        partial=false
+        if [ "$1" = "--partial" ]; then partial=true; shift 2>/dev/null || true; fi
+        pmid="$1"; shift 2>/dev/null || true
+        if [ -z "$pmid" ]; then echo "Usage: amux threads reply [--partial] <parent_mid> [body]" >&2; exit 1; fi
+        body="$*"
+        if [ -z "$body" ] && [ ! -t 0 ]; then body=$(cat); fi
+        # Resolve the parent's thread_id via the API.
+        tid=$(curl -sk "$AMUX_URL/api/messages/$pmid" | python3 -c "import json,sys; d=json.load(sys.stdin); print(d.get('thread_id') or '')")
+        if [ -z "$tid" ]; then echo "amux threads reply: parent $pmid not found" >&2; exit 1; fi
+        payload=$(python3 -c "
+import json,sys
+print(json.dumps({'body':sys.argv[1],'parent_id':sys.argv[2],'partial':sys.argv[3]=='true'}))" "$body" "$pmid" "$partial")
+        curl -sk -X POST -H 'Content-Type: application/json' \
+          -H "X-Amux-Session: ${AMUX_SESSION:-}" \
+          -d "$payload" "$AMUX_URL/api/threads/$tid/messages" | python3 -c "
+import json,sys; d=json.load(sys.stdin)
+print(d.get('id','error: '+str(d.get('error','?'))))" ;;
+      finalize|patch)
+        # amux threads finalize <mid> [body]  — mark a working message complete
+        mid="$1"; shift 2>/dev/null || true
+        if [ -z "$mid" ]; then echo "Usage: amux threads finalize <mid> [body]" >&2; exit 1; fi
+        body="$*"
+        if [ -z "$body" ] && [ ! -t 0 ]; then body=$(cat); fi
+        payload=$(python3 -c "
+import json,sys; print(json.dumps({'body':sys.argv[1]}))" "$body")
+        curl -sk -X PATCH -H 'Content-Type: application/json' \
+          -d "$payload" "$AMUX_URL/api/messages/$mid" | python3 -c "
+import json,sys; d=json.load(sys.stdin)
+print(d.get('id','error: '+str(d.get('error','?'))),d.get('status',''))" ;;
+      new)
+        # amux threads new <session> <title> [body]  — start a new thread with an agent
+        target="$1"; title="$2"; shift 2 2>/dev/null || true
+        if [ -z "$target" ] || [ -z "$title" ]; then
+          echo "Usage: amux threads new <session> <title> [body]" >&2; exit 1
+        fi
+        body="$*"
+        if [ -z "$body" ] && [ ! -t 0 ]; then body=$(cat); fi
+        payload=$(python3 -c "
+import json,sys; print(json.dumps({'title':sys.argv[1],'body':sys.argv[2],'to_session':sys.argv[3]}))" "$title" "$body" "$target")
+        curl -sk -X POST -H 'Content-Type: application/json' \
+          -d "$payload" "$AMUX_URL/api/threads" | python3 -c "
+import json,sys; d=json.load(sys.stdin)
+print(d.get('id','error: '+str(d.get('error','?'))))" ;;
+      list|ls|"")
+        curl -sk "$AMUX_URL/api/threads" | python3 -c "
+import json,sys
+for t in json.load(sys.stdin):
+    unread=sum(1 for m in t['messages'] if not m['to_session'] and not m['read'] and m['status']=='complete')
+    tag='UNREAD' if unread else '     '
+    print(t['id'],tag,'msgs='+str(len(t['messages'])),'-',t['title'])" ;;
+      show)
+        tid="$1"; shift 2>/dev/null || true
+        if [ -z "$tid" ]; then echo "Usage: amux threads show <T-N>" >&2; exit 1; fi
+        curl -sk "$AMUX_URL/api/threads/$tid" | python3 -c "
+import json,sys
+d=json.load(sys.stdin)
+if 'error' in d: print('error:',d['error']); sys.exit(1)
+print(d['id'],'-',d['title'])
+print()
+for m in d['messages']:
+    who=(m['from_session'] or 'Jeremy')+' → '+(m['to_session'] or 'Jeremy')
+    tag=('★' if m.get('flagged') else ' ')+(' unread' if not m['to_session'] and not m['read'] and m['status']=='complete' else '')
+    print(f\"{m['id']:>6s}  [{m['status']:>8s}]{tag}  {who}\")
+    if m['body']: print('    '+m['body'][:200].replace(chr(10),chr(10)+'    '))
+    print()" ;;
+      flag|unflag)
+        mid="$1"
+        if [ -z "$mid" ]; then echo "Usage: amux threads $sub <M-N>" >&2; exit 1; fi
+        val=$([ "$sub" = "flag" ] && echo "true" || echo "false")
+        curl -sk -X PATCH -H 'Content-Type: application/json' \
+          -d "{\"flagged\":$val}" "$AMUX_URL/api/messages/$mid" | python3 -c "
+import json,sys; d=json.load(sys.stdin)
+print(d.get('id','error'),'flagged=',d.get('flagged',0))" ;;
+      read)
+        mid="$1"
+        if [ -z "$mid" ]; then echo "Usage: amux threads read <M-N>" >&2; exit 1; fi
+        curl -sk -X PATCH -H 'Content-Type: application/json' \
+          -d '{"read":true}' "$AMUX_URL/api/messages/$mid" >/dev/null
+        echo "read $mid" ;;
+      *) echo "amux threads: unknown subcommand: $sub" >&2
+         echo "  try: reply | finalize | new | list | show | flag | unflag | read" >&2
+         exit 1 ;;
+    esac ;;
   restart)
     session="$1"
     if [ -z "$session" ]; then echo "Usage: amux restart <session>" >&2; exit 1; fi
@@ -3821,6 +3911,14 @@ for s in json.load(sys.stdin): print(s['name'], '(running)' if s.get('running') 
     echo "amux crm log <PPL-id> <notes>           — log an interaction"
     echo "amux crm followups                      — show upcoming follow-ups"
     echo "amux crm list                           — list all contacts"
+    echo "amux threads reply <M-N> \"<body>\"      — reply to a message in a thread"
+    echo "amux threads reply --partial <M-N> \"<body>\" — start a streaming reply; prints new M-id"
+    echo "amux threads finalize <M-N> \"<body>\"   — finalize a streaming reply"
+    echo "amux threads new <session> <title> [body] — start a new thread with an agent"
+    echo "amux threads show <T-N>                 — show a thread with all messages"
+    echo "amux threads list                       — list active threads"
+    echo "amux threads flag|unflag <M-N>          — flag/unflag a message"
+    echo "amux threads read <M-N>                 — mark a message read"
     echo "amux sessions                           — list sessions"
     echo "amux restart <session>                  — stop and restart a session"
     echo "amux share <session> [perms]            — create a public share link (perms: output, output+files, output+files+notes)"
@@ -35574,38 +35672,20 @@ class CCHandler(BaseHTTPRequestHandler):
                     )
                     return
                 preamble = (
-                    f"New message in thread **{tid}** — _{title}_ — from {sender}.\n\n"
-                    f"**{mid}**: {mbody}\n\n"
-                    f"---\n"
-                    f"Reply to this specific message. **The X-Amux-Session header is\n"
-                    f"required** — without it your reply gets recorded as coming from\n"
-                    f"Jeremy and the thread state won't update.\n\n"
-                    f"    curl -sk -X POST -H 'Content-Type: application/json' \\\n"
-                    f"      -H \"X-Amux-Session: $AMUX_SESSION\" \\\n"
-                    f"      -d '{{\"body\":\"...\", \"parent_id\":\"{mid}\"}}' \\\n"
-                    f"      $AMUX_URL/api/threads/{tid}/messages\n\n"
-                    f"To signal 'working on it' before your final reply, POST with\n"
-                    f"`partial: true` then PATCH the returned M-id with the finished\n"
-                    f"body (partial omitted or false) when done:\n\n"
-                    f"    # 1) claim it as in-flight\n"
-                    f"    MID=$(curl -sk -X POST -H 'Content-Type: application/json' \\\n"
-                    f"      -H \"X-Amux-Session: $AMUX_SESSION\" \\\n"
-                    f"      -d '{{\"body\":\"\",\"parent_id\":\"{mid}\",\"partial\":true}}' \\\n"
-                    f"      $AMUX_URL/api/threads/{tid}/messages | jq -r .id)\n"
-                    f"    # 2) finalize\n"
-                    f"    curl -sk -X PATCH -H 'Content-Type: application/json' \\\n"
-                    f"      -d '{{\"body\":\"...final answer...\"}}' \\\n"
-                    f"      $AMUX_URL/api/messages/$MID\n"
+                    f"Message from **{sender}** in thread **{tid}** — _{title}_\n\n"
+                    f"> {mbody}\n\n"
+                    f"Reply with the `amux` CLI:\n\n"
+                    f"    amux threads reply {mid} \"<your reply>\"\n\n"
+                    f"For a longer/streaming answer:\n\n"
+                    f"    MID=$(amux threads reply --partial {mid} \"working on it...\")\n"
+                    f"    # ...do the work...\n"
+                    f"    amux threads finalize $MID \"<final answer>\"\n"
                 )
                 if blocking:
                     try:
                         send_text(recipient,
                                   f"[{tid}/{mid}] {sender}: {title}\n\n{mbody}\n\n"
-                                  f"Reply via:\n"
-                                  f"  curl -sk -X POST -H 'Content-Type: application/json' \\\n"
-                                  f"    -H \"X-Amux-Session: $AMUX_SESSION\" \\\n"
-                                  f"    -d '{{\"body\":\"...\",\"parent_id\":\"{mid}\"}}' \\\n"
-                                  f"    $AMUX_URL/api/threads/{tid}/messages")
+                                  f"Reply: amux threads reply {mid} \"...\"")
                     except Exception as _e:
                         slog(f"[threads] {mid}: send_text failed: {_e}")
                 else:
