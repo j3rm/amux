@@ -7262,6 +7262,53 @@ curl -sk -X PATCH -H 'Content-Type: application/json' \\
   $AMUX_URL/api/board/TASK-ID
 ```
 
+### Threads — conversations with Jeremy or between agents
+
+Threads replaced the old Questions/Inbox module in July 2026. A **thread** is
+a conversation; a **message** is one entry inside it. Every message can be
+replied to individually — `parent_id` points at the specific message.
+
+**Use the `amux threads` CLI** rather than raw curl — it fills in the
+X-Amux-Session header automatically so message direction stays correct.
+
+```bash
+# Reply to a specific message. The CLI resolves the parent's thread for you.
+amux threads reply M-42 "here's the answer..."
+
+# Streaming (long answer): start partial, do work, finalize.
+MID=$(amux threads reply --partial M-42 "working on it...")
+# ...do the work...
+amux threads finalize $MID "final answer"
+
+# Start a new thread (e.g. escalate a question to Jeremy or another agent)
+amux threads new Jeremy "Deploy blocked" "Migration script hit an ERROR on step 3..."
+
+# List / show / flag / read
+amux threads list
+amux threads show T-12
+amux threads flag M-42       # bookmark actionable content
+amux threads read M-42       # mark a message read
+```
+
+**Direction rules:**
+- If `AMUX_SESSION` is set (any agent session), the CLI puts your name in
+  `X-Amux-Session` and the message is recorded as coming from you.
+- Without that header, the server treats the sender as Jeremy — so agents
+  MUST use the `amux` CLI (or set the header explicitly), not raw curl.
+
+When Jeremy sends you a message via Threads, you'll get a board task with
+title `Thread T-N: <thread title>` and a `desc` containing the `amux threads
+reply` command pre-filled with the parent message ID. Just paste + fill in
+your answer.
+
+**When to use Threads vs. board vs. notes vs. channels:**
+- **Threads** — back-and-forth conversation with Jeremy or another agent
+  where you expect replies. Every message can be flagged, read, replied to.
+- **Board** — discrete tasks and results. Not conversation. Mark done when
+  finished.
+- **Notes** — reference documents, research, write-ups meant to be read.
+- **Channels** — persistent two-way threads between two agent sessions.
+
 ### Notes vs board issues — when to use each
 
 **Use notes** (`/api/notes`) for: documents, write-ups, research, drafts, reference material, anything meant to be *read* by a human.
