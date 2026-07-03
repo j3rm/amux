@@ -41410,7 +41410,81 @@ def _board_watcher_clear_nudged():
         pass
 
 
-# ── Inbox stale-working reaper ─────────────────────────────────────────
+# ── Threads stale-working reaper ───────────────────────────────────────
+#
+# When an agent POSTs a partial reply (`partial: true`), the message sits at
+# status='working' until they PATCH it with the final body. Sometimes agents
+# forget — they got interrupted, hit context limits, or crashed mid-write.
+# Every 5 min this job scans for messages that have been 'working' for >15 min
+# and pings the SENDER via a board task with the 3-branch script so they
+# either flip to complete, keep working (reset timer), or discard.
+#
+# 30-min dedup per message so we don't spam the same agent every cycle.
+# Successor to the deleted _inbox_stale_working_reaper (July 2026).
+_threads_reaper_last: dict[str, int] = {}
+_THREADS_WORKING_THRESHOLD_SECS = 15 * 60
+_THREADS_REAPER_NUDGE_GAP_SECS  = 30 * 60
+
+
+def _threads_stale_working_reaper():
+    try:
+        db = get_db()
+        now = int(time.time())
+        rows = db.execute(
+            "SELECT m.id AS mid, m.thread_id AS tid, m.from_session, m.to_session, "
+            "       m.updated, t.title "
+            "  FROM messages m JOIN threads t ON t.id = m.thread_id "
+            " WHERE m.status = 'working' "
+            "   AND m.from_session IS NOT NULL AND m.from_session != '' "
+            "   AND m.updated < ? "
+            "   AND t.discarded = 0",
+            (now - _THREADS_WORKING_THRESHOLD_SECS,),
+        ).fetchall()
+        for r in rows:
+            mid = r["mid"]
+            last = _threads_reaper_last.get(mid, 0)
+            if now - last < _THREADS_REAPER_NUDGE_GAP_SECS:
+                continue
+            _threads_reaper_last[mid] = now
+            agent = r["from_session"]
+            tid = r["tid"]
+            age_min = (now - int(r["updated"])) // 60
+            title = f"Stale working message {mid} — {(r['title'] or '')[:60]}"
+            desc = (
+                f"Your message **{mid}** in thread **{tid}** (_{r['title']}_) has been "
+                f"in `working` state for **{age_min} min** with no follow-up PATCH.\n\n"
+                f"Pick whichever branch matches reality — the CLI does the work:\n\n"
+                f"1. **Still actively computing** — reset the timer by PATCHing partial again:\n\n"
+                f"       amux threads reply --partial <parent_mid> \"still on it — <what you're doing>\"\n\n"
+                f"   (Or if you meant to update {mid} itself: `curl -sk -X PATCH "
+                f"-H 'Content-Type: application/json' -d '{{\"body\":\"<current text>\","
+                f"\"partial\":true}}' $AMUX_URL/api/messages/{mid}`.)\n\n"
+                f"2. **Done — here's the final answer:**\n\n"
+                f"       amux threads finalize {mid} \"<final content>\"\n\n"
+                f"3. **Discard — I don't need this any more:**\n\n"
+                f"       curl -sk -X DELETE $AMUX_URL/api/messages/{mid}\n\n"
+                f"Convention: `working` means you're actively computing and will PATCH "
+                f"again soon. Stuck-working is a bug on the sender's side, not the reader's."
+            )
+            board_id = _next_issue_id(_prefix_from_session(agent))
+            try:
+                db.execute(
+                    "INSERT INTO issues (id, title, desc, status, session, "
+                    "  creator, created, updated, owner_type) "
+                    "VALUES (?, ?, ?, 'todo', ?, 'threads-reaper', ?, ?, 'agent')",
+                    (board_id, title, desc, agent, now, now),
+                )
+                db.commit()
+                _board_changed()
+                try:
+                    _notify_session_of_task(agent, board_id, title)
+                except Exception:
+                    pass
+                slog(f"[threads-reaper] nudged {agent} about stale {mid} ({age_min}m)")
+            except Exception as e:
+                slog(f"[threads-reaper] {mid}: board insert failed: {e}")
+    except Exception as e:
+        slog(f"[threads-reaper] error: {e}")
 
 
 def _cleanup_tmp():
@@ -42199,6 +42273,7 @@ def main():
     schedule_job(_board_watcher_clear_nudged, interval=60,             name="board_watcher_gc", initial_delay=60)
     schedule_job(_evict_stale_caches,    interval=300,                  name="cache_evict", initial_delay=60)
     schedule_job(_cleanup_tmp,           interval=1800,                 name="tmp_cleanup", initial_delay=60)
+    schedule_job(_threads_stale_working_reaper, interval=300,           name="threads_stale_working", initial_delay=120)
     schedule_job(_auto_archive_idle,     interval=3600,                 name="auto_archive", initial_delay=300)
     schedule_job(_enforce_archived_stopped, interval=600,                name="archive_enforce", initial_delay=30)
     schedule_job(_cleanup_old_transcripts, interval=86400,              name="transcript_cleanup", initial_delay=600)
