@@ -25570,10 +25570,21 @@ function _tStateTint(state) {
   return {pill:'#666', bg:'transparent', border:'var(--border)', label:'SETTLED'};
 }
 function _tMsgStateBadge(m) {
-  if (m.status === 'working')  return {text: 'writing', color: '#4a4'};
+  // Badge is from Jeremy's perspective:
+  //   working    → sender still writing (green)
+  //   discarded  → dropped (grey)
+  //   unread     → complete message TO Jeremy that he hasn't opened (red)
+  //   read       → complete message TO Jeremy that he already opened (steel)
+  //   sent       → complete message Jeremy sent to an agent (blue)
+  //   delivered  → complete message between two agents (rare) (grey)
+  if (m.status === 'working')   return {text: 'writing',   color: '#4a4'};
   if (m.status === 'discarded') return {text: 'discarded', color: '#666'};
-  if (!m.to_session && !m.read) return {text: 'unread', color: '#e11'}; // to Jeremy, awaiting his read
-  return {text: 'read', color: '#456'};
+  if (!m.to_session) {
+    // to Jeremy
+    return m.read ? {text: 'read', color: '#456'} : {text: 'unread', color: '#e11'};
+  }
+  if (!m.from_session) return {text: 'sent', color: '#468'};   // from Jeremy → agent
+  return {text: 'delivered', color: '#666'};                    // agent → agent
 }
 function _tMsgDir(m) {
   // Human-readable "who → who" for a message header.
@@ -25676,7 +25687,7 @@ function _tRenderMsg(t, m) {
   const midEsc = _tEsc(m.id);
   const tidEsc = _tEsc(t.id);
   // Auto-collapse messages already read (or that Jeremy sent — no action needed).
-  const collapsedByDefault = (m.status === 'complete' && (!!m.read || !!m.from_session === false));
+  const collapsedByDefault = (m.status === 'complete' && (!!m.read || !m.from_session));
   const expanded = _tMsgExpanded.has(m.id) ? true
                   : _tMsgExpanded.has('!' + m.id) ? false
                   : !collapsedByDefault;
