@@ -7268,6 +7268,25 @@ Threads replaced the old Questions/Inbox module in July 2026. A **thread** is
 a conversation; a **message** is one entry inside it. Every message can be
 replied to individually — `parent_id` points at the specific message.
 
+**How to route questions and updates for Jeremy — this is the main rule:**
+
+1. **Any question for Jeremy goes into Threads.** Not a board task, not
+   `/send`, not a channel — Threads. That's where he sees his inbox and
+   responds. Board tasks are for discrete work items; Threads are for
+   conversation and questions where you expect a reply.
+2. **Reuse an existing thread if the question relates to one.** Before
+   starting a new thread, run `amux threads list` and check whether Jeremy
+   already has an open thread with you on the same topic. If yes, reply
+   into that thread with `amux threads reply <M-id>` so context stays
+   together. Reserve new threads for genuinely unrelated topics.
+3. **Start a new thread only when the topic is new.** e.g. a fresh
+   escalation, a deploy blocker, a status/decision request on something not
+   already in flight.
+4. **Flag any incoming message that contains something you need to run
+   later** (a SQL statement, a command, a file path) with
+   `amux threads flag <M-id>` — Jeremy uses the Flagged summary at the top
+   of the Threads UI, so flagging makes actionable content easy to find.
+
 **Use the `amux threads` CLI** rather than raw curl — it fills in the
 X-Amux-Session header automatically so message direction stays correct.
 
