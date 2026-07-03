@@ -36236,6 +36236,307 @@ class CCHandler(BaseHTTPRequestHandler):
                     return self._json({"ok": True, "id": qid})
             return self._json({"error": "method not allowed"}, 405)
 
+        # Threads + Messages API — the successor to /api/questions.
+        #
+        # Threads model conversations as (thread, [messages]) instead of the
+        # questions-with-embedded-answer shape. Every entry is its own message;
+        # `parent_id` on a message points at the specific message it replies to.
+        # A thread's overall state (needs-you / with-agent / closed) is derived
+        # by the client from the newest message's direction and read flag.
+        #
+        # Sender is `from_session` (or X-Amux-Session header); recipient is
+        # `to_session`. Exactly one side is empty — the empty side is Jeremy.
+        #
+        # POST /api/threads              — create a thread + first message
+        # GET  /api/threads              — list all live threads with embedded messages
+        # GET  /api/threads/T-N          — one thread with embedded messages
+        # PATCH /api/threads/T-N         — star, edit title, or discard
+        # POST /api/threads/T-N/messages — append a message (Reply)
+        # GET  /api/messages/M-N         — one message
+        # PATCH /api/messages/M-N        — mark read, update body (streaming), discard
+        #
+        # Phase 1 supports text messages only; choice/set support (AskUserQuestion
+        # style) is retained in the schema for a follow-on phase.
+        if (path == "/api/threads" or path.startswith("/api/threads/")
+                or path == "/api/messages" or path.startswith("/api/messages/")):
+            db = get_db()
+
+            def _thread_to_dict(t_row, msgs=None):
+                d = dict(t_row)
+                if msgs is None:
+                    msgs = db.execute(
+                        "SELECT * FROM messages WHERE thread_id = ? "
+                        "ORDER BY position, created", (d["id"],)
+                    ).fetchall()
+                d["messages"] = [dict(m) for m in msgs]
+                return d
+
+            def _other_party(tid, sender):
+                # The 'other' participant in a thread — used to default to_session
+                # when an agent replies without specifying it. Derived from the
+                # root message: if sender is that root's from_session, other is
+                # its to_session; otherwise other is the root's from_session.
+                root = db.execute(
+                    "SELECT from_session, to_session FROM messages "
+                    "WHERE thread_id = ? ORDER BY position, created LIMIT 1",
+                    (tid,)
+                ).fetchone()
+                if not root:
+                    return ""
+                return root["to_session"] if sender == root["from_session"] else root["from_session"]
+
+            def _deliver(thread_row, msg_row):
+                # Route a newly-complete message to its recipient. Recipient == ''
+                # → Jeremy; pushover him. Recipient == agent → send_text if
+                # blocking (interrupts mid-task), else drop a board issue so the
+                # agent picks it up on next turn.
+                tid = thread_row["id"]
+                mid = msg_row["id"]
+                title = thread_row["title"]
+                mbody = msg_row["body"] or "(no body)"
+                blocking = msg_row["blocking"]
+                recipient = msg_row["to_session"]
+                sender = msg_row["from_session"] or "Jeremy"
+                if not recipient:
+                    _send_pushover(
+                        f"Thread reply from {sender}",
+                        f"{tid}: {title[:200]}",
+                        priority=1 if blocking else 0,
+                    )
+                    return
+                preamble = (
+                    f"New message in thread **{tid}** — _{title}_ — from {sender}.\n\n"
+                    f"**{mid}**: {mbody}\n\n"
+                    f"---\n"
+                    f"Reply to this specific message:\n\n"
+                    f"    curl -sk -X POST -H 'Content-Type: application/json' \\\n"
+                    f"      -d '{{\"body\":\"...\", \"parent_id\":\"{mid}\"}}' \\\n"
+                    f"      $AMUX_URL/api/threads/{tid}/messages\n"
+                )
+                if blocking:
+                    try:
+                        send_text(recipient,
+                                  f"[{tid}/{mid}] {sender}: {title}\n\n{mbody}\n\n"
+                                  f"Reply via POST $AMUX_URL/api/threads/{tid}/messages "
+                                  f"with parent_id={mid}.")
+                    except Exception as _e:
+                        slog(f"[threads] {mid}: send_text failed: {_e}")
+                else:
+                    board_id = _next_issue_id(_prefix_from_session(recipient))
+                    now_t = int(time.time())
+                    db.execute(
+                        "INSERT INTO issues (id, title, desc, status, session, creator, "
+                        "  created, updated, owner_type) "
+                        "VALUES (?, ?, ?, 'todo', ?, 'threads', ?, ?, 'agent')",
+                        (board_id, f"Thread {tid}: {title[:80]}", preamble,
+                         recipient, now_t, now_t),
+                    )
+                    db.commit()
+                    _board_changed()
+                    try:
+                        _notify_session_of_task(recipient, board_id,
+                                                f"Thread {tid}: {title[:80]}")
+                    except Exception:
+                        pass
+
+            # ── GET /api/threads — list live threads with embedded messages ─
+            if method == "GET" and path == "/api/threads":
+                rows = db.execute(
+                    "SELECT * FROM threads WHERE discarded = 0 "
+                    "ORDER BY starred DESC, updated DESC"
+                ).fetchall()
+                all_msgs = db.execute(
+                    "SELECT m.* FROM messages m "
+                    "JOIN threads t ON t.id = m.thread_id "
+                    "WHERE t.discarded = 0 "
+                    "ORDER BY m.thread_id, m.position, m.created"
+                ).fetchall()
+                by_thread: dict = {}
+                for m in all_msgs:
+                    by_thread.setdefault(m["thread_id"], []).append(m)
+                return self._json([_thread_to_dict(r, by_thread.get(r["id"], []))
+                                   for r in rows])
+
+            # ── POST /api/threads — create thread + first message ───────────
+            if method == "POST" and path == "/api/threads":
+                bj = self._read_body()
+                title = (bj.get("title") or "").strip()
+                if not title:
+                    return self._json({"error": "title required"}, 400)
+                mbody = (bj.get("body") or "").strip()
+                from_session = (bj.get("from_session")
+                                or self.headers.get("X-Amux-Session")
+                                or "").strip()
+                to_session = (bj.get("to_session") or "").strip()
+                if not from_session and not to_session:
+                    return self._json({"error": "must specify either from_session (agent posting) or to_session (Jeremy posting)"}, 400)
+                if from_session and to_session:
+                    return self._json({"error": "exactly one of from_session/to_session must be empty (the empty side is Jeremy)"}, 400)
+                blocking = 1 if bj.get("blocking") else 0
+                now = int(time.time())
+                tid = _next_issue_id("T")
+                mid = _next_issue_id("M")
+                db.execute(
+                    "INSERT INTO threads (id, title, starred, created, updated) "
+                    "VALUES (?, ?, 0, ?, ?)",
+                    (tid, title, now, now),
+                )
+                db.execute(
+                    "INSERT INTO messages (id, thread_id, parent_id, from_session, "
+                    "  to_session, body, blocking, status, position, created, updated) "
+                    "VALUES (?, ?, '', ?, ?, ?, ?, 'complete', 0, ?, ?)",
+                    (mid, tid, from_session, to_session, mbody, blocking, now, now),
+                )
+                db.commit()
+                thread_row = db.execute("SELECT * FROM threads WHERE id = ?", (tid,)).fetchone()
+                msg_row = db.execute("SELECT * FROM messages WHERE id = ?", (mid,)).fetchone()
+                _deliver(thread_row, msg_row)
+                return self._json(_thread_to_dict(thread_row, [msg_row]), 201)
+
+            # ── /api/threads/T-N and its sub-routes ─────────────────────────
+            m_thread = re.match(r"^/api/threads/([A-Za-z0-9-]+)$", path)
+            if m_thread:
+                tid = m_thread.group(1)
+                thread_row = db.execute("SELECT * FROM threads WHERE id = ?", (tid,)).fetchone()
+                if not thread_row:
+                    return self._json({"error": "not found"}, 404)
+                if method == "GET":
+                    return self._json(_thread_to_dict(thread_row))
+                if method == "PATCH":
+                    bj = self._read_body()
+                    now = int(time.time())
+                    if "starred" in bj:
+                        db.execute("UPDATE threads SET starred = ?, updated = ? WHERE id = ?",
+                                   (1 if bj["starred"] else 0, now, tid))
+                    if "title" in bj:
+                        new_t = (bj["title"] or "").strip()
+                        if new_t:
+                            db.execute("UPDATE threads SET title = ?, updated = ? WHERE id = ?",
+                                       (new_t, now, tid))
+                    if bj.get("discarded"):
+                        db.execute("UPDATE threads SET discarded = 1, updated = ? WHERE id = ?",
+                                   (now, tid))
+                    db.commit()
+                    thread_row = db.execute("SELECT * FROM threads WHERE id = ?", (tid,)).fetchone()
+                    return self._json(_thread_to_dict(thread_row))
+                if method == "DELETE":
+                    db.execute("UPDATE threads SET discarded = 1, updated = ? WHERE id = ?",
+                               (int(time.time()), tid))
+                    db.commit()
+                    return self._json({"ok": True, "id": tid})
+                return self._json({"error": "method not allowed"}, 405)
+
+            # ── POST /api/threads/T-N/messages — append a Reply ─────────────
+            m_msgs = re.match(r"^/api/threads/([A-Za-z0-9-]+)/messages$", path)
+            if m_msgs and method == "POST":
+                tid = m_msgs.group(1)
+                thread_row = db.execute("SELECT * FROM threads WHERE id = ?", (tid,)).fetchone()
+                if not thread_row:
+                    return self._json({"error": "thread not found"}, 404)
+                bj = self._read_body()
+                mbody = (bj.get("body") or "").strip()
+                if not mbody:
+                    return self._json({"error": "body required"}, 400)
+                from_session = (bj.get("from_session")
+                                or self.headers.get("X-Amux-Session")
+                                or "").strip()
+                # Default to_session = the other participant in the thread.
+                to_session = bj.get("to_session")
+                if to_session is None:
+                    to_session = _other_party(tid, from_session)
+                to_session = (to_session or "").strip()
+                parent_id = (bj.get("parent_id") or "").strip()
+                if parent_id:
+                    p = db.execute(
+                        "SELECT thread_id FROM messages WHERE id = ?", (parent_id,)
+                    ).fetchone()
+                    if not p:
+                        return self._json({"error": f"parent_id {parent_id} not found"}, 404)
+                    if p["thread_id"] != tid:
+                        return self._json({"error": f"parent_id {parent_id} belongs to a different thread"}, 400)
+                blocking = 1 if bj.get("blocking") else 0
+                partial = bool(bj.get("partial"))
+                new_status = "working" if partial else "complete"
+                now = int(time.time())
+                pos_row = db.execute(
+                    "SELECT COALESCE(MAX(position), -1) + 1 AS next_pos FROM messages "
+                    "WHERE thread_id = ?", (tid,)
+                ).fetchone()
+                pos = pos_row["next_pos"]
+                mid = _next_issue_id("M")
+                db.execute(
+                    "INSERT INTO messages (id, thread_id, parent_id, from_session, "
+                    "  to_session, body, blocking, status, position, created, updated) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    (mid, tid, parent_id, from_session, to_session, mbody,
+                     blocking, new_status, pos, now, now),
+                )
+                db.execute("UPDATE threads SET updated = ? WHERE id = ?", (now, tid))
+                db.commit()
+                msg_row = db.execute("SELECT * FROM messages WHERE id = ?", (mid,)).fetchone()
+                # Only 'complete' messages get delivered — 'working' means the
+                # sender is still writing; deliver on the flip in PATCH.
+                if new_status == "complete":
+                    _deliver(thread_row, msg_row)
+                return self._json(dict(msg_row), 201)
+
+            # ── /api/messages/M-N ───────────────────────────────────────────
+            m_msg = re.match(r"^/api/messages/([A-Za-z0-9-]+)$", path)
+            if m_msg:
+                mid = m_msg.group(1)
+                msg_row = db.execute("SELECT * FROM messages WHERE id = ?", (mid,)).fetchone()
+                if not msg_row:
+                    return self._json({"error": "not found"}, 404)
+                if method == "GET":
+                    return self._json(dict(msg_row))
+                if method == "PATCH":
+                    bj = self._read_body()
+                    now = int(time.time())
+                    delivered = False
+                    if "read" in bj:
+                        db.execute("UPDATE messages SET read = ?, updated = ? WHERE id = ?",
+                                   (1 if bj["read"] else 0, now, mid))
+                    if "body" in bj:
+                        # Streaming update path. partial=true keeps status='working';
+                        # omitting partial (or false) flips to 'complete' and triggers
+                        # delivery to the recipient exactly once.
+                        new_body = bj["body"]
+                        partial = bool(bj.get("partial"))
+                        was_working = (msg_row["status"] == "working")
+                        new_status = "working" if partial else "complete"
+                        db.execute(
+                            "UPDATE messages SET body = ?, status = ?, updated = ? "
+                            "WHERE id = ?", (new_body, new_status, now, mid),
+                        )
+                        db.execute("UPDATE threads SET updated = ? WHERE id = ?",
+                                   (now, msg_row["thread_id"]))
+                        if was_working and new_status == "complete":
+                            thread_row = db.execute(
+                                "SELECT * FROM threads WHERE id = ?",
+                                (msg_row["thread_id"],)
+                            ).fetchone()
+                            db.commit()
+                            fresh = db.execute(
+                                "SELECT * FROM messages WHERE id = ?", (mid,)
+                            ).fetchone()
+                            _deliver(thread_row, fresh)
+                            delivered = True
+                    if bj.get("discarded"):
+                        db.execute("UPDATE messages SET status = 'discarded', updated = ? "
+                                   "WHERE id = ?", (now, mid))
+                    if not delivered:
+                        db.commit()
+                    msg_row = db.execute("SELECT * FROM messages WHERE id = ?", (mid,)).fetchone()
+                    return self._json(dict(msg_row))
+                if method == "DELETE":
+                    db.execute("UPDATE messages SET status = 'discarded', updated = ? "
+                               "WHERE id = ?", (int(time.time()), mid))
+                    db.commit()
+                    return self._json({"ok": True, "id": mid})
+                return self._json({"error": "method not allowed"}, 405)
+
+            return self._json({"error": "method not allowed"}, 405)
+
         # Notifications API (/api/notifications)
         if path == "/api/notifications":
             def _notif_load():
