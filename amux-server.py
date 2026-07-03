@@ -28517,13 +28517,27 @@ async function _runDeltaSync() {
 setTimeout(_runDeltaSync, 2500);
 _applyTabVisibility();
 (function() {
+  // The tab bar sticks below the header row. Its `top` must equal where the
+  // sticky header ends: safe-area-inset-top + header height. Using only
+  // header.offsetHeight (as before) hid the tab bar behind the header on iOS
+  // because it ignored the notch. Body padding-top already resolves to
+  // env(safe-area-inset-top) at rest, so use that.
   function _syncTabTop() {
     const h = document.querySelector('.header-row');
     const t = document.querySelector('.tab-bar-outer');
-    if (h && t) t.style.top = h.offsetHeight + 'px';
+    if (!h || !t) return;
+    const bodyPadTop = parseInt(getComputedStyle(document.body).paddingTop) || 0;
+    const top = bodyPadTop + h.offsetHeight;
+    t.style.top = top + 'px';
+    document.documentElement.style.setProperty('--sticky-nav-top', top + 'px');
   }
   _syncTabTop();
   window.addEventListener('resize', _syncTabTop);
+  window.addEventListener('load', _syncTabTop);
+  // Re-run after fonts/images settle — header height can change once web
+  // fonts load, and sticky offsets need to match the final layout.
+  setTimeout(_syncTabTop, 300);
+  setTimeout(_syncTabTop, 1500);
 })();
 
 // ═══════ SSE — real-time push updates ═══════
