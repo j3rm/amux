@@ -3331,6 +3331,7 @@ CREATE TABLE IF NOT EXISTS messages (
     multi_select  INTEGER NOT NULL DEFAULT 0,
     position      INTEGER NOT NULL DEFAULT 0,
     set_id        TEXT NOT NULL DEFAULT '',
+    flagged       INTEGER NOT NULL DEFAULT 0,
     created       INTEGER NOT NULL,
     updated       INTEGER NOT NULL
 );
@@ -4013,6 +4014,10 @@ def _init_db():
         "ALTER TABLE issues ADD COLUMN notified INTEGER NOT NULL DEFAULT 0",
         "ALTER TABLE schedules ADD COLUMN kind TEXT NOT NULL DEFAULT 'tmux'",
         "ALTER TABLE schedules ADD COLUMN notify INTEGER NOT NULL DEFAULT 1",
+        # Threads/messages: per-message flag so Jeremy can bookmark actionable
+        # content (SQL to run, commands, etc.) and find it fast without
+        # having to remember which thread it was in.
+        "ALTER TABLE messages ADD COLUMN flagged INTEGER NOT NULL DEFAULT 0",
     ]:
         try:
             db.execute(migration)
@@ -13489,6 +13494,10 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
 </style>
 </head>
 <body>
+<!-- Safe-area notch cover: iOS Safari lets scrolled body content peek into the
+     region above the sticky nav (behind the notch/status bar). This fixed
+     overlay paints over that region so nothing bleeds through. -->
+<div aria-hidden="true" style="position:fixed;top:0;left:0;right:0;height:env(safe-area-inset-top);background:var(--bg,#0d1117);z-index:9999;pointer-events:none;"></div>
 <div id="js-fallback" style="position:fixed;inset:0;display:flex;align-items:center;justify-content:center;flex-direction:column;gap:16px;z-index:99999;background:var(--bg,#0d1117);color:#8b949e;font-family:-apple-system,system-ui,sans-serif;">
   <div style="font-size:1.1rem;">Loading amux...</div>
   <div id="js-fallback-retry" style="display:none;text-align:center;">
@@ -24704,6 +24713,9 @@ let _threadsLastSig = '';
 // Icons — inline SVG (matches Notes-toolbar style, no external assets).
 const _TICON_REPLY = '<svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="9 17 4 12 9 7"/><path d="M20 18v-2a4 4 0 0 0-4-4H4"/></svg>';
 const _TICON_CHECK = '<svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>';
+// Bookmark flag — filled when flagged, outline when not.
+const _TICON_FLAG_OFF = '<svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M19 21l-7-5-7 5V5a2 2 0 0 1 2-2h10a2 2 0 0 1 2 2z"/></svg>';
+const _TICON_FLAG_ON  = '<svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="#f0c02a" stroke="#f0c02a" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M19 21l-7-5-7 5V5a2 2 0 0 1 2-2h10a2 2 0 0 1 2 2z"/></svg>';
 const _TICON_TRASH = '<svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/><path d="M10 11v6M14 11v6"/><path d="M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg>';
 // Small icon button — subtle, ~24px hit target, hover tint.
 const _TICON_BTN_STYLE = 'background:transparent;border:1px solid var(--border);color:var(--muted);padding:3px 6px;border-radius:4px;cursor:pointer;display:inline-flex;align-items:center;line-height:1;';
@@ -24743,7 +24755,7 @@ function _tFmtTime(ts) {
 // Signature — cheap change detector; re-render only when content changes.
 function _threadsSig(list) {
   return list.map(t => t.id + ':' + t.starred + ':' + t.updated + ':' + t.messages.length +
-    ':' + t.messages.map(m => m.id + ',' + m.status + ',' + m.read + ',' + (m.body || '').length + ',' + m.updated).join('|')
+    ':' + t.messages.map(m => m.id + ',' + m.status + ',' + m.read + ',' + (m.flagged || 0) + ',' + (m.body || '').length + ',' + m.updated).join('|')
   ).join('~');
 }
 // Thread state — computed from newest complete message and any working ones.
@@ -24887,16 +24899,22 @@ function _tRenderMsg(t, m) {
   const canMarkRead = m.status === 'complete' && !m.to_session && !m.read;
   const midEsc = _tEsc(m.id);
   const tidEsc = _tEsc(t.id);
-  // Default: expand only unread-to-Jeremy complete messages. Working messages
-  // also stay expanded so partial content is visible. Everything else collapses.
+  // Default: expand only unread-to-Jeremy complete messages, still-writing
+  // messages, and flagged messages (they're actionable — Jeremy wants them
+  // visible when he opens the thread). Everything else collapses.
   const isUnreadToMe = (m.status === 'complete' && !m.to_session && !m.read);
   const isWorking = (m.status === 'working');
-  const expandByDefault = isUnreadToMe || isWorking;
+  const expandByDefault = isUnreadToMe || isWorking || !!m.flagged;
   const expanded = _tMsgExpanded.has(m.id) ? true
                   : _tMsgExpanded.has('!' + m.id) ? false
                   : expandByDefault;
   const chev = expanded ? '▾' : '▸';
-  let html = `<div style="margin:0 0 10px 0;border:1px solid var(--border);border-radius:6px;">
+  const flagged = !!m.flagged;
+  // Flagged messages get a gold border + faint gold background so they jump
+  // out in a long thread. The flag icon in the header row toggles state.
+  const cardBorder = flagged ? '#f0c02a' : 'var(--border)';
+  const cardBg     = flagged ? 'rgba(240,192,42,0.06)' : 'transparent';
+  let html = `<div style="margin:0 0 10px 0;border:1px solid ${cardBorder};background:${cardBg};border-radius:6px;">
     <div style="display:flex;align-items:center;gap:8px;padding:6px 10px;cursor:pointer;font-size:0.75rem;color:var(--muted);flex-wrap:wrap;" onclick="_tMsgToggle('${midEsc}', ${expanded})">
       <span style="width:12px;color:var(--muted);">${chev}</span>
       <span style="background:${st.color};color:#fff;padding:1px 6px;border-radius:3px;font-weight:600;text-transform:uppercase;letter-spacing:0.03em;">${st.text}</span>
@@ -24904,6 +24922,7 @@ function _tRenderMsg(t, m) {
       <span>${_tEsc(dir.label)}</span>
       <span style="flex:1;min-width:0;"></span>
       <span>${_tFmtTime(m.updated || m.created)}</span>
+      <button style="${_TICON_BTN_STYLE}" onclick="event.stopPropagation();_tFlagToggle('${midEsc}', ${flagged ? 'false' : 'true'})" title="${flagged ? 'Unflag' : 'Flag this message'}">${flagged ? _TICON_FLAG_ON : _TICON_FLAG_OFF}</button>
       ${canMarkRead ? `<button style="${_TICON_BTN_STYLE}" onclick="event.stopPropagation();_tMarkRead('${midEsc}')" title="Mark read">${_TICON_CHECK}</button>` : ''}
       <button style="${_TICON_BTN_STYLE}" onclick="event.stopPropagation();_tReplyTo('${tidEsc}','${midEsc}')" title="Reply to this message">${_TICON_REPLY}</button>
     </div>`;
@@ -24932,6 +24951,13 @@ async function _tMarkRead(mid) {
   await fetch(API + '/api/messages/' + encodeURIComponent(mid), {
     method: 'PATCH', headers: {'Content-Type': 'application/json'},
     body: JSON.stringify({read: true}),
+  });
+  _threadsLoad();
+}
+async function _tFlagToggle(mid, flagged) {
+  await fetch(API + '/api/messages/' + encodeURIComponent(mid), {
+    method: 'PATCH', headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({flagged: !!flagged}),
   });
   _threadsLoad();
 }
@@ -35752,6 +35778,11 @@ class CCHandler(BaseHTTPRequestHandler):
                     if "read" in bj:
                         db.execute("UPDATE messages SET read = ?, updated = ? WHERE id = ?",
                                    (1 if bj["read"] else 0, now, mid))
+                    if "flagged" in bj:
+                        # Per-message bookmark for Jeremy. Doesn't touch `read`
+                        # or `status`; a message can be flagged in any state.
+                        db.execute("UPDATE messages SET flagged = ?, updated = ? WHERE id = ?",
+                                   (1 if bj["flagged"] else 0, now, mid))
                     if "body" in bj:
                         # Streaming update path. partial=true keeps status='working';
                         # omitting partial (or false) flips to 'complete' and triggers
