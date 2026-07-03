@@ -25527,13 +25527,17 @@ let _tExpanded = new Set(JSON.parse(localStorage.getItem('amux.tExpanded') || '[
 function _tExpandedSave() {
   try { localStorage.setItem('amux.tExpanded', JSON.stringify([..._tExpanded])); } catch(e) {}
 }
-// Per-message collapse state — a settled message auto-collapses after read,
-// like the Inbox; user can force-expand by clicking the header.
+// Per-message collapse state. Default: unread-to-Jeremy expand, everything
+// else collapses. Explicit-expand ids live in _tMsgExpanded; explicit-collapse
+// ids live with a '!' prefix so the same set carries both overrides. Toggle
+// flips from whatever's showing now, so first click on a collapsed message
+// always expands it.
 let _tMsgExpanded = new Set();
-function _tMsgToggle(mid) {
-  if (_tMsgExpanded.has(mid))       { _tMsgExpanded.delete(mid); _tMsgExpanded.add('!'+mid); }
-  else if (_tMsgExpanded.has('!'+mid)) { _tMsgExpanded.delete('!'+mid); _tMsgExpanded.add(mid); }
-  else                              { _tMsgExpanded.add('!'+mid); }
+function _tMsgToggle(mid, wasExpanded) {
+  _tMsgExpanded.delete(mid);
+  _tMsgExpanded.delete('!' + mid);
+  if (wasExpanded) _tMsgExpanded.add('!' + mid);
+  else _tMsgExpanded.add(mid);
   _threadsRender();
 }
 function _tToggle(tid) {
@@ -25673,8 +25677,8 @@ function _tRenderMessages(t) {
     <div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:10px;padding-bottom:10px;border-bottom:1px dashed var(--border);">
       <button class="btn" style="opacity:0.6;" onclick="_tDiscardThread('${tidEsc}')">Discard thread</button>
     </div>`;
-  // Oldest → newest for a conversation flow.
-  const msgs = t.messages.slice().sort((a,b) => (a.position - b.position) || (a.created - b.created));
+  // Newest at top so the message you probably want to act on is first.
+  const msgs = t.messages.slice().sort((a,b) => (b.position - a.position) || (b.created - a.created));
   for (const m of msgs) html += _tRenderMsg(t, m);
   html += '</div>';
   return html;
@@ -25686,14 +25690,17 @@ function _tRenderMsg(t, m) {
   const canMarkRead = m.status === 'complete' && !m.to_session && !m.read;
   const midEsc = _tEsc(m.id);
   const tidEsc = _tEsc(t.id);
-  // Auto-collapse messages already read (or that Jeremy sent — no action needed).
-  const collapsedByDefault = (m.status === 'complete' && (!!m.read || !m.from_session));
+  // Default: expand only unread-to-Jeremy complete messages. Working messages
+  // also stay expanded so partial content is visible. Everything else collapses.
+  const isUnreadToMe = (m.status === 'complete' && !m.to_session && !m.read);
+  const isWorking = (m.status === 'working');
+  const expandByDefault = isUnreadToMe || isWorking;
   const expanded = _tMsgExpanded.has(m.id) ? true
                   : _tMsgExpanded.has('!' + m.id) ? false
-                  : !collapsedByDefault;
+                  : expandByDefault;
   const chev = expanded ? '▾' : '▸';
   let html = `<div style="margin:0 0 10px 0;border:1px solid var(--border);border-radius:6px;">
-    <div style="display:flex;align-items:baseline;gap:8px;padding:6px 10px;cursor:pointer;font-size:0.75rem;color:var(--muted);flex-wrap:wrap;" onclick="_tMsgToggle('${midEsc}')">
+    <div style="display:flex;align-items:baseline;gap:8px;padding:6px 10px;cursor:pointer;font-size:0.75rem;color:var(--muted);flex-wrap:wrap;" onclick="_tMsgToggle('${midEsc}', ${expanded})">
       <span style="width:12px;color:var(--muted);">${chev}</span>
       <span style="background:${st.color};color:#fff;padding:1px 6px;border-radius:3px;font-weight:600;text-transform:uppercase;letter-spacing:0.03em;">${st.text}</span>
       <span style="font-weight:600;color:var(--fg);">${midEsc}</span>
@@ -36644,17 +36651,35 @@ class CCHandler(BaseHTTPRequestHandler):
                     f"New message in thread **{tid}** — _{title}_ — from {sender}.\n\n"
                     f"**{mid}**: {mbody}\n\n"
                     f"---\n"
-                    f"Reply to this specific message:\n\n"
+                    f"Reply to this specific message. **The X-Amux-Session header is\n"
+                    f"required** — without it your reply gets recorded as coming from\n"
+                    f"Jeremy and the thread state won't update.\n\n"
                     f"    curl -sk -X POST -H 'Content-Type: application/json' \\\n"
+                    f"      -H \"X-Amux-Session: $AMUX_SESSION\" \\\n"
                     f"      -d '{{\"body\":\"...\", \"parent_id\":\"{mid}\"}}' \\\n"
-                    f"      $AMUX_URL/api/threads/{tid}/messages\n"
+                    f"      $AMUX_URL/api/threads/{tid}/messages\n\n"
+                    f"To signal 'working on it' before your final reply, POST with\n"
+                    f"`partial: true` then PATCH the returned M-id with the finished\n"
+                    f"body (partial omitted or false) when done:\n\n"
+                    f"    # 1) claim it as in-flight\n"
+                    f"    MID=$(curl -sk -X POST -H 'Content-Type: application/json' \\\n"
+                    f"      -H \"X-Amux-Session: $AMUX_SESSION\" \\\n"
+                    f"      -d '{{\"body\":\"\",\"parent_id\":\"{mid}\",\"partial\":true}}' \\\n"
+                    f"      $AMUX_URL/api/threads/{tid}/messages | jq -r .id)\n"
+                    f"    # 2) finalize\n"
+                    f"    curl -sk -X PATCH -H 'Content-Type: application/json' \\\n"
+                    f"      -d '{{\"body\":\"...final answer...\"}}' \\\n"
+                    f"      $AMUX_URL/api/messages/$MID\n"
                 )
                 if blocking:
                     try:
                         send_text(recipient,
                                   f"[{tid}/{mid}] {sender}: {title}\n\n{mbody}\n\n"
-                                  f"Reply via POST $AMUX_URL/api/threads/{tid}/messages "
-                                  f"with parent_id={mid}.")
+                                  f"Reply via:\n"
+                                  f"  curl -sk -X POST -H 'Content-Type: application/json' \\\n"
+                                  f"    -H \"X-Amux-Session: $AMUX_SESSION\" \\\n"
+                                  f"    -d '{{\"body\":\"...\",\"parent_id\":\"{mid}\"}}' \\\n"
+                                  f"    $AMUX_URL/api/threads/{tid}/messages")
                     except Exception as _e:
                         slog(f"[threads] {mid}: send_text failed: {_e}")
                 else:
