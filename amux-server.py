@@ -37820,6 +37820,15 @@ class CCHandler(BaseHTTPRequestHandler):
                     _gcal_sync_bg(bid, deleted=True)
                     return self._json({"ok": True, "deleted": bid})
 
+                # GET /api/board/{id} — single-item fetch. Was missing until
+                # 2026-07-03; agents that hit their own board tasks always
+                # got 404 back and treated genuine assignments as phantoms
+                # (see AH-18..23 discussion). The existence check above
+                # already validated deleted IS NULL, so this always returns
+                # the current row.
+                if method == "GET":
+                    return self._json(_item_by_id(bid))
+
             return self._json({"error": "not found"}, 404)
 
         # GET /api/cert — download TLS cert for manual trust on mobile
