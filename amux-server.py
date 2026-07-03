@@ -25123,6 +25123,21 @@ function _tRenderThread(t) {
   html += '</div>';
   return html;
 }
+// Per-thread "show all older messages" toggle — long threads default to just
+// the 5 newest settled messages so switching threads doesn't require a huge
+// scroll. Flagged / unread / still-working messages are ALWAYS visible
+// regardless of age — those are the ones Jeremy actually wants to see.
+let _tShowAllMsgs = new Set();
+function _tToggleShowAll(tid) {
+  if (_tShowAllMsgs.has(tid)) _tShowAllMsgs.delete(tid);
+  else _tShowAllMsgs.add(tid);
+  _threadsRender();
+}
+function _tMsgAlwaysShow(m) {
+  return m.status === 'working'
+      || !!m.flagged
+      || (m.status === 'complete' && !m.to_session && !m.read);  // unread to Jeremy
+}
 function _tRenderMessages(t) {
   const tidEsc = _tEsc(t.id);
   // Slightly darker inset background inside the expanded panel so the message
@@ -25131,7 +25146,29 @@ function _tRenderMessages(t) {
   let html = `<div style="border-top:1px solid var(--border);padding:12px 14px;background:rgba(0,0,0,0.18);">`;
   // Newest at top so the message you probably want to act on is first.
   const msgs = t.messages.slice().sort((a,b) => (b.position - a.position) || (b.created - a.created));
-  for (const m of msgs) html += _tRenderMsg(t, m);
+  const showAll = _tShowAllMsgs.has(t.id);
+  const READ_MAX = 5;
+  const collapsibleTotal = msgs.filter(m => !_tMsgAlwaysShow(m)).length;
+  let readShown = 0;
+  for (const m of msgs) {
+    if (_tMsgAlwaysShow(m)) {
+      html += _tRenderMsg(t, m);
+    } else if (showAll || readShown < READ_MAX) {
+      html += _tRenderMsg(t, m);
+      readShown++;
+    }
+  }
+  // Truncation control: "Show N older" collapsed; "Collapse older" expanded.
+  const hidden = collapsibleTotal - readShown;
+  if (hidden > 0) {
+    html += `<div style="text-align:center;padding:6px 8px 4px;font-size:0.8rem;">
+      <a href="javascript:void(0)" onclick="_tToggleShowAll('${tidEsc}')" style="color:var(--accent, #6aa);text-decoration:none;border-bottom:1px dashed currentColor;">Show ${hidden} older message${hidden===1?'':'s'}</a>
+    </div>`;
+  } else if (showAll && collapsibleTotal > READ_MAX) {
+    html += `<div style="text-align:center;padding:6px 8px 4px;font-size:0.8rem;">
+      <a href="javascript:void(0)" onclick="_tToggleShowAll('${tidEsc}')" style="color:var(--muted);text-decoration:none;">Collapse older messages</a>
+    </div>`;
+  }
   // Discard-thread button lives at the very bottom, right-aligned, so it
   // doesn't eat a whole row above the messages just to hold one icon.
   html += `<div style="display:flex;justify-content:flex-end;margin-top:4px;">
