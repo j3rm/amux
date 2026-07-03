@@ -25199,6 +25199,7 @@ function _qRenderChain(t) {
     <div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:10px;padding-bottom:10px;border-bottom:1px dashed var(--border);">
       <button class="btn" onclick="_questionsFollowUp('${anchorEsc}')" title="Add a follow-up question in this thread">Follow up</button>
       ${!anyOpen ? `<button class="btn" onclick="_qReactivate('${anchorEsc}')" title="Bring this thread back into the active inbox">Reactivate</button>` : ''}
+      <button class="btn" onclick="_qMoveToThreads('${_qEsc(t.key)}')" title="Convert this Inbox thread into a Threads-tab thread" style="border-color:#468;color:#8ac;">Move to Threads</button>
       <button class="btn" style="opacity:0.6;" onclick="_qDiscardThread('${_qEsc(t.key)}')">Discard thread</button>
     </div>`;
   // Sets get a single AskUserQuestion dialog card covering all N questions.
@@ -25427,6 +25428,90 @@ async function _qDiscardThread(key) {
     await fetch(API + '/api/inbox/' + encodeURIComponent(q.id), {method: 'DELETE'});
   }
   _questionsLoad();
+}
+// Move an Inbox thread over to the new Threads tab. Creates a fresh thread
+// from the root's title, then walks the chain in chronological order and
+// appends one message per Q+A pair: Q as (from → to), then the answer body
+// (if present) as (to → from). The old Inbox rows get discarded so the same
+// thread doesn't live in two places.
+async function _qMoveToThreads(key) {
+  const groups = _qGroupThreads(_questionsCache);
+  const rows = (groups.get(key) || []).slice().sort((a,b) => (a.created || 0) - (b.created || 0));
+  if (!rows.length) return;
+  const root = rows[0];
+  const target = root.to_session || root.from_session;
+  if (!target) { alert('Cannot infer target session from this Inbox thread — it has no agent participant.'); return; }
+  if (!confirm(`Move this thread to the Threads tab? ${rows.length} Q+A pair(s) will be replayed as messages, then the Inbox rows will be discarded.`)) return;
+  try {
+    // no_deliver: true on every insert — migration must not re-notify agents
+    // or pushover Jeremy for messages he's already seen in the Inbox.
+    const createdMids = [];
+    // 1) Create the new thread from the root's Q.
+    let createRes = await fetch(API + '/api/threads', {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({
+        title: root.title || '(migrated from Inbox)',
+        body: root.body || '',
+        to_session: root.to_session || undefined,
+        from_session: root.from_session || undefined,
+        no_deliver: true,
+      }),
+    });
+    if (!createRes.ok) { alert('Move failed at thread create: ' + await createRes.text()); return; }
+    const created = await createRes.json();
+    const tid = created.id;
+    createdMids.push(created.messages[0].id);
+    // 2) If the root had an answer, append it as a reply message.
+    const rootAnswer = (root.answer || '').trim();
+    if (rootAnswer) {
+      const replyTo = root.to_session || '';   // whoever was the "to" of Q now sends
+      const rr = await fetch(API + '/api/threads/' + encodeURIComponent(tid) + '/messages', {
+        method: 'POST', headers: {'Content-Type': 'application/json',
+                                  ...(replyTo ? {'X-Amux-Session': replyTo} : {})},
+        body: JSON.stringify({body: rootAnswer, parent_id: created.messages[0].id, no_deliver: true}),
+      });
+      if (rr.ok) createdMids.push((await rr.json()).id);
+    }
+    // 3) Walk the rest of the chain, mirror each Q + (optional) A.
+    for (let i = 1; i < rows.length; i++) {
+      const r = rows[i];
+      const asker = r.from_session || '';
+      const qRes = await fetch(API + '/api/threads/' + encodeURIComponent(tid) + '/messages', {
+        method: 'POST', headers: {'Content-Type': 'application/json',
+                                  ...(asker ? {'X-Amux-Session': asker} : {})},
+        body: JSON.stringify({body: r.body || r.title || '', no_deliver: true}),
+      });
+      if (!qRes.ok) continue;
+      const qMsg = await qRes.json();
+      createdMids.push(qMsg.id);
+      const rAnswer = (r.answer || '').trim();
+      if (rAnswer) {
+        const replier = r.to_session || '';
+        const rrr = await fetch(API + '/api/threads/' + encodeURIComponent(tid) + '/messages', {
+          method: 'POST', headers: {'Content-Type': 'application/json',
+                                    ...(replier ? {'X-Amux-Session': replier} : {})},
+          body: JSON.stringify({body: rAnswer, parent_id: qMsg.id, no_deliver: true}),
+        });
+        if (rrr.ok) createdMids.push((await rrr.json()).id);
+      }
+    }
+    // 4) Mark every migrated message read — Jeremy already saw them in Inbox.
+    for (const mid of createdMids) {
+      await fetch(API + '/api/messages/' + encodeURIComponent(mid), {
+        method: 'PATCH', headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({read: true}),
+      });
+    }
+    // 5) Discard the old Inbox rows so this thread doesn't live in two places.
+    for (const q of rows) {
+      await fetch(API + '/api/inbox/' + encodeURIComponent(q.id), {method: 'DELETE'});
+    }
+    _questionsLoad();
+    _threadsLoad();
+    showToast(`Moved to Threads as ${tid}. Switch tabs to see it.`);
+  } catch(e) {
+    alert('Move failed: ' + (e.message || e));
+  }
 }
 async function _questionsAnswer(qid) {
   const ta = document.getElementById('q-answer-' + qid);
@@ -36851,7 +36936,11 @@ class CCHandler(BaseHTTPRequestHandler):
                 db.commit()
                 thread_row = db.execute("SELECT * FROM threads WHERE id = ?", (tid,)).fetchone()
                 msg_row = db.execute("SELECT * FROM messages WHERE id = ?", (mid,)).fetchone()
-                _deliver(thread_row, msg_row)
+                # no_deliver=true skips notification — used by Move-to-Threads
+                # migration to avoid re-pinging agents about long-answered
+                # conversations.
+                if not bj.get("no_deliver"):
+                    _deliver(thread_row, msg_row)
                 return self._json(_thread_to_dict(thread_row, [msg_row]), 201)
 
             # ── /api/threads/T-N and its sub-routes ─────────────────────────
@@ -36937,7 +37026,8 @@ class CCHandler(BaseHTTPRequestHandler):
                 msg_row = db.execute("SELECT * FROM messages WHERE id = ?", (mid,)).fetchone()
                 # Only 'complete' messages get delivered — 'working' means the
                 # sender is still writing; deliver on the flip in PATCH.
-                if new_status == "complete":
+                # no_deliver=true skips (used by Move-to-Threads migration).
+                if new_status == "complete" and not bj.get("no_deliver"):
                     _deliver(thread_row, msg_row)
                 return self._json(dict(msg_row), 201)
 
