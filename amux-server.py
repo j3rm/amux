@@ -3317,6 +3317,57 @@ CREATE INDEX IF NOT EXISTS idx_questions_created ON questions(created);
 -- Note: from_session/to_session indexes are created in the migration block
 -- because those columns are ALTER-added on old DBs and can't be indexed until
 -- after the migration runs. See the ALTER statements in _init_db().
+-- Threads + messages — the successor to the questions table. A thread is a
+-- conversation (T-N); a message is one entry within it (M-N). Old model
+-- muddled the two: each questions row held a question and its answer on the
+-- same row. In the new model every entry is its own message, and threads are
+-- just the group. The questions table stays in place for now as read-only
+-- history — see Phase 2 for a per-item "Move to Threads" migration.
+CREATE TABLE IF NOT EXISTS threads (
+    id            TEXT PRIMARY KEY,
+    title         TEXT NOT NULL,
+    starred       INTEGER NOT NULL DEFAULT 0,
+    created       INTEGER NOT NULL,
+    updated       INTEGER NOT NULL,
+    discarded     INTEGER NOT NULL DEFAULT 0
+);
+CREATE INDEX IF NOT EXISTS idx_threads_updated ON threads(updated DESC);
+-- One row per message. Every message belongs to exactly one thread via
+-- thread_id. parent_id is the specific message this one replies to (empty
+-- for the first message in a thread); the renderer stays flat for now, but
+-- the pointer is preserved so we can add reply-chain indentation later.
+--   from_session : who sent it. '' means Jeremy.
+--   to_session   : who should reply. '' means Jeremy owes the next move.
+-- Status flow:
+--   working  → partial content, sender still writing (agents stream partial replies here)
+--   complete → delivered
+--   discarded → dropped
+-- `read` is orthogonal to status — flips to 1 when the recipient opens it.
+-- kind='choice' + options JSON drives AskUserQuestion-style dialogs; set_id
+-- groups a batch posted together.
+CREATE TABLE IF NOT EXISTS messages (
+    id            TEXT PRIMARY KEY,
+    thread_id     TEXT NOT NULL,
+    parent_id     TEXT NOT NULL DEFAULT '',
+    from_session  TEXT NOT NULL DEFAULT '',
+    to_session    TEXT NOT NULL DEFAULT '',
+    body          TEXT NOT NULL DEFAULT '',
+    blocking      INTEGER NOT NULL DEFAULT 0,
+    status        TEXT NOT NULL DEFAULT 'complete',
+    read          INTEGER NOT NULL DEFAULT 0,
+    kind          TEXT NOT NULL DEFAULT 'text',
+    options       TEXT NOT NULL DEFAULT '',
+    multi_select  INTEGER NOT NULL DEFAULT 0,
+    position      INTEGER NOT NULL DEFAULT 0,
+    set_id        TEXT NOT NULL DEFAULT '',
+    created       INTEGER NOT NULL,
+    updated       INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_messages_thread  ON messages(thread_id, position, created);
+CREATE INDEX IF NOT EXISTS idx_messages_parent  ON messages(parent_id);
+CREATE INDEX IF NOT EXISTS idx_messages_from    ON messages(from_session);
+CREATE INDEX IF NOT EXISTS idx_messages_to      ON messages(to_session);
+CREATE INDEX IF NOT EXISTS idx_messages_set     ON messages(set_id);
 CREATE TABLE IF NOT EXISTS schedules (
     id          TEXT PRIMARY KEY,
     title       TEXT NOT NULL,
