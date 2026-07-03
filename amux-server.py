@@ -25084,15 +25084,19 @@ function _tRenderThread(t) {
   const anyBlocking = t.messages.some(m => m.blocking === 1 && m.status !== 'discarded');
   const newestUpdated = t.messages.reduce((mx, m) => Math.max(mx, m.updated || 0), t.updated || 0);
   const tidEsc = _tEsc(t.id);
-  const rowStyle = `border:1px solid ${tint.border};background:${tint.bg};border-radius:8px;margin:6px 0;`;
+  // Thread cards get a chunkier border-left (4px accent bar) to visually
+  // separate them from the message cards inside; the rest of the border stays
+  // thin. Thread header is heavier (larger title, more padding) so the
+  // thread/message hierarchy reads at a glance.
+  const rowStyle = `border:1px solid ${tint.border};border-left:4px solid ${tint.pill};background:${tint.bg};border-radius:8px;margin:10px 0;`;
   let html = `<div class="t-thread" style="${rowStyle}">
-    <div style="display:flex;align-items:center;gap:10px;padding:10px 12px;cursor:pointer;" onclick="_tToggle('${tidEsc}')">
-      <span style="font-size:1.1rem;color:${starColor};cursor:pointer;user-select:none;" title="${t.starred ? 'Unstar' : 'Star (keep at top)'}" onclick="event.stopPropagation();_tStarToggle('${tidEsc}', ${t.starred ? 'false' : 'true'})">${star}</span>
+    <div style="display:flex;align-items:center;gap:10px;padding:12px 14px;cursor:pointer;" onclick="_tToggle('${tidEsc}')">
+      <span style="font-size:1.15rem;color:${starColor};cursor:pointer;user-select:none;" title="${t.starred ? 'Unstar' : 'Star (keep at top)'}" onclick="event.stopPropagation();_tStarToggle('${tidEsc}', ${t.starred ? 'false' : 'true'})">${star}</span>
       <span style="width:12px;color:var(--muted);font-size:0.9rem;">${chev}</span>
-      <span style="background:${tint.pill};color:#fff;padding:2px 8px;border-radius:4px;font-size:0.65rem;font-weight:600;text-transform:uppercase;letter-spacing:0.03em;white-space:nowrap;">${tint.label}</span>
-      ${anyBlocking ? '<span style="background:#e11;color:#fff;padding:2px 8px;border-radius:4px;font-size:0.65rem;font-weight:600;">BLOCKING</span>' : ''}
-      <span style="font-weight:600;font-size:0.85rem;color:var(--fg);white-space:nowrap;">${tidEsc}</span>
-      <span class="t-row-title" style="flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:0.9rem;">${_tEsc(t.title)}</span>
+      <span style="background:${tint.pill};color:#fff;padding:2px 8px;border-radius:4px;font-size:0.65rem;font-weight:700;text-transform:uppercase;letter-spacing:0.04em;white-space:nowrap;">${tint.label}</span>
+      ${anyBlocking ? '<span style="background:#e11;color:#fff;padding:2px 8px;border-radius:4px;font-size:0.65rem;font-weight:700;">BLOCKING</span>' : ''}
+      <span style="font-weight:700;font-size:0.9rem;color:var(--fg);white-space:nowrap;letter-spacing:0.02em;">${tidEsc}</span>
+      <span class="t-row-title" style="flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:1rem;font-weight:600;color:var(--fg);">${_tEsc(t.title)}</span>
       <span style="font-size:0.7rem;color:var(--muted);white-space:nowrap;">${t.messages.length} msg${t.messages.length===1?'':'s'}</span>
       <span class="t-row-time" style="font-size:0.7rem;color:var(--muted);white-space:nowrap;">${_tFmtTime(newestUpdated)}</span>
     </div>`;
@@ -25102,7 +25106,10 @@ function _tRenderThread(t) {
 }
 function _tRenderMessages(t) {
   const tidEsc = _tEsc(t.id);
-  let html = `<div style="border-top:1px solid var(--border);padding:10px 14px;">`;
+  // Slightly darker inset background inside the expanded panel so the message
+  // cards visually sit ON a distinct surface — makes the thread-vs-message
+  // hierarchy read instantly instead of merging into a wall of cards.
+  let html = `<div style="border-top:1px solid var(--border);padding:12px 14px;background:rgba(0,0,0,0.18);">`;
   // Newest at top so the message you probably want to act on is first.
   const msgs = t.messages.slice().sort((a,b) => (b.position - a.position) || (b.created - a.created));
   for (const m of msgs) html += _tRenderMsg(t, m);
@@ -25132,11 +25139,21 @@ function _tRenderMsg(t, m) {
                   : expandByDefault;
   const chev = expanded ? '▾' : '▸';
   const flagged = !!m.flagged;
-  // Flagged messages get a gold border + faint gold background so they jump
-  // out in a long thread. The flag icon in the header row toggles state.
-  const cardBorder = flagged ? '#f0c02a' : 'var(--border)';
-  const cardBg     = flagged ? 'rgba(240,192,42,0.06)' : 'transparent';
-  let html = `<div style="margin:0 0 10px 0;border:1px solid ${cardBorder};background:${cardBg};border-radius:6px;">
+  // Direction-colored left accent so a glance tells you who sent what without
+  // reading the "Jeremy → agent" text:
+  //   flagged            → gold (overrides everything)
+  //   working            → green (still writing)
+  //   unread to Jeremy   → red (needs attention)
+  //   from Jeremy (sent) → steel blue (your outbound)
+  //   read from agent    → muted
+  let accent = 'var(--border)';
+  if (flagged)                             accent = '#f0c02a';
+  else if (m.status === 'working')          accent = '#4a4';
+  else if (!m.to_session && !m.read && m.status === 'complete') accent = '#e11';
+  else if (!m.from_session && m.to_session) accent = '#468';
+  else if (m.status === 'complete')         accent = '#556';
+  const cardBg = flagged ? 'rgba(240,192,42,0.08)' : 'var(--card-bg, rgba(255,255,255,0.02))';
+  let html = `<div style="margin:0 0 8px 0;border:1px solid var(--border);border-left:3px solid ${accent};background:${cardBg};border-radius:4px;">
     <div style="display:flex;align-items:center;gap:8px;padding:6px 10px;cursor:pointer;font-size:0.75rem;color:var(--muted);flex-wrap:wrap;" onclick="_tMsgToggle('${midEsc}', ${expanded})">
       <span style="width:12px;color:var(--muted);">${chev}</span>
       <span style="background:${st.color};color:#fff;padding:1px 6px;border-radius:3px;font-weight:600;text-transform:uppercase;letter-spacing:0.03em;">${st.text}</span>
