@@ -25437,13 +25437,18 @@ async function _qDiscardThread(key) {
 // (if present) as (to → from). The old Inbox rows get discarded so the same
 // thread doesn't live in two places.
 async function _qMoveToThreads(key) {
+  console.log('[move-to-threads] click for key', key);
   const groups = _qGroupThreads(_questionsCache);
   const rows = (groups.get(key) || []).slice().sort((a,b) => (a.created || 0) - (b.created || 0));
-  if (!rows.length) return;
+  if (!rows.length) {
+    alert('Move to Threads: no rows found for thread key ' + key + ' — cache may be stale, try refreshing.');
+    return;
+  }
   const root = rows[0];
   const target = root.to_session || root.from_session;
   if (!target) { alert('Cannot infer target session from this Inbox thread — it has no agent participant.'); return; }
   if (!confirm(`Move this thread to the Threads tab? ${rows.length} Q+A pair(s) will be replayed as messages, then the Inbox rows will be discarded.`)) return;
+  showToast('Moving thread to Threads…');
   try {
     // no_deliver: true on every insert — migration must not re-notify agents
     // or pushover Jeremy for messages he's already seen in the Inbox.
@@ -25512,6 +25517,7 @@ async function _qMoveToThreads(key) {
     _threadsLoad();
     showToast(`Moved to Threads as ${tid}. Switch tabs to see it.`);
   } catch(e) {
+    console.error('[move-to-threads]', e);
     alert('Move failed: ' + (e.message || e));
   }
 }
