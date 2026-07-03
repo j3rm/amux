@@ -14241,14 +14241,21 @@ setTimeout(function(){var f=document.getElementById('js-fallback');if(f&&f.style
       <input id="t-new-title" type="text" placeholder="What's this conversation about?" style="width:100%;padding:6px 8px;margin-bottom:10px;border:1px solid var(--border);border-radius:5px;background:var(--card-bg,#0a0a0a);color:var(--fg);box-sizing:border-box;">
     </div>
     <label style="display:block;font-size:0.75rem;color:var(--muted);margin-bottom:2px;" id="t-new-body-label">Body (message content)</label>
-    <textarea id="t-new-body" placeholder="..." style="width:100%;min-height:120px;padding:6px 8px;margin-bottom:10px;border:1px solid var(--border);border-radius:5px;background:var(--card-bg,#0a0a0a);color:var(--fg);font-family:inherit;box-sizing:border-box;resize:vertical;"></textarea>
+    <textarea id="t-new-body" placeholder="..." style="width:100%;min-height:120px;padding:6px 8px;margin-bottom:6px;border:1px solid var(--border);border-radius:5px;background:var(--card-bg,#0a0a0a);color:var(--fg);font-family:inherit;box-sizing:border-box;resize:vertical;" onpaste="_threadsHandlePaste(event)"></textarea>
+    <!-- Attach bar — reuses .peek-attach-chip styling. -->
+    <div class="peek-attach-bar" id="t-new-attach-bar" style="margin-bottom:8px;"></div>
+    <input type="file" id="t-new-file-input" multiple
+      style="position:absolute;width:0;height:0;opacity:0;overflow:hidden;pointer-events:none;" onchange="_threadsHandleFileInput(event)">
     <label style="display:flex;align-items:center;gap:6px;font-size:0.85rem;margin-bottom:12px;">
       <input id="t-new-blocking" type="checkbox">
       Blocking (inject into agent's terminal — interrupts current work)
     </label>
-    <div style="display:flex;gap:8px;justify-content:flex-end;">
-      <button class="btn" style="opacity:0.7;" onclick="_threadsCloseNew()">Cancel</button>
-      <button class="btn" onclick="_threadsSubmitNew()">Send</button>
+    <div style="display:flex;gap:8px;justify-content:space-between;align-items:center;">
+      <button class="peek-attach-btn" title="Attach file" onclick="document.getElementById('t-new-file-input').click()">&#128206;</button>
+      <div style="display:flex;gap:8px;">
+        <button class="btn" style="opacity:0.7;" onclick="_threadsCloseNew()">Cancel</button>
+        <button class="btn" onclick="_threadsSubmitNew()">Send</button>
+      </div>
     </div>
   </div>
 </div>
@@ -25718,7 +25725,10 @@ function _tRenderMsg(t, m) {
     </div>`;
   if (!expanded) { html += '</div>'; return html; }
   html += `<div style="padding:0 12px 10px 12px;">`;
-  if (m.body) html += `<div style="white-space:pre-wrap;font-size:0.88rem;color:var(--fg);opacity:0.92;margin:4px 0 8px 0;">${_tEsc(m.body)}</div>`;
+  // linkifyOutput auto-detects absolute paths and URLs — a path like
+  // /home/jwesley/.amux/uploads/abc-doc.pdf becomes a click-to-preview link,
+  // same behavior as session peek output. It escapes non-match text internally.
+  if (m.body) html += `<div style="white-space:pre-wrap;font-size:0.88rem;color:var(--fg);opacity:0.92;margin:4px 0 8px 0;">${linkifyOutput(m.body)}</div>`;
   html += '</div></div>';
   return html;
 }
@@ -25743,6 +25753,80 @@ async function _tMarkRead(mid) {
 }
 // ── New-thread / Reply modal ──
 let _tNewCtx = null;   // {mode:'new'} or {mode:'reply', tid, parentMid}
+// Attachment state — pending uploads for the currently-open modal. Mirrors
+// peekFiles but scoped to the threads modal so composing here and in the
+// session send-command row don't stomp each other.
+let _threadsFiles = []; // [{name, path, url, isImage, previewUrl}]
+function _threadsRenderAttach() {
+  const bar = document.getElementById('t-new-attach-bar');
+  if (!bar) return;
+  bar.classList.toggle('has-files', _threadsFiles.length > 0);
+  bar.innerHTML = _threadsFiles.map((f, i) => {
+    const isUploading = !f.path;
+    let thumb = '';
+    if (f.isImage && f.previewUrl) thumb = `<img src="${f.previewUrl}" alt="">`;
+    else thumb = `<span class="chip-icon">${_fileIcon(f.name)}</span>`;
+    return `<div class="peek-attach-chip${isUploading ? ' uploading' : ''}">
+      ${thumb}
+      <span class="chip-name">${esc(f.name)}</span>
+      ${isUploading ? '<span style="color:var(--dim);font-size:0.7rem;">↑</span>' : `<span class="chip-remove" onclick="_threadsRemoveFile(${i})">×</span>`}
+    </div>`;
+  }).join('');
+}
+function _threadsRemoveFile(idx) {
+  const f = _threadsFiles[idx];
+  if (f && f.previewUrl) URL.revokeObjectURL(f.previewUrl);
+  _threadsFiles.splice(idx, 1);
+  _threadsRenderAttach();
+}
+function _threadsClearFiles() {
+  _threadsFiles.forEach(f => { if (f && f.previewUrl) URL.revokeObjectURL(f.previewUrl); });
+  _threadsFiles = [];
+  _threadsRenderAttach();
+}
+async function _threadsUploadAndAttach(file) {
+  if (file.size > 20 * 1024 * 1024) { showToast('File too large (max 20 MB)'); return; }
+  const isImage = file.type.startsWith('image/');
+  const previewUrl = isImage ? URL.createObjectURL(file) : null;
+  const placeholder = { name: file.name, path: null, url: null, isImage, previewUrl };
+  const idx = _threadsFiles.length;
+  _threadsFiles.push(placeholder);
+  _threadsRenderAttach();
+  try {
+    const buf = await file.arrayBuffer();
+    const bytes = new Uint8Array(buf);
+    let binary = '';
+    for (let i = 0; i < bytes.length; i += 8192) {
+      binary += String.fromCharCode.apply(null, bytes.subarray(i, i + 8192));
+    }
+    const b64 = btoa(binary);
+    const r = await fetch(API + '/api/upload', {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({ name: file.name, data: b64 })
+    });
+    const d = await r.json();
+    if (!r.ok || d.error) { showToast('Upload failed: ' + (d.error || r.status)); _threadsFiles.splice(idx, 1); }
+    else { _threadsFiles[idx] = { name: file.name, path: d.path, url: d.url, isImage, previewUrl }; }
+  } catch(e) {
+    showToast('Upload failed: ' + e.message); _threadsFiles.splice(idx, 1);
+  }
+  _threadsRenderAttach();
+}
+function _threadsHandleFileInput(e) {
+  for (const f of e.target.files) _threadsUploadAndAttach(f);
+  e.target.value = '';
+}
+function _threadsHandlePaste(e) {
+  const items = e.clipboardData && e.clipboardData.items;
+  if (!items) return;
+  for (const item of items) {
+    if (item.kind === 'file') {
+      e.preventDefault();
+      _threadsUploadAndAttach(item.getAsFile());
+      return;
+    }
+  }
+}
 async function _threadsOpenNew() {
   _tNewCtx = {mode: 'new'};
   document.getElementById('t-new-header').textContent = 'New thread';
@@ -25752,6 +25836,7 @@ async function _threadsOpenNew() {
   document.getElementById('t-new-title').value = '';
   document.getElementById('t-new-body').value = '';
   document.getElementById('t-new-blocking').checked = false;
+  _threadsClearFiles();
   await _tLoadTargets();
   document.getElementById('t-new-modal').style.display = 'flex';
   setTimeout(() => document.getElementById('t-new-title').focus(), 50);
@@ -25767,6 +25852,7 @@ function _tReplyTo(tid, parentMid) {
   document.getElementById('t-new-title').value = '';
   document.getElementById('t-new-body').value = '';
   document.getElementById('t-new-blocking').checked = false;
+  _threadsClearFiles();
   document.getElementById('t-new-modal').style.display = 'flex';
   setTimeout(() => document.getElementById('t-new-body').focus(), 50);
 }
@@ -25787,10 +25873,20 @@ async function _tLoadTargets() {
 function _threadsCloseNew() {
   document.getElementById('t-new-modal').style.display = 'none';
   _tNewCtx = null;
+  _threadsClearFiles();
 }
 async function _threadsSubmitNew() {
-  const body = document.getElementById('t-new-body').value.trim();
-  if (!body) { alert('Body required.'); return; }
+  const text = document.getElementById('t-new-body').value.trim();
+  // Wait for any in-flight uploads before sending — otherwise we'd omit the
+  // path (still null) and the recipient wouldn't see the attachment.
+  if (_threadsFiles.some(f => !f.path)) { alert('Wait for attachments to finish uploading.'); return; }
+  const attachPaths = _threadsFiles.filter(f => f.path).map(f => f.path);
+  if (!text && attachPaths.length === 0) { alert('Body or attachment required.'); return; }
+  // Append attachment paths on their own lines so linkifyOutput picks them up
+  // as clickable file-preview links on the recipient's side.
+  const body = attachPaths.length
+    ? (text ? text + '\n\n' : '') + attachPaths.join('\n')
+    : text;
   const blocking = document.getElementById('t-new-blocking').checked;
   if (_tNewCtx && _tNewCtx.mode === 'reply') {
     const {tid, parentMid} = _tNewCtx;
