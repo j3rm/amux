@@ -25441,13 +25441,17 @@ async function _qMoveToThreads(key) {
   const groups = _qGroupThreads(_questionsCache);
   const rows = (groups.get(key) || []).slice().sort((a,b) => (a.created || 0) - (b.created || 0));
   if (!rows.length) {
-    alert('Move to Threads: no rows found for thread key ' + key + ' — cache may be stale, try refreshing.');
+    await showAlert('Move to Threads: no rows found for thread key ' + key + ' — cache may be stale, try refreshing.');
     return;
   }
   const root = rows[0];
   const target = root.to_session || root.from_session;
-  if (!target) { alert('Cannot infer target session from this Inbox thread — it has no agent participant.'); return; }
-  if (!confirm(`Move this thread to the Threads tab? ${rows.length} Q+A pair(s) will be replayed as messages, then the Inbox rows will be discarded.`)) return;
+  if (!target) { await showAlert('Cannot infer target session from this Inbox thread — it has no agent participant.'); return; }
+  // PWA standalone blocks confirm()/alert() — showConfirm is the dashboard's
+  // async modal wrapper that works in both browser and PWA. This was the
+  // silent-fail: confirm() returned undefined on iOS PWA, guard bailed.
+  const ok = await showConfirm(`Move this thread to the Threads tab? ${rows.length} Q+A pair(s) will be replayed as messages, then the Inbox rows will be discarded.`, 'Move');
+  if (!ok) return;
   showToast('Moving thread to Threads…');
   try {
     // no_deliver: true on every insert — migration must not re-notify agents
@@ -25464,7 +25468,7 @@ async function _qMoveToThreads(key) {
         no_deliver: true,
       }),
     });
-    if (!createRes.ok) { alert('Move failed at thread create: ' + await createRes.text()); return; }
+    if (!createRes.ok) { await showAlert('Move failed at thread create: ' + await createRes.text()); return; }
     const created = await createRes.json();
     const tid = created.id;
     createdMids.push(created.messages[0].id);
@@ -25518,7 +25522,7 @@ async function _qMoveToThreads(key) {
     showToast(`Moved to Threads as ${tid}. Switch tabs to see it.`);
   } catch(e) {
     console.error('[move-to-threads]', e);
-    alert('Move failed: ' + (e.message || e));
+    await showAlert('Move failed: ' + (e.message || e));
   }
 }
 async function _questionsAnswer(qid) {
