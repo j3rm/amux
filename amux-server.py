@@ -25102,13 +25102,15 @@ function _tRenderThread(t) {
 }
 function _tRenderMessages(t) {
   const tidEsc = _tEsc(t.id);
-  let html = `<div style="border-top:1px solid var(--border);padding:10px 14px;">
-    <div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:10px;padding-bottom:10px;border-bottom:1px dashed var(--border);">
-      <button style="${_TICON_BTN_STYLE}" onclick="_tDiscardThread('${tidEsc}')" title="Discard thread">${_TICON_TRASH}</button>
-    </div>`;
+  let html = `<div style="border-top:1px solid var(--border);padding:10px 14px;">`;
   // Newest at top so the message you probably want to act on is first.
   const msgs = t.messages.slice().sort((a,b) => (b.position - a.position) || (b.created - a.created));
   for (const m of msgs) html += _tRenderMsg(t, m);
+  // Discard-thread button lives at the very bottom, right-aligned, so it
+  // doesn't eat a whole row above the messages just to hold one icon.
+  html += `<div style="display:flex;justify-content:flex-end;margin-top:4px;">
+      <button style="${_TICON_BTN_STYLE}opacity:0.55;" onclick="_tDiscardThread('${tidEsc}')" title="Discard thread">${_TICON_TRASH}</button>
+    </div>`;
   html += '</div>';
   return html;
 }
