@@ -25523,6 +25523,12 @@ setTimeout(() => { _questionsLoad(); }, 500);
 let _threadsTimer = null;
 let _threadsCache = [];
 let _threadsLastSig = '';
+// Icons — inline SVG (matches Notes-toolbar style, no external assets).
+const _TICON_REPLY = '<svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="9 17 4 12 9 7"/><path d="M20 18v-2a4 4 0 0 0-4-4H4"/></svg>';
+const _TICON_CHECK = '<svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>';
+const _TICON_TRASH = '<svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/><path d="M10 11v6M14 11v6"/><path d="M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg>';
+// Small icon button — subtle, ~24px hit target, hover tint.
+const _TICON_BTN_STYLE = 'background:transparent;border:1px solid var(--border);color:var(--muted);padding:3px 6px;border-radius:4px;cursor:pointer;display:inline-flex;align-items:center;line-height:1;';
 let _tExpanded = new Set(JSON.parse(localStorage.getItem('amux.tExpanded') || '[]'));
 function _tExpandedSave() {
   try { localStorage.setItem('amux.tExpanded', JSON.stringify([..._tExpanded])); } catch(e) {}
@@ -25675,7 +25681,7 @@ function _tRenderMessages(t) {
   const tidEsc = _tEsc(t.id);
   let html = `<div style="border-top:1px solid var(--border);padding:10px 14px;">
     <div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:10px;padding-bottom:10px;border-bottom:1px dashed var(--border);">
-      <button class="btn" style="opacity:0.6;" onclick="_tDiscardThread('${tidEsc}')">Discard thread</button>
+      <button style="${_TICON_BTN_STYLE}" onclick="_tDiscardThread('${tidEsc}')" title="Discard thread">${_TICON_TRASH}</button>
     </div>`;
   // Newest at top so the message you probably want to act on is first.
   const msgs = t.messages.slice().sort((a,b) => (b.position - a.position) || (b.created - a.created));
@@ -25700,21 +25706,19 @@ function _tRenderMsg(t, m) {
                   : expandByDefault;
   const chev = expanded ? '▾' : '▸';
   let html = `<div style="margin:0 0 10px 0;border:1px solid var(--border);border-radius:6px;">
-    <div style="display:flex;align-items:baseline;gap:8px;padding:6px 10px;cursor:pointer;font-size:0.75rem;color:var(--muted);flex-wrap:wrap;" onclick="_tMsgToggle('${midEsc}', ${expanded})">
+    <div style="display:flex;align-items:center;gap:8px;padding:6px 10px;cursor:pointer;font-size:0.75rem;color:var(--muted);flex-wrap:wrap;" onclick="_tMsgToggle('${midEsc}', ${expanded})">
       <span style="width:12px;color:var(--muted);">${chev}</span>
       <span style="background:${st.color};color:#fff;padding:1px 6px;border-radius:3px;font-weight:600;text-transform:uppercase;letter-spacing:0.03em;">${st.text}</span>
       <span style="font-weight:600;color:var(--fg);">${midEsc}</span>
       <span>${_tEsc(dir.label)}</span>
       <span style="flex:1;min-width:0;"></span>
       <span>${_tFmtTime(m.updated || m.created)}</span>
-      <button class="btn" style="padding:2px 8px;font-size:0.72rem;" onclick="event.stopPropagation();_tReplyTo('${tidEsc}','${midEsc}')" title="Reply to this specific message">Reply</button>
+      ${canMarkRead ? `<button style="${_TICON_BTN_STYLE}" onclick="event.stopPropagation();_tMarkRead('${midEsc}')" title="Mark read">${_TICON_CHECK}</button>` : ''}
+      <button style="${_TICON_BTN_STYLE}" onclick="event.stopPropagation();_tReplyTo('${tidEsc}','${midEsc}')" title="Reply to this message">${_TICON_REPLY}</button>
     </div>`;
   if (!expanded) { html += '</div>'; return html; }
   html += `<div style="padding:0 12px 10px 12px;">`;
   if (m.body) html += `<div style="white-space:pre-wrap;font-size:0.88rem;color:var(--fg);opacity:0.92;margin:4px 0 8px 0;">${_tEsc(m.body)}</div>`;
-  if (canMarkRead) {
-    html += `<div style="margin-top:4px;"><button class="btn" style="opacity:0.75;font-size:0.78rem;padding:3px 8px;" onclick="_tMarkRead('${midEsc}')">Mark Read</button></div>`;
-  }
   html += '</div></div>';
   return html;
 }
