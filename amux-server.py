@@ -24942,7 +24942,7 @@ function _threadsRender() {
     root.innerHTML = '<div style="padding:24px;text-align:center;color:var(--muted);font-size:0.9rem;">No threads yet. Click <b>+ New thread</b> to start one, or wait for an agent to open one.</div>';
     return;
   }
-  let html = '';
+  let html = _tRenderFlagSection(list);
   for (const t of list) html += _tRenderThread(t);
   root.innerHTML = html;
   // Restore drafts + focus
@@ -24951,6 +24951,81 @@ function _threadsRender() {
     if (el) el.value = val;
   }
   if (focusedId) { const el = document.getElementById(focusedId); if (el && el.focus) el.focus(); }
+}
+// Cross-thread "Flagged" summary section at the top of the list. Shows one
+// row per flagged message across every thread, so bookmarks stay findable
+// even as the thread they live in gets buried.
+let _tFlagSectionCollapsed = localStorage.getItem('amux.tFlagCollapsed') === '1';
+function _tFlagSectionToggle() {
+  _tFlagSectionCollapsed = !_tFlagSectionCollapsed;
+  try { localStorage.setItem('amux.tFlagCollapsed', _tFlagSectionCollapsed ? '1' : '0'); } catch(e) {}
+  _threadsRender();
+}
+function _tRenderFlagSection(list) {
+  // Collect every flagged message with its thread context.
+  const flagged = [];
+  for (const t of list) {
+    for (const m of t.messages) {
+      if (m.flagged) flagged.push({t, m});
+    }
+  }
+  if (!flagged.length) return '';
+  // Newest first — most recent bookmark is probably the most relevant.
+  flagged.sort((a, b) => (b.m.updated || 0) - (a.m.updated || 0));
+  const chev = _tFlagSectionCollapsed ? '▸' : '▾';
+  let html = `<div style="border:1px solid #f0c02a;background:rgba(240,192,42,0.05);border-radius:8px;margin:6px 0 14px 0;">
+    <div style="display:flex;align-items:center;gap:10px;padding:10px 12px;cursor:pointer;" onclick="_tFlagSectionToggle()">
+      <span style="width:12px;color:var(--muted);font-size:0.9rem;">${chev}</span>
+      <span style="color:#f0c02a;font-size:1rem;">${_TICON_FLAG_ON.replace('width="14" height="14"','width="16" height="16"')}</span>
+      <span style="font-weight:600;font-size:0.9rem;color:var(--fg);">Flagged</span>
+      <span style="background:#f0c02a;color:#111;padding:1px 8px;border-radius:10px;font-size:0.7rem;font-weight:700;">${flagged.length}</span>
+      <span style="flex:1;"></span>
+    </div>`;
+  if (!_tFlagSectionCollapsed) {
+    html += '<div style="border-top:1px solid rgba(240,192,42,0.25);padding:6px 10px 10px;">';
+    for (const {t, m} of flagged) {
+      const midEsc = _tEsc(m.id);
+      const tidEsc = _tEsc(t.id);
+      const dir = _tMsgDir(m);
+      const preview = (m.body || '').replace(/\s+/g, ' ').slice(0, 140);
+      html += `<div style="padding:8px 10px;margin:4px 0;border:1px solid var(--border);border-radius:6px;background:var(--card-bg,transparent);cursor:pointer;" onclick="_tJumpToFlagged('${tidEsc}','${midEsc}')">
+        <div style="display:flex;align-items:baseline;gap:8px;font-size:0.72rem;color:var(--muted);flex-wrap:wrap;">
+          <span style="font-weight:600;color:var(--fg);">${midEsc}</span>
+          <span>${_tEsc(dir.label)}</span>
+          <span style="color:var(--muted);">in ${tidEsc} · ${_tEsc(t.title)}</span>
+          <span style="flex:1;"></span>
+          <span>${_tFmtTime(m.updated || m.created)}</span>
+          <button style="${_TICON_BTN_STYLE}" onclick="event.stopPropagation();_tFlagToggle('${midEsc}', false)" title="Remove flag">${_TICON_FLAG_ON}</button>
+        </div>
+        <div style="margin-top:6px;font-size:0.85rem;color:var(--fg);opacity:0.9;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${_tEsc(preview)}</div>
+      </div>`;
+    }
+    html += '</div>';
+  }
+  html += '</div>';
+  return html;
+}
+function _tJumpToFlagged(tid, mid) {
+  _tExpanded.add(tid);
+  _tExpandedSave();
+  _tMsgExpanded.delete('!' + mid);
+  _tMsgExpanded.add(mid);
+  _threadsRender();
+  // Scroll to the message once the render lands.
+  setTimeout(() => {
+    // Find the message card by its M-id text in the visible DOM.
+    const rows = document.querySelectorAll('#threads-list [style*="border-radius:6px"]');
+    for (const el of rows) {
+      if (el.textContent && el.textContent.trim().startsWith(mid)) {
+        el.scrollIntoView({behavior:'smooth', block:'center'});
+        el.style.transition = 'background 0.4s';
+        const old = el.style.background;
+        el.style.background = 'rgba(240,192,42,0.25)';
+        setTimeout(() => { el.style.background = old; }, 900);
+        break;
+      }
+    }
+  }, 60);
 }
 function _tRenderThread(t) {
   const state = _tThreadState(t);
