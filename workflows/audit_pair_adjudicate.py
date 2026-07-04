@@ -44,12 +44,19 @@ Design (post-RTG-Research review, 2026-07-04, hardened for prose-only gap):
 
 Input contract:
     ctx = {
-        "rr_id":     "RR-643",              # the escalation item id
-        "target_id": "RA-709",              # the work item under audit
-        "org":       "RTG",                 # for locating Research session
-        "dry_run":   False,                 # skip the PATCH; useful for tests
-        "_rac_desc": "<override>",          # for tests: skip the Codex fetch
-        "_rao_desc": "<override>",          # for tests: skip the Opus fetch
+        "rr_id":         "RR-643",          # the escalation item id
+        "target_id":     "RA-709",          # the work item under audit
+        "org":           "RTG",             # for locating Research session
+        "sampling_mode": True,              # default True: auto-close PATCHes
+                                            # RR-* to `review` so adjudicator
+                                            # can certify the first N. Flip to
+                                            # False after certification; RR-*
+                                            # then goes to `done` and skips
+                                            # the Research board entirely.
+        "dry_run":       False,             # skip the PATCH; useful for tests
+        "_rac_desc":     "<override>",      # for tests: skip the Codex fetch
+        "_rao_desc":     "<override>",      # for tests: skip the Opus fetch
+        "_board_items":  [...],             # for tests: skip the board fetch
     }
 
 Output:
@@ -407,9 +414,29 @@ def _classify(rac_desc: str, rao_desc: str, target_id: str = "",
     }
 
 
-def _write_verdict(rr_id: str, verdict: str, reason: str, classification: str, signals: dict) -> None:
+def _write_verdict(rr_id: str, verdict: str, reason: str, classification: str,
+                   signals: dict, sampling_mode: bool = True) -> None:
+    """PATCH the RR-* with the auto-close verdict.
+
+    In sampling_mode (default) the RR-* is moved to `review` — the VERDICT: line
+    in the desc is enough for _auto_apply_adjudication to cascade to the target
+    (that hook only reads the desc, not the status), so the target still
+    resolves immediately. The RR-* itself lands on the Research session's
+    board in review so the adjudicator can hand-sample the first N auto-
+    closes and certify the classifier. Once certified, flip sampling_mode=False
+    and the RR-* goes straight to done.
+    """
+    target_status = "review" if sampling_mode else "done"
+    sampling_note = (
+        "\n\nSAMPLING MODE: this RR-* is landing on your board in review so "
+        "you can certify the classifier fired correctly. Read the audit-trail "
+        "above against HEAD; clear to done if right, reopen (status=todo) and "
+        "adjudicate manually if the classifier missed something. Once the "
+        "classifier is trusted, sampling_mode flips off and future auto-closes "
+        "skip your board entirely."
+    ) if sampling_mode else ""
     body = {
-        "status": "done",
+        "status": target_status,
         "desc": (
             f"[auto-adjudicated by audit_pair_adjudicate workflow, "
             f"class={classification}, verdict={verdict}]\n\n"
@@ -417,13 +444,12 @@ def _write_verdict(rr_id: str, verdict: str, reason: str, classification: str, s
             f"Reason: {reason}\n\n"
             f"Signals matched:\n"
             f"  Codex: {signals.get('codex_evidence','')}\n"
-            f"  Opus:  {signals.get('opus_evidence','')}\n\n"
-            f"This escalation was auto-closed by the deterministic adjudicator. "
-            f"Reopen if you disagree — the workflow errs conservative and only "
-            f"auto-fires on strong signals with a co-signal."
+            f"  Opus:  {signals.get('opus_evidence','')}"
+            f"{sampling_note}"
         ),
     }
-    log("verdict.patch.begin", {"rr_id": rr_id, "verdict": verdict})
+    log("verdict.patch.begin", {"rr_id": rr_id, "verdict": verdict,
+                                "target_status": target_status})
     http_patch(f"/api/board/{rr_id}", body)
     log("verdict.patch.end", {"rr_id": rr_id})
 
@@ -485,7 +511,13 @@ def run(ctx: dict) -> dict:
         if ctx.get("dry_run"):
             log("dry_run.skip_patch", {"would_verdict": "PASS", "class": classification})
             return {**result, "action": "dry-run", "verdict": "PASS"}
-        _write_verdict(rr_id, "PASS", result["reason"], classification, result["signals"])
-        return {**result, "action": "auto-closed", "verdict": "PASS"}
+        # sampling_mode defaults ON during rollout — RR-* lands in review so
+        # the Research adjudicator can certify the first N auto-closes.
+        # Flip to False in ctx (or default False at the caller) once trusted.
+        sampling_mode = bool(ctx.get("sampling_mode", True))
+        _write_verdict(rr_id, "PASS", result["reason"], classification,
+                       result["signals"], sampling_mode=sampling_mode)
+        return {**result, "action": "auto-closed",
+                "verdict": "PASS", "sampling_mode": sampling_mode}
 
     return {**result, "action": "no-op", "verdict": None}
