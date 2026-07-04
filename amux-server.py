@@ -6664,6 +6664,32 @@ def _auto_mint_escalation(target_id: str, org: str, my_audit_id: str,
     )
     db.commit()
     _notify_session_of_task(research_session, rr_id, title)
+
+    # Deterministic pre-adjudication: for orgs where the audit_pair_adjudicate
+    # workflow has been certified, classify the split immediately. If it lands
+    # in a known-safe class (stale-cascade with BUILD-VERIFY fact, deploy-status
+    # with source-clean co-signal), the workflow PATCHes the RR-* with a
+    # VERDICT: line — _auto_apply_adjudication cascades to the target and the
+    # RR-* stays in review (sampling_mode) so the Research adjudicator can
+    # certify the first N auto-closes against HEAD. Everything else no-ops
+    # and the RR-* stays as a fresh todo for manual adjudication.
+    #
+    # Runs in a background thread so the audit PATCH that triggered this
+    # mint doesn't block on the classifier's fetch-and-PATCH round-trip.
+    # If the workflow errors, the RR-* stays as-minted — same as if this
+    # code path weren't wired at all.
+    if org == "RTG":
+        try:
+            threading.Thread(
+                target=_run_workflow,
+                args=("audit_pair_adjudicate",
+                      {"rr_id": rr_id, "target_id": target_id, "org": org}),
+                daemon=True,
+                name=f"wf-adjudicate-{rr_id}",
+            ).start()
+        except Exception as _e:
+            slog(f"[audit-adjudicate] failed to spawn workflow for {rr_id}: {_e}")
+
     return {"action": "escalation-minted", "rr": rr_id, "target": target_id,
             "research": research_session}
 
