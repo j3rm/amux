@@ -1,6 +1,49 @@
 #!/bin/sh
 # amux CLI stub — proxies board/session commands to the amux server API
 AMUX_URL="${AMUX_URL:-https://localhost:8822}"
+
+# ── Retry helper for writes ─────────────────────────────────────────────────
+# _amux_write METHOD URL [DATA] [EXTRA_HEADER]
+# Retries on connection reset, empty response, or HTTP 5xx (0/2/5s backoff).
+# Prints response body on stdout on success; exits 1 with body on final failure.
+# Silent-write-loss protection: when the server is being SIGKILLed / restarted,
+# in-flight TLS connections cut with EOF and curl -sk returns empty stdout. If
+# the caller ignored the exit code, the write vanished. Retry catches those.
+_amux_write() {
+  _m="$1"; _u="$2"; _d="$3"; _h="$4"
+  _body_file=$(mktemp 2>/dev/null) || _body_file="/tmp/amux-w.$$"
+  for _delay in 0 2 5; do
+    [ "$_delay" -gt 0 ] && sleep "$_delay"
+    if [ -n "$_h" ]; then
+      _hdr_arg="-H"
+      _http_code=$(curl -sk -o "$_body_file" -w '%{http_code}' \
+        -X "$_m" -H 'Content-Type: application/json' -H "$_h" \
+        ${_d:+-d "$_d"} "$_u" 2>/dev/null)
+    else
+      _http_code=$(curl -sk -o "$_body_file" -w '%{http_code}' \
+        -X "$_m" -H 'Content-Type: application/json' \
+        ${_d:+-d "$_d"} "$_u" 2>/dev/null)
+    fi
+    _rc=$?
+    _size=$(wc -c < "$_body_file" 2>/dev/null || echo 0)
+    # Success = curl exit 0, non-empty body, HTTP < 500
+    if [ "$_rc" -eq 0 ] && [ "$_size" -gt 0 ] \
+       && [ -n "$_http_code" ] && [ "$_http_code" -lt 500 ] 2>/dev/null; then
+      cat "$_body_file"
+      rm -f "$_body_file"
+      return 0
+    fi
+    # Log retry to stderr so callers know
+    if [ "$_delay" = "0" ]; then
+      echo "[amux] $_m $_u — retrying (rc=$_rc size=$_size code=${_http_code:-?})" >&2
+    fi
+  done
+  # Final failure — return whatever body we got, non-zero exit
+  cat "$_body_file" 2>/dev/null
+  rm -f "$_body_file"
+  return 1
+}
+
 cmd="$1"; shift 2>/dev/null || true
 
 case "$cmd" in
@@ -9,13 +52,12 @@ case "$cmd" in
     case "$sub" in
       done|doing|todo|backlog|review|verified|discarded)
         for id in "$@"; do
-          curl -sk -X PATCH -H 'Content-Type: application/json' \
-            -d "{\"status\":\"$sub\"}" "$AMUX_URL/api/board/$id" >/dev/null
+          _amux_write PATCH "$AMUX_URL/api/board/$id" "{\"status\":\"$sub\"}" >/dev/null
         done ;;
       add)
         title="$*"
-        curl -sk -X POST -H 'Content-Type: application/json' \
-          -d "{\"title\":\"$title\",\"status\":\"todo\",\"session\":\"${AMUX_SESSION:-}\"}" "$AMUX_URL/api/board" ;;
+        _amux_write POST "$AMUX_URL/api/board" \
+          "{\"title\":\"$title\",\"status\":\"todo\",\"session\":\"${AMUX_SESSION:-}\"}" ;;
       list|ls|"")
         curl -sk "$AMUX_URL/api/board" | python3 -c "
 import json,sys
@@ -36,7 +78,7 @@ for a in args:
     else: name_parts.append(a)
 if name_parts: fields['name']=' '.join(name_parts)
 print(json.dumps(fields))" "$@")
-        curl -sk -X POST -H 'Content-Type: application/json' -d "$json" "$AMUX_URL/api/crm/contacts" | python3 -c "
+        _amux_write POST "$AMUX_URL/api/crm/contacts" "$json" | python3 -c "
 import json,sys; d=json.load(sys.stdin)
 print(d.get('id','error'),'-',d.get('error','created'))" ;;
       update)
@@ -47,7 +89,7 @@ import sys,json; fields={}
 for a in sys.argv[1:]:
     if '=' in a: k,v=a.split('=',1); fields[k]=v
 print(json.dumps(fields))" "$@")
-        curl -sk -X PATCH -H 'Content-Type: application/json' -d "$json" "$AMUX_URL/api/crm/contacts/$cid" | python3 -c "
+        _amux_write PATCH "$AMUX_URL/api/crm/contacts/$cid" "$json" | python3 -c "
 import json,sys; d=json.load(sys.stdin)
 print('updated' if d.get('ok') else d.get('error','failed'))" ;;
       get)
@@ -66,9 +108,8 @@ ixs=c.get('interactions',[])
 if ixs: print('  last interaction:',ixs[0].get('date'),'-',ixs[0].get('notes','')[:60])" ;;
       log)
         cid="$1"; shift 2>/dev/null || true; notes="$*"
-        curl -sk -X POST -H 'Content-Type: application/json' \
-          -d "{\"notes\":\"$notes\",\"date\":\"$(date +%Y-%m-%d)\",\"type\":\"other\"}" \
-          "$AMUX_URL/api/crm/contacts/$cid/interactions" ;;
+        _amux_write POST "$AMUX_URL/api/crm/contacts/$cid/interactions" \
+          "{\"notes\":\"$notes\",\"date\":\"$(date +%Y-%m-%d)\",\"type\":\"other\"}" ;;
       followups|fu)
         curl -sk "$AMUX_URL/api/crm/followups" | python3 -c "
 import json,sys
@@ -96,15 +137,14 @@ for c in cs: print(c.get('id',''),c.get('name',''),c.get('company',''))" ;;
         if [ -z "$pmid" ]; then echo "Usage: amux threads reply [--partial] <parent_mid> [body]" >&2; exit 1; fi
         body="$*"
         if [ -z "$body" ] && [ ! -t 0 ]; then body=$(cat); fi
-        # Resolve the parent's thread_id via the API.
+        # Resolve the parent's thread_id via the API (read — no retry needed).
         tid=$(curl -sk "$AMUX_URL/api/messages/$pmid" | python3 -c "import json,sys; d=json.load(sys.stdin); print(d.get('thread_id') or '')")
         if [ -z "$tid" ]; then echo "amux threads reply: parent $pmid not found" >&2; exit 1; fi
         payload=$(python3 -c "
 import json,sys
 print(json.dumps({'body':sys.argv[1],'parent_id':sys.argv[2],'partial':sys.argv[3]=='true'}))" "$body" "$pmid" "$partial")
-        curl -sk -X POST -H 'Content-Type: application/json' \
-          -H "X-Amux-Session: ${AMUX_SESSION:-}" \
-          -d "$payload" "$AMUX_URL/api/threads/$tid/messages" | python3 -c "
+        _amux_write POST "$AMUX_URL/api/threads/$tid/messages" "$payload" \
+          "X-Amux-Session: ${AMUX_SESSION:-}" | python3 -c "
 import json,sys; d=json.load(sys.stdin)
 print(d.get('id','error: '+str(d.get('error','?'))))" ;;
       finalize|patch)
@@ -115,8 +155,7 @@ print(d.get('id','error: '+str(d.get('error','?'))))" ;;
         if [ -z "$body" ] && [ ! -t 0 ]; then body=$(cat); fi
         payload=$(python3 -c "
 import json,sys; print(json.dumps({'body':sys.argv[1]}))" "$body")
-        curl -sk -X PATCH -H 'Content-Type: application/json' \
-          -d "$payload" "$AMUX_URL/api/messages/$mid" | python3 -c "
+        _amux_write PATCH "$AMUX_URL/api/messages/$mid" "$payload" | python3 -c "
 import json,sys; d=json.load(sys.stdin)
 print(d.get('id','error: '+str(d.get('error','?'))),d.get('status',''))" ;;
       new)
@@ -129,8 +168,7 @@ print(d.get('id','error: '+str(d.get('error','?'))),d.get('status',''))" ;;
         if [ -z "$body" ] && [ ! -t 0 ]; then body=$(cat); fi
         payload=$(python3 -c "
 import json,sys; print(json.dumps({'title':sys.argv[1],'body':sys.argv[2],'to_session':sys.argv[3]}))" "$title" "$body" "$target")
-        curl -sk -X POST -H 'Content-Type: application/json' \
-          -d "$payload" "$AMUX_URL/api/threads" | python3 -c "
+        _amux_write POST "$AMUX_URL/api/threads" "$payload" | python3 -c "
 import json,sys; d=json.load(sys.stdin)
 print(d.get('id','error: '+str(d.get('error','?'))))" ;;
       list|ls|"")
@@ -159,15 +197,13 @@ for m in d['messages']:
         mid="$1"
         if [ -z "$mid" ]; then echo "Usage: amux threads $sub <M-N>" >&2; exit 1; fi
         val=$([ "$sub" = "flag" ] && echo "true" || echo "false")
-        curl -sk -X PATCH -H 'Content-Type: application/json' \
-          -d "{\"flagged\":$val}" "$AMUX_URL/api/messages/$mid" | python3 -c "
+        _amux_write PATCH "$AMUX_URL/api/messages/$mid" "{\"flagged\":$val}" | python3 -c "
 import json,sys; d=json.load(sys.stdin)
 print(d.get('id','error'),'flagged=',d.get('flagged',0))" ;;
       read)
         mid="$1"
         if [ -z "$mid" ]; then echo "Usage: amux threads read <M-N>" >&2; exit 1; fi
-        curl -sk -X PATCH -H 'Content-Type: application/json' \
-          -d '{"read":true}' "$AMUX_URL/api/messages/$mid" >/dev/null
+        _amux_write PATCH "$AMUX_URL/api/messages/$mid" '{"read":true}' >/dev/null
         echo "read $mid" ;;
       *) echo "amux threads: unknown subcommand: $sub" >&2
          echo "  try: reply | finalize | new | list | show | flag | unflag | read" >&2
@@ -189,14 +225,12 @@ for s in json.load(sys.stdin): print(s['name'], '(running)' if s.get('running') 
   share)
     session="$1"; shift 2>/dev/null || true
     perms="${1:-output}"
-    result=$(curl -sk -X POST -H 'Content-Type: application/json' \
-      -d "{\"perms\":\"$perms\"}" "$AMUX_URL/api/sessions/$session/share")
+    result=$(_amux_write POST "$AMUX_URL/api/sessions/$session/share" "{\"perms\":\"$perms\"}")
     echo "$result" | python3 -c "import json,sys; d=json.load(sys.stdin); print(d.get('url','error: '+d.get('error','unknown')))" ;;
   unshare)
     session="$1"; shift 2>/dev/null || true
     token="$1"
-    curl -sk -X DELETE -H 'Content-Type: application/json' \
-      -d "{\"token\":\"$token\"}" "$AMUX_URL/api/sessions/$session/share" >/dev/null
+    _amux_write DELETE "$AMUX_URL/api/sessions/$session/share" "{\"token\":\"$token\"}" >/dev/null
     echo "revoked" ;;
   help|--help|-h|"")
     echo "amux board <done|doing|todo> <ITEM_ID>  — update board item status"
