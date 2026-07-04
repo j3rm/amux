@@ -3379,6 +3379,23 @@ CREATE TABLE IF NOT EXISTS prefs (
     key   TEXT PRIMARY KEY,
     value TEXT NOT NULL
 );
+-- Workflow runs — Python workflow modules under /mnt/gitdata/amux/workflows/
+-- are deterministic multi-step choreographies (see AH-workflows, 2026-07-04).
+-- Each invocation logs its inputs, outputs, per-step events, and duration
+-- so we can inspect a run after the fact and answer questions like
+-- "why did this auto-adjudicate as stale-cascade?".
+CREATE TABLE IF NOT EXISTS workflow_runs (
+    id          TEXT PRIMARY KEY,
+    name        TEXT NOT NULL,
+    ctx_in      TEXT NOT NULL DEFAULT '{}',
+    result      TEXT NOT NULL DEFAULT '{}',
+    events      TEXT NOT NULL DEFAULT '[]',
+    status      TEXT NOT NULL DEFAULT 'running',    -- running | ok | error
+    error       TEXT NOT NULL DEFAULT '',
+    started_at  INTEGER NOT NULL,
+    finished_at INTEGER
+);
+CREATE INDEX IF NOT EXISTS idx_workflow_runs_name ON workflow_runs(name, started_at DESC);
 CREATE TABLE IF NOT EXISTS logs (
     id       INTEGER PRIMARY KEY AUTOINCREMENT,
     ts       INTEGER NOT NULL,
@@ -36117,6 +36134,46 @@ class CCHandler(BaseHTTPRequestHandler):
 
             return self._json({"error": "method not allowed"}, 405)
 
+        # Workflows API (/api/workflows) — deterministic multi-step choreographies.
+        # See _run_workflow above + /mnt/gitdata/amux/workflows/*.py.
+        if path == "/api/workflows" or path.startswith("/api/workflows/"):
+            db = get_db()
+            if method == "GET" and path == "/api/workflows":
+                return self._json(_list_workflows())
+            m_run = re.match(r"^/api/workflows/([a-zA-Z0-9_]+)/run$", path)
+            if m_run and method == "POST":
+                wf_name = m_run.group(1)
+                bj = self._read_body()
+                inner_ctx = bj.get("ctx") if isinstance(bj, dict) else {}
+                if not isinstance(inner_ctx, dict):
+                    inner_ctx = {}
+                result = _run_workflow(wf_name, inner_ctx)
+                code = 200 if result.get("status") == "ok" else (
+                    404 if result.get("error", "").startswith("workflow ") else 500
+                )
+                return self._json(result, code)
+            m_runid = re.match(r"^/api/workflows/runs/([A-Za-z0-9_-]+)$", path)
+            if m_runid and method == "GET":
+                row = db.execute(
+                    "SELECT * FROM workflow_runs WHERE id = ?", (m_runid.group(1),)
+                ).fetchone()
+                if not row:
+                    return self._json({"error": "run not found"}, 404)
+                d = dict(row)
+                for k in ("ctx_in", "result", "events"):
+                    try: d[k] = json.loads(d[k])
+                    except Exception: pass
+                return self._json(d)
+            if method == "GET" and path == "/api/workflows/runs":
+                # Recent runs across all workflows — for a future UI list.
+                limit = int(qs.get("limit", ["50"])[0])
+                rows = db.execute(
+                    "SELECT id, name, status, started_at, finished_at "
+                    "FROM workflow_runs ORDER BY started_at DESC LIMIT ?", (limit,)
+                ).fetchall()
+                return self._json([dict(r) for r in rows])
+            return self._json({"error": "method not allowed"}, 405)
+
         # Notifications API (/api/notifications)
         if path == "/api/notifications":
             def _notif_load():
@@ -41541,6 +41598,109 @@ def _threads_stale_working_reaper():
                 slog(f"[threads-reaper] {mid}: board insert failed: {e}")
     except Exception as e:
         slog(f"[threads-reaper] error: {e}")
+
+
+# ── Workflow runner ────────────────────────────────────────────────────────
+#
+# Workflow modules live at /mnt/gitdata/amux/workflows/<name>.py. Each exposes
+# a `run(ctx: dict) -> dict` function and a `META` dict. The runner imports
+# the module fresh on each invocation so authors can edit workflows without
+# restarting the server. Every run is persisted to workflow_runs with its
+# inputs, outputs, per-step events, and duration.
+#
+# See workflows/_amux_workflow.py for the helper module (llm.invoke, log,
+# http_*) and workflows/audit_pair_adjudicate.py for the flagship example
+# (auto-close known-safe audit-pair splits before they burn Fable tokens).
+_WORKFLOWS_DIR = Path("/mnt/gitdata/amux/workflows")
+
+
+def _list_workflows() -> list:
+    """Enumerate available workflow modules. Skips _*.py and __init__.py.
+    Loads META via a fresh import so schema drift is visible immediately."""
+    import importlib
+    import sys as _sys
+    if not _WORKFLOWS_DIR.exists():
+        return []
+    out = []
+    for f in sorted(_WORKFLOWS_DIR.glob("*.py")):
+        if f.name.startswith("_") or f.name == "__init__.py":
+            continue
+        name = f.stem
+        meta = {"name": name, "description": "", "input_schema": {}, "output_schema": {}}
+        try:
+            mod_name = f"workflows.{name}"
+            if mod_name in _sys.modules:
+                del _sys.modules[mod_name]
+            mod = importlib.import_module(mod_name)
+            if hasattr(mod, "META") and isinstance(mod.META, dict):
+                meta.update(mod.META)
+        except Exception as e:
+            meta["error"] = str(e)[:200]
+        out.append(meta)
+    return out
+
+
+def _run_workflow(name: str, ctx: dict) -> dict:
+    """Load and run a workflow. Persists a workflow_runs row. Returns:
+        {run_id, status, result, error, duration_ms}
+    """
+    import importlib
+    import sys as _sys
+    import traceback
+    if not re.match(r"^[a-zA-Z0-9_]+$", name):
+        return {"error": "invalid workflow name"}
+    module_path = _WORKFLOWS_DIR / f"{name}.py"
+    if not module_path.exists():
+        return {"error": f"workflow '{name}' not found"}
+    run_id = "wfr-" + uuid.uuid4().hex[:12]
+    now = int(time.time())
+    db = get_db()
+    db.execute(
+        "INSERT INTO workflow_runs (id, name, ctx_in, status, started_at) "
+        "VALUES (?, ?, ?, 'running', ?)",
+        (run_id, name, json.dumps(ctx), now),
+    )
+    db.commit()
+    # Import the helper module first so we can plumb the run_id in.
+    try:
+        helper_name = "workflows._amux_workflow"
+        if helper_name in _sys.modules:
+            del _sys.modules[helper_name]
+        helper = importlib.import_module(helper_name)
+        helper._set_run(run_id)
+        mod_name = f"workflows.{name}"
+        if mod_name in _sys.modules:
+            del _sys.modules[mod_name]
+        mod = importlib.import_module(mod_name)
+        result = mod.run(dict(ctx))
+        events = helper._drain_events()
+        finished = int(time.time())
+        db.execute(
+            "UPDATE workflow_runs SET result = ?, events = ?, status = 'ok', "
+            "  finished_at = ? WHERE id = ?",
+            (json.dumps(result), json.dumps(events), finished, run_id),
+        )
+        db.commit()
+        return {
+            "run_id": run_id,
+            "status": "ok",
+            "result": result,
+            "duration_ms": (finished - now) * 1000,
+        }
+    except Exception as e:
+        tb = traceback.format_exc()
+        try:
+            events = helper._drain_events()
+        except Exception:
+            events = []
+        finished = int(time.time())
+        db.execute(
+            "UPDATE workflow_runs SET events = ?, status = 'error', "
+            "  error = ?, finished_at = ? WHERE id = ?",
+            (json.dumps(events), tb[:4000], finished, run_id),
+        )
+        db.commit()
+        return {"run_id": run_id, "status": "error", "error": str(e), "duration_ms": (finished - now) * 1000}
 
 
 def _cleanup_tmp():
