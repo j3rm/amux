@@ -25,7 +25,7 @@ Split taxonomy (RTG-Research / amux-helper, 2026-07-04):
 The classifier is CONSERVATIVE. False PASS ships a regression. Every rule
 requires a co-signal so a single ambiguous phrase can't fire an auto-close.
 
-Design (post-RTG-Research review, 2026-07-04):
+Design (post-RTG-Research review, 2026-07-04, hardened for prose-only gap):
   - Shape gate first (Codex-FAIL + Opus-PASS/PASS-WW only).
   - Veto: Codex saying finding is "still present" / "at HEAD" → genuine,
     regardless of any commit-sha or compile-blocker phrasing.
@@ -33,11 +33,14 @@ Design (post-RTG-Research review, 2026-07-04):
     artifact (SQL seed, cshtml section, DDL, config) → genuine. Build-verify
     doesn't cover runtime; classifier can't safely close those.
   - Deploy-status: requires BOTH a deploy-pending phrase in Codex desc AND a
-    source-clean acknowledgment in Codex desc. The bare deploy phrase is a
+    source-clean acknowledgment in Codex desc. Bare deploy phrase is a
     known false-fire vector.
-  - Stale-cascade: requires a compile-blocker hint in Codex AND (a passing
-    build-verify citation OR an explicit downstream-fix phrase in Opus).
-    Passing-BV is the primary signal — a FACT, not prose.
+  - Stale-cascade: requires a compile-blocker hint in Codex AND a BUILD-VERIFY
+    FACT (either an RV-* citation in Opus desc, or an independent lookup of a
+    passing BUILD-VERIFY board item covering the target). Opus prose alone
+    is NOT sufficient — Opus can misread too (the mirror of RA-703). This is
+    the highest-severity closing gap: an Opus false PASS on a real compile
+    blocker only slips through if we trust prose over a verified BV FACT.
 
 Input contract:
     ctx = {
@@ -150,8 +153,10 @@ BV_CITATION_PATTERNS = [
     r"Framework\s+build\s+.{0,20}(pass|clean|0\s+errors?)",
 ]
 
-# DOWNSTREAM-FIX PROSE (in Opus PASS desc) — weaker corroboration. Kept as
-# a fallback when no BV citation exists, but flagged lower-confidence.
+# DOWNSTREAM-FIX PROSE (in Opus PASS desc) — kept for classification signal
+# but NO LONGER a corroboration path on its own. Retained so the classifier
+# can log which prose fired (useful for RTG-Research hand-sampling and for
+# future audit prompt tuning).
 DOWNSTREAM_FIX_PATTERNS = [
     r"fixed\s+(downstream|by\s+RA-\d+)",
     r"current\s+tree\s+(is\s+)?correct",
@@ -209,6 +214,46 @@ def _all_hits(desc: str, patterns: list) -> list:
     return hits
 
 
+def _find_target_bv(target_id: str, board_items: list) -> dict | None:
+    """Independent BUILD-VERIFY lookup for a compile-class stale claim.
+
+    Walks the board for RV-* items that reference the target and returned
+    PASS. If found, that's a FACT — verifiable proof the compile blocker
+    Codex flagged is gone at HEAD. Used to remove the prose-only trust
+    dependency on Opus for the highest-severity path (RTG-Research review
+    Q5c, 2026-07-04).
+
+    Returns {rv_id, title, verdict_line} on hit, else None.
+    """
+    if not target_id:
+        return None
+    for item in board_items:
+        rv_id = item.get("id", "")
+        if not rv_id.startswith("RV-"):
+            continue
+        # BV items are terminal-status when complete.
+        if item.get("status") not in ("done", "verified"):
+            continue
+        title = item.get("title", "") or ""
+        desc = item.get("desc", "") or ""
+        # BV items title-line the primary target after "BUILD-VERIFY", but
+        # a single RV can cover several targets (RV-93 covers RA-728/730/
+        # 731/733). Match target_id anywhere in title or desc.
+        if target_id not in title and target_id not in desc:
+            continue
+        if "BUILD-VERIFY" not in title:
+            continue
+        # Confirm the BV verdict is PASS.
+        verdict_m = re.search(
+            r"(VERDICT:\s*PASS\b[^\n]{0,120}|BUILD\s+PASS[^\n]{0,120}|0\s+errors?[^\n]{0,80})",
+            desc, re.I,
+        )
+        if not verdict_m:
+            continue
+        return {"rv_id": rv_id, "title": title, "verdict_line": verdict_m.group(1).strip()}
+    return None
+
+
 def _split_findings(rac_desc: str) -> list:
     """Return each BLOCKING finding sentence separately.
 
@@ -226,8 +271,14 @@ def _split_findings(rac_desc: str) -> list:
 
 # ── The classifier itself ──────────────────────────────────────────────────
 
-def _classify(rac_desc: str, rao_desc: str) -> dict:
-    """Returns a dict with: classification, reason, confidence, signals."""
+def _classify(rac_desc: str, rao_desc: str, target_id: str = "",
+              board_items: list | None = None) -> dict:
+    """Returns a dict with: classification, reason, confidence, signals.
+
+    board_items is the pre-fetched /api/board list — passed in so the
+    classifier stays testable without HTTP. If omitted, the independent
+    BV lookup is skipped and only inline Opus BV citations count.
+    """
     signals = {"matched_patterns": [], "codex_evidence": "", "opus_evidence": "", "vetoes": []}
     rac_v = _extract_verdict(rac_desc)
     rao_v = _extract_verdict(rao_desc)
@@ -288,39 +339,65 @@ def _classify(rac_desc: str, rao_desc: str) -> dict:
             "signals": signals,
         }
 
-    # 4. Stale-cascade: compile-blocker hint in Codex + strong corroboration in Opus.
+    # 4. Stale-cascade: compile-blocker hint in Codex + BUILD-VERIFY FACT.
+    #    Opus prose alone is NOT sufficient — Opus can misread too (mirror
+    #    of RA-703). Two acceptable corroborations:
+    #      (a) Opus explicitly cites an RV-* PASS in its desc
+    #      (b) Independent board lookup finds a passing BUILD-VERIFY item
+    #          covering the target
+    #    If neither exists → genuine. Downstream-fix prose is recorded in
+    #    signals for hand-sampling but never fires an auto-close alone.
     stale_pat, stale_hit = _first_hit(rac_desc, STALE_CODEX_HINTS)
     if stale_pat:
-        # PRIMARY: passing-BV citation in Opus (a FACT).
         bv_pat, bv_hit = _first_hit(rao_desc, BV_CITATION_PATTERNS)
         if bv_pat:
             signals["matched_patterns"] = [stale_pat, bv_pat]
             signals["codex_evidence"] = f"compile-blocker hint: {stale_hit!r}"
-            signals["opus_evidence"] = f"passing-BV citation: {bv_hit!r}"
+            signals["opus_evidence"] = f"Opus BV citation: {bv_hit!r}"
             return {
                 "classification": "stale-cascade",
                 "reason": (
                     f"Codex flagged compile blocker ({stale_hit!r}); "
-                    f"Opus cites passing build-verify ({bv_hit!r}) — proof compile is clean at HEAD"
+                    f"Opus cites passing build-verify ({bv_hit!r}) — verified fact"
                 ),
                 "confidence": 0.9,
                 "signals": signals,
             }
-        # SECONDARY: downstream-fix prose in Opus (weaker; Opus can misread).
+        # Independent board lookup — the highest-integrity corroboration.
+        if board_items is not None:
+            bv = _find_target_bv(target_id, board_items)
+            if bv:
+                signals["matched_patterns"] = [stale_pat, "board:BUILD-VERIFY"]
+                signals["codex_evidence"] = f"compile-blocker hint: {stale_hit!r}"
+                signals["opus_evidence"] = (
+                    f"board lookup: {bv['rv_id']} PASS ({bv['verdict_line'][:80]})"
+                )
+                return {
+                    "classification": "stale-cascade",
+                    "reason": (
+                        f"Codex flagged compile blocker ({stale_hit!r}); "
+                        f"independent board lookup found {bv['rv_id']} PASS covering "
+                        f"{target_id} — verified fact"
+                    ),
+                    "confidence": 0.9,
+                    "signals": signals,
+                }
+        # No BV fact available. Log any downstream-fix prose so hand-sampling
+        # can see what fired, but do NOT auto-close — Opus prose alone is
+        # the RA-703-mirror gap.
         ds_pat, ds_hit = _first_hit(rao_desc, DOWNSTREAM_FIX_PATTERNS)
         if ds_pat:
-            signals["matched_patterns"] = [stale_pat, ds_pat]
-            signals["codex_evidence"] = f"compile-blocker hint: {stale_hit!r}"
-            signals["opus_evidence"] = f"downstream-fix prose: {ds_hit!r}"
-            return {
-                "classification": "stale-cascade",
-                "reason": (
-                    f"Codex flagged compile blocker ({stale_hit!r}); "
-                    f"Opus notes downstream fix ({ds_hit!r}) — prose only, no build-verify cited"
-                ),
-                "confidence": 0.7,
-                "signals": signals,
-            }
+            signals["opus_evidence"] = f"downstream-fix prose only (no BV fact): {ds_hit!r}"
+        return {
+            "classification": "genuine",
+            "reason": (
+                f"Codex compile-blocker hint present ({stale_hit!r}) but no "
+                f"BUILD-VERIFY fact (Opus RV citation or board lookup) — refusing "
+                f"prose-only auto-close"
+            ),
+            "confidence": 0.0,
+            "signals": signals,
+        }
 
     return {
         "classification": "genuine",
@@ -379,7 +456,23 @@ def run(ctx: dict) -> dict:
         rac_desc = rac.get("desc", "") or ""
         rao_desc = rao.get("desc", "") or ""
 
-    result = _classify(rac_desc, rao_desc)
+    # Fetch the board list once so the classifier can do the independent
+    # BV lookup on compile-class stale claims. Cheap — this is the same
+    # call the dashboard makes every 5s. Callers can pre-populate via
+    # ctx["_board_items"] for tests without an HTTP hop.
+    board_items = ctx.get("_board_items")
+    if board_items is None:
+        try:
+            # done_limit=0 = unlimited. The default cap is 100 done/verified
+            # items, which truncates older BUILD-VERIFY items out — exactly
+            # the ones the classifier needs to look up for older stale claims.
+            board_items = http_get("/api/board?done_limit=0")
+            if not isinstance(board_items, list):
+                board_items = []
+        except Exception as e:
+            log("board.fetch.failed", {"err": str(e)[:120]})
+            board_items = []
+    result = _classify(rac_desc, rao_desc, target_id=target_id, board_items=board_items)
     classification = result["classification"]
     log("classified", {
         "class": classification,
