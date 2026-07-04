@@ -16968,15 +16968,9 @@ setTimeout(function(){var f=document.getElementById('js-fallback');if(f&&f.style
         </div>
         <input type="file" id="peek-file-input" multiple
           style="position:absolute;width:0;height:0;opacity:0;overflow:hidden;pointer-events:none;" onchange="handlePeekFileInput(event)">
-        <div class="peek-more-wrap">
-          <button class="peek-attach-btn" id="peek-more-btn" title="Attach / history" onclick="_togglePeekMore(event)">&#x22EF;</button>
-          <div class="peek-more-menu" id="peek-more-menu">
-            <button type="button" onclick="_peekMoreClose();document.getElementById('peek-file-input').click()">&#128206; Attach file</button>
-            <button type="button" onclick="_peekMoreClose();openCmdHistoryModal()">&#x1F551; Message history</button>
-            <button type="button" onclick="_peekMoreClose();_openSavedMessages()">&#128190; Saved messages</button>
-          </div>
-        </div>
-        <div class="send-split"><button class="btn primary send-split-main" onpointerdown="event.preventDefault();_tapTraceEv('pointerdown')" onpointerup="_tapTraceEv('pointerup');_btnFire(event, sendPeekCmd)" onpointercancel="_tapTraceEv('pointercancel')" ontouchstart="_btnTouchStart(event)" ontouchend="_btnTouchEnd(event, sendPeekCmd)" onclick="_tapTraceEv('click');_btnFire(event, sendPeekCmd)">Send</button><button class="btn primary send-split-arrow" onpointerdown="event.preventDefault()" onpointerup="_btnFire(event, () => _toggleSendMode(event))" ontouchstart="_btnTouchStart(event)" ontouchend="_btnTouchEnd(event, () => _toggleSendMode(event))" onclick="_btnFire(event, () => _toggleSendMode(event))" title="Switch send mode">&#x25BC;</button></div>
+        <button class="peek-attach-btn" title="Attach file" onclick="document.getElementById('peek-file-input').click()">&#128206;</button>
+        <button class="peek-attach-btn" id="peek-hist-btn" onclick="openCmdHistoryModal()" title="Message history">&#x1F551;</button>
+        <div class="send-split"><button class="btn primary send-split-main" onpointerdown="event.preventDefault();_tapTraceEv('pointerdown')" onpointerup="_tapTraceEv('pointerup');_btnFire(event, sendPeekCmd)" onpointercancel="_tapTraceEv('pointercancel')" onclick="_tapTraceEv('click');_btnFire(event, sendPeekCmd)">Send</button><button class="btn primary send-split-arrow" onpointerdown="event.preventDefault()" onpointerup="_btnFire(event, () => _toggleSendMode(event))" onclick="_btnFire(event, () => _toggleSendMode(event))" title="Switch send mode">&#x25BC;</button></div>
       </div>
       <!-- Drag-over hint (shown by CSS when drag-over class is on peek-overlay) -->
       <div class="peek-drag-hint" style="display:none;">&#128206; Drop to attach</div>
@@ -21564,7 +21558,7 @@ async function saveGlobalMemory() {
   }
 }
 
-const APP_VER = '0.9.57';   // bump together with the sw.js CACHE version
+const APP_VER = '0.8.9';   // bump together with the sw.js CACHE version
 let _peekScrollLockY = 0;
 function openPeek(name, opts) {
   _stopPeekPoll();
@@ -21858,7 +21852,68 @@ function _syncPeekOverlayToVisualViewport() {
   }
   ov.classList.toggle('vv-compact', constrained && vv.height < window.innerHeight * 0.7);
 }
-(function() {
+// Tap the "Updated … · vX.Y.Z" status line to dump exact bottom-edge geometry
+// from the running device — for diagnosing layout gaps that only reproduce on
+// real hardware (safe areas, standalone-PWA viewport quirks).
+// Auto-beacon: small screens self-report peek geometry once per page load
+// (POST /api/client-debug) so mobile layout bugs are diagnosed from real
+// device numbers — no user round-trips.
+let _geoBeaconSent = false;
+// Second snapshot with the keyboard UP (fires once, on first input focus) —
+// the keyboard-down beacon can't show keyboard-state bugs.
+let _kbdBeaconSent = false;
+function _peekKbdBeacon() {
+  if (_kbdBeaconSent || window.innerWidth > 700) return;
+  _kbdBeaconSent = true;
+  setTimeout(() => {
+    try {
+      const ov = document.getElementById('peek-overlay');
+      const bar = document.querySelector('.peek-cmd-bar');
+      const row = document.querySelector('.peek-cmd-row');
+      const vv = window.visualViewport || {};
+      const b = bar.getBoundingClientRect(), r = row.getBoundingClientRect();
+      // what's rendered just below the input row? (identifies the gap content)
+      const below = document.elementFromPoint(Math.round(window.innerWidth / 2), Math.min(Math.round(r.bottom + 8), window.innerHeight - 2));
+      fetch(API + '/api/client-debug', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          kind: 'peek-geo-kbd', ver: APP_VER,
+          appliedZoom: document.documentElement.style.zoom || '1',
+          win: window.innerWidth + 'x' + window.innerHeight,
+          vvH: Math.round(vv.height || 0), vvTop: Math.round(vv.offsetTop || 0),
+          ovPadB: getComputedStyle(ov).paddingBottom,
+          barBottom: Math.round(b.bottom), rowBottom: Math.round(r.bottom),
+          vvBottom: Math.round((vv.height || 0) + (vv.offsetTop || 0)),
+          belowRow: below ? (below.id || below.className.toString().slice(0, 40) || below.tagName) : '(none)',
+        }),
+      }).catch(() => {});
+    } catch (e) {}
+  }, 1200);
+}
+// Tap tracer: record every pointer/click event on the Send buttons; if a
+// pointerdown is not followed by a handler fire within 600ms, report the event
+// trace — catches the "dead first tap" with event-level evidence.
+let _tapTrace = [], _tapReported = 0;
+function _tapTraceEv(ev) {
+  _tapTrace.push({ t: Math.round(performance.now()), e: ev });
+  if (_tapTrace.length > 24) _tapTrace = _tapTrace.slice(-24);
+  if (ev === 'pointerdown') {
+    const started = Math.round(performance.now());
+    setTimeout(() => {
+      const fired = _tapTrace.some(x => x.e === 'FIRE' && x.t >= started);
+      if (!fired && Date.now() - _tapReported > 15000) {
+        _tapReported = Date.now();
+        fetch(API + '/api/client-debug', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ kind: 'dead-tap', ver: APP_VER, trace: _tapTrace.slice(-12) }),
+        }).catch(() => {});
+      }
+    }, 600);
+  }
+}
+function _peekGeoBeacon() {
+  if (_geoBeaconSent || window.innerWidth > 700) return;
+  _geoBeaconSent = true;
   try {
   if (!window.visualViewport) return;
   window.visualViewport.addEventListener('resize', () => {
@@ -24032,44 +24087,7 @@ function _btnFire(e, fn) {
   if (t._fireTs && now - t._fireTs < 350) { _tapTraceEv('DEDUP'); return; }   // click echo of the same tap
   t._fireTs = now;
   _tapTraceEv('FIRE');
-  // Mobile diagnostic: no dead-tap beacon means events DO reach the button, so
-  // "two presses" is the send no-oping. Capture pre/post input length AND any
-  // sync throw or async rejection so the device pins down the exact cause.
-  const inp = document.getElementById('peek-cmd-input');
-  const before = inp ? inp.value.trim().length : -1;
-  const mode = (typeof _sendMode !== 'undefined' ? _sendMode : '?');
-  const sess = (typeof peekSession !== 'undefined' ? peekSession : null);
-  const seq = _tapTrace.slice(-7).map(x => x.e).join(',');
-  let syncErr = '';
-  try {
-    const r = fn();
-    if (r && typeof r.then === 'function') {
-      r.then(() => _btnDbg({ kind: 'send-fire', phase: 'resolved', before, after: inp ? inp.value.trim().length : -1, mode, session: sess, seq }))
-       .catch(er => _btnDbg({ kind: 'send-fire', phase: 'async-throw', err: String(er).slice(0, 200), before, mode, session: sess, seq }));
-    }
-  } catch (er) { syncErr = String(er).slice(0, 200); }
-  _btnDbg({ kind: 'send-fire', phase: syncErr ? 'sync-throw' : 'called', err: syncErr,
-    before, after: inp ? inp.value.trim().length : -1, mode, session: sess, seq });
-}
-// iOS cancels the synthesized click (and pointer events) when a tap races a
-// scroll or a re-render — and the peek re-renders every 1.2s while a session
-// streams. Such taps produce no pointer/click at all ("press send twice").
-// Touch events are the primitive and ALWAYS fire: treat a stationary touch
-// ending on the button as the tap. _btnFire's dedup absorbs the pointerup/
-// click duplicates when they do arrive.
-let _btnTouchX = 0, _btnTouchY = 0;
-function _btnTouchStart(e) {
-  const t = e.touches && e.touches[0];
-  if (t) { _btnTouchX = t.clientX; _btnTouchY = t.clientY; }
-  _tapTraceEv('touchstart');
-}
-function _btnTouchEnd(e, fn) {
-  _tapTraceEv('touchend');
-  const t = e.changedTouches && e.changedTouches[0];
-  if (!t) return;
-  if (Math.abs(t.clientX - _btnTouchX) > 24 || Math.abs(t.clientY - _btnTouchY) > 24) return;   // swipe, not a tap (loosened for thumbs)
-  e.preventDefault();   // we own the tap; suppress the synthetic mouse/click
-  _btnFire(e, fn);
+  fn();
 }
 function slashAcBeforeInput(e) { _sendBeforeInput(e, sendPeekCmd); }
 function cardSlashAcBeforeInput(name, e) { _sendBeforeInput(e, () => sendFromInput(name)); }
@@ -37713,7 +37731,7 @@ PWA_MANIFEST = json.dumps({
 
 # Robust service worker: cache-first with localStorage fallback for multi-day offline
 SERVICE_WORKER = r"""
-const CACHE = 'amux-v0.9.35';
+const CACHE = 'amux-v0.8.9';
 const SHELL_URLS = ['/', '/manifest.json', '/icon.svg', '/icon.png', '/icon-192.png', '/icon-512.png'];
 
 // Install: pre-cache entire app shell
