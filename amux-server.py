@@ -17224,6 +17224,7 @@ setTimeout(function(){var f=document.getElementById('js-fallback');if(f&&f.style
             autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false"
             enterkeyhint="send" style="width:100%;"
             oninput="autoGrow(this);slashAcUpdate();cmdHistoryReset()" onkeydown="slashAcKeydown(event)"
+            onbeforeinput="slashAcBeforeInput(event)"
             onpaste="handlePeekPaste(event)"></textarea>
           <button type="button" class="peek-input-expand" id="peek-input-expand" title="Expand to full screen" onclick="_expandPeekInput()">&#x26F6;</button>
           <div id="slash-ac-list" class="ac-list slash-ac"></div>
@@ -19304,8 +19305,9 @@ function render() {
             placeholder="Send to ${esc(s.name)}..." autocomplete="off" autocorrect="on"
             autocapitalize="sentences" spellcheck="true" enterkeyhint="enter"
             oninput="autoGrow(this);cardSlashAcUpdate('${s.name}');cmdHistoryReset()"
-            onkeydown="cardSlashAcKeydown('${s.name}',event)"></textarea>
-          <button class="btn primary" onmousedown="event.preventDefault()" onclick="sendFromInput('${s.name}')">Send</button>
+            onkeydown="cardSlashAcKeydown('${s.name}',event)"
+            onbeforeinput="cardSlashAcBeforeInput('${s.name}',event)"></textarea>
+          <button class="btn primary" onpointerdown="event.preventDefault()" onclick="sendFromInput('${s.name}')">Send</button>
         </div>` : ''}
       </div>
     </div>`;
@@ -22698,12 +22700,9 @@ async function refreshPeek() {
     _peekEtag = r.headers.get('ETag') || _peekEtag;
     const data = await r.json();
     const output = data.output || '(no output)';
-    // Skip re-render when output is identical — saves ansiToHtml work on every poll tick.
-    // This also applies with an active search: the highlights are already in the DOM,
-    // so re-running applyPeekSearch would needlessly scroll the view back to the current
-    // match every tick (the "force-scroll back to result" bug on idle sessions).
-    if (output === _lastPeekRaw && lastPeekHTML) {
-      if (performance.now() > _peekGeoHold) statusEl.textContent = 'Updated ' + new Date().toLocaleTimeString() + ' · v' + APP_VER;
+    // Skip re-render when output is identical — saves ansiToHtml work on every poll tick
+    if (output === _lastPeekRaw && lastPeekHTML && !peekSearchQuery.trim()) {
+      statusEl.textContent = 'Updated ' + new Date().toLocaleTimeString() + ' · v' + APP_VER;
       return;
     }
     _lastPeekRaw = output;
@@ -22738,7 +22737,7 @@ async function refreshPeek() {
         _hideScrollLockBadge(body);
       });
     }
-    statusEl.textContent = (data.saved ? 'Saved log' : 'Updated') + ' ' + new Date().toLocaleTimeString();
+    statusEl.textContent = (data.saved ? 'Saved log' : 'Updated') + ' ' + new Date().toLocaleTimeString() + ' · v' + APP_VER;
     // Cache peek output for offline browsing
     _idb.set('peek_' + peekSession, { output, time: Date.now() });
   } catch(e) {
@@ -24397,34 +24396,16 @@ function slashAcPick(i) {
 // so it still inserts a newline.
 let _lastKeyShiftEnter = false;
 function _sendBeforeInput(e, send) {
-  // Enter inserts a newline now (standard textarea) — never send from a line break.
-  // Kept as a no-op so the existing onbeforeinput bindings don't error.
-}
-// Send-button firing: onpointerdown preventDefault keeps the input focused
-// (no keyboard collapse mid-tap) — but on real iOS Safari, canceling
-// pointerdown ALSO suppresses the click event (WebKit divergence from Chrome),
-// so onclick alone never fires on the tap ("press send twice"). Fire on
-// pointerup (never suppressed) and keep click as the fallback for non-pointer
-// environments, deduped per-button so one tap can't double-fire.
-function _btnDbg(obj) {
-  if (window.innerWidth > 700) return;
-  try {
-    fetch(API + '/api/client-debug', { method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(Object.assign({ ver: APP_VER }, obj)) }).catch(() => {});
-  } catch (e) {}
-}
-function _btnFire(e, fn) {
-  const t = e.currentTarget;
-  const now = performance.now();
-  if (t._fireTs && now - t._fireTs < 350) { _tapTraceEv('DEDUP'); return; }   // click echo of the same tap
-  t._fireTs = now;
-  _tapTraceEv('FIRE');
-  fn();
+  if (e.inputType !== 'insertLineBreak') return;
+  if (_lastKeyShiftEnter) return;   // Shift+Enter = newline
+  e.preventDefault();
+  send();
 }
 function slashAcBeforeInput(e) { _sendBeforeInput(e, sendPeekCmd); }
 function cardSlashAcBeforeInput(name, e) { _sendBeforeInput(e, () => sendFromInput(name)); }
 
 function slashAcKeydown(e) {
+  _lastKeyShiftEnter = (e.key === 'Enter' && e.shiftKey);
   if (e.isComposing || e.keyCode === 229) return; // ignore IME composition Enter
   const inp = document.getElementById('peek-cmd-input');
   const el = document.getElementById('slash-ac-list');
@@ -24686,6 +24667,7 @@ function cardSlashAcPick(name, i) {
 }
 
 function cardSlashAcKeydown(name, e) {
+  _lastKeyShiftEnter = (e.key === 'Enter' && e.shiftKey);
   if (e.isComposing || e.keyCode === 229) return; // ignore IME composition Enter
   const inp = document.getElementById('input-' + name);
   const el = document.getElementById('card-ac-' + name);
