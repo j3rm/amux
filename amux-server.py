@@ -2581,6 +2581,53 @@ def _render_session_transcript(name: str, max_chars: int = 40000) -> str:
     return text
 
 
+def _trim_live_overlap(transcript: str, live: str) -> str:
+    """Return the live frame minus the portion that re-renders content the
+    transcript already covers. History must render from ONE source: the
+    transcript is canonical and width-stable, while the frame re-renders the
+    same messages at whatever width the tmux window happens to be at the time
+    (attach/detach resizes change it) — the old approach kept the whole frame
+    and trimmed the transcript, so width-mismatched re-renders slipped past the
+    string matching and the same table/paragraph appeared twice at two
+    different wraps. The frame's unique value is only its tail: in-progress
+    streaming output (not yet flushed to the JSONL), the input box, and the
+    status bar — everything after the last frame line the transcript already
+    has. If fewer than 3 frame lines match the transcript tail, the frame is
+    assumed disjoint (transcript stale/empty) and kept whole."""
+    if not transcript or not live:
+        return live
+
+    def _norm(s: str) -> str:
+        s = _STRIP_ANSI.sub("", s)
+        # drop markdown / box-drawing / status decoration so raw-markdown
+        # transcript lines match their rendered live-frame counterparts
+        s = re.sub(r"[*#`_|\u2502\u250c\u2510\u2514\u2518\u251c\u2524\u252c\u2534\u253c\u2500=>\u2022\u00b7\u00bb\u276f\u23bf\u23fa\u273b\u2726\u25cf]+", " ", s)
+        return re.sub(r"\s+", " ", s).strip().lower()
+
+    tail_norm = [n for n in (_norm(x) for x in transcript.split("\n")[-140:]) if len(n) >= 12]
+    tail_set = set(tail_norm)
+    long_tail = [n for n in tail_norm if len(n) >= 46]
+
+    def _in_transcript(n: str) -> bool:
+        if len(n) < 12:
+            return False
+        if n in tail_set:
+            return True
+        # Wrap tolerance: a frame line wrapped at the tmux width is a substring
+        # of the transcript's full logical line (or vice versa for short rows).
+        if len(n) >= 24:
+            for tv in long_tail:
+                if n in tv or tv in n:
+                    return True
+        return False
+
+    ll = live.split("\n")
+    matches = [i for i, x in enumerate(ll) if _in_transcript(_norm(x))]
+    if len(matches) < 3:
+        return live
+    return "\n".join(ll[matches[-1] + 1:]).lstrip("\n")
+
+
 _healing_logs: set = set()  # sessions whose log is being rebuilt right now
 
 
