@@ -6530,6 +6530,48 @@ def _auto_on_build_verify_close(item: dict, db) -> dict | None:
     return None
 
 
+def _maybe_auto_mint_writeup_handoff(item: dict, db) -> dict | None:
+    """When a Nightly billable-notes writeup source item PATCHes to review,
+    fire the writeup_handoff_auto_mint workflow to auto-mint the Cypra-PAA
+    handoff. Removes step 4 (post CP-* to Cypra-PAA) from agent responsibility.
+
+    Only fires when:
+      - title starts with 'Nightly billable-notes writeup:'
+      - source session is a CD-* session (client-data agents only — matches
+        the nightly script's dispatch scope)
+      - status is 'review' (the workflow is idempotent, so accidental
+        double-fires are safe, but this narrows scope for the hook)
+
+    Runs the workflow in a background thread so the PATCH that triggered
+    this doesn't block on the classifier's fetch-and-POST. Failures never
+    fail the PATCH — worst case is the CP-* doesn't mint and the PAA
+    silence audit surfaces it 8h later (same as pre-hook behavior).
+
+    Returns a dict marking the cascade, or None. The dict is informational
+    only — the actual mint happens async in the thread.
+    """
+    title = item.get("title", "") or ""
+    if not title.startswith("Nightly billable-notes writeup:"):
+        return None
+    session = item.get("session", "") or ""
+    if not session.startswith("CD-"):
+        return None
+    if item.get("status") != "review":
+        return None
+    source_id = item.get("id", "")
+    try:
+        threading.Thread(
+            target=_run_workflow,
+            args=("writeup_handoff_auto_mint", {"source_item_id": source_id}),
+            daemon=True,
+            name=f"wf-writeup-handoff-{source_id}",
+        ).start()
+    except Exception as _e:
+        slog(f"[writeup-handoff] {source_id}: workflow spawn failed: {_e}")
+        return None
+    return {"action": "writeup-handoff-mint-spawned", "source": source_id}
+
+
 def _auto_mint_audit_pair(target_item: dict, db) -> dict | None:
     """Called when a worker item PATCHes to status=review. Eligibility-checks,
     then enforces the build-verify gate (if CC_BUILD_GATE is set in the target
@@ -37961,6 +38003,14 @@ class CCHandler(BaseHTTPRequestHandler):
                             minted = _auto_mint_audit_pair(updated_item, db)
                             if minted:
                                 cascaded = cascaded or minted
+                            # Writeup handoff auto-mint: when a Nightly
+                            # billable-notes writeup source item transitions
+                            # to review, mint the Cypra-PAA CP-* handoff so
+                            # step 4 (agent-side) is deterministic. Idempotent
+                            # via existing-CP-* lookup.
+                            handoff = _maybe_auto_mint_writeup_handoff(updated_item, db)
+                            if handoff:
+                                cascaded = cascaded or handoff
                     except Exception as _ce:
                         slog(f"[hooks] {bid}: hook error: {_ce}")
                         cascaded = None
