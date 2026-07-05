@@ -11964,6 +11964,14 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
      (screen.height - innerHeight) and injects it as --js-top-inset. */
   body.js-top-inset .overlay { top: var(--js-top-inset, 0px) !important; padding-top: 10px !important; }
   body.js-top-inset { padding-top: calc(var(--js-top-inset, 0px) + 10px) !important; }
+  body.js-top-inset .header-row { top: var(--js-top-inset, 0px); }
+  /* Standalone iOS: the window is full-screen but the LAYOUT viewport is a
+     status-bar short (sim: 812 of 874; phone: 762 of 812). Flowed content
+     paints past the layout viewport to the true bottom, but fixed bottom:0
+     clamps to it — leaving a dead strip under the peek command bar. Extend
+     fixed overlays down by the carve; the command bar's env(bottom) padding
+     still keeps content above the home indicator. */
+  body.js-bottom-extend .overlay { bottom: calc(-1 * var(--js-bottom-extend, 0px)) !important; }
   /* board-detail sits above peek when opened from within it */
   #board-detail-overlay { z-index: 150; }
   .overlay {
@@ -21242,31 +21250,26 @@ function _syncPeekOverlayToVisualViewport() {
         envTop = p.getBoundingClientRect().height;
         p.remove();
       } catch (e2) {}
-      const carve = screen.height - window.innerHeight;   // status-bar-sized when iOS "carves"
-      // iOS 26 web-app host renders FULL-BLEED under the status bar while
-      // env(safe-area-inset-top) lies as 0 (the BOTTOM inset still reports —
-      // sim beacon: envTop=0, sab=34, carve=62). There is no CSS inset to zero
-      // or rely on — compute the real one from the carve and inject via JS.
-      const fullBleedUnreported = navigator.standalone === true
+      const carve = screen.height - window.innerHeight;   // status-bar height when the host under-reports
+      const standaloneCarve = navigator.standalone === true
         && window.innerWidth <= 700
-        && envTop === 0 && carve >= 20 && carve <= 80;
-      // Legacy quirk (older iOS): webview genuinely starts below the status bar
-      // but env(top) STILL reports ~50 — a redundant second inset to zero. Only
-      // applies when env actually reports one; with env=0 there is nothing to zero.
-      const redundantTop = navigator.standalone === true
-        && window.innerWidth <= 700
-        && envTop > 0
-        && window.innerHeight < (screen.height - 10);
-      document.body.classList.toggle('no-top-inset', redundantTop);
+        && carve >= 20 && carve <= 80;
+      const fullBleedUnreported = standaloneCarve && envTop === 0;
       document.body.classList.toggle('js-top-inset', fullBleedUnreported);
       if (fullBleedUnreported) document.body.style.setProperty('--js-top-inset', carve + 'px');
+      // Fixed bottom:0 clamps to the layout viewport, which is a status-bar
+      // short of the full-screen window — extend fixed overlays by the carve
+      // in BOTH flavors (env-truthful phone, env-lying sim).
+      document.body.classList.toggle('js-bottom-extend', standaloneCarve);
+      if (standaloneCarve) document.body.style.setProperty('--js-bottom-extend', carve + 'px');
       if (window.innerWidth <= 700 && navigator.standalone) {
         try {
           fetch(API + '/api/client-debug', { method: 'POST', headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ kind: 'boot-geo', ver: APP_VER, standalone: 1,
               innerH: window.innerHeight, innerW: window.innerWidth,
               screenH: screen.height, screenW: screen.width, screenY: window.screenY,
-              envTop, carve, applied: redundantTop ? 1 : (fullBleedUnreported ? 2 : 0) }) }).catch(() => {});
+              envTop, carve, applied: fullBleedUnreported ? 2 : 0,
+              bottomExtend: standaloneCarve ? carve : 0 }) }).catch(() => {});
         } catch (e3) {}
       }
     };
