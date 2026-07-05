@@ -2042,6 +2042,148 @@ def _tool_result_text(content) -> str:
     return str(content)
 
 
+# ── Markdown → ANSI (make transcript history look like Claude Code's terminal
+#    render instead of raw markdown source) ─────────────────────────────────────
+_MD_TABLE_SEP_RE = re.compile(r'^\s*\|?\s*:?-{2,}:?\s*(?:\|\s*:?-{2,}:?\s*)+\|?\s*$')
+# base fg the assistant text is wrapped in — inline styles restore to it
+_MD_BASE = "\x1b[39m"
+
+
+def _md_inline(s: str) -> str:
+    """Render inline Markdown (bold, italic, inline code) to ANSI, matching how
+    Claude Code renders it in the terminal. Restores to the base assistant color
+    so the surrounding wrapper's colour is preserved."""
+    # inline code first so ** inside code isn't treated as bold. Colour 153
+    # (lavender) is Claude Code's actual terminal inline-code colour — verified
+    # against live `tmux capture-pane -e` frames; earlier blue/orange were wrong.
+    s = re.sub(r'`([^`\n]+)`', lambda m: '\x1b[38;5;153m' + m.group(1) + _MD_BASE, s)
+    # **bold** / __bold__
+    s = re.sub(r'\*\*([^*\n]+?)\*\*', lambda m: '\x1b[1m' + m.group(1) + '\x1b[22m', s)
+    s = re.sub(r'(?<!\w)__([^_\n]+?)__(?!\w)', lambda m: '\x1b[1m' + m.group(1) + '\x1b[22m', s)
+    # *italic* / _italic_ — single delimiter, not adjacent to a word char or a
+    # space (so it never eats `2*3`, `*.py` globs, `- ` bullets, or math).
+    s = re.sub(r'(?<![\w*])\*(?!\s)([^*\n]+?)(?<!\s)\*(?![\w*])',
+               lambda m: '\x1b[3m' + m.group(1) + '\x1b[23m', s)
+    s = re.sub(r'(?<![\w_])_(?!\s)([^_\n]+?)(?<!\s)_(?![\w_])',
+               lambda m: '\x1b[3m' + m.group(1) + '\x1b[23m', s)
+    return s
+
+
+def _md_render_table(block: list, max_width: int = 100) -> str:
+    """Render a Markdown table as a box-drawing table, WRAPPING cells so the whole
+    table fits within max_width columns — like Claude Code's terminal render. This
+    caps table width so a wide cell can't blow the row out to hundreds of columns
+    and break the peek (the box-drawing then wraps mid-glyph in the browser)."""
+    import textwrap
+
+    def cells(row: str) -> list:
+        r = row.strip()
+        if r.startswith('|'):
+            r = r[1:]
+        if r.endswith('|'):
+            r = r[:-1]
+        return [c.strip() for c in r.split('|')]
+
+    def strip_md(s: str) -> str:  # width math is on plain text; no ANSI inside cells
+        s = re.sub(r'`([^`]+)`', r'\1', s)
+        s = re.sub(r'\*\*([^*]+)\*\*', r'\1', s)
+        s = re.sub(r'__([^_]+)__', r'\1', s)
+        return s
+
+    rows = [[strip_md(c) for c in cells(block[0])]] + [[strip_md(c) for c in cells(r)] for r in block[2:]]
+    ncol = max((len(r) for r in rows), default=0)
+    if ncol == 0:
+        return "\n".join(block)
+    for r in rows:
+        r.extend([''] * (ncol - len(r)))
+    natural = [max((len(rows[ri][ci]) for ri in range(len(rows))), default=0) for ci in range(ncol)]
+    avail = max(ncol * 6, max_width - (3 * ncol + 1))   # leave room for the borders
+    widths = list(natural)
+    guard = 0
+    while sum(widths) > avail and guard < 10000:        # shrink the widest column until it fits
+        guard += 1
+        mx = max(range(ncol), key=lambda c: widths[c])
+        if widths[mx] <= 6:
+            break
+        widths[mx] -= 1
+
+    widths = [max(1, w) for w in widths]   # never 0 — textwrap.wrap(w=0) raises
+
+    def wrap_cell(text: str, w: int) -> list:
+        return textwrap.wrap(text, max(1, w), break_long_words=True, break_on_hyphens=False) or ['']
+
+    def render_row(cs: list, header: bool = False) -> str:
+        wrapped = [wrap_cell(cs[ci], widths[ci]) for ci in range(ncol)]
+        h = max(len(w) for w in wrapped)
+        out = []
+        for k in range(h):
+            parts = []
+            for ci in range(ncol):
+                seg = wrapped[ci][k] if k < len(wrapped[ci]) else ''
+                pad = seg + ' ' * (widths[ci] - len(seg))
+                parts.append(('\x1b[1m' + pad + '\x1b[22m') if (header and seg) else pad)
+            out.append('│ ' + ' │ '.join(parts) + ' │')
+        return '\n'.join(out)
+
+    top = '┌' + '┬'.join('─' * (w + 2) for w in widths) + '┐'
+    mid = '├' + '┼'.join('─' * (w + 2) for w in widths) + '┤'
+    bot = '└' + '┴'.join('─' * (w + 2) for w in widths) + '┘'
+    res = [top, render_row(rows[0], header=True), mid]
+    res.extend(render_row(r) for r in rows[1:])
+    res.append(bot)
+    return "\n".join(res)
+
+
+def _md_to_ansi(text: str) -> str:
+    """Render a practical subset of Markdown (bold, inline code, headers, and
+    tables) to ANSI so transcript history matches Claude Code's terminal render
+    rather than showing raw `**`, backticks and `| pipe |` tables.
+
+    Fail-safe: any rendering error returns the ORIGINAL text — a formatting bug
+    must never blank the transcript (a table crash once turned peeks into
+    "(no output)")."""
+    try:
+        return _md_to_ansi_inner(text)
+    except Exception:
+        return text
+
+
+def _md_to_ansi_inner(text: str) -> str:
+    lines = text.split("\n")
+    out: list = []
+    i = 0
+    while i < len(lines):
+        ln = lines[i]
+        # table: a pipe row followed by a |---|---| separator
+        if (ln.strip().startswith('|') and ln.count('|') >= 2
+                and i + 1 < len(lines) and _MD_TABLE_SEP_RE.match(lines[i + 1])):
+            blk = [ln, lines[i + 1]]
+            j = i + 2
+            while j < len(lines) and lines[j].strip().startswith('|') and lines[j].count('|') >= 2:
+                blk.append(lines[j])
+                j += 1
+            out.append(_md_render_table(blk))
+            i = j
+            continue
+        # ATX header → bold, drop the leading #s
+        hm = re.match(r'^(#{1,6})\s+(.*)$', ln)
+        if hm:
+            out.append('\x1b[1m' + _md_inline(hm.group(2)) + '\x1b[22m')
+            i += 1
+            continue
+        out.append(_md_inline(ln))
+        i += 1
+    return "\n".join(out)
+
+
+def _USER_ECHO_ANSI(txt: str) -> str:
+    """User-message echo in Claude Code's exact style: fg-239 '❯ ' and fg-231
+    text on a bg-237 highlight block, continuations indented 2 (captured from
+    a live Claude Code pane — keep byte-identical for visual parity)."""
+    return ("\x1b[38;5;239m\x1b[48;5;237m❯ \x1b[38;5;231m"
+            + txt.replace("\n", "\n  ") + "\x1b[39m\x1b[49m")
+
+
 def _render_session_transcript(name: str, max_chars: int = 40000) -> str:
     """Render a session's JSONL conversation as clean ANSI-colored text for the
     peek Transcript tab — the gap-free, never-torn alternative to the alt-screen
@@ -2077,7 +2219,32 @@ def _render_session_transcript(name: str, max_chars: int = 40000) -> str:
                 if not txt:
                     continue
                 if role == "user":
-                    out.append("\x1b[1m\x1b[38;5;220m❯ " + txt.replace("\n", "\n  ") + "\x1b[0m")
+                    # Harness-injected reminders are invisible in Claude Code — hide them here too
+                    if "<system-reminder>" in txt:
+                        txt = re.sub(r"<system-reminder>.*?</system-reminder>", "", txt, flags=re.S).strip()
+                        if not txt:
+                            continue
+                    # Local slash-command turns are stored with meta tags; Claude Code
+                    # shows the bare command + dim ⎿ output, never the raw tags
+                    m_cmd = re.search(r"<command-name>(.*?)</command-name>", txt, re.S)
+                    m_arg = re.search(r"<command-args>(.*?)</command-args>", txt, re.S)
+                    m_out = re.search(r"<local-command-stdout>(.*?)</local-command-stdout>", txt, re.S)
+                    if m_cmd or m_out:
+                        if m_cmd and m_cmd.group(1).strip():
+                            cmd_line = m_cmd.group(1).strip()
+                            if m_arg and m_arg.group(1).strip():
+                                cmd_line += " " + m_arg.group(1).strip()
+                            out.append(_USER_ECHO_ANSI(cmd_line))
+                        body = m_out.group(1).strip() if m_out else ""
+                        if body:
+                            for k, ln in enumerate(body.split("\n")[:6]):
+                                prefix = "  ⎿  " if k == 0 else "     "
+                                out.append("\x1b[38;5;246m" + prefix + ln.rstrip() + "\x1b[0m")
+                        out.append("")
+                        continue
+                    # Match Claude Code's real echo: dim-gray ❯ on a subtle bg-237
+                    # highlight block, near-white text — captured from a live pane
+                    out.append(_USER_ECHO_ANSI(txt))
                 else:
                     out.append("\x1b[38;5;252m" + txt + "\x1b[0m")
                 out.append("")
