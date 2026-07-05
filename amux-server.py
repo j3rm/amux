@@ -12766,8 +12766,12 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
   .peek-highlight.current { background: rgba(210,153,34,0.85); color: #000; }
   .peek-prompt { display: block; border-left: 3px solid rgba(210,180,60,0.5); padding-left: 8px; margin-left: -11px; background: rgba(210,180,60,0.07); border-radius: 0 3px 3px 0; }
 
-  /* Peek overlay — flush to bottom, cmd bar handles its own safe-area padding */
+  /* Peek overlay — flush to bottom, cmd bar handles its own safe-area padding.
+     In standalone (js-bottom-extend) "flush" means the TRUE screen bottom,
+     which sits a carve below the short layout viewport — same specificity
+     tier (ID) so it can win over the bottom:0 pin below. */
   #peek-overlay { padding-bottom: 0 !important; bottom: 0 !important; }
+  body.js-bottom-extend #peek-overlay { bottom: calc(-1 * var(--js-bottom-extend, 0px)) !important; }
 
   /* Peek focus mode — collapse everything above terminal on mobile */
   #peek-overlay.peek-focus .overlay-header,
