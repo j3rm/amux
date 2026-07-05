@@ -11488,7 +11488,14 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
 <meta name="apple-mobile-web-app-capable" content="yes">
-<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<!-- status-bar-style: 'default' (not black-translucent). black-translucent asked iOS to
+     render the webview FULL-BLEED under the status bar, and iOS kept flip-flopping between
+     honoring it (innerHeight 812) and falling back to an inset webview (762) every ~2s —
+     THAT oscillation was the root of the top cut-off / bottom excess / jitter (device
+     beacons 2026-07-05). 'default' pins a stable INSET webview below a solid status bar:
+     env(top)=0, content flush at top:0, no oscillation, no env double-count. Takes effect
+     on the next COLD start of the installed app. -->
+<meta name="apple-mobile-web-app-status-bar-style" content="default">
 <meta name="mobile-web-app-capable" content="yes">
 <meta name="theme-color" content="#0d1117">
 <link rel="manifest" href="/manifest.json">
