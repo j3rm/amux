@@ -24993,6 +24993,19 @@ function _tToggle(tid) {
 // HTML escape + friendly time formatter (used to live on _qEsc/_qFmtTime in
 // the deleted Inbox module — reimplemented here so Threads is self-contained).
 function _tEsc(s) { return String(s || '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
+// Some agents post message bodies with LITERAL '\n' char sequences (backslash
+// + n) instead of real newlines — happens when a body is double-encoded via
+// nested JSON or built by a script that escapes newlines twice. `white-space:
+// pre-wrap` in CSS can't recover from that; we have to turn the two chars
+// into a real \n before rendering. Same story for \t and \r. Leaves a real
+// escaped-backslash-followed-by-n (\\n) alone.
+function _tNormalizeBody(s) {
+  return String(s || '')
+    .replace(/(^|[^\\])\\n/g, '$1\n')
+    .replace(/(^|[^\\])\\t/g, '$1\t')
+    .replace(/(^|[^\\])\\r/g, '$1\r')
+    .replace(/\\\\/g, '\\');
+}
 function _tFmtTime(ts) {
   if (!ts) return '';
   const d = new Date(ts * 1000);
@@ -25138,7 +25151,7 @@ function _tRenderFlagSection(list) {
       const midEsc = _tEsc(m.id);
       const tidEsc = _tEsc(t.id);
       const dir = _tMsgDir(m);
-      const preview = (m.body || '').replace(/\s+/g, ' ').slice(0, 140);
+      const preview = _tNormalizeBody(m.body).replace(/\s+/g, ' ').slice(0, 140);
       html += `<div style="padding:8px 10px;margin:4px 0;border:1px solid var(--border);border-radius:6px;background:var(--card-bg,transparent);cursor:pointer;" onclick="_tJumpToFlagged('${tidEsc}','${midEsc}')">
         <div style="display:flex;align-items:baseline;gap:8px;font-size:0.72rem;color:var(--muted);flex-wrap:wrap;">
           <span style="font-weight:600;color:var(--fg);">${midEsc}</span>
@@ -25311,7 +25324,7 @@ function _tRenderMsg(t, m) {
   // linkifyOutput auto-detects absolute paths and URLs — a path like
   // /home/jwesley/.amux/uploads/abc-doc.pdf becomes a click-to-preview link,
   // same behavior as session peek output. It escapes non-match text internally.
-  if (m.body) html += `<div style="white-space:pre-wrap;font-size:0.88rem;color:var(--fg);opacity:0.92;margin:4px 0 8px 0;">${linkifyOutput(m.body)}</div>`;
+  if (m.body) html += `<div style="white-space:pre-wrap;font-size:0.88rem;color:var(--fg);opacity:0.92;margin:4px 0 8px 0;">${linkifyOutput(_tNormalizeBody(m.body))}</div>`;
   html += '</div></div>';
   return html;
 }
