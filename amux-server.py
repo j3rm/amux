@@ -11948,23 +11948,18 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
     background: var(--bg);
     z-index: 100; flex-direction: column;
   }
-  /* Standalone home-screen app on a non-cover viewport: iOS already carves the
-     status bar OUT of the webview (innerHeight = screen.height - statusbar), so
-     env(safe-area-inset-top) is a REDUNDANT second inset — it left ~50px of
-     dead space above the peek/list (device beacons: ovTop 50 with a 762px
-     viewport on an 812pt screen). _topInsetGuard sets body.no-top-inset in that
-     case; zero the top positioning and let a small visual pad show below the
-     status bar. Bottom inset stays (the webview DOES include the home
-     indicator). Cover PWAs / Safari tabs never get this class. */
+  /* iOS home-screen web app top inset (2026-07-05 device beacon): innerHeight is a
+     status-bar SHORT of screen (762 of 812) => the webview is already INSET below the
+     status bar; it does NOT render full-bleed. iOS 26 still reports env(top)=50 anyway —
+     a REDUNDANT second inset that drops the header to physical y=100, opening a ~50px top
+     gap (user: "still"). When the viewport is inset (standalone + carve>=20), zero the top
+     so the overlay/header/list sit flush at the webview top (physical y just below the
+     status bar). Safari (non-standalone, bleeds under the status bar) is excluded and keeps
+     env(top) to clear the clock. Flush at ovTop 0 in v0.9.4/0.9.6/0.9.11; the v0.9.13
+     "trust env" retirement is what reintroduced the gap. */
   body.no-top-inset .overlay { top: 0 !important; padding-top: 10px !important; }
-  /* Session-list page: same redundant top inset on the body container. */
   body.no-top-inset { padding-top: 10px !important; }
-  /* iOS 26 web-app host: full-bleed webview but env(safe-area-inset-top)
-     lies as 0 — _topInsetGuard measures the real status-bar height
-     (screen.height - innerHeight) and injects it as --js-top-inset. */
-  body.js-top-inset .overlay { top: var(--js-top-inset, 0px) !important; padding-top: 10px !important; }
-  body.js-top-inset { padding-top: calc(var(--js-top-inset, 0px) + 10px) !important; }
-  body.js-top-inset .header-row { top: var(--js-top-inset, 0px); }
+  body.no-top-inset .header-row { top: 0 !important; }
   /* board-detail sits above peek when opened from within it */
   #board-detail-overlay { z-index: 150; }
   .overlay {
@@ -21232,10 +21227,16 @@ function _syncPeekOverlayToVisualViewport() {
   });
   } catch (e) {}
 })();
-// Standalone home-screen app whose webview already excludes the status bar
-// (innerHeight < screen.height): env(safe-area-inset-top) is a redundant second
-// inset — zero it via body.no-top-inset. Only this exact case; Safari tabs and
-// cover PWAs are left alone. Evaluated once at boot (keyboard-closed geometry).
+// Standalone top inset (2026-07-05 device beacon, iPhone 14 mini home-screen app):
+// innerHeight is a status-bar SHORT of screen (762 of 812) => the webview is already
+// INSET below the status bar; it does NOT render full-bleed (a full-bleed webview would
+// report innerHeight == screen). iOS 26 still reports env(safe-area-inset-top)=50 anyway,
+// so the base CSS `top: max(chrome, env(top))` applies a REDUNDANT second inset that drops
+// the header to physical y=100 — the ~50px top gap. When the viewport is inset (standalone
+// + carve>=20), zero it via body.no-top-inset so content sits flush at the webview top.
+// This is what v0.9.4/0.9.6/0.9.11 did (ovTop 0, user-confirmed flush); the v0.9.13 "trust
+// env" retirement reintroduced the gap on the false premise that the webview is full-bleed.
+// Safari (non-standalone, genuinely bleeds under the status bar) is excluded and keeps env.
 (function() {
   try {
     const decide = () => {
@@ -21248,13 +21249,11 @@ function _syncPeekOverlayToVisualViewport() {
         envTop = p.getBoundingClientRect().height;
         p.remove();
       } catch (e2) {}
-      const carve = screen.height - window.innerHeight;   // status-bar height when the host under-reports
-      const standaloneCarve = navigator.standalone === true
+      const carve = screen.height - window.innerHeight;   // >0 means the viewport is inset (status bar excluded)
+      const standaloneInset = navigator.standalone === true
         && window.innerWidth <= 700
         && carve >= 20 && carve <= 80;
-      const fullBleedUnreported = standaloneCarve && envTop === 0;
-      document.body.classList.toggle('js-top-inset', fullBleedUnreported);
-      if (fullBleedUnreported) document.body.style.setProperty('--js-top-inset', carve + 'px');
+      document.body.classList.toggle('no-top-inset', standaloneInset);
       // NO bottom extend. In a toolbar-less standalone webview window.innerHeight is
       // the full visible height and fixed bottom:0 reaches the true screen bottom
       // (device beacon 2026-07-05: ovBottom 762 == innerHeight). The retired
@@ -21268,7 +21267,7 @@ function _syncPeekOverlayToVisualViewport() {
             body: JSON.stringify({ kind: 'boot-geo', ver: APP_VER, standalone: 1,
               innerH: window.innerHeight, innerW: window.innerWidth,
               screenH: screen.height, screenW: screen.width, screenY: window.screenY,
-              envTop, carve, applied: fullBleedUnreported ? 2 : 0,
+              envTop, carve, applied: standaloneInset ? 1 : 0,
               bottomExtend: 0 }) }).catch(() => {});
         } catch (e3) {}
       }
