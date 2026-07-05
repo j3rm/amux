@@ -11948,6 +11948,22 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
     background: var(--bg);
     z-index: 100; flex-direction: column;
   }
+  /* Standalone home-screen app on a non-cover viewport: iOS already carves the
+     status bar OUT of the webview (innerHeight = screen.height - statusbar), so
+     env(safe-area-inset-top) is a REDUNDANT second inset — it left ~50px of
+     dead space above the peek/list (device beacons: ovTop 50 with a 762px
+     viewport on an 812pt screen). _topInsetGuard sets body.no-top-inset in that
+     case; zero the top positioning and let a small visual pad show below the
+     status bar. Bottom inset stays (the webview DOES include the home
+     indicator). Cover PWAs / Safari tabs never get this class. */
+  body.no-top-inset .overlay { top: 0 !important; padding-top: 10px !important; }
+  /* Session-list page: same redundant top inset on the body container. */
+  body.no-top-inset { padding-top: 10px !important; }
+  /* iOS 26 web-app host: full-bleed webview but env(safe-area-inset-top)
+     lies as 0 — _topInsetGuard measures the real status-bar height
+     (screen.height - innerHeight) and injects it as --js-top-inset. */
+  body.js-top-inset .overlay { top: var(--js-top-inset, 0px) !important; padding-top: 10px !important; }
+  body.js-top-inset { padding-top: calc(var(--js-top-inset, 0px) + 10px) !important; }
   /* board-detail sits above peek when opened from within it */
   #board-detail-overlay { z-index: 150; }
   .overlay {
@@ -21208,6 +21224,65 @@ function _syncPeekOverlayToVisualViewport() {
     setTimeout(_syncPeekOverlayToVisualViewport, 100);
     setTimeout(_syncPeekOverlayToVisualViewport, 400);
   });
+  } catch (e) {}
+})();
+// Standalone home-screen app whose webview already excludes the status bar
+// (innerHeight < screen.height): env(safe-area-inset-top) is a redundant second
+// inset — zero it via body.no-top-inset. Only this exact case; Safari tabs and
+// cover PWAs are left alone. Evaluated once at boot (keyboard-closed geometry).
+(function() {
+  try {
+    const decide = () => {
+      // Ground truth: measure the real env(safe-area-inset-top) with a probe
+      let envTop = -1;
+      try {
+        const p = document.createElement('div');
+        p.style.cssText = 'position:fixed;top:0;height:env(safe-area-inset-top,0px);width:1px;visibility:hidden;';
+        document.body.appendChild(p);
+        envTop = p.getBoundingClientRect().height;
+        p.remove();
+      } catch (e2) {}
+      const carve = screen.height - window.innerHeight;   // status-bar-sized when iOS "carves"
+      // iOS 26 web-app host renders FULL-BLEED under the status bar while
+      // env(safe-area-inset-top) lies as 0 (the BOTTOM inset still reports —
+      // sim beacon: envTop=0, sab=34, carve=62). There is no CSS inset to zero
+      // or rely on — compute the real one from the carve and inject via JS.
+      const fullBleedUnreported = navigator.standalone === true
+        && window.innerWidth <= 700
+        && envTop === 0 && carve >= 20 && carve <= 80;
+      // Legacy quirk (older iOS): webview genuinely starts below the status bar
+      // but env(top) STILL reports ~50 — a redundant second inset to zero. Only
+      // applies when env actually reports one; with env=0 there is nothing to zero.
+      const redundantTop = navigator.standalone === true
+        && window.innerWidth <= 700
+        && envTop > 0
+        && window.innerHeight < (screen.height - 10);
+      document.body.classList.toggle('no-top-inset', redundantTop);
+      document.body.classList.toggle('js-top-inset', fullBleedUnreported);
+      if (fullBleedUnreported) document.body.style.setProperty('--js-top-inset', carve + 'px');
+      if (window.innerWidth <= 700 && navigator.standalone) {
+        try {
+          fetch(API + '/api/client-debug', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ kind: 'boot-geo', ver: APP_VER, standalone: 1,
+              innerH: window.innerHeight, innerW: window.innerWidth,
+              screenH: screen.height, screenW: screen.width, screenY: window.screenY,
+              envTop, carve, applied: redundantTop ? 1 : (fullBleedUnreported ? 2 : 0) }) }).catch(() => {});
+        } catch (e3) {}
+      }
+    };
+    if (document.body) decide(); else document.addEventListener('DOMContentLoaded', decide);
+  } catch (e) {}
+})();
+(function() {
+  if (!window.visualViewport) return;
+  window.visualViewport.addEventListener('resize', () => _vvKick());
+  window.visualViewport.addEventListener('scroll', () => _vvKick());
+  // Keyboard show/hide always follows a focus change inside the overlay
+  const ov = document.getElementById('peek-overlay');
+  if (ov) {
+    ov.addEventListener('focusin', () => { _vvKick(1500); _peekKbdBeacon(); });
+    ov.addEventListener('focusout', () => _vvKick(1500));
+  }
 })();
 
 // Swipe right to close peek (but never when touching the terminal body — preserve text selection)
