@@ -6304,14 +6304,32 @@ _ANY_ID_RE = re.compile(r'\b([A-Z][A-Z0-9]*)-(\d+)\b')
 
 
 def _is_research_session(session: str) -> bool:
-    """True if the session is one of the *-Research adjudicators (RTG-Research,
-    Ember-Research, etc.). Session-based detection lets the C3 hook work
-    across orgs without depending on item-id prefix conventions, which collide
-    across orgs (e.g. Ember EAC- is both auditor items AND EmberCRM_API_Core
-    worker items)."""
+    """True if the session is an audit-split adjudicator: either <Org>-Research
+    (RTG, Ember) or <Org>-Reviewer (iSchedule and later). Session-based
+    detection lets the C3 hook work across orgs without depending on item-id
+    prefix conventions, which collide across orgs (e.g. Ember EAC- is both
+    auditor items AND EmberCRM_API_Core worker items).
+
+    Kept as `_is_research_session` (not renamed) to avoid churn across the
+    many call sites; the name is historical. Any new suffix an org wants to
+    use for its adjudicator lives in the tuple below.
+    """
     if not session:
         return False
-    return session.endswith("-Research")
+    return session.endswith(("-Research", "-Reviewer"))
+
+
+def _resolve_adjudicator_session(org: str) -> str | None:
+    """Return the adjudicator session name for `org`, preferring the newer
+    -Reviewer convention over -Research when both exist. Returns None if
+    neither env file exists — caller should skip escalation minting."""
+    if not org:
+        return None
+    for suffix in ("-Reviewer", "-Research"):
+        name = f"{org}{suffix}"
+        if (CC_SESSIONS / f"{name}.env").exists():
+            return name
+    return None
 
 
 def _is_audit_session(session: str) -> bool:
@@ -6657,11 +6675,11 @@ def _auto_mint_escalation(target_id: str, org: str, my_audit_id: str,
     catches duplicate attempts in the same 24h window.
 
     Returns the minted item dict if successful, else None (gate blocked or
-    research session missing)."""
+    adjudicator session missing)."""
     if not org:
         return None
-    research_session = f"{org}-Research"
-    if not (CC_SESSIONS / f"{research_session}.env").exists():
+    research_session = _resolve_adjudicator_session(org)
+    if not research_session:
         return None
     prefix = _prefix_from_session(research_session)
     now = int(time.time())
@@ -6671,8 +6689,9 @@ def _auto_mint_escalation(target_id: str, org: str, my_audit_id: str,
     # Match TITLE only — desc bodies often contain cross-references to other
     # target ids that would false-positive as prior escalations. Aligns with
     # the same fix in the POST-handler gate (2026-07-01).
+    # Session LIKE covers both '-Research' and '-Reviewer' suffixes.
     prior = db.execute(
-        "SELECT id FROM issues WHERE session LIKE '%-Research' AND deleted IS NULL "
+        "SELECT id FROM issues WHERE (session LIKE '%-Research' OR session LIKE '%-Reviewer') AND deleted IS NULL "
         "  AND status != 'discarded' AND created > ? "
         "  AND title LIKE ? "
         "ORDER BY created DESC LIMIT 1",
