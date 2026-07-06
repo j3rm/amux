@@ -4072,6 +4072,9 @@ def _auto_trust_dir(work_dir: str, home_dir: "str | None" = None):
         claude_json.write_text(_json.dumps(cfg, indent=2))
 
 
+def _sync_skills_and_cli():
+    """Sync skills to ~/.claude/commands/ and install the amux CLI stub (once at startup)."""
+    import pathlib as _pathlib
     # ── ~/.claude/commands/ — skills as slash commands ────────────────────────
     # Sync all skills from SQLite. Targets host commands dir + each product's
     # shared home so container sessions get the same /skill-name library.
@@ -4083,8 +4086,6 @@ def _auto_trust_dir(work_dir: str, home_dir: "str | None" = None):
         pass
 
     # ── /usr/local/bin/amux — CLI stub for sessions ───────────────────────────
-    # Writes a minimal amux shim so Claude sessions can use `amux board ...`
-    # commands without needing the full amux bash script installed.
     _amux_stub = r"""#!/bin/sh
 # amux CLI stub — proxies board/session commands to the amux server API
 AMUX_URL="${AMUX_URL:-https://localhost:8822}"
@@ -43641,6 +43642,7 @@ def main():
 
     # Pre-configure ~/.claude.json to skip interactive setup wizard
     _init_claude_config()
+    _sync_skills_and_cli()
 
     # Bind one HTTPS server per host in bind_hosts. Retry on TIME_WAIT after restart.
     servers = []
