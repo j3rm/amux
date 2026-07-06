@@ -16607,13 +16607,27 @@ setTimeout(function(){var f=document.getElementById('js-fallback');if(f&&f.style
       </div>
     </div>
   </div>
-  <!-- Schedules panel -->
-  <div id="peek-schedules-panel" class="peek-tasks-panel">
-    <div class="peek-tasks-add" style="gap:10px;">
-      <span id="peek-schedules-count" style="flex:1;font-size:0.82rem;color:var(--dim);align-self:center;"></span>
-      <button class="btn primary" style="font-size:0.8rem;padding:5px 12px;" onclick="_peekNewSchedule()">+ New schedule</button>
+  <!-- Schedules panel — same view as the homepage Scheduler, scoped to this session -->
+  <div id="peek-schedules-panel" class="peek-tasks-panel" style="padding:0;gap:0;">
+    <div style="padding:10px 12px 8px;display:flex;align-items:center;gap:8px;border-bottom:1px solid var(--border);flex-shrink:0;">
+      <span style="font-weight:600;font-size:0.9rem;">Scheduler</span>
+      <span id="peek-sched-stats" style="font-size:0.7rem;color:var(--dim);flex:1;"></span>
+      <button class="btn" onclick="_peekNewSchedule()" style="font-size:0.78rem;padding:4px 10px;">+ New</button>
     </div>
-    <div class="peek-tasks-list" id="peek-schedules-list"></div>
+    <div style="padding:8px 12px 0;flex-shrink:0;">
+      <div class="search-wrap" id="peek-sched-search-wrap" style="width:100%;">
+        <input class="search-input" id="peek-sched-search" type="text" placeholder="Search schedules — title, command, cadence…" autocomplete="off"
+          oninput="_peekSchedSearch=this.value;document.getElementById('peek-sched-search-wrap').classList.toggle('has-value',!!this.value);_peekRenderSchedules()">
+        <button class="search-clear" onclick="document.getElementById('peek-sched-search').value='';_peekSchedSearch='';document.getElementById('peek-sched-search-wrap').classList.remove('has-value');_peekRenderSchedules()">&#x2715;</button>
+      </div>
+    </div>
+    <div class="peek-tasks-list" id="peek-schedules-list" style="padding:10px 12px;"></div>
+    <details id="peek-sched-runs-details" style="border-top:1px solid var(--border);padding:0 12px;padding-bottom:max(10px,env(safe-area-inset-bottom));flex-shrink:0;">
+      <summary style="cursor:pointer;font-size:0.78rem;font-weight:600;color:var(--dim);padding:8px 0 4px;list-style:none;display:flex;align-items:center;gap:5px;">
+        <span style="font-size:0.6rem;">&#x25B6;</span> Recent Runs
+      </summary>
+      <div id="peek-schedules-runs"></div>
+    </details>
   </div>
   <!-- Notes panel -->
   <div id="peek-notes-panel" class="peek-tasks-panel" style="flex-direction:row;padding:0;gap:0;overflow:hidden;">
@@ -20455,19 +20469,32 @@ async function _peekUpdateTabCounts() {
   } catch(e) {}
 }
 
+let _peekSchedSearch = '';
+// Render-only: reuse the homepage scheduler renderer, scoped to this session, so
+// the peek Schedules tab is literally the same view. Assumes schedules/_schedulerRuns
+// globals are already populated (call _peekLoadSchedules to fetch first).
+function _peekRenderSchedules() {
+  if (!peekSession) return;
+  renderScheduler({
+    listId: 'peek-schedules-list',
+    runsId: 'peek-schedules-runs',
+    statsId: 'peek-sched-stats',
+    session: peekSession,
+    searchQuery: _peekSchedSearch,
+  });
+}
 async function _peekLoadSchedules() {
   const list = document.getElementById('peek-schedules-list');
-  const count = document.getElementById('peek-schedules-count');
-  if (!peekSession) return;
+  if (!peekSession || !list) return;
   list.innerHTML = '<div style="color:var(--dim);font-size:0.85rem;padding:12px 4px;">Loading…</div>';
   try {
-    const r = await fetch(API + '/api/schedules');
-    const all = await r.json();
-    const items = all.filter(s => s.session === peekSession && !s.deleted);
-    count.textContent = items.length ? items.length + ' schedule' + (items.length === 1 ? '' : 's') : '';
+    await Promise.all([fetchSchedules(), fetchSchedulerRuns()]);
+    if (!peekSession) return;
+    _peekRenderSchedules();
+    const n = schedules.filter(s => s.session === peekSession && !s.deleted).length;
     const tabCount = document.getElementById('peek-tab-schedules-count');
     if (tabCount) {
-      if (items.length > 0) { tabCount.textContent = items.length; tabCount.classList.add('has-count'); }
+      if (n > 0) { tabCount.textContent = n; tabCount.classList.add('has-count'); }
       else { tabCount.textContent = ''; tabCount.classList.remove('has-count'); }
     }
     if (!items.length) {
@@ -28130,13 +28157,89 @@ async function fetchSchedulerRuns() {
   }
 }
 
-function renderScheduler() {
-  const listEl = document.getElementById('scheduler-list');
-  const runsEl = document.getElementById('scheduler-runs');
-  if (!listEl || !runsEl) return;
+// ── Scheduler helpers ──────────────────────────────────────────────────────
+function relTime(val) {
+  if (!val) return '—';
+  let ms;
+  if (typeof val === 'string') ms = new Date(val).getTime();
+  else ms = val > 2e9 ? val : val * 1000;
+  if (isNaN(ms)) return '—';
+  const diff = ms - Date.now();
+  const abs = Math.abs(diff);
+  const m = Math.floor(abs / 60000);
+  const h = Math.floor(m / 60);
+  const d = Math.floor(h / 24);
+  let label;
+  if (d >= 2) label = `${d}d`;
+  else if (d >= 1) label = `1d ${h % 24 > 0 ? (h % 24) + 'h' : ''}`.trim();
+  else if (h >= 1) label = `${h}h${m % 60 > 0 ? ' ' + (m % 60) + 'm' : ''}`;
+  else if (m >= 1) label = `${m}m`;
+  else label = '<1m';
+  return diff > 0 ? `in ${label}` : `${label} ago`;
+}
 
-  // ── Schedule list ─────────────────────────────────────────────────────────
-  if (!schedules.length) {
+function isLoopCadence(s) {
+  const expr = (s.schedule_expr || s.recurrence || '').toLowerCase();
+  return /every\s+\d+m/.test(expr) || /every\s+[12]h/.test(expr) || expr === 'hourly';
+}
+
+function schedCadence(s) {
+  if (isLoopCadence(s)) return 'loop';
+  const expr = (s.schedule_expr || '').toLowerCase();
+  if (/weekly|monthly|every\s+(mon|tue|wed|thu|fri|sat|sun)/.test(expr)) return 'weekly';
+  return 'routine';
+}
+
+function _copySchedId(id) {
+  try { navigator.clipboard.writeText(id); } catch(e) {}
+  if (typeof showToast === 'function') showToast(id + ' copied');
+}
+function toggleSchedExpand(id) {
+  const el = document.getElementById('sched-cmd-' + id);
+  if (!el) return;
+  const showing = el.style.display !== 'none';
+  el.style.display = showing ? 'none' : 'block';
+  const btn = document.getElementById('sched-view-btn-' + id);
+  if (btn) btn.textContent = showing ? 'View' : 'Hide';
+}
+
+function renderScheduler(opts) {
+  opts = opts || {};
+  const listEl = document.getElementById(opts.listId || 'scheduler-list');
+  const runsEl = document.getElementById(opts.runsId || 'scheduler-runs');
+  const statsEl = document.getElementById(opts.statsId || 'sched-stats');
+  if (!listEl) return;
+
+  // Scope: when driven from the peek Schedules tab (opts.session), only the
+  // current session's schedules/runs are shown; the homepage view shows the whole
+  // fleet. Same renderer either way, so the two views stay pixel-identical.
+  const sessionFilter = opts.session || null;
+  const scope = sessionFilter ? schedules.filter(s => s.session === sessionFilter && !s.deleted) : schedules;
+  const scopeIds = sessionFilter ? new Set(scope.map(s => s.id)) : null;
+  const runsScoped = scopeIds ? _schedulerRuns.filter(r => scopeIds.has(r.schedule_id)) : _schedulerRuns;
+  const searchQ = (opts.searchQuery != null ? opts.searchQuery : schedSearchQuery) || '';
+
+  // Build run history map: schedule_id → last N run records
+  const runMap = {};
+  for (const r of runsScoped) {
+    if (!runMap[r.schedule_id]) runMap[r.schedule_id] = [];
+    if (runMap[r.schedule_id].length < 6) runMap[r.schedule_id].push(r);
+  }
+
+  // Session status map
+  const sessMap = {};
+  for (const s of sessions) sessMap[s.name] = s.status || 'idle';
+
+  // Stats
+  const dayAgo = (Date.now() / 1000) - 86400;
+  const runsToday = runsScoped.filter(r => r.ran_at > dayAgo).length;
+  const activeCount = scope.filter(s => s.enabled).length;
+  const loopCount = scope.filter(s => s.enabled && isLoopCadence(s)).length;
+  if (statsEl) {
+    statsEl.innerHTML = `<strong>${activeCount}</strong> active &nbsp;&middot;&nbsp; <strong>${loopCount}</strong> looping &nbsp;&middot;&nbsp; <strong>${runsToday}</strong> runs today`;
+  }
+
+  if (!scope.length) {
     listEl.innerHTML = `<div style="text-align:center;padding:40px 0;color:var(--dim);">
       <div style="font-size:2rem;margin-bottom:10px;">⏰</div>
       <div style="font-weight:600;font-size:0.9rem;margin-bottom:6px;color:var(--text);">No schedules yet</div>
@@ -28181,24 +28284,119 @@ function renderScheduler() {
           </div>
         </div>
       </div>`;
-    }).join('');
+    };
+
+    const renderDisabledCard = (s) => {
+      const recLabel = s.schedule_expr || (s.sched_type === 'once' ? 'once' : (s.recurrence || 'recurring'));
+      const runs = runMap[s.id] || [];
+      const dots = runs.map(r => `<span class="sched-run-dot ${r.status === 'ok' ? 'ok' : 'err'}" title="${esc(r.status)}"></span>`).join('');
+      return `<div class="card sched-item" style="padding:8px 12px;">
+        <div style="display:flex;align-items:flex-start;gap:8px;">
+          <label class="sched-toggle-label" title="Enable">
+            <input type="checkbox" onchange="toggleSchedEnabled('${esc(s.id)}', this.checked)"
+              style="width:auto;accent-color:var(--accent);">
+          </label>
+          <div style="flex:1;min-width:0;">
+            <div style="display:flex;align-items:center;gap:6px;flex-wrap:wrap;margin-bottom:3px;">
+              <code class="sched-id-badge" title="Schedule id — click to copy" onclick="event.stopPropagation();_copySchedId('${esc(s.id)}')">${esc(s.id)}</code>
+              <span style="font-weight:600;font-size:0.82rem;">${esc(s.title)}</span>
+              <code class="sched-cadence-pill">${esc(recLabel)}</code>
+            </div>
+            <div style="font-size:0.7rem;color:var(--dim);display:flex;align-items:center;gap:6px;">
+              ${s.session ? `<span style="color:var(--accent);">${esc(s.session)}</span>` : ''}
+              <span>&#xD7;${s.run_count || 0}</span>
+              ${dots ? `<span style="display:flex;align-items:center;gap:2px;">${dots}</span>` : ''}
+            </div>
+            <div class="sched-actions">
+              <button class="btn sched-action-btn" onclick="openSchedModal('${esc(s.id)}')">Edit</button>
+              <button class="btn sched-action-btn" style="color:var(--red);" onclick="deleteSchedule('${esc(s.id)}')">Delete</button>
+            </div>
+          </div>
+        </div>
+      </div>`;
+    };
+
+    // Apply search filter (title, session, command, cadence, id, trigger, stop pattern)
+    const q = searchQ.trim().toLowerCase();
+    const filtered = !q ? scope : scope.filter(s => {
+      const hay = [s.title, s.session, s.command, s.schedule_expr, s.recurrence, s.id,
+                   s.trigger_on, s.done_pattern].filter(Boolean).join(' ').toLowerCase();
+      return hay.includes(q);
+    });
+
+    // Group active schedules
+    const groups = [
+      { key: 'loop', label: 'Active Loops', emoji: '&#x21BB;', items: [] },
+      { key: 'routine', label: 'Daily Routines', emoji: '&#x2600;', items: [] },
+      { key: 'weekly', label: 'Weekly &amp; Less', emoji: '&#x1F4C5;', items: [] },
+    ];
+    const disabled = [];
+    for (const s of filtered) {
+      if (!s.enabled) { disabled.push(s); continue; }
+      const cad = schedCadence(s);
+      const g = groups.find(g => g.key === cad) || groups[1];
+      g.items.push(s);
+    }
+
+    const renderGroup = ({ label, emoji, items }) => {
+      if (!items.length) return '';
+      return `<div class="sched-group">
+        <div class="sched-group-header">${emoji} ${label} <span class="sched-group-count">${items.length}</span></div>
+        <div style="display:flex;flex-direction:column;gap:6px;">${items.map(renderCard).join('')}</div>
+      </div>`;
+    };
+
+    let html = groups.map(renderGroup).join('');
+
+    if (disabled.length) {
+      html += `<details class="sched-disabled-details" ${q ? 'open' : ''}>
+        <summary><span class="sched-disabled-arrow">&#x25B6;</span> Inactive <span class="sched-group-count">${disabled.length}</span></summary>
+        <div style="display:flex;flex-direction:column;gap:6px;margin-top:6px;opacity:0.6;">
+          ${disabled.map(renderDisabledCard).join('')}
+        </div>
+      </details>`;
+    }
+
+    if (!html) {
+      html = `<div style="text-align:center;padding:36px 0;color:var(--dim);font-size:0.82rem;">
+        No schedules match &ldquo;${esc(schedSearchQuery)}&rdquo;.</div>`;
+    }
+
+    listEl.innerHTML = html;
   }
 
-  // ── Recent runs ───────────────────────────────────────────────────────────
-  if (!_schedulerRuns.length) {
+  // ── Recent runs (collapsible) ─────────────────────────────────────────────
+  const det = document.getElementById('sched-runs-details');
+  const arrow = document.getElementById('sched-runs-arrow');
+  if (det && arrow) {
+    det.addEventListener('toggle', () => {
+      arrow.style.transform = det.open ? 'rotate(90deg)' : '';
+    }, { once: true });
+  }
+  if (!runsEl) {
+    // peek view may omit the runs list — nothing to render
+  } else if (!runsScoped.length) {
     runsEl.innerHTML = `<div style="color:var(--dim);font-size:0.78rem;padding:4px 0;">No runs recorded yet.</div>`;
   } else {
-    runsEl.innerHTML = _schedulerRuns.slice(0, 30).map(r => {
-      const ts = r.ran_at ? new Date(r.ran_at * 1000).toLocaleString() : '?';
-      const okColor = r.status === 'ok' ? 'var(--green,#4ade80)' : 'var(--red)';
-      return `<div style="display:flex;align-items:center;gap:8px;padding:4px 0;border-bottom:1px solid var(--border);font-size:0.75rem;">
-        <span style="color:${okColor};font-weight:600;min-width:38px;">${esc(r.status)}</span>
-        <span style="color:var(--dim);min-width:140px;">${esc(ts)}</span>
-        <span style="flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${esc(r.title || r.schedule_id)}</span>
-        ${r.note ? `<span style="color:var(--red);max-width:160px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;" title="${esc(r.note)}">${esc(r.note)}</span>` : ''}
+    runsEl.innerHTML = runsScoped.slice(0, 30).map(r => {
+      const timeStr = r.ran_at ? relTime(r.ran_at) : '?';
+      const fullDate = r.ran_at ? new Date(r.ran_at * 1000).toLocaleString() : '';
+      const okColor = r.status === 'ok' ? 'var(--green,#4ade80)' : r.status === 'done' ? 'var(--accent)' : 'var(--red)';
+      return `<div style="display:flex;align-items:center;gap:8px;padding:4px 0;border-bottom:1px solid var(--border);font-size:0.75rem;min-width:0;">
+        <span style="color:${okColor};font-weight:600;min-width:28px;flex-shrink:0;">${esc(r.status)}</span>
+        <span style="color:var(--dim);white-space:nowrap;flex-shrink:0;" title="${esc(fullDate)}">${esc(timeStr)}</span>
+        <span style="flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;min-width:0;">${esc(r.title || r.schedule_id)}</span>
+        ${r.note ? `<span style="color:var(--red);max-width:100px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex-shrink:0;" title="${esc(r.note)}">${esc(r.note)}</span>` : ''}
       </div>`;
     }).join('');
   }
+}
+
+// The peek Schedules tab shares these handlers with the homepage, so re-render it
+// too when it's the active peek tab (otherwise a toggle/run/delete there goes stale).
+function _peekRefreshSchedIfActive() {
+  const panel = document.getElementById('peek-schedules-panel');
+  if (typeof peekSession !== 'undefined' && peekSession && panel && panel.classList.contains('active')) _peekRenderSchedules();
 }
 
 async function runScheduleNow(id) {
@@ -28208,6 +28406,7 @@ async function runScheduleNow(id) {
   if (r) {
     await Promise.all([fetchSchedules(), fetchSchedulerRuns()]);
     renderScheduler();
+    _peekRefreshSchedIfActive();
   }
 }
 
@@ -28218,6 +28417,7 @@ async function toggleSchedEnabled(id, enabled) {
   });
   await fetchSchedules();
   renderScheduler();
+  _peekRefreshSchedIfActive();
 }
 
 async function fetchBoard() {
@@ -29007,6 +29207,7 @@ async function deleteSchedule(id) {
   await fetchSchedules();
   renderCalendar();
   renderScheduler();
+  _peekRefreshSchedIfActive();
 }
 
 function openBoardAdd(statusOrDate, prefillDate) {
