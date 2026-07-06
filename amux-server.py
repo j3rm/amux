@@ -23132,12 +23132,89 @@ function slashAcPick(i) {
   inp.focus({ preventScroll: true });
 }
 
+// With autocorrect/predictive text ON, iOS delivers the send-key press as an
+// IME event (keydown isComposing / keyCode 229), which the keydown handlers
+// below deliberately ignore — so the first Enter only committed the autocorrect
+// and a newline slipped in ("press enter twice to send"). The line break still
+// arrives as a CANCELABLE beforeinput 'insertLineBreak' after the composition
+// commits, so we catch the composed path there. Normal Enter never reaches
+// beforeinput (keydown preventDefaults it); Shift+Enter is tracked via the flag
+// so it still inserts a newline.
+let _lastKeyShiftEnter = false;
+function _sendBeforeInput(e, send) {
+  // Enter inserts a newline now (standard textarea) — never send from a line break.
+  // Kept as a no-op so the existing onbeforeinput bindings don't error.
+}
+// Send-button firing: onpointerdown preventDefault keeps the input focused
+// (no keyboard collapse mid-tap) — but on real iOS Safari, canceling
+// pointerdown ALSO suppresses the click event (WebKit divergence from Chrome),
+// so onclick alone never fires on the tap ("press send twice"). Fire on
+// pointerup (never suppressed) and keep click as the fallback for non-pointer
+// environments, deduped per-button so one tap can't double-fire.
+function _btnDbg(obj) {
+  if (window.innerWidth > 700) return;
+  try {
+    fetch(API + '/api/client-debug', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(Object.assign({ ver: APP_VER }, obj)) }).catch(() => {});
+  } catch (e) {}
+}
+function _btnFire(e, fn) {
+  const t = e.currentTarget;
+  const now = performance.now();
+  if (t._fireTs && now - t._fireTs < 350) { _tapTraceEv('DEDUP'); return; }   // click echo of the same tap
+  t._fireTs = now;
+  _tapTraceEv('FIRE');
+  // Mobile diagnostic: no dead-tap beacon means events DO reach the button, so
+  // "two presses" is the send no-oping. Capture pre/post input length AND any
+  // sync throw or async rejection so the device pins down the exact cause.
+  const inp = document.getElementById('peek-cmd-input');
+  const before = inp ? inp.value.trim().length : -1;
+  const mode = (typeof _sendMode !== 'undefined' ? _sendMode : '?');
+  const sess = (typeof peekSession !== 'undefined' ? peekSession : null);
+  const seq = _tapTrace.slice(-7).map(x => x.e).join(',');
+  let syncErr = '';
+  try {
+    const r = fn();
+    if (r && typeof r.then === 'function') {
+      r.then(() => _btnDbg({ kind: 'send-fire', phase: 'resolved', before, after: inp ? inp.value.trim().length : -1, mode, session: sess, seq }))
+       .catch(er => _btnDbg({ kind: 'send-fire', phase: 'async-throw', err: String(er).slice(0, 200), before, mode, session: sess, seq }));
+    }
+  } catch (er) { syncErr = String(er).slice(0, 200); }
+  _btnDbg({ kind: 'send-fire', phase: syncErr ? 'sync-throw' : 'called', err: syncErr,
+    before, after: inp ? inp.value.trim().length : -1, mode, session: sess, seq });
+}
+// iOS cancels the synthesized click (and pointer events) when a tap races a
+// scroll or a re-render — and the peek re-renders every 1.2s while a session
+// streams. Such taps produce no pointer/click at all ("press send twice").
+// Touch events are the primitive and ALWAYS fire: treat a stationary touch
+// ending on the button as the tap. _btnFire's dedup absorbs the pointerup/
+// click duplicates when they do arrive.
+let _btnTouchX = 0, _btnTouchY = 0;
+function _btnTouchStart(e) {
+  const t = e.touches && e.touches[0];
+  if (t) { _btnTouchX = t.clientX; _btnTouchY = t.clientY; }
+  _tapTraceEv('touchstart');
+}
+function _btnTouchEnd(e, fn) {
+  _tapTraceEv('touchend');
+  const t = e.changedTouches && e.changedTouches[0];
+  if (!t) return;
+  if (Math.abs(t.clientX - _btnTouchX) > 24 || Math.abs(t.clientY - _btnTouchY) > 24) return;   // swipe, not a tap (loosened for thumbs)
+  e.preventDefault();   // we own the tap; suppress the synthetic mouse/click
+  _btnFire(e, fn);
+}
+function slashAcBeforeInput(e) { _sendBeforeInput(e, sendPeekCmd); }
+function cardSlashAcBeforeInput(name, e) { _sendBeforeInput(e, () => sendFromInput(name)); }
+
 function slashAcKeydown(e) {
+  _lastKeyShiftEnter = (e.key === 'Enter' && e.shiftKey);
+  if (e.isComposing || e.keyCode === 229) return; // let IME composition finish
   const inp = document.getElementById('peek-cmd-input');
   const el = document.getElementById('slash-ac-list');
   if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) { e.preventDefault(); sendPeekCmd(); return; }
   if (!el.classList.contains('open')) {
-    if (e.key === 'Enter' && !e.shiftKey && (!matchMedia('(pointer: coarse)').matches || !inp.value.trim())) { e.preventDefault(); sendPeekCmd(); return; }
+    // Enter inserts a newline (standard textarea) — do NOT send. Send is the Send
+    // button or Cmd/Ctrl+Enter (handled just above). Arrows still browse history.
     if (e.key === 'ArrowUp' && inp.selectionStart === 0) { e.preventDefault(); cmdHistoryUp(inp); return; }
     if (e.key === 'ArrowDown' && _cmdHistoryIdx !== -1) { e.preventDefault(); cmdHistoryDown(inp); return; }
     return;
@@ -23155,10 +23232,10 @@ function slashAcKeydown(e) {
     setSel(getSel() >= itemLen - 1 ? 0 : getSel() + 1);
     slashAcHighlight();
   } else if (e.key === 'Enter') {
-    e.preventDefault();
-    if (getSel() >= 0) slashAcPick(getSel());
-    else if (atMode) slashAcPick(0);
-    else { el.classList.remove('open'); sendPeekCmd(); }
+    // Accept a navigated-to suggestion; otherwise just close the dropdown and let
+    // Enter insert a newline (no preventDefault) — never send on Enter.
+    if (getSel() >= 0) { e.preventDefault(); slashAcPick(getSel()); }
+    else { el.classList.remove('open'); el._atItems = null; el._atSel = -1; }
   } else if (e.key === 'Tab') {
     e.preventDefault();
     slashAcPick(getSel() >= 0 ? getSel() : 0);
@@ -23394,7 +23471,8 @@ function cardSlashAcKeydown(name, e) {
   const el = document.getElementById('card-ac-' + name);
   if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) { e.preventDefault(); sendFromInput(name); return; }
   if (!el || !el.classList.contains('open')) {
-    if (e.key === 'Enter' && !e.shiftKey && (!matchMedia('(pointer: coarse)').matches || !(inp && inp.value.trim()))) { e.preventDefault(); sendFromInput(name); return; }
+    // Enter inserts a newline (standard textarea) — do NOT send. Send is the Send
+    // button or Cmd/Ctrl+Enter (handled just above). Arrows still browse history.
     if (e.key === 'ArrowUp' && inp && inp.selectionStart === 0) { e.preventDefault(); cmdHistoryUp(inp); return; }
     if (e.key === 'ArrowDown' && _cmdHistoryIdx !== -1) { e.preventDefault(); if (inp) cmdHistoryDown(inp); return; }
     return;
@@ -23412,10 +23490,10 @@ function cardSlashAcKeydown(name, e) {
     setSel(getSel() >= itemLen - 1 ? 0 : getSel() + 1);
     cardSlashAcHighlight(name);
   } else if (e.key === 'Enter') {
-    e.preventDefault();
-    if (getSel() >= 0) cardSlashAcPick(name, getSel());
-    else if (atMode) cardSlashAcPick(name, 0);
-    else el.classList.remove('open');
+    // Accept a navigated-to suggestion; otherwise close the dropdown and let Enter
+    // insert a newline (no preventDefault) — never send on Enter.
+    if (getSel() >= 0) { e.preventDefault(); cardSlashAcPick(name, getSel()); }
+    else { el.classList.remove('open'); el._atItems = null; el._atSel = -1; }
   } else if (e.key === 'Tab') {
     e.preventDefault();
     cardSlashAcPick(name, getSel() >= 0 ? getSel() : 0);
