@@ -77,12 +77,16 @@ CYPRA_SESSION = "Cypra-PAA"
 # the hook. 20 covers a typical light-medium day writeup and is cheap.
 MAX_MSG_IDS_TO_CHECK = 20
 
-# PAA writes an outcome-code line to the source desc after reconciliation
-# (LOGGED — 0h no activity, STAGED — ..., NEEDS REVIEW — ..., SKIPPED — ...).
-# Presence of any of these means PAA already closed the loop; a hook fire
-# post-outcome would be a duplicate mint attempt.
+# PAA writes an outcome-code line to the source desc after reconciliation.
+# Two formats seen in the wild:
+#   - PAA direct:        "LOGGED — 0h no activity ..."
+#   - amux-helper relay: "OUTCOME: SKIPPED — ..." (Wyoming route)
+# Presence of either means the reconciliation loop is closed; a hook fire
+# post-outcome would be a duplicate mint attempt. Optional OUTCOME: prefix
+# is what the silence-audit script also matches on (kept in sync).
 OUTCOME_CODE_PATTERN = re.compile(
-    r"(?m)^\s*(LOGGED|STAGED|NEEDS[-\s]REVIEW|SKIPPED)\s*[—–-]", re.MULTILINE
+    r"(?m)^\s*(?:OUTCOME:\s*)?(LOGGED|STAGED|NEEDS[-\s]REVIEW|SKIPPED)\s*[—–-]",
+    re.MULTILINE,
 )
 
 
