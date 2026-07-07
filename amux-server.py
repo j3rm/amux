@@ -12978,7 +12978,10 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
     border-radius: 9px; background: rgba(88,166,255,0.14); color: var(--accent);
     border: 1px solid rgba(88,166,255,0.28); vertical-align: 1px; line-height: 1.2; }
   .peek-tab-count.has-count { display: inline-block; }
-  .peek-dir-bar { display: flex; align-items: center; gap: 8px; padding: 6px 14px;
+  /* Schedules badge: green when the session has ≥1 active schedule, grey when all inactive. */
+  .peek-tab-count.sched-on { background: rgba(63,185,80,0.16); color: #3fb950; border-color: rgba(63,185,80,0.34); }
+  .peek-tab-count.sched-off { background: rgba(139,148,158,0.14); color: var(--dim); border-color: rgba(139,148,158,0.28); }
+  .peek-dir-bar { display: flex; align-items: center; gap: 8px; padding: 3px 14px;
     font-size: 0.75rem; color: var(--dim); border-bottom: 1px solid var(--border);
     flex-shrink: 0; min-width: 0; overflow: hidden; }
   .peek-dir-bar span { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 0; font-family: "SF Mono","Fira Code",monospace; }
@@ -20635,6 +20638,16 @@ function _renderPeekIssuesKanban(items, list) {
   });
 }
 // ── Peek Schedules (scheduler tasks for this session) ────────────────────────
+// Color the Schedules tab badge: green when the session has ≥1 ACTIVE (enabled)
+// schedule, grey when it has schedules but all are inactive (paused).
+function _peekColorSchedBadge(schedList) {
+  const el = document.getElementById('peek-tab-schedules-count');
+  if (!el) return;
+  const n = (schedList || []).length;
+  const anyActive = (schedList || []).some(s => s.enabled);
+  el.classList.toggle('sched-on', n > 0 && anyActive);
+  el.classList.toggle('sched-off', n > 0 && !anyActive);
+}
 async function _peekUpdateTabCounts() {
   if (!peekSession) return;
   const sess = peekSession;
@@ -20657,8 +20670,9 @@ async function _peekUpdateTabCounts() {
     const r = await fetch(API + '/api/schedules');
     if (peekSession !== sess) return;
     const all = await r.json();
-    const n = all.filter(s => s.session === sess && !s.deleted).length;
-    setCount('peek-tab-schedules-count', n);
+    const sched = all.filter(s => s.session === sess && !s.deleted);
+    setCount('peek-tab-schedules-count', sched.length);
+    _peekColorSchedBadge(sched);
   } catch(e) {}
   try {
     const r = await fetch(API + '/api/notes');
@@ -20692,39 +20706,14 @@ async function _peekLoadSchedules() {
     await Promise.all([fetchSchedules(), fetchSchedulerRuns()]);
     if (!peekSession) return;
     _peekRenderSchedules();
-    const n = schedules.filter(s => s.session === peekSession && !s.deleted).length;
+    const sched = schedules.filter(s => s.session === peekSession && !s.deleted);
+    const n = sched.length;
     const tabCount = document.getElementById('peek-tab-schedules-count');
     if (tabCount) {
       if (n > 0) { tabCount.textContent = n; tabCount.classList.add('has-count'); }
       else { tabCount.textContent = ''; tabCount.classList.remove('has-count'); }
     }
-    if (!items.length) {
-      list.innerHTML = '<div style="color:var(--dim);font-size:0.85rem;padding:12px 4px;">No schedules for this session.</div>';
-      return;
-    }
-    list.innerHTML = items.map(s => {
-      const enabled = s.enabled ? 'enabled' : 'disabled';
-      const ebg = s.enabled ? 'rgba(63,185,80,0.15)' : 'rgba(139,148,158,0.15)';
-      const ecol = s.enabled ? '#3fb950' : 'var(--dim)';
-      const badge = '<span style="font-size:0.7rem;padding:1px 6px;border-radius:10px;background:' + ebg + ';color:' + ecol + ';">' + enabled + '</span>';
-      const stype = s.sched_type === 'recurring' ? (s.schedule_expr || 'recurring') : (s.run_at || 'once');
-      const nextRun = s.next_run ? '<span style="color:var(--dim);font-size:0.75rem;">next: ' + esc(s.next_run) + '</span>' : '';
-      const lastRun = s.last_run ? '<span style="color:var(--dim);font-size:0.75rem;">last: ' + esc(s.last_run) + '</span>' : '';
-      return '<div class="peek-issue-item" style="cursor:default;">' +
-        '<span class="peek-issue-key">' + esc(s.id) + '</span>' +
-        '<span class="peek-issue-title">' + esc(s.title || s.command || '(untitled)') + '</span>' +
-        '<span class="peek-issue-meta" style="gap:6px;">' + badge +
-          '<span style="font-size:0.72rem;color:var(--dim);font-family:monospace;">' + esc(stype) + '</span>' +
-          nextRun + lastRun +
-        '</span>' +
-        '<div style="display:flex;gap:4px;margin-top:4px;">' +
-          '<button class="btn" style="font-size:0.7rem;padding:2px 8px;" onclick="event.stopPropagation();_peekToggleSchedule(\'' + esc(s.id) + '\',' + (s.enabled ? 0 : 1) + ')">' + (s.enabled ? 'Disable' : 'Enable') + '</button>' +
-          '<button class="btn" style="font-size:0.7rem;padding:2px 8px;" onclick="event.stopPropagation();_peekRunSchedule(\'' + esc(s.id) + '\')">Run now</button>' +
-          '<button class="btn" style="font-size:0.7rem;padding:2px 8px;" onclick="event.stopPropagation();_peekEditSchedule(\'' + esc(s.id) + '\')">Edit</button>' +
-          '<button class="btn" style="font-size:0.7rem;padding:2px 8px;color:var(--red);" onclick="event.stopPropagation();_peekDeleteSchedule(\'' + esc(s.id) + '\')">Delete</button>' +
-        '</div>' +
-      '</div>';
-    }).join('');
+    _peekColorSchedBadge(sched);
   } catch(e) {
     list.innerHTML = '<div style="color:var(--dim);font-size:0.85rem;padding:12px 4px;">Failed to load schedules.</div>';
   }
@@ -21219,7 +21208,7 @@ function openPeek(name, opts) {
   // Reset tab badges; will be repopulated by _peekUpdateTabCounts
   ['peek-tab-steering-count','peek-tab-issues-count','peek-tab-schedules-count','peek-tab-notes-count'].forEach(id => {
     const el = document.getElementById(id);
-    if (el) { el.textContent = ''; el.classList.remove('has-count'); }
+    if (el) { el.textContent = ''; el.classList.remove('has-count', 'sched-on', 'sched-off'); }
   });
   _peekUpdateTabCounts();
   loadPeekCommitGuard(name);
