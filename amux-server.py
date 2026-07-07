@@ -12029,6 +12029,9 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
     word-break: normal; overflow-wrap: normal; -webkit-overflow-scrolling: touch; }
   .overlay-body .peek-box::-webkit-scrollbar { height: 6px; }
   .overlay-body .peek-box::-webkit-scrollbar-thumb { background: rgba(255,255,255,0.22); border-radius: 3px; }
+  /* Emoji occupy exactly 2 monospace cells inside tables so borders stay aligned
+     (browsers render them ~2.1ch, which otherwise detaches the right border). */
+  .overlay-body .peek-box .pemoji { display: inline-block; width: 2ch; text-align: center; overflow: hidden; }
   .overlay-status { color: var(--dim); font-size: 0.68rem; margin-top: 2px; flex-shrink: 0; text-align: center; }
   .scroll-lock-badge {
     position: sticky; bottom: 0; left: 0; right: 0;
@@ -21692,13 +21695,21 @@ function wrapBoxBlocks(html) {
     if (HRULE.test(t)) return true;                 // a border/rule line
     return (t.match(VERT) || []).length >= 2;       // a content row: │ a │ b │
   };
+  // Emoji render WIDER than the 2 monospace cells the terminal (and Claude's
+  // table layout) reserve for them (e.g. ✅ = 2.13ch), so every emoji row's right
+  // border drifts out of alignment. Force each emoji cluster to exactly 2ch —
+  // ONLY inside box blocks, and only in text (never inside a tag).
+  let EMOJI = null;
+  try { EMOJI = /(\p{Extended_Pictographic}(?:\uFE0F|\u200D\p{Extended_Pictographic}|[\u{1F3FB}-\u{1F3FF}])*)/gu; } catch (e) {}
+  const fixEmojiWidth = block => EMOJI ? block.split(/(<[^>]+>)/).map((seg, k) =>
+    k % 2 === 0 ? seg.replace(EMOJI, '<span class="pemoji">$1</span>') : seg).join('') : block;
   const lines = html.split('\n');
   const out = [];
   for (let i = 0; i < lines.length; ) {
     if (isBoxLine(lines[i])) {
       let j = i;
       while (j < lines.length && isBoxLine(lines[j])) j++;
-      out.push('<div class="peek-box">' + lines.slice(i, j).join('\n') + '</div>');
+      out.push('<div class="peek-box">' + fixEmojiWidth(lines.slice(i, j).join('\n')) + '</div>');
       i = j;
     } else { out.push(lines[i]); i++; }
   }
