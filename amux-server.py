@@ -12023,7 +12023,13 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
   .overlay-body .file-link:active { color: #79ead3; }
   .overlay-body .md-link { color: var(--yellow); text-decoration: none; border-bottom: 1px dashed var(--yellow); cursor: pointer; }
   .overlay-body .md-link:active { color: #e8c547; }
-  .overlay-status { color: var(--dim); font-size: 0.75rem; margin-top: 6px; flex-shrink: 0; text-align: center; }
+  /* Box-drawing tables/frames: keep monospace alignment, scroll sideways instead
+     of wrapping (which detached borders and shredded rows on narrow screens). */
+  .overlay-body .peek-box { display: block; white-space: pre; overflow-x: auto; max-width: 100%;
+    word-break: normal; overflow-wrap: normal; -webkit-overflow-scrolling: touch; }
+  .overlay-body .peek-box::-webkit-scrollbar { height: 6px; }
+  .overlay-body .peek-box::-webkit-scrollbar-thumb { background: rgba(255,255,255,0.22); border-radius: 3px; }
+  .overlay-status { color: var(--dim); font-size: 0.68rem; margin-top: 2px; flex-shrink: 0; text-align: center; }
   .scroll-lock-badge {
     position: sticky; bottom: 0; left: 0; right: 0;
     text-align: center; padding: 6px 0;
@@ -19780,6 +19786,37 @@ async function sendFromInput(name) {
 
 let _peekTab = 'terminal';
 let _peekGitData = null;
+let _transcriptTimer = null;
+
+// ── Transcript tab: clean JSONL conversation history ──
+async function loadPeekTranscript(showLoading) {
+  const body = document.getElementById('peek-transcript-body');
+  const status = document.getElementById('peek-transcript-status');
+  if (!peekSession || !body) return;
+  const name = peekSession;
+  if (showLoading && !body.innerHTML) body.innerHTML = '<div style="color:var(--dim);padding:20px;">Loading transcript…</div>';
+  try {
+    const r = await fetch(API + '/api/sessions/' + encodeURIComponent(name) + '/transcript');
+    const d = await r.json();
+    if (_peekTab !== 'transcript' || peekSession !== name) return;
+    if (d.empty || !d.output) {
+      body.innerHTML = '<div style="color:var(--dim);padding:20px;">No JSONL transcript found for this session.</div>';
+      if (status) status.textContent = '';
+      return;
+    }
+    const atBottom = _isScrolledToBottom(body);
+    const html = wrapBoxBlocks(ansiToHtml(d.output));
+    if (html !== body._lastHTML) {
+      body._lastHTML = html;
+      body.innerHTML = html;
+      if (atBottom) body.scrollTop = body.scrollHeight;
+    }
+    if (status) status.textContent = 'Updated ' + new Date().toLocaleTimeString() + ' · from conversation JSONL';
+  } catch (e) {
+    if (status) status.textContent = 'Failed to load transcript';
+  }
+}
+
 function setPeekTab(tab) {
   _peekTab = tab;
   // Flush peek notes save when switching away
@@ -21115,7 +21152,7 @@ function openPeek(name, opts) {
   _idb.get('peek_' + name).then(cached => {
     if (peekSession !== name) return;  // session changed before cache resolved
     if (cached && (!lastPeekHTML || lastPeekHTML.includes('Loading...'))) {
-      lastPeekHTML = highlightPrompts(ansiToHtml(cached.output));
+      lastPeekHTML = wrapBoxBlocks(highlightPrompts(ansiToHtml(cached.output)));
       applyPeekSearch();
       const ago = Math.floor((Date.now() - cached.time) / 60000);
       document.getElementById('peek-status').textContent = 'Cached ' + (ago < 1 ? 'just now' : ago + 'm ago');
@@ -21486,11 +21523,13 @@ function ansiToHtml(text) {
     .replace(/\x1b[()][A-Z0-9]/g,'')                          // charset selection
     .replace(/\x1b[\x20-\x2f]*[\x40-\x5a\x5c-\x7e]/g,'')     // other C1 (excl [ = 0x5b)
     .replace(/\x1b\[[0-9;?]*[A-Za-ln-z]/g,'')                 // CSI non-SGR (not m)
-    .replace(/^─{10,}\n?/gm,'')                                // drop bare full-line rules
-    // Cap long box-drawing rules (Claude's 220-col input-box borders are ANSI-colored,
-    // so they dodge the rule above) to a compact divider — otherwise each one wraps into
-    // ~6 empty lines on the narrow mobile peek and eats the screen.
-    .replace(/[─━═]{24,}/g, s => s[0].repeat(24));
+    .replace(/^─{10,}\n?/gm,'');                               // drop bare full-line rules
+  // NOTE: box-drawing tables and wide rules are deliberately NOT capped here.
+  // The old `[─━═]{24,}` cap shortened horizontal rules but left the │-bordered
+  // content rows full-width, which DETACHED table borders (the "floating right
+  // border" peek bug). wrapBoxBlocks() now wraps each contiguous box block in a
+  // horizontal-scroll container, so alignment is preserved and a wide rule scrolls
+  // instead of wrapping into empty lines.
   let bold=false,dim=false,italic=false,uline=false,fg=null,bg=null,spanOpen=false;
   const closeSpan=()=>{ if(!spanOpen)return ''; spanOpen=false; return '</span>'; };
   const openSpan=()=>{
@@ -21639,6 +21678,33 @@ function highlightPrompts(html) {
   return out.join('\n');
 }
 
+// Wrap each contiguous run of box-drawing lines (tables, framed boxes, wide rules)
+// in a horizontal-scroll container so monospace alignment survives on narrow
+// screens instead of wrapping — which shredded tables and detached their borders.
+function wrapBoxBlocks(html) {
+  const BOX   = /[─-╿]/;              // any box-drawing char (U+2500–257F)
+  const HRULE = /[─━═]/;         // ─ ━ ═ → structural border line
+  const VERT  = /[│┃┌-╿]/g; // │┃ + corners/junctions/rounded/diagonals
+  const stripTags = s => s.replace(/<[^>]*>/g, '');
+  const isBoxLine = raw => {
+    const t = stripTags(raw);
+    if (!BOX.test(t)) return false;
+    if (HRULE.test(t)) return true;                 // a border/rule line
+    return (t.match(VERT) || []).length >= 2;       // a content row: │ a │ b │
+  };
+  const lines = html.split('\n');
+  const out = [];
+  for (let i = 0; i < lines.length; ) {
+    if (isBoxLine(lines[i])) {
+      let j = i;
+      while (j < lines.length && isBoxLine(lines[j])) j++;
+      out.push('<div class="peek-box">' + lines.slice(i, j).join('\n') + '</div>');
+      i = j;
+    } else { out.push(lines[i]); i++; }
+  }
+  return out.join('\n');
+}
+
 let peekSelecting = false;
 let _peekScrollLocked = false;
 // (B) Set true immediately before any PROGRAMMATIC peek scroll so the scroll
@@ -21695,7 +21761,7 @@ async function refreshPeek() {
     _lastPeekRaw = output;
     const atBottom = _isScrolledToBottom(body);
     if (atBottom) _peekScrollLocked = false;
-    const newHTML = highlightPrompts(ansiToHtml(output));
+    const newHTML = wrapBoxBlocks(highlightPrompts(ansiToHtml(output)));
     if (peekSelecting || (window.getSelection()?.toString().length > 0)) return;
     if (_sendingSnapshot && newHTML !== _sendingSnapshot) clearSendingIndicator();
     lastPeekHTML = newHTML;
@@ -21725,7 +21791,7 @@ async function refreshPeek() {
     if (!lastPeekHTML || lastPeekHTML.includes('Loading...')) {
       const cached = await _idb.get('peek_' + peekSession);
       if (cached) {
-        lastPeekHTML = highlightPrompts(ansiToHtml(cached.output));
+        lastPeekHTML = wrapBoxBlocks(highlightPrompts(ansiToHtml(cached.output)));
         applyPeekSearch();
         const ago = Math.floor((Date.now() - cached.time) / 60000);
         statusEl.textContent = 'Cached ' + (ago < 1 ? 'just now' : ago + 'm ago');
