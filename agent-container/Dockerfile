@@ -26,11 +26,20 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         less jq sqlite3 vim-tiny \
     && rm -rf /var/lib/apt/lists/*
 
-# Claude Code CLI, installed globally so every session's HOME can use it.
-# Postinstall downloads the platform-native binary — must run (do NOT use
-# --ignore-scripts or you get "Error: claude native binary not installed" at
-# first invocation).
-RUN npm install -g @anthropic-ai/claude-code
+# Claude Code CLI + OpenAI Codex CLI, installed globally so every session's
+# HOME can use them. Postinstall downloads platform-native binaries — must
+# run (do NOT use --ignore-scripts or you get "Error: claude native binary
+# not installed" at first invocation).
+# Codex is used by the *-Audit-Codex sessions (RTG-Audit-Codex,
+# Ember-Audit-Codex, iSchedule-Audit-Codex, ShareScore-audit).
+RUN npm install -g @anthropic-ai/claude-code @openai/codex
+
+# The `amux` CLI lives in the amux repo (host bind-mounts /mnt/gitdata/amux
+# read-only into every product container). Symlink it onto PATH so agents
+# can call `amux threads reply ...` etc. without knowing the full path.
+# The link resolves at runtime once the mount is attached; broken until then,
+# which is fine — no session runs before the mount exists.
+RUN ln -s /mnt/gitdata/amux/amux /usr/local/bin/amux
 
 # Force tmux's socket dir off /tmp so it can't accidentally merge with the
 # host's tmux daemon if a product spec ever bind-mounts /tmp. Tmux uses

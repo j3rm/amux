@@ -1058,9 +1058,20 @@ def _validate_cc_session_name(name: str) -> bool:
     return bool(name and len(name) <= 64 and _VALID_CC_SESSION_NAME.match(name))
 
 
-def _cc_session_exists_in_project(session_name: str, work_dir: str) -> bool:
+def _claude_projects_dir_for_session(session: str) -> Path:
+    """Which host filesystem path holds this session's Claude Code JSONL files?
+    Host runtime → ~/.claude/projects (CLAUDE_HOME/projects, shared jwesley account).
+    Docker runtime → ~/.amux/products/<product>/home/.claude/projects (that product
+    container's shared home, per-container-account isolation)."""
+    prod = _session_product(session)
+    if prod:
+        return CC_PRODUCTS / prod / "home" / ".claude" / "projects"
+    return CLAUDE_HOME / "projects"
+
+
+def _cc_session_exists_in_project(session_name: str, work_dir: str, projects_dir: "Path | None" = None) -> bool:
     """Check if a Claude Code session with this name exists in the project directory."""
-    proj_dir = CLAUDE_HOME / "projects" / _project_name(work_dir)
+    proj_dir = (projects_dir or CLAUDE_HOME / "projects") / _project_name(work_dir)
     if not proj_dir.is_dir():
         return False
     try:
@@ -1079,13 +1090,18 @@ def _cc_session_exists_in_project(session_name: str, work_dir: str) -> bool:
     return False
 
 
-def _cc_session_id_for_name(session_name: str, work_dir: str) -> str:
+def _cc_session_id_for_name(session_name: str, work_dir: str, projects_dir: "Path | None" = None) -> str:
     """Return the UUID of a uniquely-named Claude Code session, or '' if ambiguous/missing.
 
     When exactly one session matches, return its UUID so we can --resume <uuid>
     (which bypasses the interactive picker). When multiple match, return '' to
-    force a fresh --name start instead of opening the picker."""
-    proj_dir = CLAUDE_HOME / "projects" / _project_name(work_dir)
+    force a fresh --name start instead of opening the picker.
+
+    projects_dir defaults to CLAUDE_HOME/projects (host-shared, jwesley account).
+    For container-mode sessions callers pass the product's shared home projects
+    dir — new conversations created inside a container land there, not in host
+    ~/.claude/, so this lookup must follow the container's location."""
+    proj_dir = (projects_dir or CLAUDE_HOME / "projects") / _project_name(work_dir)
     if not proj_dir.is_dir():
         return ""
     matches = []
@@ -1790,6 +1806,18 @@ def _log_path(session: str) -> Path:
     return CC_LOGS / f"{session}.log"
 
 
+def _log_path_in_runtime(session: str) -> str:
+    """Path to this session's log file as visible from inside its tmux pane.
+
+    Host runtime → the host absolute path (same as _log_path).
+    Docker runtime → /logs/<session>.log inside the container, which is bind-
+    mounted from the same host file so the server on host reads the same
+    bytes the pane writes."""
+    if _session_runtime(session).startswith("docker:"):
+        return f"/logs/{session}.log"
+    return str(_log_path(session))
+
+
 _last_log_save: dict[str, float] = {}  # session -> monotonic time of last save
 _LOG_SAVE_INTERVAL = 30  # seconds between saves per session
 
@@ -1957,12 +1985,9 @@ def _yolo_auto_respond():
     # Fetch running tmux sessions once to avoid spawning a subprocess per session
     running_sessions = set()
     try:
-        r = subprocess.run(
-            ["tmux", "list-sessions", "-F", "#{session_name}"],
-            capture_output=True, text=True, timeout=5,
-        )
-        if r.returncode == 0:
-            running_sessions = set(r.stdout.splitlines())
+        # Union host tmux + running product containers so docker sessions are
+        # included in the auto-respond/rate-limit scans.
+        running_sessions = set(_tmux_info_map().keys())
     except Exception:
         return  # tmux not available, nothing to do
     for f in CC_SESSIONS.glob("*.env"):
@@ -2277,12 +2302,9 @@ def _rate_limit_auto_respond():
     now = time.time()
     running_sessions = set()
     try:
-        r = subprocess.run(
-            ["tmux", "list-sessions", "-F", "#{session_name}"],
-            capture_output=True, text=True, timeout=5,
-        )
-        if r.returncode == 0:
-            running_sessions = set(r.stdout.splitlines())
+        # Union host tmux + running product containers so docker sessions are
+        # included in the auto-respond/rate-limit scans.
+        running_sessions = set(_tmux_info_map().keys())
     except Exception:
         return  # tmux not available
     for f in CC_SESSIONS.glob("*.env"):
@@ -2378,12 +2400,9 @@ def _rate_limit_auto_resume():
 
     running_sessions = set()
     try:
-        r = subprocess.run(
-            ["tmux", "list-sessions", "-F", "#{session_name}"],
-            capture_output=True, text=True, timeout=5,
-        )
-        if r.returncode == 0:
-            running_sessions = set(r.stdout.splitlines())
+        # Union host tmux + running product containers so docker sessions are
+        # included in the auto-respond/rate-limit scans.
+        running_sessions = set(_tmux_info_map().keys())
     except Exception:
         return
 
@@ -2762,15 +2781,13 @@ def _snapshot_all_sessions():
         _snapshot_running = False
 
 def _snapshot_all_sessions_inner():
-    # Fetch running tmux sessions once to avoid spawning a subprocess per session
-    running_sessions = set()
+    # Fetch running tmux sessions once to avoid spawning a subprocess per session.
+    # Use _tmux_info_map so container-mode sessions (in amux-product-* containers)
+    # are unioned in with host tmux — otherwise this whole monitoring loop
+    # (auto-restart, thinking-block recovery, hibernate, spinner detection,
+    # etc.) skips every docker session.
     try:
-        r = subprocess.run(
-            ["tmux", "list-sessions", "-F", "#{session_name}"],
-            capture_output=True, text=True, timeout=5,
-        )
-        if r.returncode == 0:
-            running_sessions = set(r.stdout.splitlines())
+        running_sessions = set(_tmux_info_map().keys())
     except Exception:
         return
     _HIBERNATE_IDLE_SECS = 1800  # 30 minutes
@@ -3977,11 +3994,19 @@ def _init_claude_config():
         settings_file.write_text(_json.dumps(settings, indent=2))
 
 
-def _auto_trust_dir(work_dir: str):
-    """Pre-trust a directory in ~/.claude.json so Claude doesn't show the folder trust dialog."""
+def _auto_trust_dir(work_dir: str, home_dir: "str | None" = None):
+    """Pre-trust a directory in <home>/.claude.json so Claude doesn't show the
+    folder trust dialog.
+
+    home_dir defaults to the server's own $HOME (host-mode sessions). For
+    container-mode sessions, pass the product's shared home (e.g.
+    ~/.amux/products/RTG/home) — that's where the container's Claude Code
+    will actually read .claude.json from."""
     import json as _json
     import pathlib as _pathlib
-    claude_json = _pathlib.Path.home() / ".claude.json"
+    base = _pathlib.Path(home_dir) if home_dir else _pathlib.Path.home()
+    base.mkdir(parents=True, exist_ok=True)
+    claude_json = base / ".claude.json"
     try:
         cfg = _json.loads(claude_json.read_text()) if claude_json.exists() else {}
     except Exception:
@@ -4247,10 +4272,13 @@ esac
         pass  # may not have write permission on local dev machines
 
 
-def _auto_trust_codex_dir(work_dir: str):
-    """Pre-trust a directory in ~/.codex/config.toml so Codex starts noninteractively."""
+def _auto_trust_codex_dir(work_dir: str, home_dir: "str | None" = None):
+    """Pre-trust a directory in <home>/.codex/config.toml so Codex starts noninteractively.
+    home_dir defaults to the server's own $HOME; for container-mode Codex sessions,
+    pass the product's shared home (e.g. ~/.amux/products/RTG/home)."""
     try:
-        config_file = Path.home() / ".codex" / "config.toml"
+        base = Path(home_dir) if home_dir else Path.home()
+        config_file = base / ".codex" / "config.toml"
         config_file.parent.mkdir(parents=True, exist_ok=True)
         text = config_file.read_text() if config_file.exists() else ""
         header = f"[projects.{json.dumps(work_dir)}]"
@@ -8059,7 +8087,10 @@ def _auto_resume_sessions():
 
 
 def _log_pipe_command(log_path: Path) -> str:
-    """Return a tmux pipe-pane command that redacts API keys before logging."""
+    """Return a tmux pipe-pane command that redacts API keys before logging.
+    log_path is the path as seen from INSIDE the tmux pane's shell (host
+    absolute path for host sessions, /logs/<name>.log for docker sessions —
+    _log_path_in_runtime resolves this)."""
     redactor = (
         "import re,sys\n"
         "pat=re.compile(rb'((?:mxp|usr|ret)_sk)_[A-Za-z0-9_-]+|((?:AMUX_MIXPEEK_OPS_TOKEN|ANTHROPIC_API_KEY|OPENAI_API_KEY|GOOGLE_MAPS_API_KEY|GOOGLE_API_KEY|CLOUDFLARE_API_TOKEN|ELEVENLABS_API_KEY|POSTHOG_KEY|POSTHOG_PERSONAL_API_KEY)=)[^\\s\\r\\n]+|(?:ghp|gho|ghu|ghs|ghr)_[A-Za-z0-9_]{20,}|github_pat_[A-Za-z0-9_]+|sk-ant-[A-Za-z0-9_-]+|sk-proj-[A-Za-z0-9_-]+|sk[_-][A-Za-z0-9]{32,}|AIza[0-9A-Za-z_-]{30,}|(?:phx|phc)_[A-Za-z0-9]+')\n"
@@ -8093,9 +8124,13 @@ def _attach_log_streaming():
                 lf.write(f"\n\n=== Server restarted: {ts} ===\n\n".encode())
         except Exception:
             pass
+        # pipe-pane runs inside the tmux pane's shell — for docker sessions
+        # that shell is inside the container and only sees /logs/<name>.log
+        # (bind-mounted to the same host file); for host sessions the pane's
+        # shell sees the host absolute path directly.
         subprocess.run(
             [*_tmux_prefix(name), "pipe-pane", "-t", tmux_name(name), "-o",
-             _log_pipe_command(lp)],
+             _log_pipe_command(_log_path_in_runtime(name))],
             capture_output=True, timeout=5,
         )
 
@@ -8714,7 +8749,14 @@ def start_session(name: str, extra_flags: str = "", _skip_conv_id: bool = False)
         # Claude Code v2.1.69+ rejects --dangerously-skip-permissions when running as root.
         if os.getuid() == 0 and "--dangerously-skip-permissions" in flags:
             flags = flags.replace("--dangerously-skip-permissions", "").strip()
-        _auto_trust_dir(work_dir)
+        # For container-mode sessions, write the trust entry into the product's
+        # shared home ~/.amux/products/<product>/home/.claude.json — that's the
+        # .claude.json the container's Claude Code will read from. Host trust
+        # entry is irrelevant to a container process.
+        if _product:
+            _auto_trust_dir(work_dir, home_dir=str(CC_PRODUCTS / _product / "home"))
+        else:
+            _auto_trust_dir(work_dir)
         _ensure_memory(name, work_dir)
 
         # Determine session resume strategy: name-based (new) > UUID (migration) > fresh
@@ -8724,16 +8766,20 @@ def start_session(name: str, extra_flags: str = "", _skip_conv_id: bool = False)
         if not _skip_conv_id and provider == "claude":
             cc_session_name = meta.get("cc_session_name", "")
             conv_id = meta.get("cc_conversation_id", "")
+            # For docker sessions, look up JSONLs in the product's shared home
+            # (that's where the container's Claude Code writes them). Falls
+            # back to CLAUDE_HOME/projects for host sessions.
+            _projects_dir_for_lookup = _claude_projects_dir_for_session(name)
             if cc_session_name and _validate_cc_session_name(cc_session_name):
-                _sid = _cc_session_id_for_name(cc_session_name, work_dir)
+                _sid = _cc_session_id_for_name(cc_session_name, work_dir, projects_dir=_projects_dir_for_lookup)
                 if _sid:
                     # Use UUID to resume — bypasses interactive picker
                     session_flag = f'--resume {_sid}'
                     print(f"[start] {name}: resume={cc_session_name} (uuid={_sid})")
-                elif _cc_session_exists_in_project(cc_session_name, work_dir):
+                elif _cc_session_exists_in_project(cc_session_name, work_dir, projects_dir=_projects_dir_for_lookup):
                     # Multiple sessions with this name — fall back to UUID if available
                     if conv_id and _uuid_re.match(conv_id):
-                        conv_file = CLAUDE_HOME / "projects" / _project_name(work_dir) / f"{conv_id}.jsonl"
+                        conv_file = _projects_dir_for_lookup / _project_name(work_dir) / f"{conv_id}.jsonl"
                         if conv_file.exists():
                             session_flag = f'--resume {conv_id}'
                             print(f"[start] {name}: resume via UUID fallback (ambiguous name '{cc_session_name}', uuid={conv_id})")
@@ -8750,9 +8796,9 @@ def start_session(name: str, extra_flags: str = "", _skip_conv_id: bool = False)
                     session_flag = f'--name {shlex.quote(name)}'
                     print(f"[start] {name}: fresh start (session '{cc_session_name}' not found in project)")
             elif conv_id and _uuid_re.match(conv_id):
-                # Migration path: old UUID-based session
+                # Migration path: old UUID-based session (per-runtime projects dir)
                 conv_file = (
-                    CLAUDE_HOME / "projects" / _project_name(work_dir) / f"{conv_id}.jsonl"
+                    _projects_dir_for_lookup / _project_name(work_dir) / f"{conv_id}.jsonl"
                 )
                 if conv_file.exists():
                     session_flag = f"--resume {conv_id}"
@@ -8799,7 +8845,12 @@ def start_session(name: str, extra_flags: str = "", _skip_conv_id: bool = False)
             default_flags = dcfg.get("CC_DEFAULT_FLAGS", "")
 
         if provider == "codex":
-            _auto_trust_codex_dir(work_dir)
+            # Container-mode codex sessions need trust in their product's
+            # shared home, not on host.
+            if _product:
+                _auto_trust_codex_dir(work_dir, home_dir=str(CC_PRODUCTS / _product / "home"))
+            else:
+                _auto_trust_codex_dir(work_dir)
             # Resume from stored codex session ID (per amux session), not by cwd
             codex_session_id = meta.get("codex_session_id", "")
             _codex_yolo = False
@@ -8967,10 +9018,12 @@ def start_session(name: str, extra_flags: str = "", _skip_conv_id: bool = False)
                 if _eVal:
                     _env_args += ["-e", f"{_ekey}={_eVal}"]
     
-            # Check if tmux session already exists
-            r_tmux = subprocess.run(["tmux", "list-sessions", "-F", "#{session_name}"],
+            # Check if tmux session already exists — route via _tmux_prefix so
+            # docker sessions ask their own container's tmux daemon (host tmux
+            # wouldn't know about them).
+            r_tmux = subprocess.run(_tmux_cmd(name, "list-sessions", "-F", "#{session_name}"),
                                     capture_output=True, text=True)
-            tmux_exists = tmux_sess in r_tmux.stdout.splitlines()
+            tmux_exists = r_tmux.returncode == 0 and tmux_sess in r_tmux.stdout.splitlines()
     
             if tmux_exists:
                 # Existing tmux session -- reuse it
@@ -9219,7 +9272,7 @@ def start_session(name: str, extra_flags: str = "", _skip_conv_id: bool = False)
                 pass
             subprocess.run(
                 [*_tmux_prefix(name), "pipe-pane", "-t", tmux_name(name), "-o",
-                 _log_pipe_command(lp)],
+                 _log_pipe_command(_log_path_in_runtime(name))],
                 capture_output=True, timeout=5,
             )
             # Migration: if we resumed via UUID and Claude is running, read session name
@@ -9333,11 +9386,12 @@ def stop_session(name: str) -> tuple[bool, str]:
         return False, "invalid session name"
     with _get_session_lock(name):
         tmux_sess = tmux_name(name)
-        # Check tmux exists at all
+        # Check tmux exists at all — routed so docker sessions ask their
+        # own container's tmux (their container may already be stopped).
         try:
-            r = subprocess.run(["tmux", "list-sessions", "-F", "#{session_name}"],
+            r = subprocess.run(_tmux_cmd(name, "list-sessions", "-F", "#{session_name}"),
                                capture_output=True, text=True)
-            if tmux_sess not in r.stdout.splitlines():
+            if r.returncode != 0 or tmux_sess not in r.stdout.splitlines():
                 return True, "not running"
         except FileNotFoundError:
             return True, "not running"
