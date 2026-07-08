@@ -6315,34 +6315,80 @@ def _detect_claude_status(raw_output: str) -> str:
     return ""
 
 
-def _tmux_info_map() -> dict:
-    """Get activity, creation time, and pane title for all tmux sessions."""
-    result = {}
+_TMUX_INFO_FMT = "#{session_name}\t#{window_activity}\t#{session_created}\t#{pane_title}"
+
+
+def _running_product_containers() -> list:
+    """Return the names of currently running amux-product-* containers.
+    Called by _tmux_info_map to know which containers to union into the
+    tmux enumeration. Returns [] if docker is missing or errors \u2014 the
+    caller degrades to host-only enumeration."""
     try:
         r = subprocess.run(
-            ["tmux", "list-panes", "-a", "-F",
-             "#{session_name}\t#{window_activity}\t#{session_created}\t#{pane_title}"],
+            ["docker", "ps", "--format", "{{.Names}}",
+             "--filter", "status=running", "--filter", "name=amux-product-"],
             capture_output=True, text=True, timeout=5,
         )
         if r.returncode != 0:
-            return {}
-        for line in r.stdout.strip().splitlines():
-            parts = line.split("\t", 3)
-            if len(parts) >= 3:
-                name = parts[0]
-                # Only keep first pane per session
-                if name not in result:
-                    title = parts[3].strip() if len(parts) >= 4 else ""
-                    # Strip leading braille/dingbat status chars from pane title
-                    clean_title = re.sub(r'^[\u2800-\u28ff\u2700-\u27bf\s]+', '', title).strip()
-                    result[name] = {
-                        "activity": int(parts[1]),
-                        "created": int(parts[2]),
-                        "pane_title": clean_title,
-                    }
-        return result
+            return []
+        return [ln.strip() for ln in r.stdout.splitlines() if ln.strip()]
     except Exception:
-        return {}
+        return []
+
+
+def _parse_tmux_info_output(text: str, result: dict) -> None:
+    """Merge tmux list-panes output (in _TMUX_INFO_FMT) into result dict.
+    Only the first pane per session is kept (matches host enumeration behaviour)."""
+    for line in text.strip().splitlines():
+        parts = line.split("\t", 3)
+        if len(parts) < 3:
+            continue
+        name = parts[0]
+        if name in result:
+            continue
+        title = parts[3].strip() if len(parts) >= 4 else ""
+        clean_title = re.sub(r'^[\u2800-\u28ff\u2700-\u27bf\s]+', '', title).strip()
+        try:
+            result[name] = {
+                "activity": int(parts[1]),
+                "created": int(parts[2]),
+                "pane_title": clean_title,
+            }
+        except ValueError:
+            # Malformed activity/created \u2014 skip this pane silently.
+            pass
+
+
+def _tmux_info_map() -> dict:
+    """Get activity, creation time, and pane title for all tmux sessions.
+
+    Unions the host tmux daemon with every running amux-product-* container's
+    tmux daemon. Host takes precedence for duplicate session names (shouldn't
+    happen: session names are globally unique across the AMUX box)."""
+    result = {}
+    # Host tmux first
+    try:
+        r = subprocess.run(
+            ["tmux", "list-panes", "-a", "-F", _TMUX_INFO_FMT],
+            capture_output=True, text=True, timeout=5,
+        )
+        if r.returncode == 0:
+            _parse_tmux_info_output(r.stdout, result)
+    except Exception:
+        pass
+    # Union with each running product container
+    for ctr in _running_product_containers():
+        try:
+            r = subprocess.run(
+                ["docker", "exec", ctr, "tmux", "list-panes", "-a", "-F", _TMUX_INFO_FMT],
+                capture_output=True, text=True, timeout=5,
+            )
+            if r.returncode == 0:
+                _parse_tmux_info_output(r.stdout, result)
+        except Exception:
+            # A single container failing must not break the whole enumeration.
+            continue
+    return result
 
 
 def _parse_task_time(raw_output: str) -> str:
