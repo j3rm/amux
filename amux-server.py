@@ -8195,9 +8195,10 @@ def _compose_memory(global_content: str, session_content: str) -> str:
 
 
 def _capture_claude_memory_changes(name: str, work_dir: str):
-    """Capture changes Claude made to MEMORY.md during the previous session."""
+    """Capture changes Claude made to MEMORY.md during the previous session.
+    Runtime-aware: reads from the same location _write_claude_memory writes to."""
     pname = _project_name(work_dir)
-    claude_mem_file = CLAUDE_HOME / "projects" / pname / "memory" / "MEMORY.md"
+    claude_mem_file = _claude_projects_dir_for_session(name) / pname / "memory" / "MEMORY.md"
     session_file = CC_MEMORY / f"{name}.md"
     if not claude_mem_file.exists() or claude_mem_file.is_symlink():
         return
@@ -8216,13 +8217,15 @@ def _capture_claude_memory_changes(name: str, work_dir: str):
 
 
 def _write_claude_memory(name: str, work_dir: str):
-    """Write composed (global + session) memory to Claude's project memory dir."""
+    """Write composed (global + session) memory to Claude's project memory dir.
+    Runtime-aware: docker sessions write into their product's shared home so
+    the container's Claude Code actually sees the MEMORY.md when it starts."""
     pname = _project_name(work_dir)
     session_file = CC_MEMORY / f"{name}.md"
     global_content = _GLOBAL_MEM_FILE.read_text(errors="replace") if _GLOBAL_MEM_FILE.exists() else ""
     session_content = session_file.read_text(errors="replace") if session_file.exists() else ""
     composed = _compose_memory(global_content, session_content)
-    claude_mem_dir = CLAUDE_HOME / "projects" / pname / "memory"
+    claude_mem_dir = _claude_projects_dir_for_session(name) / pname / "memory"
     claude_mem_file = claude_mem_dir / "MEMORY.md"
     try:
         claude_mem_dir.mkdir(parents=True, exist_ok=True)
@@ -9353,7 +9356,37 @@ def _wait_for_claude_prompt(name: str, timeout: int = 5) -> bool:
 
 
 def _hard_kill_claude(name: str):
-    """Kill the Claude process in a session without graceful /exit. Tmux survives."""
+    """Kill the Claude process in a session without graceful /exit. Tmux survives.
+
+    For docker sessions the Claude process lives inside the container's PID
+    namespace — host pgrep/kill can't reach it. Route the kill through
+    docker exec pkill instead."""
+    _prod = _session_product(name)
+    if _prod:
+        # Docker session: pkill inside the container by claude cmdline pattern
+        # (matches the `claude ... --name <session>` invocation). Container's
+        # PID namespace is separate; can't reach it from host.
+        try:
+            subprocess.run(
+                ["docker", "exec", _product_container_name(_prod),
+                 "pkill", "-9", "-f", f"claude .* --name {name}"],
+                capture_output=True, timeout=10,
+            )
+        except Exception:
+            pass
+        time.sleep(1)
+        # Reset terminal (send-keys routes through docker exec).
+        try:
+            subprocess.run([*_tmux_prefix(name), "send-keys", "-t", tmux_target(name), "-l", "stty sane"],
+                           capture_output=True, timeout=5)
+            time.sleep(0.1)
+            subprocess.run([*_tmux_prefix(name), "send-keys", "-t", tmux_target(name), "Enter"],
+                           capture_output=True, timeout=5)
+        except Exception:
+            pass
+        return
+
+    # Host session
     claude_pid = _find_claude_pid(name)
     if claude_pid and claude_pid > 1:
         try:
