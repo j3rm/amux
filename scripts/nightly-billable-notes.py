@@ -44,14 +44,39 @@ _ctx.verify_mode = ssl.CERT_NONE
 
 
 def _post(path: str, body: dict) -> dict:
-    req = urllib.request.Request(
-        AMUX_URL + path,
-        data=json.dumps(body).encode(),
-        method="POST",
-        headers={"Content-Type": "application/json"},
-    )
-    with urllib.request.urlopen(req, context=_ctx, timeout=15) as r:
-        return json.loads(r.read())
+    # Retry-with-backoff. Board writes race the every-15-min watchdog and
+    # occasionally lose the SQLite lock (5s BEGIN IMMEDIATE timeout → HTTP 500
+    # "database is locked"). One retry after 3s and a second after 8s covers
+    # every collision we've seen without risking runaway attempts. Non-lock
+    # errors bubble immediately.
+    import time as _t
+    last_err = None
+    for delay in (0, 3, 8):
+        if delay:
+            _t.sleep(delay)
+        req = urllib.request.Request(
+            AMUX_URL + path,
+            data=json.dumps(body).encode(),
+            method="POST",
+            headers={"Content-Type": "application/json"},
+        )
+        try:
+            with urllib.request.urlopen(req, context=_ctx, timeout=15) as r:
+                return json.loads(r.read())
+        except urllib.error.HTTPError as e:
+            body_txt = ""
+            try:
+                body_txt = e.read().decode(errors="replace")
+            except Exception:
+                pass
+            last_err = e
+            if e.code == 500 and "database is locked" in body_txt.lower():
+                continue  # retry
+            raise
+        except Exception as e:
+            last_err = e
+            raise
+    raise last_err  # exhausted retries
 
 
 def _parse_env(env_file: Path) -> dict:
