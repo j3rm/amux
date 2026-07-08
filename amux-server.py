@@ -1535,7 +1535,16 @@ def ensure_product_container(product: str) -> "tuple[bool, str]":
     if state != "missing":
         return False, f"container in unexpected state: {state}"
 
-    # Missing — create. Pre-create per-session HOMEs so bind mounts don't fail.
+    # Missing — create. Pre-create the shared product HOME (Claude auth lives
+    # here, shared across every session in the container by default) AND per-
+    # session HOMEs (only used when a session opts out with
+    # CC_CLAUDE_AUTH_SHARED=0). Both mounts always attach — the choice of
+    # which HOME wins is made at tmux new-session -e time.
+    product_home = CC_PRODUCTS / product / "home"
+    try:
+        product_home.mkdir(parents=True, exist_ok=True)
+    except Exception as e:
+        return False, f"failed to prep product home {product_home}: {e}"
     for session in spec["sessions"]:
         try:
             _ensure_session_home_dir(spec, session)
@@ -1554,7 +1563,13 @@ def ensure_product_container(product: str) -> "tuple[bool, str]":
     # Explicit read-only cross-product mounts
     for m in spec["readonly_cross_mounts"]:
         cmd += ["-v", f"{m['source']}:{m['target']}:{m['mode']}"]
-    # Per-session HOMEs (each session's ~/.claude/ lives here — full isolation)
+    # Shared product HOME → /home/amux (the container's default user home).
+    # This is where every session's ~/.claude/ lives by default: first session
+    # to /login populates the OAuth store; every subsequent session in this
+    # container is authenticated automatically. Sessions can opt out via
+    # CC_CLAUDE_AUTH_SHARED=0 to get their own HOME (per-session isolation).
+    cmd += ["-v", f"{product_home}:/home/amux:rw"]
+    # Per-session HOMEs (opt-in isolation via CC_CLAUDE_AUTH_SHARED=0)
     for session in spec["sessions"]:
         host_home = spec["session_home_dir_pattern"].format(session=session)
         cmd += ["-v", f"{host_home}:/homes/{session}:rw"]
@@ -9026,13 +9041,22 @@ def start_session(name: str, extra_flags: str = "", _skip_conv_id: bool = False)
                 # For container-mode sessions, override:
                 #   AMUX_URL host → host.docker.internal (the container hostname
                 #     mapped to the docker bridge gateway; agents still curl -sk).
-                #   HOME=/homes/<session> so this session's ~/.claude/ isolates
-                #     from every other session in the container.
+                #   HOME defaults to /home/amux (the container-shared HOME bind-
+                #     mounted from ~/.amux/products/<product>/home) so every
+                #     session in the same container shares its ~/.claude/ (one
+                #     /login per container). If the session opts out with
+                #     CC_CLAUDE_AUTH_SHARED=0, HOME=/homes/<session> instead,
+                #     giving that session its own ~/.claude/.
                 _scheme = "http" if "--no-tls" in sys.argv else "https"
                 _api_host = "host.docker.internal" if _product else "localhost"
                 _extra_env = []
                 if _product:
-                    _extra_env += ["-e", f"HOME=/homes/{name}"]
+                    _auth_shared = (cfg.get("CC_CLAUDE_AUTH_SHARED", "1") or "1").strip()
+                    if _auth_shared in ("0", "false", "no"):
+                        _extra_env += ["-e", f"HOME=/homes/{name}"]
+                    # else: default HOME=/home/amux from the container image +
+                    # shared-home bind mount handles the "one login per
+                    # container" case with no per-session override.
                 subprocess.run(
                     [*_tmux_prefix(name), "new-session", "-d", "-s", tmux_sess, "-n", name, "-c", work_dir,
                      "-e", "TMUX_SESSION_NAME=" + name,
