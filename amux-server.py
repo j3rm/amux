@@ -17294,6 +17294,26 @@ let peekSearchIndex = 0;
 let _peekMatches = [];
 let lastPeekHTML = '';
 let _lastPeekRaw = '';   // raw output from last peek — skip re-render if unchanged
+let _peekEtag = null;    // ETag of last peek response — enables conditional 304 fetches
+// Adaptive peek polling: fast while the session generates, back off when idle
+// (each idle poll is a cheap 304 anyway), and pause entirely when the tab is hidden.
+function _peekPollInterval() {
+  const s = (typeof sessions !== 'undefined' && sessions.find) ? sessions.find(x => x.name === peekSession) : null;
+  const st = s && s.status;
+  if (st === 'active') return 1800;
+  if (st === 'waiting') return 2500;
+  return 7000;
+}
+function _stopPeekPoll() { if (peekTimer) { clearTimeout(peekTimer); peekTimer = null; } }
+function _schedulePeekPoll() {
+  _stopPeekPoll();
+  if (!peekSession || document.hidden) return;
+  peekTimer = setTimeout(async () => {
+    peekTimer = null;
+    try { await refreshPeek(); } catch(e) {}
+    _schedulePeekPoll();
+  }, _peekPollInterval());
+}
 const _peekDrafts = {};  // session name → command text
 
 // ═══════ ZOOM ═══════
@@ -21238,10 +21258,13 @@ async function saveGlobalMemory() {
   }
 }
 
-const APP_VER = '0.9.35';   // bump together with the sw.js CACHE version
+const APP_VER = '0.9.56';   // bump together with the sw.js CACHE version
 let _peekScrollLockY = 0;
 function openPeek(name, opts) {
-  if (peekTimer) { clearInterval(peekTimer); peekTimer = null; }
+  _stopPeekPoll();
+  if (_transcriptTimer) { clearInterval(_transcriptTimer); _transcriptTimer = null; }
+  const _tb = document.getElementById('peek-transcript-body');
+  if (_tb) { _tb.innerHTML = ''; _tb._lastHTML = null; }
   clearPeekFiles();  // clear any stale attachments from previous peek
   peekSession = name;
   _peekScrollLocked = false;
@@ -21269,6 +21292,7 @@ function openPeek(name, opts) {
   _peekMatches = [];
   lastPeekHTML = '';
   _lastPeekRaw = '';
+  _peekEtag = null;   // new session → drop the old session's ETag
   const searchInp = document.getElementById('peek-search');
   if (searchInp) {
     searchInp.value = prefillQuery;
@@ -21313,7 +21337,7 @@ function openPeek(name, opts) {
     }
   });
   refreshPeek();
-  peekTimer = setInterval(refreshPeek, 3000);
+  _schedulePeekPoll();
   _updateSendSplit();   // sync the Send/Queue button label to the current mode
   _savePeekState();
 }
@@ -21364,8 +21388,16 @@ function closePeek() {
   ov.style.height = '';
   ov.style.top = '';
   ov.style.bottom = '';
-  ov.style.paddingBottom = '';
-  if (peekTimer) { clearInterval(peekTimer); peekTimer = null; }
+  ov.style.removeProperty('padding-bottom');   // was set with !important
+  ov._vvSig = null;   // styles were reset behind the sync cache
+  if (document.body.style.position === 'fixed') {
+    document.body.style.position = '';
+    document.body.style.top = '';
+    document.body.style.width = '';
+    window.scrollTo(0, _peekScrollLockY || 0);
+  }
+  _stopPeekPoll();
+  if (_transcriptTimer) { clearInterval(_transcriptTimer); _transcriptTimer = null; }
   sessionStorage.removeItem('peekState');
 }
 
@@ -21962,9 +21994,15 @@ async function refreshPeek() {
   const body = document.getElementById('peek-body');
   const statusEl = document.getElementById('peek-status');
   try {
-    const r = await fetch(API + '/api/sessions/' + name + '/peek?lines=300');
-    const data = await r.json();
+    const r = await fetch(API + '/api/sessions/' + name + '/peek?lines=300',
+      _peekEtag ? { headers: { 'If-None-Match': _peekEtag } } : undefined);
     if (peekSession !== name) return;
+    if (r.status === 304) {   // unchanged — nothing transferred, skip parse + render entirely
+      if (performance.now() > _peekGeoHold) statusEl.textContent = 'Updated ' + new Date().toLocaleTimeString() + ' · v' + APP_VER;
+      return;
+    }
+    _peekEtag = r.headers.get('ETag') || _peekEtag;
+    const data = await r.json();
     const output = data.output || '(no output)';
     // Skip re-render when output is identical — saves ansiToHtml work on every poll tick.
     // This also applies with an active search: the highlights are already in the DOM,
@@ -31630,7 +31668,10 @@ function _resyncEverything() {
   _runDeltaSync();
 }
 function _onClientResume(reason) {
-  if (document.hidden) return;
+  if (document.hidden) { _stopPeekPoll(); return; }   // tab backgrounded → pause peek polling
+  // Resume adaptive peek polling if we're on a peek and it was paused while hidden.
+  if (peekSession && !peekTimer) { refreshPeek(); _schedulePeekPoll(); }
+  if (window._peekEmbed) { refreshPeek(); return; }
   // Always pull fresh state — cheap and the user expects up-to-date data.
   if (_lastDataTime && Date.now() - _lastDataTime > _SSE_REFRESH_MS) {
     _resyncEverything();
@@ -37726,6 +37767,29 @@ class CCHandler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
+    def _json_etag(self, data):
+        """_json + a content-hash ETag with If-None-Match → 304 support, so a
+        client can skip re-transferring an unchanged peek. For an idle session the
+        ~140KB payload is otherwise re-sent on every poll; a 304 is a few bytes."""
+        body = json.dumps(data).encode()
+        etag = '"' + _hashlib.md5(body).hexdigest()[:16] + '"'
+        if self.headers.get("If-None-Match", "") == etag:
+            self.send_response(304)
+            self._cors()
+            self.send_header("ETag", etag)
+            self.end_headers()
+            return
+        self.send_response(200)
+        self._cors()
+        self.send_header("Content-Type", "application/json")
+        self.send_header("ETag", etag)
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        try:
+            self.wfile.write(body)
+        except Exception:
+            pass
+
     def _html(self, html):
         body = html.encode()
         self.send_response(200)
@@ -38130,11 +38194,13 @@ class CCHandler(BaseHTTPRequestHandler):
                 now = time.monotonic()
                 cached = _peek_cache.get(session_name)
                 if cached and cached[1] >= lines and (now - cached[0]) < _PEEK_CACHE_TTL:
-                    output = cached[2]
-                else:
-                    output = tmux_capture(session_name, lines)
-                    if output:
-                        _peek_cache[session_name] = (now, lines, output)
+                    return self._json_etag(cached[2])
+                output = tmux_capture(session_name, lines)
+                tmux_lines = len(output.splitlines()) if output else 0
+                if not output or (tmux_lines < 30 and tmux_lines < lines // 4):
+                    log_out = load_session_log(session_name, tail_bytes=65_536)
+                    if log_out:
+                        output = log_out
                 if not output:
                     output = load_session_log(session_name, tail_bytes=65_536) or "(no output)"
                 return self._json({"name": session_name, "output": output})
@@ -43290,21 +43356,63 @@ p{{color:#888;margin:12px 0 28px;font-size:0.9rem;line-height:1.5}}
                 now = time.monotonic()
                 cached = _peek_cache.get(name)
                 if cached and cached[1] >= lines and (now - cached[0]) < _PEEK_CACHE_TTL:
-                    output = cached[2]
-                else:
-                    output = tmux_capture(name, lines)
+                    return self._json_etag(cached[2])
+                output = tmux_capture(name, lines)
+                tmux_lines = len(output.splitlines()) if output else 0
+                is_alt = _tmux_alt_screen(name)
+                # Alt-screen (Claude Code TUI): transcript for history,
+                # live capture for current state. No saved-log merging.
+                if is_alt:
                     if output:
-                        _peek_cache[name] = (now, lines, output)
-                if output:
+                        last_save = _last_log_save.get(name, 0)
+                        if now - last_save >= _LOG_SAVE_INTERVAL:
+                            threading.Thread(target=save_alt_capture, args=(name, output), daemon=True).start()
+                    transcript = _render_session_transcript(name, max_chars=120_000)
+                    live = _strip_launch_noise(output.strip()) if output else ""
+                    if transcript and live:
+                        # The live frame re-shows the most recent messages the
+                        # transcript ends with — trim that overlap so they don't
+                        # render twice (raw-markdown transcript + rendered frame).
+                        live = _trim_live_overlap(transcript, live)
+                        joined = (transcript.rstrip() + "\n\n" + live) if transcript else live
+                        resp = {"name": name, "output": _collapse_blank_runs(joined)}
+                    elif live:
+                        resp = {"name": name, "output": _collapse_blank_runs(live)}
+                    elif transcript:
+                        resp = {"name": name, "output": transcript}
+                    else:
+                        resp = {"name": name, "output": "(no output)"}
+                    _peek_cache[name] = (now, lines, resp)
+                    return self._json_etag(resp)
+                # Normal screen: show capture directly, save log in background.
+                if output and tmux_lines >= 30:
                     last_save = _last_log_save.get(name, 0)
                     if now - last_save >= _LOG_SAVE_INTERVAL:
                         threading.Thread(target=save_session_log, args=(name, output), daemon=True).start()
-                    return self._json({"name": name, "output": output})
-                # Not running or empty — serve saved log (tail only to limit memory)
+                    resp = {"name": name, "output": _collapse_blank_runs(_strip_launch_noise(output))}
+                    _peek_cache[name] = (now, lines, resp)
+                    return self._json_etag(resp)
                 saved = load_session_log(name, tail_bytes=65_536)
                 if saved:
-                    return self._json({"name": name, "output": saved, "saved": True})
-                return self._json({"name": name, "output": "(no output)"})
+                    live = _strip_launch_noise(output.strip()) if output else ""
+                    if live and not saved.rstrip().endswith(live):
+                        combined = saved.rstrip() + "\n\n" + live + "\n"
+                    else:
+                        combined = saved
+                    resp = {"name": name, "output": _collapse_blank_runs(combined), "saved": True}
+                    _peek_cache[name] = (now, lines, resp)
+                    return self._json_etag(resp)
+                resp = {"name": name, "output": _collapse_blank_runs(output or "(no output)")}
+                _peek_cache[name] = (now, lines, resp)
+                return self._json_etag(resp)
+            if action == "transcript":
+                # Clean, gap-free conversation history rendered from Claude Code's
+                # JSONL — the authoritative alternative to torn alt-screen snapshots.
+                mx = int(qs.get("max", ["40000"])[0])
+                txt = _render_session_transcript(name, max_chars=mx)
+                if not txt:
+                    return self._json({"name": name, "output": "", "empty": True})
+                return self._json({"name": name, "output": txt, "source": "transcript"})
             if action == "info":
                 info = get_session_info(name)
                 return self._json(info)
