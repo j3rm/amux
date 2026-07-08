@@ -1314,6 +1314,63 @@ def tmux_target(session: str) -> str:
     return tmux_name(session)
 
 
+# ── Session runtime abstraction (isolation Phase 1) ──────────────────────────
+# CC_RUNTIME in each session's env file selects where its tmux+claude live:
+#   "host" (default, or CC_RUNTIME unset) — spawn tmux locally, as today
+#   "docker:<product>"                    — spawn tmux inside amux-product-<product>
+# Phase 1 default is host for every session — behaviour is unchanged. Phase 2
+# adds the docker backend + per-product containers; wiring is already in place
+# so that migration is opt-in per session via CC_RUNTIME, not a big-bang cut.
+def _session_runtime(session: str) -> str:
+    """Return this session's runtime tag ("host" or "docker:<product>")."""
+    try:
+        f = CC_SESSIONS / f"{session}.env"
+        if not f.exists():
+            return "host"
+        cfg = parse_env_file(f)
+        rt = (cfg.get("CC_RUNTIME") or "").strip()
+        # Do NOT lowercase — product names are case-sensitive in docker:<product>
+        # (RTG not rtg; the container name amux-product-RTG must match exactly).
+        return rt if rt else "host"
+    except Exception:
+        # Any failure to read env: fall back to host. Never break the session
+        # because we couldn't parse a runtime hint.
+        return "host"
+
+
+def _tmux_prefix(session: str) -> list:
+    """Return the argv prefix that invokes tmux in this session's runtime.
+
+    host → ["tmux"]. docker:<p> → ["docker", "exec", "amux-product-<p>", "tmux"].
+    Callers append the tmux subcommand + flags. See _tmux_cmd for the sugared
+    single-call form."""
+    rt = _session_runtime(session)
+    if rt == "host":
+        return ["tmux"]
+    if rt.startswith("docker:"):
+        product = rt.split(":", 1)[1]
+        # amux-product-<product> is the container name convention set by the
+        # product-spec lifecycle (Phase 2). Container must be running before
+        # any docker exec fires; ensured by ensure_product_container(product).
+        return ["docker", "exec", f"amux-product-{product}", "tmux"]
+    # Unknown runtime: log once and degrade to host so the session stays alive.
+    print(f"[runtime] {session}: unknown CC_RUNTIME={rt!r}, falling back to host")
+    return ["tmux"]
+
+
+def _tmux_cmd(session: str, *args) -> list:
+    """Return the full argv for a tmux invocation in this session's runtime.
+
+    Example: _tmux_cmd("RTG-Research", "list-panes", "-t", tmux_target("RTG-Research"))
+    → host:   ["tmux", "list-panes", "-t", "amux-RTG-Research"]
+    → docker: ["docker", "exec", "amux-product-RTG", "tmux", "list-panes", "-t", "amux-RTG-Research"]
+
+    Only for SESSION-SCOPED tmux calls. Host-wide enumeration (`tmux list-sessions`
+    across all runtimes) is not in scope here — that's a Phase 2 union across the
+    host tmux socket + each running product container's socket."""
+    return [*_tmux_prefix(session), *args]
+
+
 def is_running(session: str) -> bool:
     """Check if Claude is running in this session's tmux pane."""
     iterm2_id = _session_iterm2_id(session)
