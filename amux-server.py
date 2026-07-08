@@ -36020,6 +36020,42 @@ class CCHandler(BaseHTTPRequestHandler):
                     except Exception:
                         pass
 
+            def _check_thread_addressing(from_session, to_session, body):
+                # Threads are for Jeremy only. When an agent (from_session set)
+                # sends to Jeremy (to_session blank) and the body addresses
+                # another known session with '<name>:' — e.g. "Scorpio: ..." or
+                # "Addendum for Scorpio: ..." — the addressed agent never sees
+                # it. Reject and hint at board (handoff) or channels (chatter).
+                # Doc: /mnt/gitdata/amux/CLAUDE.md 'Threads are for Jeremy only'.
+                if not from_session or to_session or not body:
+                    return ""
+                names = []
+                for env in CC_SESSIONS.glob("*.env"):
+                    name = env.stem
+                    if not name or name == from_session:
+                        continue
+                    names.append(name)
+                if not names:
+                    return ""
+                # Longest first so 'iSchedule-Main' wins over 'iSchedule'.
+                names.sort(key=len, reverse=True)
+                pattern = r'\b(' + '|'.join(re.escape(n) for n in names) + r')\s*:'
+                m = re.search(pattern, body)
+                return m.group(1) if m else ""
+
+            def _addressing_error(addressed, from_session):
+                return {
+                    "error": "thread-addressing-guard",
+                    "addressed": addressed,
+                    "hint": (
+                        f"Thread body addresses {addressed} but threads only "
+                        f"notify Jeremy — {addressed} will never see this. "
+                        f"For a handoff, POST /api/board with "
+                        f'session="{addressed}". For back-and-forth chatter, '
+                        f"POST /api/channels/{from_session}/{addressed}/messages."
+                    ),
+                }
+
             # ── GET /api/threads — list live threads with embedded messages ─
             if method == "GET" and path == "/api/threads":
                 rows = db.execute(
@@ -36053,6 +36089,9 @@ class CCHandler(BaseHTTPRequestHandler):
                     return self._json({"error": "must specify either from_session (agent posting) or to_session (Jeremy posting)"}, 400)
                 if from_session and to_session:
                     return self._json({"error": "exactly one of from_session/to_session must be empty (the empty side is Jeremy)"}, 400)
+                addressed = _check_thread_addressing(from_session, to_session, mbody)
+                if addressed:
+                    return self._json(_addressing_error(addressed, from_session), 400)
                 blocking = 1 if bj.get("blocking") else 0
                 now = int(time.time())
                 tid = _next_issue_id("T")
@@ -36145,6 +36184,13 @@ class CCHandler(BaseHTTPRequestHandler):
                 blocking = 1 if bj.get("blocking") else 0
                 partial = bool(bj.get("partial"))
                 new_status = "working" if partial else "complete"
+                # Skip the check on partial (streaming) writes — enforced at
+                # finalize instead (PATCH body → complete). Prevents rejecting a
+                # message the agent is still editing.
+                if not partial:
+                    addressed = _check_thread_addressing(from_session, to_session, mbody)
+                    if addressed:
+                        return self._json(_addressing_error(addressed, from_session), 400)
                 now = int(time.time())
                 pos_row = db.execute(
                     "SELECT COALESCE(MAX(position), -1) + 1 AS next_pos FROM messages "
@@ -36199,6 +36245,16 @@ class CCHandler(BaseHTTPRequestHandler):
                         partial = bool(bj.get("partial"))
                         was_working = (msg_row["status"] == "working")
                         new_status = "working" if partial else "complete"
+                        # Enforce thread-addressing guard on finalize. Uses the
+                        # message's stored from/to (agent-set on original POST)
+                        # against the NEW body, so an agent can't smuggle
+                        # inter-agent addressing in via a finalize.
+                        if not partial:
+                            addressed = _check_thread_addressing(
+                                msg_row["from_session"], msg_row["to_session"], new_body)
+                            if addressed:
+                                return self._json(
+                                    _addressing_error(addressed, msg_row["from_session"]), 400)
                         db.execute(
                             "UPDATE messages SET body = ?, status = ?, updated = ? "
                             "WHERE id = ?", (new_body, new_status, now, mid),

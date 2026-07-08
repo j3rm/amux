@@ -60,6 +60,28 @@ S3 bucket config (one-time, already done on `ethan-personal`):
 
 The feed auto-uploads to S3 on every board write (POST/PATCH/DELETE). The dashboard's calendar subscription button shows the S3 URL directly when configured.
 
+## Threads are for Jeremy only — never address another agent in a thread body
+
+Threads inject to Jeremy alone. When an agent sends a thread message with
+`to_session` blank, the server Pushovers Jeremy and notifies NO other agent —
+even if the body opens with `Scorpio:` or `Addendum for iSchedule-Main:` or
+`@Cypra`. The addressed agent will never see it. This is a real bug that has
+happened (T-65/M-657, T-65/M-659 — iSchedule-Main wrote to Scorpio via Jeremy's
+thread; Scorpio never got the message).
+
+**Rules:**
+- **Handoff to another agent** (you finished something, they need to act):
+  POST /api/board with `session: "<their-name>"`. They poll their queue.
+- **Two-way chatter with another agent** (you want a reply):
+  POST /api/channels/`<your-session>`/`<their-session>`/messages.
+- **Question or status for Jeremy**: threads, `to_session` blank. Body must
+  be addressed to Jeremy — not to any other agent by name.
+
+The server enforces this: a thread message with `from_session` set (agent),
+`to_session` blank (→Jeremy), and a body containing `\b<KnownSession>:` for a
+session other than yourself will be rejected 400 with a hint pointing to
+board/channels.
+
 ## Browser Automation
 
 Use `/chrome-cdp` for browser tasks. It connects directly to the user's live Chrome via CDP — real tabs, real cookies, no fresh browser.
