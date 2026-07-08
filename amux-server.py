@@ -12075,7 +12075,12 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
   /* Box-drawing tables/frames: keep monospace alignment, scroll sideways instead
      of wrapping (which detached borders and shredded rows on narrow screens). */
   .overlay-body .peek-box { display: block; white-space: pre; overflow-x: auto; max-width: 100%;
-    word-break: normal; overflow-wrap: normal; -webkit-overflow-scrolling: touch; }
+    word-break: normal; overflow-wrap: normal; -webkit-overflow-scrolling: touch;
+    /* Only claim HORIZONTAL pans; vertical scroll gestures pass through to the
+       peek-body. Without this, iOS treats each box block as its own touch-scroll
+       context and traps the vertical swipe when your finger lands on one — which
+       are the ──── rules around every prompt, so you couldn't scroll up past ❯. */
+    touch-action: pan-x; overscroll-behavior: contain; }
   .overlay-body .peek-box::-webkit-scrollbar { height: 6px; }
   .overlay-body .peek-box::-webkit-scrollbar-thumb { background: rgba(255,255,255,0.22); border-radius: 3px; }
   /* Emoji occupy exactly 2 monospace cells inside tables so borders stay aligned
