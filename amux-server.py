@@ -25330,9 +25330,9 @@ function _tRenderMsg(t, m) {
   let html = `<div style="margin:0 0 8px 0;border:1px solid var(--border);border-left:3px solid ${accent};background:${cardBg};border-radius:4px;">
     <div style="display:flex;align-items:center;gap:8px;padding:6px 10px;cursor:pointer;font-size:0.75rem;color:var(--muted);flex-wrap:wrap;" onclick="_tMsgToggle('${midEsc}', ${expanded})">
       <span style="width:12px;color:var(--muted);">${chev}</span>
-      <span style="background:${st.color};color:#fff;padding:1px 6px;border-radius:3px;font-weight:600;text-transform:uppercase;letter-spacing:0.03em;">${st.text}</span>
       <button style="${_TICON_BTN_STYLE}" onclick="event.stopPropagation();_tFlagToggle('${midEsc}', ${flagged ? 'false' : 'true'})" title="${flagged ? 'Unflag' : 'Flag this message'}">${flagged ? _TICON_FLAG_ON : _TICON_FLAG_OFF}</button>
       <button style="${_TICON_BTN_STYLE}" onclick="event.stopPropagation();_tReplyTo('${tidEsc}','${midEsc}')" title="Reply to this message">${_TICON_REPLY}</button>
+      <span style="background:${st.color};color:#fff;padding:1px 6px;border-radius:3px;font-weight:600;text-transform:uppercase;letter-spacing:0.03em;">${st.text}</span>
       <span style="font-weight:600;color:var(--fg);">${midEsc}</span>
       <span>${_tEsc(dir.label)}</span>
       <span style="flex:1;min-width:0;"></span>
