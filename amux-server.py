@@ -23,6 +23,18 @@ from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
 from pathlib import Path
 from urllib.parse import urlparse, parse_qs, unquote
 
+# PyYAML is used by the product-spec loader (isolation Phase 2b). It's a
+# soft dependency: without it, the server still starts and every session
+# runs on host runtime — the only thing that stops working is loading
+# container-mode product specs (~/.amux/products/*.yml). Fine for a box
+# that hasn't set up isolation yet.
+try:
+    import yaml as _yaml
+    _YAML_AVAILABLE = True
+except ImportError:
+    _yaml = None
+    _YAML_AVAILABLE = False
+
 # Strip Claude Code env vars so child processes (new sessions) don't inherit them
 for _cv in ("CLAUDECODE", "CLAUDE_CODE_ENTRYPOINT"):
     os.environ.pop(_cv, None)
@@ -59,6 +71,8 @@ CC_MEMORY = CC_HOME / "memory"
 CC_BOARD_DIR = CC_HOME / "board"
 CC_UPLOADS = CC_HOME / "uploads"
 CC_BLOCKED_SESSIONS = CC_HOME / "blocked-sessions.txt"
+CC_PRODUCTS = CC_HOME / "products"  # per-product container specs (isolation Phase 2)
+CC_SESSION_HOMES = Path("/opt/amux/homes")  # per-session HOMEs bind-mounted into containers
 CC_NOTES = Path(os.environ.get("AMUX_NOTES_DIR", "")) if os.environ.get("AMUX_NOTES_DIR") else CC_HOME / "notes"
 CC_NOTES_PINS = CC_HOME / "notes" / ".pins.json"
 CC_NOTES_TRASH = CC_HOME / "notes" / ".trash"
@@ -1369,6 +1383,96 @@ def _tmux_cmd(session: str, *args) -> list:
     across all runtimes) is not in scope here — that's a Phase 2 union across the
     host tmux socket + each running product container's socket."""
     return [*_tmux_prefix(session), *args]
+
+
+# ── Product spec loader (isolation Phase 2b) ─────────────────────────────────
+# A product spec at ~/.amux/products/<name>.yml describes a per-product
+# container: its image, sessions, host→container mounts, secrets, env, and
+# any read-only cross-product mounts. Loaded on demand; no caching yet —
+# the specs are small and reads are infrequent.
+#
+# Schema (minimum required in bold):
+#   **name**        str          product identifier (must match filename)
+#   image           str          container image (default: amux-agent-base:latest)
+#   sessions        [str]        session names owned by this product (informational
+#                                cross-check against CC_RUNTIME on each session)
+#   mounts          [dict]       [{source, target, mode}] — bind mounts, host→container
+#   readonly_cross_mounts [dict] same shape, always ro — explicit inter-product access
+#   env             {str:str}    tmux new-session -e KEY=VAL entries
+#   session_home_dir_pattern str default "/opt/amux/homes/{session}" — the per-session
+#                                HOME bind-mounted at /homes/{session} in container
+_PRODUCT_NAME_RE = re.compile(r'^[a-zA-Z0-9_.\-]+$')
+
+
+def _load_product_spec(product_name: str) -> "dict | None":
+    """Load ~/.amux/products/<name>.yml. Returns dict on success, None on failure.
+    Never raises — logs and returns None so the caller can degrade gracefully."""
+    if not _PRODUCT_NAME_RE.match(product_name):
+        print(f"[product-spec] invalid product name: {product_name!r}")
+        return None
+    if not _YAML_AVAILABLE:
+        print(f"[product-spec] PyYAML not installed — cannot load {product_name}")
+        return None
+    f = CC_PRODUCTS / f"{product_name}.yml"
+    if not f.exists():
+        return None
+    try:
+        with f.open() as fh:
+            spec = _yaml.safe_load(fh) or {}
+    except Exception as e:
+        print(f"[product-spec] {product_name}: parse error: {e}")
+        return None
+    if not isinstance(spec, dict):
+        print(f"[product-spec] {product_name}: top level must be a mapping, got {type(spec).__name__}")
+        return None
+    # Validate + default
+    if spec.get("name") and spec["name"] != product_name:
+        print(f"[product-spec] {product_name}: 'name' field {spec['name']!r} does not match filename")
+        return None
+    spec.setdefault("name", product_name)
+    spec.setdefault("image", "amux-agent-base:latest")
+    spec.setdefault("sessions", [])
+    spec.setdefault("mounts", [])
+    spec.setdefault("readonly_cross_mounts", [])
+    spec.setdefault("env", {})
+    spec.setdefault("session_home_dir_pattern", "/opt/amux/homes/{session}")
+    # Type sanity — refuse silently-wrong specs
+    for field, want_type in (
+        ("sessions", list), ("mounts", list),
+        ("readonly_cross_mounts", list), ("env", dict),
+        ("image", str), ("session_home_dir_pattern", str),
+    ):
+        if not isinstance(spec[field], want_type):
+            print(f"[product-spec] {product_name}: field {field!r} must be {want_type.__name__}")
+            return None
+    for mount_list_name in ("mounts", "readonly_cross_mounts"):
+        for i, m in enumerate(spec[mount_list_name]):
+            if not (isinstance(m, dict) and "source" in m and "target" in m):
+                print(f"[product-spec] {product_name}: {mount_list_name}[{i}] must have source+target")
+                return None
+            m.setdefault("mode", "ro" if mount_list_name == "readonly_cross_mounts" else "rw")
+    return spec
+
+
+def _list_product_specs() -> "list[dict]":
+    """Enumerate all loadable product specs, sorted by name. Broken specs are skipped."""
+    if not CC_PRODUCTS.exists() or not _YAML_AVAILABLE:
+        return []
+    specs = []
+    for f in sorted(CC_PRODUCTS.glob("*.yml")):
+        spec = _load_product_spec(f.stem)
+        if spec:
+            specs.append(spec)
+    return specs
+
+
+def _session_product(session: str) -> "str | None":
+    """Return the product name this session belongs to (from CC_RUNTIME=docker:X),
+    or None for host-mode sessions."""
+    rt = _session_runtime(session)
+    if rt.startswith("docker:"):
+        return rt.split(":", 1)[1]
+    return None
 
 
 def is_running(session: str) -> bool:
