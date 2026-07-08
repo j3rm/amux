@@ -25233,6 +25233,7 @@ function _tRenderThread(t) {
       ${anyBlocking ? '<span style="background:#e11;color:#fff;padding:2px 8px;border-radius:4px;font-size:0.65rem;font-weight:700;">BLOCKING</span>' : ''}
       <span style="font-weight:700;font-size:0.9rem;color:var(--fg);white-space:nowrap;letter-spacing:0.02em;">${tidEsc}</span>
       <span class="t-row-title" style="flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:1rem;font-weight:600;color:var(--fg);">${_tEsc(t.title)}</span>
+      <button style="${_TICON_BTN_STYLE}opacity:0.55;" onclick="event.stopPropagation();_tRenameThread('${tidEsc}')" title="Rename thread">✎</button>
       <span style="font-size:0.7rem;color:var(--muted);white-space:nowrap;">${t.messages.length} msg${t.messages.length===1?'':'s'}</span>
       <span class="t-row-time" style="font-size:0.7rem;color:var(--muted);white-space:nowrap;">${_tFmtTime(newestUpdated)}</span>
     </div>`;
@@ -25330,13 +25331,13 @@ function _tRenderMsg(t, m) {
     <div style="display:flex;align-items:center;gap:8px;padding:6px 10px;cursor:pointer;font-size:0.75rem;color:var(--muted);flex-wrap:wrap;" onclick="_tMsgToggle('${midEsc}', ${expanded})">
       <span style="width:12px;color:var(--muted);">${chev}</span>
       <span style="background:${st.color};color:#fff;padding:1px 6px;border-radius:3px;font-weight:600;text-transform:uppercase;letter-spacing:0.03em;">${st.text}</span>
+      <button style="${_TICON_BTN_STYLE}" onclick="event.stopPropagation();_tFlagToggle('${midEsc}', ${flagged ? 'false' : 'true'})" title="${flagged ? 'Unflag' : 'Flag this message'}">${flagged ? _TICON_FLAG_ON : _TICON_FLAG_OFF}</button>
+      <button style="${_TICON_BTN_STYLE}" onclick="event.stopPropagation();_tReplyTo('${tidEsc}','${midEsc}')" title="Reply to this message">${_TICON_REPLY}</button>
       <span style="font-weight:600;color:var(--fg);">${midEsc}</span>
       <span>${_tEsc(dir.label)}</span>
       <span style="flex:1;min-width:0;"></span>
       <span>${_tFmtTime(m.updated || m.created)}</span>
-      <button style="${_TICON_BTN_STYLE}" onclick="event.stopPropagation();_tFlagToggle('${midEsc}', ${flagged ? 'false' : 'true'})" title="${flagged ? 'Unflag' : 'Flag this message'}">${flagged ? _TICON_FLAG_ON : _TICON_FLAG_OFF}</button>
       ${canMarkRead ? `<button style="${_TICON_BTN_STYLE}" onclick="event.stopPropagation();_tMarkRead('${midEsc}')" title="Mark read">${_TICON_CHECK}</button>` : ''}
-      <button style="${_TICON_BTN_STYLE}" onclick="event.stopPropagation();_tReplyTo('${tidEsc}','${midEsc}')" title="Reply to this message">${_TICON_REPLY}</button>
     </div>`;
   if (!expanded) { html += '</div>'; return html; }
   html += `<div style="padding:0 12px 10px 12px;">`;
@@ -25357,6 +25358,21 @@ async function _tStarToggle(tid, starred) {
 async function _tDiscardThread(tid) {
   if (!confirm('Discard thread ' + tid + '?')) return;
   await fetch(API + '/api/threads/' + encodeURIComponent(tid), {method: 'DELETE'});
+  _threadsLoad();
+}
+async function _tRenameThread(tid) {
+  // Look up the current title so the prompt starts pre-filled — Jeremy is
+  // usually tweaking a title, not composing one from scratch.
+  const cur = (_threadsCache.find(t => t.id === tid) || {}).title || '';
+  const next = prompt('Rename thread ' + tid + ':', cur);
+  if (next === null) return;               // cancel
+  const trimmed = next.trim();
+  if (!trimmed || trimmed === cur) return; // empty or unchanged
+  const r = await fetch(API + '/api/threads/' + encodeURIComponent(tid), {
+    method: 'PATCH', headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({title: trimmed}),
+  });
+  if (!r.ok) { alert('Rename failed'); return; }
   _threadsLoad();
 }
 async function _tMarkRead(mid) {
