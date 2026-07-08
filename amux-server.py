@@ -72,7 +72,10 @@ CC_BOARD_DIR = CC_HOME / "board"
 CC_UPLOADS = CC_HOME / "uploads"
 CC_BLOCKED_SESSIONS = CC_HOME / "blocked-sessions.txt"
 CC_PRODUCTS = CC_HOME / "products"  # per-product container specs (isolation Phase 2)
-CC_SESSION_HOMES = Path("/opt/amux/homes")  # per-session HOMEs bind-mounted into containers
+CC_SESSION_HOMES = CC_HOME / "homes"  # per-session HOMEs bind-mounted into containers
+# ^ Was /opt/amux/homes originally (mirrored the cloud pattern), but AMUX runs
+# as jwesley and doesn't own /opt. Under ~/.amux/ everything is user-writable
+# and the whole isolation surface is inside one dir.
 CC_NOTES = Path(os.environ.get("AMUX_NOTES_DIR", "")) if os.environ.get("AMUX_NOTES_DIR") else CC_HOME / "notes"
 CC_NOTES_PINS = CC_HOME / "notes" / ".pins.json"
 CC_NOTES_TRASH = CC_HOME / "notes" / ".trash"
@@ -1435,7 +1438,7 @@ def _load_product_spec(product_name: str) -> "dict | None":
     spec.setdefault("mounts", [])
     spec.setdefault("readonly_cross_mounts", [])
     spec.setdefault("env", {})
-    spec.setdefault("session_home_dir_pattern", "/opt/amux/homes/{session}")
+    spec.setdefault("session_home_dir_pattern", str(CC_SESSION_HOMES / "{session}"))
     # Type sanity — refuse silently-wrong specs
     for field, want_type in (
         ("sessions", list), ("mounts", list),
@@ -1473,6 +1476,117 @@ def _session_product(session: str) -> "str | None":
     if rt.startswith("docker:"):
         return rt.split(":", 1)[1]
     return None
+
+
+# ── Product container lifecycle (isolation Phase 2c) ────────────────────────
+# amux-product-<name> is the container that runs one product's agents. Its
+# entrypoint is tini+tail so it stays up idle; the AMUX server uses docker
+# exec to spawn tmux new-session inside for each of the product's agent
+# sessions. Lifecycle is idempotent: ensure_product_container(p) is safe to
+# call before every session start in that product — creates on first hit,
+# starts on subsequent hits, no-ops when already running.
+def _product_container_name(product: str) -> str:
+    return f"amux-product-{product}"
+
+
+def _product_container_state(product: str) -> str:
+    """Return docker inspect state ('running', 'exited', 'created', 'paused',
+    or 'missing' if the container doesn't exist)."""
+    r = subprocess.run(
+        ["docker", "inspect", "-f", "{{.State.Status}}", _product_container_name(product)],
+        capture_output=True, text=True, timeout=10,
+    )
+    if r.returncode != 0:
+        return "missing"
+    return r.stdout.strip() or "missing"
+
+
+def _ensure_session_home_dir(spec: dict, session: str) -> str:
+    """Create /opt/amux/homes/<session>/ on host if absent. Returns the path.
+    The dir is where the session's ~/.claude/ (OAuth, projects, settings) lives —
+    bind-mounted into the container at /homes/<session>/ and referenced by
+    HOME=/homes/<session> at tmux new-session time."""
+    pattern = spec.get("session_home_dir_pattern") or str(CC_SESSION_HOMES / "{session}")
+    home = Path(pattern.format(session=session))
+    home.mkdir(parents=True, exist_ok=True)
+    return str(home)
+
+
+def ensure_product_container(product: str) -> "tuple[bool, str]":
+    """Bring up amux-product-<name> if it's not already running. Idempotent.
+    Reads the product spec, materializes per-session HOMEs, and constructs the
+    docker run command with product+session bind mounts."""
+    spec = _load_product_spec(product)
+    if not spec:
+        return False, f"no valid spec at ~/.amux/products/{product}.yml"
+    container = _product_container_name(product)
+
+    state = _product_container_state(product)
+    if state == "running":
+        return True, "already running"
+    if state in ("exited", "created", "paused"):
+        r = subprocess.run(
+            ["docker", "start", container],
+            capture_output=True, text=True, timeout=30,
+        )
+        if r.returncode == 0:
+            return True, "restarted"
+        return False, f"docker start failed: {r.stderr.strip() or r.stdout.strip()}"
+    if state != "missing":
+        return False, f"container in unexpected state: {state}"
+
+    # Missing — create. Pre-create per-session HOMEs so bind mounts don't fail.
+    for session in spec["sessions"]:
+        try:
+            _ensure_session_home_dir(spec, session)
+        except Exception as e:
+            return False, f"failed to prep session home for {session}: {e}"
+
+    cmd = [
+        "docker", "run", "-d",
+        "--name", container,
+        "--add-host=host.docker.internal:host-gateway",
+        "--restart", "unless-stopped",
+    ]
+    # Product-spec mounts (working repos, client data)
+    for m in spec["mounts"]:
+        cmd += ["-v", f"{m['source']}:{m['target']}:{m['mode']}"]
+    # Explicit read-only cross-product mounts
+    for m in spec["readonly_cross_mounts"]:
+        cmd += ["-v", f"{m['source']}:{m['target']}:{m['mode']}"]
+    # Per-session HOMEs (each session's ~/.claude/ lives here — full isolation)
+    for session in spec["sessions"]:
+        host_home = spec["session_home_dir_pattern"].format(session=session)
+        cmd += ["-v", f"{host_home}:/homes/{session}:rw"]
+    # Log dir — Phase 2c uses a flat mount; Phase 9 will restructure to
+    # ~/.amux/logs/<product>/<session>.log with a per-product subdir mount.
+    cmd += ["-v", f"{CC_LOGS}:/logs:rw"]
+    # Product-level env vars, if any
+    for k, v in (spec.get("env") or {}).items():
+        cmd += ["-e", f"{k}={v}"]
+    cmd.append(spec["image"])
+
+    r = subprocess.run(cmd, capture_output=True, text=True, timeout=90)
+    if r.returncode == 0:
+        return True, "created and running"
+    return False, f"docker run failed: {r.stderr.strip() or r.stdout.strip()}"
+
+
+def stop_product_container(product: str) -> "tuple[bool, str]":
+    """Stop and remove the amux-product-<name> container. Sessions inside must
+    be exited first — this does not check. Safe to call when the container is
+    already stopped or missing."""
+    container = _product_container_name(product)
+    state = _product_container_state(product)
+    if state == "missing":
+        return True, "not present"
+    r = subprocess.run(
+        ["docker", "rm", "-f", container],
+        capture_output=True, text=True, timeout=30,
+    )
+    if r.returncode == 0:
+        return True, "removed"
+    return False, f"docker rm failed: {r.stderr.strip() or r.stdout.strip()}"
 
 
 def is_running(session: str) -> bool:

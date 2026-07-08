@@ -62,5 +62,7 @@ env: {}
 #   <pattern>/.claude/         — Claude Code OAuth store, per-session
 #   <pattern>/.bashrc          — minimal shell profile
 # The container sees this at /homes/<session>/ (bind-mounted by
-# ensure_product_container in Phase 2c).
-session_home_dir_pattern: /opt/amux/homes/{session}
+# ensure_product_container). Default is ~/.amux/homes/{session} which is
+# jwesley-writable — override to a shared path if you need multi-user
+# provisioning.
+session_home_dir_pattern: ~/.amux/homes/{session}
