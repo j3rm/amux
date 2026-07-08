@@ -1595,12 +1595,17 @@ def is_running(session: str) -> bool:
     if iterm2_id:
         return _iterm2_session_exists(iterm2_id)
     try:
+        # Route via _tmux_cmd so container-mode sessions ask their own
+        # container's tmux daemon. Host-mode sessions get the plain
+        # `tmux list-sessions` as before.
+        # NOTE: if the session's container isn't running, docker exec fails —
+        # treat that as "not running" (returncode != 0 → empty stdout).
         r = subprocess.run(
-            ["tmux", "list-sessions", "-F", "#{session_name}"],
+            _tmux_cmd(session, "list-sessions", "-F", "#{session_name}"),
             capture_output=True, text=True,
         )
         tmux_sess = tmux_name(session)
-        if tmux_sess not in r.stdout.splitlines():
+        if r.returncode != 0 or tmux_sess not in r.stdout.splitlines():
             return False
         # Tmux exists -- check if Claude is actually running (not at shell prompt)
         output = tmux_capture(session, 10)
@@ -8630,6 +8635,17 @@ def start_session(name: str, extra_flags: str = "", _skip_conv_id: bool = False)
         cfg = parse_env_file(f)
         if cfg.get("CC_ARCHIVED") == "1":
             return False, "session is archived; wake it first"
+
+        # ── Container runtime prep (isolation Phase 2d) ──────────────────────
+        # If this session is CC_RUNTIME=docker:<product>, bring up its product
+        # container BEFORE any tmux call. ensure_product_container is idempotent —
+        # cheap when already running.
+        _product = _session_product(name)
+        if _product:
+            _ok, _msg = ensure_product_container(_product)
+            if not _ok:
+                return False, f"product container prep failed: {_msg}"
+
         work_dir = str(Path(cfg.get("CC_DIR", str(Path.home()))).expanduser().resolve())
         # Stamp this session's commits with its name (durable git trailer).
         _install_amux_commit_hook(work_dir)
@@ -8960,12 +8976,23 @@ def start_session(name: str, extra_flags: str = "", _skip_conv_id: bool = False)
                                        capture_output=True, timeout=5)
                         _poll_shell_prompt(name, timeout=3.0)
             else:
-                # New tmux session -- start bash shell (not Claude directly)
+                # New tmux session -- start bash shell (not Claude directly).
+                # For container-mode sessions, override:
+                #   AMUX_URL host → host.docker.internal (the container hostname
+                #     mapped to the docker bridge gateway; agents still curl -sk).
+                #   HOME=/homes/<session> so this session's ~/.claude/ isolates
+                #     from every other session in the container.
+                _scheme = "http" if "--no-tls" in sys.argv else "https"
+                _api_host = "host.docker.internal" if _product else "localhost"
+                _extra_env = []
+                if _product:
+                    _extra_env += ["-e", f"HOME=/homes/{name}"]
                 subprocess.run(
                     [*_tmux_prefix(name), "new-session", "-d", "-s", tmux_sess, "-n", name, "-c", work_dir,
                      "-e", "TMUX_SESSION_NAME=" + name,
                      "-e", "AMUX_SESSION=" + name,
-                     "-e", ("AMUX_URL=http" if "--no-tls" in sys.argv else "AMUX_URL=https") + "://localhost:8822",
+                     "-e", f"AMUX_URL={_scheme}://{_api_host}:8822",
+                     *_extra_env,
                      *_env_args,
                      _USER_SHELL],
                     check=True, capture_output=True, timeout=10,

@@ -32,6 +32,14 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # first invocation).
 RUN npm install -g @anthropic-ai/claude-code
 
+# Force tmux's socket dir off /tmp so it can't accidentally merge with the
+# host's tmux daemon if a product spec ever bind-mounts /tmp. Tmux uses
+# $TMUX_TMPDIR/tmux-<uid>/default; anywhere-but-/tmp keeps container and
+# host daemons distinct even under sloppy mount configs. Set + chmod BEFORE
+# the amux user switch so root can write /run/tmux.
+ENV TMUX_TMPDIR=/run/tmux
+RUN mkdir -p /run/tmux && chmod 0777 /run/tmux
+
 # Uid 1000 = jwesley on host, so bind-mounted files owned by jwesley are
 # read/write to the container process without any chown dance.
 RUN useradd -m -s /bin/bash -u 1000 amux
