@@ -24629,8 +24629,14 @@ async function openFilePreview(path) {
     dlBtn.dataset.filename = data.path.split('/').pop();
     dlBtn.style.display = '';
     _renderFileBody(data, _fileViewMode);
-    // Update cache
-    _idb.setFile(path, { type: 'file', data });
+    // Cache for offline viewing — but only SMALL text (e.g. .md) + small images.
+    // Never large binaries / video / audio / pdf: their data_url (base64) would
+    // bloat IndexedDB, and the user explicitly asked not to store large binaries.
+    const _dot = path.lastIndexOf('.'); const _ext = _dot >= 0 ? path.slice(_dot).toLowerCase() : '';
+    const _sz = data.size || (data.data_url ? data.data_url.length : (data.content ? data.content.length : 0));
+    const _cacheable = isTextFile ? (_sz <= 1024 * 1024)
+                                  : (_CACHEABLE_IMG_EXTS.has(_ext) && _sz <= 256 * 1024);
+    if (_cacheable) _idb.setFile(path, { type: 'file', data });
   } catch(e) {
     // Offline: try IDB cache
     const cached = await _idb.getFile(path);
@@ -24939,6 +24945,31 @@ function _filesOverflowToggle() {
 function _filesOverflowClose() {
   document.getElementById('files-overflow-menu')?.classList.remove('open');
 }
+// After a dir loads online, quietly cache the SMALL TEXT files in it (e.g. .md)
+// so they're viewable offline without opening each one first. Skips binaries and
+// anything over 256KB, is capped per dir, and stops on the first error/offline.
+async function _autoCacheDirFiles(path, entries) {
+  if (!Array.isArray(entries)) return;
+  let n = 0;
+  for (const e of entries) {
+    if (n >= 40) break;                       // cap so a big dir doesn't hammer the server
+    if (e.type === 'dir') continue;
+    const dot = e.name.lastIndexOf('.'); const ext = dot >= 0 ? e.name.slice(dot).toLowerCase() : '';
+    const isText = _CACHEABLE_TEXT_EXTS.has(ext) || (!ext && (e.size || 0) < 50000);
+    if (!isText || (e.size || 0) > 262144) continue;   // small text only; leave binaries/large alone
+    const ep = path.replace(/\/$/, '') + '/' + e.name;
+    try {
+      const existing = await _idb.getFile(ep);
+      if (existing && existing.type === 'file') continue;   // already cached
+      const fr = await fetch(API + '/api/file?path=' + encodeURIComponent(ep));
+      if (!fr.ok) continue;
+      const fd = await fr.json();
+      if (!fd.error && !fd.is_binary && !fd.is_video && !fd.is_audio && !fd.is_pdf && !fd.is_image) {
+        _idb.setFile(ep, { type: 'file', data: fd }); n++;
+      }
+    } catch(_) { break; }   // offline / error — stop quietly
+  }
+}
 async function loadFiles(path) {
   const body = document.getElementById('files-body');
   body.innerHTML = '<div style="padding:16px;color:var(--dim)">Loading...</div>';
@@ -24965,6 +24996,7 @@ async function loadFiles(path) {
     if (data.error) { body.innerHTML = '<div style="padding:16px;color:var(--dim)">' + esc(data.error) + '</div>'; return; }
     _renderFilesEntries(body, path, data, false);
     _idb.setFile(path, { type: 'dir', data });
+    _autoCacheDirFiles(path, data.entries);   // background: cache small text files (.md, …) for offline
   } catch(e) {
     // Offline: try IDB cache
     const cached = await _idb.getFile(path);
