@@ -998,7 +998,7 @@ def _get_session_lock(name: str) -> threading.RLock:
 def _find_claude_pid(name: str) -> int:
     """Find Claude's PID as a child of the tmux pane's shell process."""
     try:
-        r = subprocess.run(["tmux", "list-panes", "-t", tmux_target(name), "-F", "#{pane_pid}"],
+        r = subprocess.run([*_tmux_prefix(name), "list-panes", "-t", tmux_target(name), "-F", "#{pane_pid}"],
                            capture_output=True, text=True, timeout=5)
         if r.returncode != 0 or not r.stdout.strip():
             return 0
@@ -1300,9 +1300,9 @@ def tmux_name(session: str) -> str:
         _tmux_name_migrated.add(session)
         for old in [f"cmux-{session}", f"cc-{session}"]:
             try:
-                r = subprocess.run(["tmux", "has-session", "-t", old], capture_output=True, timeout=3)
+                r = subprocess.run([*_tmux_prefix(session), "has-session", "-t", old], capture_output=True, timeout=3)
                 if r.returncode == 0:
-                    subprocess.run(["tmux", "rename-session", "-t", old, new], capture_output=True, timeout=5)
+                    subprocess.run([*_tmux_prefix(session), "rename-session", "-t", old, new], capture_output=True, timeout=5)
                     break
             except Exception:
                 pass
@@ -1395,7 +1395,7 @@ def is_running(session: str) -> bool:
         # shell actually has a child process (Claude).
         try:
             r_pp = subprocess.run(
-                ["tmux", "list-panes", "-t", tmux_sess, "-F", "#{pane_pid}"],
+                [*_tmux_prefix(name), "list-panes", "-t", tmux_sess, "-F", "#{pane_pid}"],
                 capture_output=True, text=True, timeout=5)
             if r_pp.returncode == 0 and r_pp.stdout.strip():
                 shell_pid = r_pp.stdout.strip().split("\n")[0]
@@ -1417,7 +1417,7 @@ def tmux_capture(session: str, lines: int = 500) -> str:
         return _iterm2_capture(iterm2_id)
     try:
         r = subprocess.run(
-            ["tmux", "capture-pane", "-t", tmux_target(session), "-p", "-e", "-S", f"-{lines}"],
+            [*_tmux_prefix(session), "capture-pane", "-t", tmux_target(session), "-p", "-e", "-S", f"-{lines}"],
             capture_output=True, text=True, timeout=5,
         )
         # Strip leading/trailing blank lines so content isn't cut off
@@ -2724,7 +2724,7 @@ def _snapshot_all_sessions_inner():
                         try:
                             tmux_sess = tmux_name(name)
                             r_pp = subprocess.run(
-                                ["tmux", "list-panes", "-t", tmux_sess, "-F", "#{pane_pid}"],
+                                [*_tmux_prefix(name), "list-panes", "-t", tmux_sess, "-F", "#{pane_pid}"],
                                 capture_output=True, text=True, timeout=5)
                             if r_pp.returncode == 0 and r_pp.stdout.strip():
                                 shell_pid = r_pp.stdout.strip().split("\n")[0]
@@ -2863,7 +2863,7 @@ def _snapshot_all_sessions_inner():
                     actions["last_stale_check"] = now
                     try:
                         tmux_sess = tmux_name(name)
-                        r = subprocess.run(["tmux", "list-panes", "-t", tmux_sess, "-F", "#{pane_pid}"],
+                        r = subprocess.run([*_tmux_prefix(name), "list-panes", "-t", tmux_sess, "-F", "#{pane_pid}"],
                                            capture_output=True, text=True, timeout=5)
                         if r.returncode == 0 and r.stdout.strip():
                             shell_pid = r.stdout.strip().split("\n")[0]
@@ -7330,7 +7330,7 @@ def _live_conv_id(name: str, work_dir: str = "") -> str:
     """
     try:
         r = subprocess.run(
-            ["tmux", "list-panes", "-t", tmux_target(name), "-F", "#{pane_pid}"],
+            [*_tmux_prefix(name), "list-panes", "-t", tmux_target(name), "-F", "#{pane_pid}"],
             capture_output=True, text=True, timeout=5,
         )
         pane_pid = r.stdout.strip().split("\n")[0] if r.returncode == 0 else ""
@@ -7810,7 +7810,7 @@ def _attach_log_streaming():
         except Exception:
             pass
         subprocess.run(
-            ["tmux", "pipe-pane", "-t", tmux_name(name), "-o",
+            [*_tmux_prefix(name), "pipe-pane", "-t", tmux_name(name), "-o",
              _log_pipe_command(lp)],
             capture_output=True, timeout=5,
         )
@@ -8137,14 +8137,14 @@ def _capture_log_tail_for_reload(name: str, reason: str) -> bool:
     if is_running(name):
         try:
             subprocess.run(
-                ["tmux", "pipe-pane", "-t", tmux_name(name)],
+                [*_tmux_prefix(name), "pipe-pane", "-t", tmux_name(name)],
                 capture_output=True, timeout=5,
             )
         except Exception:
             pass
         try:
             r = subprocess.run(
-                ["tmux", "capture-pane", "-t", tmux_target(name), "-p", "-S", "-"],
+                [*_tmux_prefix(name), "capture-pane", "-t", tmux_target(name), "-p", "-S", "-"],
                 capture_output=True, text=True, timeout=30,
             )
             if r.stdout.strip():
@@ -8209,26 +8209,26 @@ def _stop_session_for_restart(name: str, provider: str) -> tuple[bool, str]:
         return stop_session(name)
     try:
         subprocess.run(
-            ["tmux", "pipe-pane", "-t", tmux_name(name)],
+            [*_tmux_prefix(name), "pipe-pane", "-t", tmux_name(name)],
             capture_output=True, timeout=5,
         )
     except Exception:
         pass
     try:
         subprocess.run(
-            ["tmux", "send-keys", "-t", tmux_target(name), "C-c"],
+            [*_tmux_prefix(name), "send-keys", "-t", tmux_target(name), "C-c"],
             capture_output=True, timeout=5,
         )
         time.sleep(1)
         if _at_shell_prompt(tmux_capture(name, 10)):
             return True, "stopped"
         subprocess.run(
-            ["tmux", "respawn-pane", "-k", "-t", tmux_target(name), _USER_SHELL],
+            [*_tmux_prefix(name), "respawn-pane", "-k", "-t", tmux_target(name), _USER_SHELL],
             capture_output=True, timeout=5,
         )
         time.sleep(0.2)
         subprocess.run(
-            ["tmux", "send-keys", "-t", tmux_target(name), "Enter"],
+            [*_tmux_prefix(name), "send-keys", "-t", tmux_target(name), "Enter"],
             capture_output=True, timeout=5,
         )
         _poll_shell_prompt(name, timeout=3.0)
@@ -8682,69 +8682,69 @@ def start_session(name: str, extra_flags: str = "", _skip_conv_id: bool = False)
                 output = tmux_capture(name, 10)
                 if _at_shell_prompt(output):
                     # At shell prompt -- clear and send Claude command
-                    subprocess.run(["tmux", "send-keys", "-t", tmux_target(name), "C-c"],
+                    subprocess.run([*_tmux_prefix(name), "send-keys", "-t", tmux_target(name), "C-c"],
                                    capture_output=True, timeout=5)
                     time.sleep(0.1)
-                    subprocess.run(["tmux", "send-keys", "-t", tmux_target(name), "C-u"],
+                    subprocess.run([*_tmux_prefix(name), "send-keys", "-t", tmux_target(name), "C-u"],
                                    capture_output=True, timeout=5)
                     time.sleep(0.1)
                     # Set HISTFILE to avoid leaking launch command to bash history
-                    subprocess.run(["tmux", "send-keys", "-t", tmux_target(name), "-l",
+                    subprocess.run([*_tmux_prefix(name), "send-keys", "-t", tmux_target(name), "-l",
                                     "HISTFILE=/dev/null"],
                                    capture_output=True, timeout=5)
                     time.sleep(0.1)
-                    subprocess.run(["tmux", "send-keys", "-t", tmux_target(name), "Enter"],
+                    subprocess.run([*_tmux_prefix(name), "send-keys", "-t", tmux_target(name), "Enter"],
                                    capture_output=True, timeout=5)
                     _poll_shell_prompt(name, timeout=3.0)
                     # cd to work_dir
-                    subprocess.run(["tmux", "send-keys", "-t", tmux_target(name), "-l",
+                    subprocess.run([*_tmux_prefix(name), "send-keys", "-t", tmux_target(name), "-l",
                                     f"cd {shlex.quote(work_dir)}"],
                                    capture_output=True, timeout=5)
                     time.sleep(0.1)
-                    subprocess.run(["tmux", "send-keys", "-t", tmux_target(name), "Enter"],
+                    subprocess.run([*_tmux_prefix(name), "send-keys", "-t", tmux_target(name), "Enter"],
                                    capture_output=True, timeout=5)
                     _poll_shell_prompt(name, timeout=3.0)
                 else:
                     # Not at prompt -- try Ctrl+C, wait, then respawn if needed
-                    subprocess.run(["tmux", "send-keys", "-t", tmux_target(name), "C-c"],
+                    subprocess.run([*_tmux_prefix(name), "send-keys", "-t", tmux_target(name), "C-c"],
                                    capture_output=True, timeout=5)
                     time.sleep(3)
                     output2 = tmux_capture(name, 10)
                     if not _at_shell_prompt(output2):
                         # Still not at prompt -- respawn pane
-                        subprocess.run(["tmux", "respawn-pane", "-k", "-t", tmux_target(name), _USER_SHELL],
+                        subprocess.run([*_tmux_prefix(name), "respawn-pane", "-k", "-t", tmux_target(name), _USER_SHELL],
                                        capture_output=True, timeout=5)
                         time.sleep(1)
                         # Source profile in the new pane
-                        subprocess.run(["tmux", "send-keys", "-t", tmux_target(name), "-l", shell_rc],
+                        subprocess.run([*_tmux_prefix(name), "send-keys", "-t", tmux_target(name), "-l", shell_rc],
                                        capture_output=True, timeout=5)
                         time.sleep(0.1)
-                        subprocess.run(["tmux", "send-keys", "-t", tmux_target(name), "Enter"],
+                        subprocess.run([*_tmux_prefix(name), "send-keys", "-t", tmux_target(name), "Enter"],
                                        capture_output=True, timeout=5)
                         _poll_shell_prompt(name, timeout=3.0)
                     else:
                         # Got to prompt after Ctrl+C -- cd to work_dir
-                        subprocess.run(["tmux", "send-keys", "-t", tmux_target(name), "C-u"],
+                        subprocess.run([*_tmux_prefix(name), "send-keys", "-t", tmux_target(name), "C-u"],
                                        capture_output=True, timeout=5)
                         time.sleep(0.1)
-                        subprocess.run(["tmux", "send-keys", "-t", tmux_target(name), "-l",
+                        subprocess.run([*_tmux_prefix(name), "send-keys", "-t", tmux_target(name), "-l",
                                         "HISTFILE=/dev/null"],
                                        capture_output=True, timeout=5)
                         time.sleep(0.1)
-                        subprocess.run(["tmux", "send-keys", "-t", tmux_target(name), "Enter"],
+                        subprocess.run([*_tmux_prefix(name), "send-keys", "-t", tmux_target(name), "Enter"],
                                        capture_output=True, timeout=5)
                         _poll_shell_prompt(name, timeout=3.0)
-                        subprocess.run(["tmux", "send-keys", "-t", tmux_target(name), "-l",
+                        subprocess.run([*_tmux_prefix(name), "send-keys", "-t", tmux_target(name), "-l",
                                         f"cd {shlex.quote(work_dir)}"],
                                        capture_output=True, timeout=5)
                         time.sleep(0.1)
-                        subprocess.run(["tmux", "send-keys", "-t", tmux_target(name), "Enter"],
+                        subprocess.run([*_tmux_prefix(name), "send-keys", "-t", tmux_target(name), "Enter"],
                                        capture_output=True, timeout=5)
                         _poll_shell_prompt(name, timeout=3.0)
             else:
                 # New tmux session -- start bash shell (not Claude directly)
                 subprocess.run(
-                    ["tmux", "new-session", "-d", "-s", tmux_sess, "-n", name, "-c", work_dir,
+                    [*_tmux_prefix(name), "new-session", "-d", "-s", tmux_sess, "-n", name, "-c", work_dir,
                      "-e", "TMUX_SESSION_NAME=" + name,
                      "-e", "AMUX_SESSION=" + name,
                      "-e", ("AMUX_URL=http" if "--no-tls" in sys.argv else "AMUX_URL=https") + "://localhost:8822",
@@ -8753,36 +8753,36 @@ def start_session(name: str, extra_flags: str = "", _skip_conv_id: bool = False)
                     check=True, capture_output=True, timeout=10,
                 )
                 # Set remain-on-exit so pane survives if bash crashes
-                subprocess.run(["tmux", "set-option", "-t", tmux_sess, "remain-on-exit", "on"],
+                subprocess.run([*_tmux_prefix(name), "set-option", "-t", tmux_sess, "remain-on-exit", "on"],
                                capture_output=True, timeout=5)
                 # Lock the window name immediately
                 subprocess.run(
-                    ["tmux", "set-option", "-t", tmux_sess, "allow-rename", "off"],
+                    [*_tmux_prefix(name), "set-option", "-t", tmux_sess, "allow-rename", "off"],
                     capture_output=True, timeout=5,
                 )
                 subprocess.run(
-                    ["tmux", "set-window-option", "-t", tmux_sess, "automatic-rename", "off"],
+                    [*_tmux_prefix(name), "set-window-option", "-t", tmux_sess, "automatic-rename", "off"],
                     capture_output=True, timeout=5,
                 )
                 subprocess.run(
-                    ["tmux", "rename-window", "-t", tmux_sess, name],
+                    [*_tmux_prefix(name), "rename-window", "-t", tmux_sess, name],
                     capture_output=True, timeout=5,
                 )
                 # Source profile and cd to work_dir
-                subprocess.run(["tmux", "send-keys", "-t", tmux_target(name), "-l", shell_rc],
+                subprocess.run([*_tmux_prefix(name), "send-keys", "-t", tmux_target(name), "-l", shell_rc],
                                capture_output=True, timeout=5)
                 time.sleep(0.1)
-                subprocess.run(["tmux", "send-keys", "-t", tmux_target(name), "Enter"],
+                subprocess.run([*_tmux_prefix(name), "send-keys", "-t", tmux_target(name), "Enter"],
                                capture_output=True, timeout=5)
                 _poll_shell_prompt(name, timeout=3.0)  # let profile source complete
     
             # Ensure ANTHROPIC_API_KEY is unset when OAuth is available
             if _has_oauth and provider not in ("codex", "gemini"):
-                subprocess.run(["tmux", "send-keys", "-t", tmux_target(name), "-l",
+                subprocess.run([*_tmux_prefix(name), "send-keys", "-t", tmux_target(name), "-l",
                                 "unset ANTHROPIC_API_KEY"],
                                capture_output=True, timeout=5)
                 time.sleep(0.1)
-                subprocess.run(["tmux", "send-keys", "-t", tmux_target(name), "Enter"],
+                subprocess.run([*_tmux_prefix(name), "send-keys", "-t", tmux_target(name), "Enter"],
                                capture_output=True, timeout=5)
                 _poll_shell_prompt(name, timeout=3.0)
 
@@ -8790,16 +8790,16 @@ def start_session(name: str, extra_flags: str = "", _skip_conv_id: bool = False)
             _sess_color = cfg.get("CC_COLOR", "").strip()
             if _sess_color:
                 subprocess.run(
-                    ["tmux", "set-option", "-t", tmux_sess, "status-style",
+                    [*_tmux_prefix(name), "set-option", "-t", tmux_sess, "status-style",
                      f"bg={_sess_color},fg=white"],
                     capture_output=True, timeout=5,
                 )
 
             # Send the Claude command
-            subprocess.run(["tmux", "send-keys", "-t", tmux_target(name), "-l", cmd],
+            subprocess.run([*_tmux_prefix(name), "send-keys", "-t", tmux_target(name), "-l", cmd],
                            capture_output=True, timeout=5)
             time.sleep(0.15)
-            subprocess.run(["tmux", "send-keys", "-t", tmux_target(name), "Enter"],
+            subprocess.run([*_tmux_prefix(name), "send-keys", "-t", tmux_target(name), "Enter"],
                            capture_output=True, timeout=5)
     
             # Wait for Claude's UI to appear (not shell prompt) for up to 10s
@@ -8822,10 +8822,10 @@ def start_session(name: str, extra_flags: str = "", _skip_conv_id: bool = False)
                 if _at_resume_picker(_out_check):
                     print(f"[start] {name}: stuck in resume picker, escaping and starting fresh")
                     # Send Escape to close picker, then Ctrl-C to exit claude
-                    subprocess.run(["tmux", "send-keys", "-t", tmux_target(name), "Escape"],
+                    subprocess.run([*_tmux_prefix(name), "send-keys", "-t", tmux_target(name), "Escape"],
                                    capture_output=True, timeout=5)
                     time.sleep(0.5)
-                    subprocess.run(["tmux", "send-keys", "-t", tmux_target(name), "C-c"],
+                    subprocess.run([*_tmux_prefix(name), "send-keys", "-t", tmux_target(name), "C-c"],
                                    capture_output=True, timeout=5)
                     time.sleep(2)
                     # Wait for shell prompt
@@ -8849,10 +8849,10 @@ def start_session(name: str, extra_flags: str = "", _skip_conv_id: bool = False)
                     meta.pop("cc_conversation_id", None)
                     _save_meta(name, meta)
                     # Clear prompt and send fresh start command
-                    subprocess.run(["tmux", "send-keys", "-t", tmux_target(name), "C-c"],
+                    subprocess.run([*_tmux_prefix(name), "send-keys", "-t", tmux_target(name), "C-c"],
                                    capture_output=True, timeout=5)
                     time.sleep(0.1)
-                    subprocess.run(["tmux", "send-keys", "-t", tmux_target(name), "C-u"],
+                    subprocess.run([*_tmux_prefix(name), "send-keys", "-t", tmux_target(name), "C-u"],
                                    capture_output=True, timeout=5)
                     time.sleep(0.1)
                     # Rebuild cmd with --name instead of --resume
@@ -8873,10 +8873,10 @@ def start_session(name: str, extra_flags: str = "", _skip_conv_id: bool = False)
                         cmd_fresh += " --disallowedTools " + _CD_MCP_DENY_ARG
                     if "--model" not in cmd_fresh:
                         cmd_fresh += " --model sonnet"
-                    subprocess.run(["tmux", "send-keys", "-t", tmux_target(name), "-l", cmd_fresh],
+                    subprocess.run([*_tmux_prefix(name), "send-keys", "-t", tmux_target(name), "-l", cmd_fresh],
                                    capture_output=True, timeout=5)
                     time.sleep(0.15)
-                    subprocess.run(["tmux", "send-keys", "-t", tmux_target(name), "Enter"],
+                    subprocess.run([*_tmux_prefix(name), "send-keys", "-t", tmux_target(name), "Enter"],
                                    capture_output=True, timeout=5)
                     # Wait for fallback to launch
                     for _j in range(10):
@@ -8903,7 +8903,7 @@ def start_session(name: str, extra_flags: str = "", _skip_conv_id: bool = False)
             except Exception:
                 pass
             subprocess.run(
-                ["tmux", "pipe-pane", "-t", tmux_name(name), "-o",
+                [*_tmux_prefix(name), "pipe-pane", "-t", tmux_name(name), "-o",
                  _log_pipe_command(lp)],
                 capture_output=True, timeout=5,
             )
@@ -8996,17 +8996,17 @@ def _hard_kill_claude(name: str):
         time.sleep(1)
         # Reset terminal
         try:
-            subprocess.run(["tmux", "send-keys", "-t", tmux_target(name), "-l", "stty sane"],
+            subprocess.run([*_tmux_prefix(name), "send-keys", "-t", tmux_target(name), "-l", "stty sane"],
                            capture_output=True, timeout=5)
             time.sleep(0.1)
-            subprocess.run(["tmux", "send-keys", "-t", tmux_target(name), "Enter"],
+            subprocess.run([*_tmux_prefix(name), "send-keys", "-t", tmux_target(name), "Enter"],
                            capture_output=True, timeout=5)
         except Exception:
             pass
     else:
         # Can't find Claude PID -- respawn pane to get a clean shell (keep tmux alive)
         try:
-            subprocess.run(["tmux", "respawn-pane", "-k", "-t", tmux_target(name), _USER_SHELL],
+            subprocess.run([*_tmux_prefix(name), "respawn-pane", "-k", "-t", tmux_target(name), _USER_SHELL],
                            capture_output=True, timeout=5)
         except Exception:
             pass
@@ -9048,10 +9048,10 @@ def stop_session(name: str) -> tuple[bool, str]:
             # Wait for Claude prompt before sending /rename
             _wait_for_claude_prompt(name, timeout=5)
             try:
-                subprocess.run(["tmux", "send-keys", "-t", tmux_target(name), "-l", f"/rename {name}"],
+                subprocess.run([*_tmux_prefix(name), "send-keys", "-t", tmux_target(name), "-l", f"/rename {name}"],
                                check=True, capture_output=True, timeout=5)
                 time.sleep(0.15)
-                subprocess.run(["tmux", "send-keys", "-t", tmux_target(name), "Enter"],
+                subprocess.run([*_tmux_prefix(name), "send-keys", "-t", tmux_target(name), "Enter"],
                                check=True, capture_output=True, timeout=5)
                 _wait_for_claude_prompt(name, timeout=3)  # let rename settle
             except Exception:
@@ -9062,20 +9062,20 @@ def stop_session(name: str) -> tuple[bool, str]:
     
         # Detach pipe-pane before sending shell-visible commands
         try:
-            subprocess.run(["tmux", "pipe-pane", "-t", tmux_sess],
+            subprocess.run([*_tmux_prefix(name), "pipe-pane", "-t", tmux_sess],
                            capture_output=True, timeout=5)
         except Exception:
             pass
     
         # Send /exit
         try:
-            subprocess.run(["tmux", "send-keys", "-t", tmux_target(name), "C-u"],
+            subprocess.run([*_tmux_prefix(name), "send-keys", "-t", tmux_target(name), "C-u"],
                            capture_output=True, timeout=5)
             time.sleep(0.1)
-            subprocess.run(["tmux", "send-keys", "-t", tmux_target(name), "-l", "/exit"],
+            subprocess.run([*_tmux_prefix(name), "send-keys", "-t", tmux_target(name), "-l", "/exit"],
                            check=True, capture_output=True, timeout=5)
             time.sleep(0.15)
-            subprocess.run(["tmux", "send-keys", "-t", tmux_target(name), "Enter"],
+            subprocess.run([*_tmux_prefix(name), "send-keys", "-t", tmux_target(name), "Enter"],
                            check=True, capture_output=True, timeout=5)
         except Exception as e:
             print(f"[graceful-stop] {name}: failed to send /exit: {e}")
@@ -9098,10 +9098,10 @@ def stop_session(name: str) -> tuple[bool, str]:
                 pass
         # Reset terminal state
         try:
-            subprocess.run(["tmux", "send-keys", "-t", tmux_target(name), "-l", "stty sane"],
+            subprocess.run([*_tmux_prefix(name), "send-keys", "-t", tmux_target(name), "-l", "stty sane"],
                            capture_output=True, timeout=5)
             time.sleep(0.1)
-            subprocess.run(["tmux", "send-keys", "-t", tmux_target(name), "Enter"],
+            subprocess.run([*_tmux_prefix(name), "send-keys", "-t", tmux_target(name), "Enter"],
                            capture_output=True, timeout=5)
         except Exception:
             pass
@@ -9113,7 +9113,7 @@ def _kill_tmux_session(name: str) -> None:
     """Best-effort removal of the tmux session backing an archived amux session."""
     try:
         subprocess.run(
-            ["tmux", "kill-session", "-t", tmux_name(name)],
+            [*_tmux_prefix(name), "kill-session", "-t", tmux_name(name)],
             capture_output=True,
             timeout=5,
         )
@@ -9130,7 +9130,7 @@ def archive_session(name: str) -> tuple[bool, str]:
     if is_running(name):
         try:
             r = subprocess.run(
-                ["tmux", "capture-pane", "-t", tmux_target(name), "-p", "-S", "-"],
+                [*_tmux_prefix(name), "capture-pane", "-t", tmux_target(name), "-p", "-S", "-"],
                 capture_output=True, text=True, timeout=30,
             )
             if r.stdout.strip():
@@ -9227,7 +9227,7 @@ def send_text(name: str, text: str) -> tuple[bool, str]:
                 # Extract suggested prompt from the pane and send it as real text
                 try:
                     cap = subprocess.run(
-                        ["tmux", "capture-pane", "-t", tmux_target(name), "-p"],
+                        [*_tmux_prefix(name), "capture-pane", "-t", tmux_target(name), "-p"],
                         capture_output=True, text=True, timeout=5
                     )
                     for line in reversed(cap.stdout.splitlines()):
@@ -9242,7 +9242,7 @@ def send_text(name: str, text: str) -> tuple[bool, str]:
                 if not text:
                     return True, "no suggestion found"
                 # Clear any ghost text in the input before typing
-                subprocess.run(["tmux", "send-keys", "-t", tmux_target(name), "C-u"], capture_output=True, timeout=5)
+                subprocess.run([*_tmux_prefix(name), "send-keys", "-t", tmux_target(name), "C-u"], capture_output=True, timeout=5)
                 time.sleep(0.05)
             if len(text) > 400:
                 import tempfile, os as _os
@@ -9252,16 +9252,16 @@ def send_text(name: str, text: str) -> tuple[bool, str]:
                     f.write(text)
                     tmp = f.name
                 try:
-                    subprocess.run(["tmux", "load-buffer", "-b", buf_name, tmp], check=True, capture_output=True, timeout=10)
+                    subprocess.run([*_tmux_prefix(name), "load-buffer", "-b", buf_name, tmp], check=True, capture_output=True, timeout=10)
                     # -p flag pastes literally without interpreting newlines as Enter
-                    subprocess.run(["tmux", "paste-buffer", "-p", "-b", buf_name, "-t", t], check=True, capture_output=True, timeout=10)
-                    subprocess.run(["tmux", "delete-buffer", "-b", buf_name], capture_output=True, timeout=5)
+                    subprocess.run([*_tmux_prefix(name), "paste-buffer", "-p", "-b", buf_name, "-t", t], check=True, capture_output=True, timeout=10)
+                    subprocess.run([*_tmux_prefix(name), "delete-buffer", "-b", buf_name], capture_output=True, timeout=5)
                 finally:
                     _os.unlink(tmp)
             else:
                 # Send text literally (-l) then Enter separately
                 subprocess.run(
-                    ["tmux", "send-keys", "-t", t, "-l", text],
+                    [*_tmux_prefix(name), "send-keys", "-t", t, "-l", text],
                     check=True, capture_output=True, timeout=10,
                 )
             # Give readline time to process all queued characters before Enter arrives.
@@ -9269,7 +9269,7 @@ def send_text(name: str, text: str) -> tuple[bool, str]:
             # needs even less, but we use the same value for simplicity.
             time.sleep(0.02)
             subprocess.run(
-                ["tmux", "send-keys", "-t", t, "Enter"],
+                [*_tmux_prefix(name), "send-keys", "-t", t, "Enter"],
                 check=True, capture_output=True, timeout=5,
             )
             return True, "sent"
@@ -9409,7 +9409,7 @@ def send_keys(name: str, keys: str) -> tuple[bool, str]:
     with lock:
         try:
             subprocess.run(
-                ["tmux", "send-keys", "-t", tmux_target(name), keys],
+                [*_tmux_prefix(name), "send-keys", "-t", tmux_target(name), keys],
                 check=True, capture_output=True, timeout=5,
             )
             return True, "sent"
@@ -38562,7 +38562,7 @@ class CCHandler(BaseHTTPRequestHandler):
             # Get working dir from tmux
             try:
                 r = subprocess.run(
-                    ["tmux", "display-message", "-t", tmux_session, "-p", "#{pane_current_path}"],
+                    [*_tmux_prefix(name), "display-message", "-t", tmux_session, "-p", "#{pane_current_path}"],
                     capture_output=True, text=True, timeout=5,
                 )
                 cwd = r.stdout.strip() if r.returncode == 0 else ""
@@ -38575,7 +38575,7 @@ class CCHandler(BaseHTTPRequestHandler):
             if tmux_session != expected_tmux:
                 try:
                     subprocess.run(
-                        ["tmux", "rename-session", "-t", tmux_session, expected_tmux],
+                        [*_tmux_prefix(name), "rename-session", "-t", tmux_session, expected_tmux],
                         capture_output=True, timeout=5,
                     )
                 except Exception:
@@ -41100,7 +41100,7 @@ p{{color:#888;margin:12px 0 28px;font-size:0.9rem;line-height:1.5}}
             if action == "clear":
                 try:
                     subprocess.run(
-                        ["tmux", "clear-history", "-t", tmux_target(name)],
+                        [*_tmux_prefix(name), "clear-history", "-t", tmux_target(name)],
                         capture_output=True, timeout=5,
                     )
                     return self._json({"ok": True, "message": "cleared"})
@@ -41152,7 +41152,7 @@ p{{color:#888;margin:12px 0 28px;font-size:0.9rem;line-height:1.5}}
                     scrollback = ""
                     try:
                         r = subprocess.run(
-                            ["tmux", "capture-pane", "-t", tmux_target(name), "-p", "-S", "-3000"],
+                            [*_tmux_prefix(name), "capture-pane", "-t", tmux_target(name), "-p", "-S", "-3000"],
                             capture_output=True, text=True, timeout=10,
                         )
                         raw = r.stdout
@@ -41175,10 +41175,10 @@ p{{color:#888;margin:12px 0 28px;font-size:0.9rem;line-height:1.5}}
                             f"```\n{scrollback}\n```"
                         )
                         t = tmux_name(new_name)
-                        subprocess.run(["tmux", "send-keys", "-t", t, "-l", prompt],
+                        subprocess.run([*_tmux_prefix(new_name), "send-keys", "-t", t, "-l", prompt],
                                        capture_output=True, timeout=30)
                         _time.sleep(1)
-                        subprocess.run(["tmux", "send-keys", "-t", t, "Enter"],
+                        subprocess.run([*_tmux_prefix(new_name), "send-keys", "-t", t, "Enter"],
                                        capture_output=True, timeout=5)
                 return self._json({"ok": True, "message": f"cloned as {new_name} (method: {method_used})", "started": ok})
             if action == "archive":
@@ -41272,7 +41272,7 @@ p{{color:#888;margin:12px 0 28px;font-size:0.9rem;line-height:1.5}}
                     # Rename tmux session if running
                     if is_running(name):
                         subprocess.run(
-                            ["tmux", "rename-session", "-t", tmux_target(name), tmux_name(new_name)],
+                            [*_tmux_prefix(name), "rename-session", "-t", tmux_target(name), tmux_name(new_name)],
                             capture_output=True, timeout=5,
                         )
                     env_file.rename(new_file)
@@ -41515,13 +41515,13 @@ p{{color:#888;margin:12px 0 28px;font-size:0.9rem;line-height:1.5}}
                         _tsess = tmux_name(session_name)
                         if new_color:
                             subprocess.run(
-                                ["tmux", "set-option", "-t", _tsess, "status-style",
+                                [*_tmux_prefix(session_name), "set-option", "-t", _tsess, "status-style",
                                  f"bg={new_color},fg=white"],
                                 capture_output=True, timeout=5,
                             )
                         else:
                             subprocess.run(
-                                ["tmux", "set-option", "-t", _tsess, "-u", "status-style"],
+                                [*_tmux_prefix(session_name), "set-option", "-t", _tsess, "-u", "status-style"],
                                 capture_output=True, timeout=5,
                             )
                     except Exception:
@@ -41701,7 +41701,7 @@ def _board_watcher():
                 continue
             try:
                 r = subprocess.run(
-                    ["tmux", "capture-pane", "-p", "-t", tmux_target(session_name)],
+                    [*_tmux_prefix(session_name), "capture-pane", "-p", "-t", tmux_target(session_name)],
                     capture_output=True, text=True, timeout=5,
                 )
                 raw = r.stdout if r.returncode == 0 else ""
@@ -41984,7 +41984,7 @@ def _auto_archive_idle():
         # Check tmux pane last activity time
         try:
             r = subprocess.run(
-                ["tmux", "display-message", "-t", tmux_target(name), "-p", "#{pane_activity}"],
+                [*_tmux_prefix(name), "display-message", "-t", tmux_target(name), "-p", "#{pane_activity}"],
                 capture_output=True, text=True, timeout=5,
             )
             if r.returncode != 0 or not r.stdout.strip():
