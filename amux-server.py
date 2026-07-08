@@ -12985,6 +12985,8 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
   .sm-scope-tab { flex: 1; padding: 6px 10px; font-size: 0.8rem; background: var(--card); border: 1px solid var(--border); border-radius: 6px; color: var(--dim); cursor: pointer; font-family: inherit; min-height: 36px; }
   .sm-scope-tab.active { background: var(--accent); color: #fff; border-color: var(--accent); font-weight: 500; }
   .sm-item .sm-sess { flex-shrink: 0; font-size: 0.66rem; color: var(--accent); background: rgba(88,166,255,0.12); border: 1px solid rgba(88,166,255,0.25); border-radius: 8px; padding: 1px 7px; white-space: nowrap; align-self: flex-start; }
+  /* Long task labels scroll horizontally instead of truncating with an ellipsis. */
+  #peek-task-label::-webkit-scrollbar { height: 0; }
   .peek-dir-bar { display: flex; align-items: center; gap: 8px; padding: 3px 14px;
     font-size: 0.75rem; color: var(--dim); border-bottom: 1px solid var(--border);
     flex-shrink: 0; min-width: 0; overflow: hidden; }
@@ -16554,7 +16556,11 @@ setTimeout(function(){var f=document.getElementById('js-fallback');if(f&&f.style
       <span id="peek-session-status"></span>
       <span id="peek-model-badge" style="font-size:0.75rem;padding:2px 8px;border-radius:9999px;background:rgba(255,255,255,0.06);color:var(--dim);border:1px solid var(--border);white-space:nowrap;"></span>
     </div>
-    <div style="display:flex;gap:8px;align-items:center;">
+    <div id="peek-task-row" style="display:none;align-items:center;gap:6px;min-width:0;max-width:100%;">
+      <span style="font-size:0.72rem;color:var(--dim);flex-shrink:0;">Task:</span>
+      <span id="peek-task-label" style="font-size:0.82rem;font-weight:600;color:var(--text);white-space:nowrap;overflow-x:auto;overflow-y:hidden;flex:1;min-width:0;-webkit-overflow-scrolling:touch;scrollbar-width:none;touch-action:pan-x;overscroll-behavior-x:contain;cursor:pointer;" onclick="editField(peekSession,'task',this.textContent.trim())" title="Click to edit task label"></span>
+    </div>
+    <div style="display:flex;gap:6px;align-items:center;">
       <div class="peek-find-wrap" id="peek-search-wrap">
         <input class="search-input" id="peek-search" type="text" placeholder="Find..." autocomplete="off" autocorrect="off"
           oninput="peekSearchQuery=this.value;document.getElementById('peek-search-wrap').classList.toggle('has-value',!!this.value);applyPeekSearch()"
