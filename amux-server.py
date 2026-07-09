@@ -18648,14 +18648,14 @@ function openBulkActions() {
     html += `<button class="btn primary" style="width:100%;" onclick="bulkSendContinue(false)">Send "continue" to ${transient.length} session${transient.length>1?'s':''}</button>`;
     html += `</div>`;
   }
-  if (weekly.length) {
+  if (capped.length) {
     html += `<div style="padding:12px 14px;border:1px solid var(--border);border-radius:10px;margin-bottom:10px;">`;
-    html += `<div style="font-weight:600;font-size:0.9rem;margin-bottom:8px;">&#x1F4C5; Weekly limit reached</div>`;
-    html += `<div style="font-size:0.8rem;color:var(--dim);margin-bottom:12px;">${weekly.length} session${weekly.length>1?'s':''} hit the weekly cap. amux auto-resumes each at its reset time — no action needed.</div>`;
+    html += `<div style="font-weight:600;font-size:0.9rem;margin-bottom:8px;">&#x1F4C5; Usage limit reached</div>`;
+    html += `<div style="font-size:0.8rem;color:var(--dim);margin-bottom:12px;">${capped.length} session${capped.length>1?'s':''} hit a usage cap (weekly or 5-hour session). amux auto-resumes each at the reset time shown — no action needed.</div>`;
     html += `<div style="display:flex;flex-direction:column;gap:4px;margin-bottom:14px;max-height:180px;overflow-y:auto;">`;
-    weekly.forEach(s => { html += _rlRow(s, '#f0a020'); });
+    capped.forEach(s => { html += _rlRow(s, '#f0a020'); });
     html += `</div>`;
-    html += `<button class="btn" style="width:100%;" onclick="bulkSendContinue(true)">Send "continue" anyway to ${weekly.length} session${weekly.length>1?'s':''}</button>`;
+    html += `<button class="btn" style="width:100%;" onclick="bulkSendContinue(true)">Send "continue" anyway to ${capped.length} session${capped.length>1?'s':''}</button>`;
     html += `</div>`;
   }
   if (creditLimited.length) {
@@ -18696,10 +18696,11 @@ async function bulkSwitchModel(model) {
 function closeBulkActions() {
   document.getElementById('bulk-actions-overlay').classList.remove('open');
 }
-async function bulkSendContinue(weeklyOnly) {
+async function bulkSendContinue(cappedOnly) {
   const now = Date.now() / 1000;
+  const isCapped = s => s.rate_limit_banner || s.rate_limit_weekly;
   const matched = sessions.filter(s => s.rate_limited_until && s.rate_limited_until > now
-    && (weeklyOnly ? s.rate_limit_weekly : !s.rate_limit_weekly));
+    && (cappedOnly ? isCapped(s) : !isCapped(s)));
   if (!matched.length) { closeBulkActions(); return; }
   closeBulkActions();
   let sent = 0;
