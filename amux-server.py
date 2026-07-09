@@ -9188,12 +9188,25 @@ def _live_conv_id(name: str, work_dir: str = "") -> str:
         )
         pane_pid = r.stdout.strip().split("\n")[0] if r.returncode == 0 else ""
         if pane_pid:
-            r2 = subprocess.run(["pgrep", "-P", pane_pid], capture_output=True, text=True, timeout=5)
+            # pane_pid is namespaced to the session's runtime — the follow-up
+            # pgrep / ps must land in the same namespace. Without this the
+            # docker path silently returns "" and every caller (restart-preserving
+            # -conversation flows in stop_session, snapshot §5, force-model
+            # switches at 45079/45143/45182) falls back to the mtime-heuristic
+            # jsonl branch that this function's own docstring calls unreliable
+            # when multiple amux sessions share a work_dir. Same shape as
+            # e7a4a57 / 6a89353.
+            _rt_c = _session_runtime(name)
+            _pfx_c = (
+                ["docker", "exec", f"amux-org-{_rt_c.split(':', 1)[1]}"]
+                if _rt_c.startswith("docker:") else []
+            )
+            r2 = subprocess.run([*_pfx_c, "pgrep", "-P", pane_pid], capture_output=True, text=True, timeout=5)
             for pid in r2.stdout.strip().split("\n"):
                 if not pid:
                     continue
                 r3 = subprocess.run(
-                    ["ps", "-o", "command=", "-p", pid],
+                    [*_pfx_c, "ps", "-o", "command=", "-p", pid],
                     capture_output=True, text=True, timeout=5,
                 )
                 cmd = r3.stdout.strip()
