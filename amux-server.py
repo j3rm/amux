@@ -45151,12 +45151,20 @@ p{{color:#888;margin:12px 0 28px;font-size:0.9rem;line-height:1.5}}
                     new_mem = CC_MEMORY / f"{new_name}.md"
                     if old_mem.exists() and not new_mem.exists():
                         old_mem.rename(new_mem)
-                    # Repair Claude symlink to point at new memory file
+                    # Repair Claude symlink to point at new memory file. Route
+                    # through the session's runtime home — for a docker session
+                    # the projects dir is CC_ORGS/<org>/home/.claude/projects/,
+                    # not host CLAUDE_HOME/projects/, so the pre-fix version
+                    # dropped the symlink in a place Claude Code inside the
+                    # container never looks. Use the NEW name because env has
+                    # already been renamed.
                     work_dir = cfg.get("CC_DIR", "")
                     if work_dir:
                         pname = _project_name(work_dir)
-                        claude_link = CLAUDE_HOME / "projects" / pname / "memory" / "MEMORY.md"
+                        claude_link = (_claude_projects_dir_for_session(new_name)
+                                       / pname / "memory" / "MEMORY.md")
                         try:
+                            claude_link.parent.mkdir(parents=True, exist_ok=True)
                             if claude_link.is_symlink():
                                 claude_link.unlink()
                             claude_link.symlink_to(new_mem)
