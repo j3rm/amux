@@ -22569,6 +22569,27 @@ function _peekGeoBeacon() {
     if (document.body) decide(); else document.addEventListener('DOMContentLoaded', decide);
   } catch (e) {}
 })();
+// Visual-viewport tracking loop (mobile). Both `resize` and `scroll` fire ONCE
+// per iOS keyboard animation, but the overlay needs to re-sync throughout —
+// otherwise its bottom edge floats above the keyboard for the whole
+// animation and past its settle point. _vvKick starts (or extends) an rAF
+// loop that syncs every frame until _vvUntil elapses. Introduced in 1763aee;
+// the whole kit went missing in the fresh-main overlay, leaving the four
+// visualViewport / focusin / focusout handlers below throwing ReferenceError.
+let _vvRaf = 0, _vvUntil = 0;
+function _vvKick(ms) {
+  if (!window.visualViewport) return;
+  const until = performance.now() + (ms || 1200);
+  if (until > _vvUntil) _vvUntil = until;
+  if (!_vvRaf) _vvRaf = requestAnimationFrame(_vvTick);
+}
+function _vvTick() {
+  _vvRaf = 0;
+  const ov = document.getElementById('peek-overlay');
+  if (!ov || !ov.classList.contains('active')) return;   // stops when peek closes
+  _syncPeekOverlayToVisualViewport();
+  if (performance.now() < _vvUntil) _vvRaf = requestAnimationFrame(_vvTick);
+}
 (function() {
   if (!window.visualViewport) return;
   window.visualViewport.addEventListener('resize', () => _vvKick());
