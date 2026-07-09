@@ -1027,26 +1027,51 @@ def _get_session_lock(name: str) -> threading.RLock:
 
 
 def _find_claude_pid(name: str) -> int:
-    """Find Claude's PID as a child of the tmux pane's shell process."""
+    """Find Claude's PID as a child of the tmux pane's shell process.
+
+    IMPORTANT: the returned PID is namespaced to the session's RUNTIME —
+    for docker sessions it's the container-internal PID, not a host PID.
+    Callers that then do `kill(pid, ...)` or read /proc/<pid> on the host
+    will find nothing. Use _hard_kill_claude (already runtime-gated) for
+    signals, or route the follow-up call through the same runtime prefix.
+    Returns 0 if no claude child exists."""
     try:
         r = subprocess.run([*_tmux_prefix(name), "list-panes", "-t", tmux_target(name), "-F", "#{pane_pid}"],
                            capture_output=True, text=True, timeout=5)
         if r.returncode != 0 or not r.stdout.strip():
             return 0
         shell_pid = r.stdout.strip().split("\n")[0]
-        r2 = subprocess.run(["pgrep", "-P", shell_pid, "-x", "claude"],
+        # Prefix ALL follow-up process queries with the session's runtime, or
+        # docker sessions get a host pgrep against a container PID (always
+        # returns empty). Same shape as fd6d294 / 511c518 / b4f1693 — the
+        # tmux call above was routed but the pgreps below were not.
+        rt = _session_runtime(name)
+        pfx = (
+            ["docker", "exec", f"amux-org-{rt.split(':', 1)[1]}"]
+            if rt.startswith("docker:") else []
+        )
+        r2 = subprocess.run([*pfx, "pgrep", "-P", shell_pid, "-x", "claude"],
                             capture_output=True, text=True, timeout=5)
         if r2.stdout.strip():
             pid = int(r2.stdout.strip().split("\n")[0])
             return pid if pid > 1 else 0
         # Fallback: check any child (claude might be named differently)
-        r3 = subprocess.run(["pgrep", "-P", shell_pid],
+        r3 = subprocess.run([*pfx, "pgrep", "-P", shell_pid],
                             capture_output=True, text=True, timeout=5)
+        # The session-file lookup lives under the *runtime's* $HOME. For a
+        # docker session that's the container's /home/amux/.claude/sessions/,
+        # which on the host maps to ~/.amux/orgs/<org>/home/.claude/sessions/.
+        # Use _claude_projects_dir_for_session's sibling logic (org-aware).
+        org = _session_docker_org(name)
+        sessions_dir = (
+            CC_ORGS / org / "home" / ".claude" / "sessions"
+            if org else Path.home() / ".claude" / "sessions"
+        )
         for line in r3.stdout.strip().split("\n"):
             if not line.strip():
                 continue
             cpid = int(line.strip())
-            sf = Path.home() / ".claude" / "sessions" / f"{cpid}.json"
+            sf = sessions_dir / f"{cpid}.json"
             if sf.exists():
                 return cpid
         return 0
