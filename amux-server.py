@@ -8216,6 +8216,63 @@ def _capture_claude_memory_changes(name: str, work_dir: str):
         pass
 
 
+def _container_context_preamble(name: str) -> str:
+    """Container-mode agent orientation, auto-prepended to composed memory.
+
+    Two things a docker-mode agent can't figure out on its own that shape
+    their behaviour: they share a Claude account with their sibling sessions
+    in the same container, and their filesystem view is limited to whatever
+    the product spec mounts. Everything else about the API + amux CLI +
+    coordination pattern is unchanged from host mode."""
+    prod = _session_product(name)
+    if not prod:
+        return ""
+    spec = _load_product_spec(prod)
+    if not spec:
+        return ""
+    # Enumerate siblings + mounted paths so the note is concrete
+    siblings = [s for s in spec.get("sessions", []) if s != name]
+    mount_lines = []
+    for m in spec.get("mounts", []):
+        mode = m.get("mode", "rw")
+        mount_lines.append(f"- `{m['target']}` ({mode})")
+    for m in spec.get("readonly_cross_mounts", []):
+        mount_lines.append(f"- `{m['target']}` (ro, cross-product)")
+    mount_lines.append("- `/home/amux/` (your shared HOME — includes `~/.claude/`)")
+    mount_lines.append("- `/logs/` (session logs, bind-mount of `~/.amux/logs/` on host)")
+    return (
+        f"# ─ Container context (docker:{prod}) ─\n"
+        f"\n"
+        f"You are running inside container `amux-product-{prod}`. This is auto-added — "
+        f"do not remove.\n"
+        f"\n"
+        f"**Shared Claude account.** The `/home/amux/.claude/` OAuth token and "
+        f"`projects/*.jsonl` history are shared with "
+        + (f"{len(siblings)} other AMUX session" + ("s" if len(siblings) != 1 else "")
+           + f" in this container: {', '.join(siblings) if siblings else '(none)'}. "
+             f"Whichever of you /logged in first is who all of you are talking to Anthropic as. "
+             f"Rate limits and usage quotas are shared — be mindful of token spend, and if you "
+             f"hit a limit every sibling session stops too.\n"
+             f"\n") +
+        f"**Filesystem is scoped.** From inside this container you can only see:\n"
+        + "\n".join(mount_lines) + "\n"
+        f"\n"
+        f"Everything else on the host is invisible. If you need read access to another "
+        f"product's code (springboard pattern), ask Jeremy to add it to "
+        f"`~/.amux/products/{prod}.yml` under `readonly_cross_mounts:` — do not try to work "
+        f"around this.\n"
+        f"\n"
+        f"**Coordination with sessions in other containers still works the same** — "
+        f"the board / threads / channels / notes API is at `$AMUX_URL` "
+        f"(`host.docker.internal:8822` from your side). Use the `amux` CLI as always. "
+        f"Filesystem is NOT a coordination channel — other containers' HOMEs and work "
+        f"dirs are simply not mounted.\n"
+        f"\n"
+        f"─────────────────────────────────────────────────────────────────────────────\n"
+        f"\n"
+    )
+
+
 def _write_claude_memory(name: str, work_dir: str):
     """Write composed (global + session) memory to Claude's project memory dir.
     Runtime-aware: docker sessions write into their product's shared home so
@@ -8225,6 +8282,8 @@ def _write_claude_memory(name: str, work_dir: str):
     global_content = _GLOBAL_MEM_FILE.read_text(errors="replace") if _GLOBAL_MEM_FILE.exists() else ""
     session_content = session_file.read_text(errors="replace") if session_file.exists() else ""
     composed = _compose_memory(global_content, session_content)
+    # Prepend container-context preamble for docker sessions. No-op for host.
+    composed = _container_context_preamble(name) + composed
     claude_mem_dir = _claude_projects_dir_for_session(name) / pname / "memory"
     claude_mem_file = claude_mem_dir / "MEMORY.md"
     try:
