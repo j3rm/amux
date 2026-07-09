@@ -37324,6 +37324,25 @@ class CCHandler(BaseHTTPRequestHandler):
             db = get_db()
             db.execute("DELETE FROM skills WHERE name=?", (name,))
             db.commit()
+            # Sweep every sync target so the slash command actually goes away
+            # for every agent — host + every org's shared home.
+            _sweep_paths = [
+                CC_HOME / "skills" / (name + ".md"),
+                Path.home() / ".claude" / "commands" / (name + ".md"),
+            ]
+            try:
+                for _spec in _list_org_specs():
+                    _sweep_paths.append(
+                        CC_ORGS / _spec["name"] / "home" / ".claude" / "commands" / (name + ".md")
+                    )
+            except Exception:
+                pass
+            for _p in _sweep_paths:
+                try:
+                    if _p.exists():
+                        _p.unlink()
+                except Exception:
+                    pass
             try:
                 f = CC_HOME / "skills" / (name + ".md")
                 if f.exists():
