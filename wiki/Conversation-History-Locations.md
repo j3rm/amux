@@ -24,18 +24,31 @@ $HOME/.claude/projects/<encoded-work-dir>/<uuid>.jsonl
 
 ## The path-encoding rule (v2.1.205, observed empirically)
 
-Claude Code encodes an absolute work-dir into a project-dir name by replacing every `/` with `-` **and dropping every `.` in a path segment**. It does NOT literally keep dots.
+Claude Code encodes an absolute work-dir into a project-dir name by replacing **any character that is not a letter or digit with `-`**. That covers three separate cases you will hit in practice — and I got each of them wrong in isolation before the pattern crystallised:
 
-Concretely, for `/mnt/gitdata/RemoteTechGroup/.agents/RTG-Research`:
+- `/` between segments → `-`. `mnt/gitdata` → `mnt-gitdata`.
+- `.` in a segment → `-`. Because there is already a `-` separator from the parent segment, a leading dot yields a **double dash**: `.agents` → `-agents` inside its segment, so `RemoteTechGroup/.agents` encodes to `RemoteTechGroup--agents`.
+- `_` in a segment → `-`. `ACT_CRM` → `ACT-CRM`; `ACP_Azure_Backup_Service` → `ACP-Azure-Backup-Service`.
 
-- replace `/` with `-` → `-mnt-gitdata-RemoteTechGroup-.agents-RTG-Research`
-- drop `.` from `.agents` → **`-mnt-gitdata-RemoteTechGroup--agents-RTG-Research`** ← the dir Claude Code actually reads/writes
+Full example — `/mnt/gitdata/RemoteTechGroup/.agents/RTG-Research`:
 
-The double dash between `RemoteTechGroup` and `agents` is where the leading `.` used to be. This is the CORRECT encoding.
+1. split into segments: `['mnt', 'gitdata', 'RemoteTechGroup', '.agents', 'RTG-Research']`
+2. within each segment, replace `.` and `_` with `-`: `['mnt', 'gitdata', 'RemoteTechGroup', '-agents', 'RTG-Research']`
+3. join with `-` and prepend one leading `-`: **`-mnt-gitdata-RemoteTechGroup--agents-RTG-Research`**
 
-You will also see `-mnt-gitdata-RemoteTechGroup-.agents-RTG-Research` dirs (dot preserved, single dash) sitting on disk with only a `memory/` subdir inside. Those are **amux memory-file placeholders**, not Claude Code project dirs. Claude Code does not look in them. Do not put JSONLs there — they will be invisible to `/resume`.
+That is the exact dir Claude Code reads/writes. `/resume` lists only conversations directly under it.
 
-If you see BOTH encodings for the same session and JSONLs are in the `-.` one, they need to move to the `--` one.
+You will also see `-mnt-gitdata-RemoteTechGroup-.agents-RTG-Research` dirs (dot preserved, single dash) sitting on disk with only a `memory/` subdir inside. Those are **amux memory-file placeholders**, not Claude Code project dirs. Claude Code does not look in them. Do not put JSONLs there — they will be invisible to `/resume`. If you see BOTH encodings for the same session and JSONLs are in the `-.` one, they need to move to the `--` one.
+
+Python reference for the encoder (matches observed behaviour on 2026-07-09):
+
+```python
+import re
+def encode_workdir(wd: str) -> str:
+    parts = wd.strip('/').split('/')
+    encoded = [re.sub(r'[^A-Za-z0-9-]', '-', p) for p in parts]
+    return '-' + '-'.join(encoded)
+```
 
 ## Which paths live in which container home — cheat sheet
 
