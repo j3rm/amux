@@ -4459,30 +4459,44 @@ def _reap_stale_browsers():
         _browser_session_activity.pop(session, None)
 
     # ── Phase 2: hard-kill orphan Chrome/Playwright processes past max TTL ──
-    try:
-        r = subprocess.run(["pgrep", "-f", "browser-use-user-data-dir"],
-                           capture_output=True, text=True, timeout=5)
-        pids = [p.strip() for p in r.stdout.strip().split("\n") if p.strip()]
-        if not pids:
-            return
-        reaped = 0
-        for pid in pids:
-            try:
-                r2 = subprocess.run(["ps", "-o", "etime=", "-p", pid],
-                                    capture_output=True, text=True, timeout=5)
-                secs = _parse_etime(r2.stdout.strip())
-                if secs is None:
-                    continue
-                if secs > _BROWSER_MAX_TTL_SECONDS:
-                    os.kill(int(pid), 9)
-                    reaped += 1
-            except (ProcessLookupError, ValueError, subprocess.TimeoutExpired):
-                pass
-        if reaped:
-            slog(f"[browser-reaper] hard-killed {reaped} orphan Chrome processes "
-                 f"(>{_BROWSER_MAX_TTL_SECONDS//3600}h old)")
-    except Exception:
-        pass
+    # Sweep the host AND every running amux-org container. Browser MCP is
+    # host-side today, so container passes are almost always no-ops — but
+    # if a docker session ever spawns Chrome inside its container (via a
+    # browser-use tool call), the host-only sweep would leave the orphan
+    # running forever. Cheap to fix, guards against a future foot-gun.
+    def _sweep(prefix: list):
+        try:
+            r = subprocess.run([*prefix, "pgrep", "-f", "browser-use-user-data-dir"],
+                               capture_output=True, text=True, timeout=5)
+            pids = [p.strip() for p in r.stdout.strip().split("\n") if p.strip()]
+            if not pids:
+                return 0
+            reaped = 0
+            for pid in pids:
+                try:
+                    r2 = subprocess.run([*prefix, "ps", "-o", "etime=", "-p", pid],
+                                        capture_output=True, text=True, timeout=5)
+                    secs = _parse_etime(r2.stdout.strip())
+                    if secs is None:
+                        continue
+                    if secs > _BROWSER_MAX_TTL_SECONDS:
+                        if prefix:
+                            subprocess.run([*prefix, "kill", "-9", pid],
+                                           capture_output=True, timeout=5)
+                        else:
+                            os.kill(int(pid), 9)
+                        reaped += 1
+                except (ProcessLookupError, ValueError, subprocess.TimeoutExpired):
+                    pass
+            return reaped
+        except Exception:
+            return 0
+    total = _sweep([])  # host
+    for _ctr in _running_org_containers():
+        total += _sweep(["docker", "exec", _ctr])
+    if total:
+        slog(f"[browser-reaper] hard-killed {total} orphan Chrome processes "
+             f"(>{_BROWSER_MAX_TTL_SECONDS//3600}h old)")
 
 
 # ── Ray Serve killer — Ray should never be running locally for extended periods ──
@@ -4497,31 +4511,38 @@ def _kill_stale_ray():
     if now - _last_ray_check < 600:
         return
     _last_ray_check = now
-    try:
-        r = subprocess.run(["pgrep", "-f", "ray::ServeController"],
-                           capture_output=True, text=True, timeout=5)
-        if not r.stdout.strip():
-            return
-        pid = r.stdout.strip().split("\n")[0]
-        r2 = subprocess.run(["ps", "-o", "etime=", "-p", pid],
-                            capture_output=True, text=True, timeout=5)
-        etime = r2.stdout.strip()
-        if not etime:
-            return
-        parts = etime.replace("-", ":").split(":")
-        parts = [int(p) for p in parts]
-        if len(parts) == 2: secs = parts[0]*60 + parts[1]
-        elif len(parts) == 3: secs = parts[0]*3600 + parts[1]*60 + parts[2]
-        elif len(parts) == 4: secs = parts[0]*86400 + parts[1]*3600 + parts[2]*60 + parts[3]
-        else: return
-        if secs > 1800:  # > 30 minutes
-            subprocess.run("pkill -9 -f 'ray::' 2>/dev/null; pkill -9 -f 'ray/core/src/ray' 2>/dev/null; "
-                           "pkill -9 -f 'ray/dashboard' 2>/dev/null; pkill -9 -f 'ray/autoscaler' 2>/dev/null; "
-                           "pkill -9 -f 'ray.util.client' 2>/dev/null",
-                           shell=True, timeout=15)
-            slog(f"[ray-reaper] killed Ray Serve cluster — was running for {secs//60}m")
-    except Exception:
-        pass
+    # Sweep host + every running container. A session running local ML
+    # tests is likely on the host today, but the same footgun as the
+    # browser reaper applies for docker sessions: a container-side Ray
+    # would run forever if we only searched the host PID namespace.
+    _ray_kill_script = (
+        "pkill -9 -f 'ray::' 2>/dev/null; pkill -9 -f 'ray/core/src/ray' 2>/dev/null; "
+        "pkill -9 -f 'ray/dashboard' 2>/dev/null; pkill -9 -f 'ray/autoscaler' 2>/dev/null; "
+        "pkill -9 -f 'ray.util.client' 2>/dev/null"
+    )
+    def _ray_sweep(prefix: list, where: str):
+        try:
+            r = subprocess.run([*prefix, "pgrep", "-f", "ray::ServeController"],
+                               capture_output=True, text=True, timeout=5)
+            if not r.stdout.strip():
+                return
+            pid = r.stdout.strip().split("\n")[0]
+            r2 = subprocess.run([*prefix, "ps", "-o", "etime=", "-p", pid],
+                                capture_output=True, text=True, timeout=5)
+            secs = _parse_etime(r2.stdout.strip())
+            if secs is None or secs <= 1800:  # < 30 minutes → let it run
+                return
+            if prefix:
+                subprocess.run([*prefix, "sh", "-c", _ray_kill_script],
+                               capture_output=True, timeout=15)
+            else:
+                subprocess.run(_ray_kill_script, shell=True, timeout=15)
+            slog(f"[ray-reaper]{where} killed Ray Serve cluster — was running for {secs//60}m")
+        except Exception:
+            pass
+    _ray_sweep([], "")
+    for _ctr in _running_org_containers():
+        _ray_sweep(["docker", "exec", _ctr], f" [{_ctr}]")
 
 
 def get_claude_stats(work_dir: str) -> dict:
