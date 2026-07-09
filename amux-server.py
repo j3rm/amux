@@ -4611,13 +4611,18 @@ def get_claude_stats(work_dir: str, session: str = "") -> dict:
 _model_cache = {}  # {work_dir: (model, mtime, timestamp)}
 _MODEL_CACHE_TTL = 15  # seconds
 
-def detect_active_model(work_dir: str, conversation_id: str = "") -> str:
-    """Detect the model in use from the session's own JSONL conversation file."""
+def detect_active_model(work_dir: str, conversation_id: str = "", session: str = "") -> str:
+    """Detect the model in use from the session's own JSONL conversation file.
+
+    `session` is optional and used to pick the correct projects dir for
+    docker-runtime sessions. Without it the docker model badge is blank.
+    """
     if not work_dir:
         return ""
     resolved = str(Path(work_dir).expanduser().resolve())
     project_name = resolved.replace("/", "-")
-    project_dir = CLAUDE_HOME / "projects" / project_name
+    base = _claude_projects_dir_for_session(session) if session else (CLAUDE_HOME / "projects")
+    project_dir = base / project_name
     if not project_dir.is_dir():
         return ""
     # Prefer the session's own conversation JSONL file
@@ -9113,7 +9118,7 @@ def list_sessions() -> list:
         if provider in ("codex", "gemini"):
             active_model = _extract_model_from_flags(cfg.get("CC_FLAGS", "")) or _default_model_for_provider(provider)
         else:
-            active_model = detect_active_model(raw_dir, meta.get("cc_conversation_id", ""))
+            active_model = detect_active_model(raw_dir, meta.get("cc_conversation_id", ""), name)
         # Parse task time from spinner line
         task_time = _parse_task_time(raw) if raw else ""
         # Token count from JSONL cache (refreshed once above the loop).
