@@ -1079,11 +1079,23 @@ def _find_claude_pid(name: str) -> int:
         return 0
 
 
-def _read_claude_session_name(claude_pid: int) -> str:
-    """Read the session name from Claude's PID-keyed session file."""
+def _read_claude_session_name(claude_pid: int, session_name: str = "") -> str:
+    """Read the session name from Claude's PID-keyed session file.
+
+    session_name lets the caller pick the correct HOME for docker sessions —
+    the file lives at $HOME/.claude/sessions/<pid>.json, and $HOME is a
+    per-container path (~/.amux/orgs/<org>/home/) for docker-runtime
+    sessions. Without this arg, docker callers would read the host's
+    ~/.claude/sessions/ where the PID doesn't exist and the file isn't
+    written."""
     if claude_pid <= 1:
         return ""
-    sf = Path.home() / ".claude" / "sessions" / f"{claude_pid}.json"
+    org = _session_docker_org(session_name) if session_name else None
+    base = (
+        CC_ORGS / org / "home" / ".claude" / "sessions"
+        if org else Path.home() / ".claude" / "sessions"
+    )
+    sf = base / f"{claude_pid}.json"
     try:
         if not sf.is_file() or sf.stat().st_size > 1_000_000:
             return ""
@@ -10962,7 +10974,7 @@ def start_session(name: str, extra_flags: str = "", _skip_conv_id: bool = False)
             # Migration: if we resumed via UUID and Claude is running, read session name
             if not _skip_conv_id and meta.get("cc_conversation_id") and not meta.get("cc_session_name"):
                 _cpid = _find_claude_pid(name)
-                _cname = _read_claude_session_name(_cpid) if _cpid else ""
+                _cname = _read_claude_session_name(_cpid, name) if _cpid else ""
                 if _cname and _validate_cc_session_name(_cname):
                     meta["cc_session_name"] = _cname
                     meta.pop("cc_conversation_id", None)
@@ -11132,7 +11144,7 @@ def stop_session(name: str) -> tuple[bool, str]:
     
         # Read session name from Claude's PID file
         claude_pid = _find_claude_pid(name)
-        existing_name = _read_claude_session_name(claude_pid) if claude_pid else ""
+        existing_name = _read_claude_session_name(claude_pid, name) if claude_pid else ""
     
         if existing_name and _validate_cc_session_name(existing_name):
             session_name = existing_name
@@ -11181,23 +11193,18 @@ def stop_session(name: str) -> tuple[bool, str]:
                 print(f"[graceful-stop] {name}: exited gracefully (name={session_name})")
                 return True, "stopped"
     
-        # Timeout -- hard-kill Claude process but keep tmux alive
-        print(f"[graceful-stop] {name}: timeout after 15s, hard-killing pid {claude_pid}")
-        if claude_pid and claude_pid > 1:
-            try:
-                subprocess.run(["pkill", "-9", "-P", str(claude_pid)], capture_output=True, timeout=5)
-                os.kill(claude_pid, 9)
-            except Exception:
-                pass
-        # Reset terminal state
-        try:
-            subprocess.run([*_tmux_prefix(name), "send-keys", "-t", tmux_target(name), "-l", "stty sane"],
-                           capture_output=True, timeout=5)
-            time.sleep(0.1)
-            subprocess.run([*_tmux_prefix(name), "send-keys", "-t", tmux_target(name), "Enter"],
-                           capture_output=True, timeout=5)
-        except Exception:
-            pass
+        # Timeout -- hard-kill Claude process but keep tmux alive.
+        # Delegate to _hard_kill_claude, which is already runtime-gated:
+        # for docker sessions it runs `pkill -9 -f "claude .* --name <n>"`
+        # INSIDE the container, which is the only place the process is
+        # visible. The pre-CR-5 code did host `pkill -9 -P <pid>` +
+        # `os.kill(pid, 9)` — both against a container-namespaced PID —
+        # so /exit-timeouts on docker sessions used to silently no-op and
+        # leave the session wedged. This also gets the stty sane / Enter
+        # terminal reset for free, avoiding two divergent copies of the
+        # same shell-reset sequence.
+        print(f"[graceful-stop] {name}: timeout after 15s, hard-killing (runtime-routed)")
+        _hard_kill_claude(name)
         time.sleep(1)
         return True, "stopped (hard-kill)"
 
