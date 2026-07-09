@@ -4080,13 +4080,28 @@ def _snapshot_all_sessions_inner():
             # `claude --name <session>` process. If none for >60s, the session
             # is silently dead. Push alert always; auto-restart only when
             # CC_AUTO_CONTINUE=1.
-            if running and not actions.get("restarting") and not actions.get("hibernated"):
+            # `running` used to gate this — but the loop already `continue`s
+            # above (line ~3843) when the session's tmux isn't in
+            # running_sessions, so every iteration that reaches here is
+            # by definition running. The `running` bareword was never bound
+            # in this scope; NameError was silently caught by the enclosing
+            # try/except and this whole detector never ran. Drop the flag
+            # and keep the semantic guard (restarting / hibernated).
+            if not actions.get("restarting") and not actions.get("hibernated"):
                 cfg_d = parse_env_file(f)
                 if cfg_d.get("CC_ARCHIVED") != "1":
                     last_seen = actions.get("last_claude_pid_seen", now)
                     try:
+                        # Route pgrep through the session's runtime; a host
+                        # pgrep would miss the claude process for docker
+                        # sessions (identical shape to fd6d294 / 511c518).
+                        _rt_d = _session_runtime(name)
+                        _pgrep_pfx_d = (
+                            ["docker", "exec", f"amux-org-{_rt_d.split(':', 1)[1]}"]
+                            if _rt_d.startswith("docker:") else []
+                        )
                         r_pg = subprocess.run(
-                            ["pgrep", "-f", f"claude .* --name {name}( |$)"],
+                            [*_pgrep_pfx_d, "pgrep", "-f", f"claude .* --name {name}( |$)"],
                             capture_output=True, text=True, timeout=5,
                         )
                         # If exit 0 with output → claude is alive (refresh last_seen)
