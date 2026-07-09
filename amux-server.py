@@ -23,10 +23,10 @@ from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
 from pathlib import Path
 from urllib.parse import urlparse, parse_qs, unquote
 
-# PyYAML is used by the product-spec loader (isolation Phase 2b). It's a
+# PyYAML is used by the org-spec loader (isolation Phase 2b). It's a
 # soft dependency: without it, the server still starts and every session
 # runs on host runtime — the only thing that stops working is loading
-# container-mode product specs (~/.amux/products/*.yml). Fine for a box
+# container-mode org specs (~/.amux/orgs/*.yml). Fine for a box
 # that hasn't set up isolation yet.
 try:
     import yaml as _yaml
@@ -71,7 +71,7 @@ CC_MEMORY = CC_HOME / "memory"
 CC_BOARD_DIR = CC_HOME / "board"
 CC_UPLOADS = CC_HOME / "uploads"
 CC_BLOCKED_SESSIONS = CC_HOME / "blocked-sessions.txt"
-CC_PRODUCTS = CC_HOME / "products"  # per-product container specs (isolation Phase 2)
+CC_ORGS = CC_HOME / "orgs"  # per-org container specs (isolation Phase 2)
 CC_SESSION_HOMES = CC_HOME / "homes"  # per-session HOMEs bind-mounted into containers
 # ^ Was /opt/amux/homes originally (mirrored the cloud pattern), but AMUX runs
 # as jwesley and doesn't own /opt. Under ~/.amux/ everything is user-writable
@@ -1061,11 +1061,11 @@ def _validate_cc_session_name(name: str) -> bool:
 def _claude_projects_dir_for_session(session: str) -> Path:
     """Which host filesystem path holds this session's Claude Code JSONL files?
     Host runtime → ~/.claude/projects (CLAUDE_HOME/projects, shared jwesley account).
-    Docker runtime → ~/.amux/products/<product>/home/.claude/projects (that product
+    Docker runtime → ~/.amux/orgs/<product>/home/.claude/projects (that product
     container's shared home, per-container-account isolation)."""
-    prod = _session_product(session)
+    prod = _session_docker_org(session)
     if prod:
-        return CC_PRODUCTS / prod / "home" / ".claude" / "projects"
+        return CC_ORGS / prod / "home" / ".claude" / "projects"
     return CLAUDE_HOME / "projects"
 
 
@@ -1098,7 +1098,7 @@ def _cc_session_id_for_name(session_name: str, work_dir: str, projects_dir: "Pat
     force a fresh --name start instead of opening the picker.
 
     projects_dir defaults to CLAUDE_HOME/projects (host-shared, jwesley account).
-    For container-mode sessions callers pass the product's shared home projects
+    For container-mode sessions callers pass the org's shared home projects
     dir — new conversations created inside a container land there, not in host
     ~/.claude/, so this lookup must follow the container's location."""
     proj_dir = (projects_dir or CLAUDE_HOME / "projects") / _project_name(work_dir)
@@ -1350,9 +1350,9 @@ def tmux_target(session: str) -> str:
 # ── Session runtime abstraction (isolation Phase 1) ──────────────────────────
 # CC_RUNTIME in each session's env file selects where its tmux+claude live:
 #   "host" (default, or CC_RUNTIME unset) — spawn tmux locally, as today
-#   "docker:<product>"                    — spawn tmux inside amux-product-<product>
+#   "docker:<product>"                    — spawn tmux inside amux-org-<product>
 # Phase 1 default is host for every session — behaviour is unchanged. Phase 2
-# adds the docker backend + per-product containers; wiring is already in place
+# adds the docker backend + per-org containers; wiring is already in place
 # so that migration is opt-in per session via CC_RUNTIME, not a big-bang cut.
 def _session_runtime(session: str) -> str:
     """Return this session's runtime tag ("host" or "docker:<product>")."""
@@ -1362,8 +1362,8 @@ def _session_runtime(session: str) -> str:
             return "host"
         cfg = parse_env_file(f)
         rt = (cfg.get("CC_RUNTIME") or "").strip()
-        # Do NOT lowercase — product names are case-sensitive in docker:<product>
-        # (RTG not rtg; the container name amux-product-RTG must match exactly).
+        # Do NOT lowercase — org names are case-sensitive in docker:<product>
+        # (RTG not rtg; the container name amux-org-RTG must match exactly).
         return rt if rt else "host"
     except Exception:
         # Any failure to read env: fall back to host. Never break the session
@@ -1374,18 +1374,18 @@ def _session_runtime(session: str) -> str:
 def _tmux_prefix(session: str) -> list:
     """Return the argv prefix that invokes tmux in this session's runtime.
 
-    host → ["tmux"]. docker:<p> → ["docker", "exec", "amux-product-<p>", "tmux"].
+    host → ["tmux"]. docker:<p> → ["docker", "exec", "amux-org-<p>", "tmux"].
     Callers append the tmux subcommand + flags. See _tmux_cmd for the sugared
     single-call form."""
     rt = _session_runtime(session)
     if rt == "host":
         return ["tmux"]
     if rt.startswith("docker:"):
-        product = rt.split(":", 1)[1]
-        # amux-product-<product> is the container name convention set by the
-        # product-spec lifecycle (Phase 2). Container must be running before
-        # any docker exec fires; ensured by ensure_product_container(product).
-        return ["docker", "exec", f"amux-product-{product}", "tmux"]
+        org = rt.split(":", 1)[1]
+        # amux-org-<product> is the container name convention set by the
+        # org-spec lifecycle (Phase 2). Container must be running before
+        # any docker exec fires; ensured by ensure_org_container(org).
+        return ["docker", "exec", f"amux-org-{org}", "tmux"]
     # Unknown runtime: log once and degrade to host so the session stays alive.
     print(f"[runtime] {session}: unknown CC_RUNTIME={rt!r}, falling back to host")
     return ["tmux"]
@@ -1396,24 +1396,24 @@ def _tmux_cmd(session: str, *args) -> list:
 
     Example: _tmux_cmd("RTG-Research", "list-panes", "-t", tmux_target("RTG-Research"))
     → host:   ["tmux", "list-panes", "-t", "amux-RTG-Research"]
-    → docker: ["docker", "exec", "amux-product-RTG", "tmux", "list-panes", "-t", "amux-RTG-Research"]
+    → docker: ["docker", "exec", "amux-org-RTG", "tmux", "list-panes", "-t", "amux-RTG-Research"]
 
     Only for SESSION-SCOPED tmux calls. Host-wide enumeration (`tmux list-sessions`
     across all runtimes) is not in scope here — that's a Phase 2 union across the
-    host tmux socket + each running product container's socket."""
+    host tmux socket + each running org container's socket."""
     return [*_tmux_prefix(session), *args]
 
 
 # ── Product spec loader (isolation Phase 2b) ─────────────────────────────────
-# A product spec at ~/.amux/products/<name>.yml describes a per-product
+# A org spec at ~/.amux/orgs/<name>.yml describes a per-org
 # container: its image, sessions, host→container mounts, secrets, env, and
 # any read-only cross-product mounts. Loaded on demand; no caching yet —
 # the specs are small and reads are infrequent.
 #
 # Schema (minimum required in bold):
-#   **name**        str          product identifier (must match filename)
+#   **name**        str          org identifier (must match filename)
 #   image           str          container image (default: amux-agent-base:latest)
-#   sessions        [str]        session names owned by this product (informational
+#   sessions        [str]        session names owned by this org (informational
 #                                cross-check against CC_RUNTIME on each session)
 #   mounts          [dict]       [{source, target, mode}] — bind mounts, host→container
 #   readonly_cross_mounts [dict] same shape, always ro — explicit inter-product access
@@ -1423,30 +1423,30 @@ def _tmux_cmd(session: str, *args) -> list:
 _PRODUCT_NAME_RE = re.compile(r'^[a-zA-Z0-9_.\-]+$')
 
 
-def _load_product_spec(product_name: str) -> "dict | None":
-    """Load ~/.amux/products/<name>.yml. Returns dict on success, None on failure.
+def _load_org_spec(product_name: str) -> "dict | None":
+    """Load ~/.amux/orgs/<name>.yml. Returns dict on success, None on failure.
     Never raises — logs and returns None so the caller can degrade gracefully."""
     if not _PRODUCT_NAME_RE.match(product_name):
-        print(f"[product-spec] invalid product name: {product_name!r}")
+        print(f"[org-spec] invalid org name: {product_name!r}")
         return None
     if not _YAML_AVAILABLE:
-        print(f"[product-spec] PyYAML not installed — cannot load {product_name}")
+        print(f"[org-spec] PyYAML not installed — cannot load {product_name}")
         return None
-    f = CC_PRODUCTS / f"{product_name}.yml"
+    f = CC_ORGS / f"{product_name}.yml"
     if not f.exists():
         return None
     try:
         with f.open() as fh:
             spec = _yaml.safe_load(fh) or {}
     except Exception as e:
-        print(f"[product-spec] {product_name}: parse error: {e}")
+        print(f"[org-spec] {product_name}: parse error: {e}")
         return None
     if not isinstance(spec, dict):
-        print(f"[product-spec] {product_name}: top level must be a mapping, got {type(spec).__name__}")
+        print(f"[org-spec] {product_name}: top level must be a mapping, got {type(spec).__name__}")
         return None
     # Validate + default
     if spec.get("name") and spec["name"] != product_name:
-        print(f"[product-spec] {product_name}: 'name' field {spec['name']!r} does not match filename")
+        print(f"[org-spec] {product_name}: 'name' field {spec['name']!r} does not match filename")
         return None
     spec.setdefault("name", product_name)
     spec.setdefault("image", "amux-agent-base:latest")
@@ -1462,12 +1462,12 @@ def _load_product_spec(product_name: str) -> "dict | None":
         ("image", str), ("session_home_dir_pattern", str),
     ):
         if not isinstance(spec[field], want_type):
-            print(f"[product-spec] {product_name}: field {field!r} must be {want_type.__name__}")
+            print(f"[org-spec] {product_name}: field {field!r} must be {want_type.__name__}")
             return None
     for mount_list_name in ("mounts", "readonly_cross_mounts"):
         for i, m in enumerate(spec[mount_list_name]):
             if not (isinstance(m, dict) and "source" in m and "target" in m):
-                print(f"[product-spec] {product_name}: {mount_list_name}[{i}] must have source+target")
+                print(f"[org-spec] {product_name}: {mount_list_name}[{i}] must have source+target")
                 return None
             m.setdefault("mode", "ro" if mount_list_name == "readonly_cross_mounts" else "rw")
             # docker -v does NOT expand ~ — do it here so specs can write
@@ -1477,21 +1477,26 @@ def _load_product_spec(product_name: str) -> "dict | None":
     return spec
 
 
-def _list_product_specs() -> "list[dict]":
-    """Enumerate all loadable product specs, sorted by name. Broken specs are skipped."""
-    if not CC_PRODUCTS.exists() or not _YAML_AVAILABLE:
+def _list_org_specs() -> "list[dict]":
+    """Enumerate all loadable org specs, sorted by name. Broken specs are skipped."""
+    if not CC_ORGS.exists() or not _YAML_AVAILABLE:
         return []
     specs = []
-    for f in sorted(CC_PRODUCTS.glob("*.yml")):
-        spec = _load_product_spec(f.stem)
+    for f in sorted(CC_ORGS.glob("*.yml")):
+        spec = _load_org_spec(f.stem)
         if spec:
             specs.append(spec)
     return specs
 
 
-def _session_product(session: str) -> "str | None":
-    """Return the product name this session belongs to (from CC_RUNTIME=docker:X),
-    or None for host-mode sessions."""
+def _session_docker_org(session: str) -> "str | None":
+    """Return the org that this session's docker container runs under
+    (parsed from CC_RUNTIME=docker:<org>), or None for host-mode sessions.
+
+    NOTE: distinct from _session_org (defined later in the file) which reads
+    the CC_ORG env-file field for board partitioning. A session with
+    CC_ORG=RTG but no CC_RUNTIME is a HOST session tagged for the RTG fleet
+    — this function returns None for it; _session_org returns "RTG"."""
     rt = _session_runtime(session)
     if rt.startswith("docker:"):
         return rt.split(":", 1)[1]
@@ -1499,21 +1504,21 @@ def _session_product(session: str) -> "str | None":
 
 
 # ── Product container lifecycle (isolation Phase 2c) ────────────────────────
-# amux-product-<name> is the container that runs one product's agents. Its
+# amux-org-<name> is the container that runs one product's agents. Its
 # entrypoint is tini+tail so it stays up idle; the AMUX server uses docker
-# exec to spawn tmux new-session inside for each of the product's agent
-# sessions. Lifecycle is idempotent: ensure_product_container(p) is safe to
-# call before every session start in that product — creates on first hit,
+# exec to spawn tmux new-session inside for each of the org's agent
+# sessions. Lifecycle is idempotent: ensure_org_container(p) is safe to
+# call before every session start in that org — creates on first hit,
 # starts on subsequent hits, no-ops when already running.
-def _product_container_name(product: str) -> str:
-    return f"amux-product-{product}"
+def _org_container_name(org: str) -> str:
+    return f"amux-org-{org}"
 
 
-def _product_container_state(product: str) -> str:
+def _org_container_state(org: str) -> str:
     """Return docker inspect state ('running', 'exited', 'created', 'paused',
     or 'missing' if the container doesn't exist)."""
     r = subprocess.run(
-        ["docker", "inspect", "-f", "{{.State.Status}}", _product_container_name(product)],
+        ["docker", "inspect", "-f", "{{.State.Status}}", _org_container_name(org)],
         capture_output=True, text=True, timeout=10,
     )
     if r.returncode != 0:
@@ -1532,16 +1537,16 @@ def _ensure_session_home_dir(spec: dict, session: str) -> str:
     return str(home)
 
 
-def ensure_product_container(product: str) -> "tuple[bool, str]":
-    """Bring up amux-product-<name> if it's not already running. Idempotent.
-    Reads the product spec, materializes per-session HOMEs, and constructs the
+def ensure_org_container(org: str) -> "tuple[bool, str]":
+    """Bring up amux-org-<name> if it's not already running. Idempotent.
+    Reads the org spec, materializes per-session HOMEs, and constructs the
     docker run command with product+session bind mounts."""
-    spec = _load_product_spec(product)
+    spec = _load_org_spec(org)
     if not spec:
-        return False, f"no valid spec at ~/.amux/products/{product}.yml"
-    container = _product_container_name(product)
+        return False, f"no valid spec at ~/.amux/orgs/{org}.yml"
+    container = _org_container_name(org)
 
-    state = _product_container_state(product)
+    state = _org_container_state(org)
     if state == "running":
         return True, "already running"
     if state in ("exited", "created", "paused"):
@@ -1555,16 +1560,16 @@ def ensure_product_container(product: str) -> "tuple[bool, str]":
     if state != "missing":
         return False, f"container in unexpected state: {state}"
 
-    # Missing — create. Pre-create the shared product HOME (Claude auth lives
+    # Missing — create. Pre-create the shared org HOME (Claude auth lives
     # here, shared across every session in the container by default) AND per-
     # session HOMEs (only used when a session opts out with
     # CC_CLAUDE_AUTH_SHARED=0). Both mounts always attach — the choice of
     # which HOME wins is made at tmux new-session -e time.
-    product_home = CC_PRODUCTS / product / "home"
+    product_home = CC_ORGS / org / "home"
     try:
         product_home.mkdir(parents=True, exist_ok=True)
     except Exception as e:
-        return False, f"failed to prep product home {product_home}: {e}"
+        return False, f"failed to prep org home {product_home}: {e}"
     for session in spec["sessions"]:
         try:
             _ensure_session_home_dir(spec, session)
@@ -1583,7 +1588,7 @@ def ensure_product_container(product: str) -> "tuple[bool, str]":
     # Explicit read-only cross-product mounts
     for m in spec["readonly_cross_mounts"]:
         cmd += ["-v", f"{m['source']}:{m['target']}:{m['mode']}"]
-    # Shared product HOME → /home/amux (the container's default user home).
+    # Shared org HOME → /home/amux (the container's default user home).
     # This is where every session's ~/.claude/ lives by default: first session
     # to /login populates the OAuth store; every subsequent session in this
     # container is authenticated automatically. Sessions can opt out via
@@ -1594,7 +1599,7 @@ def ensure_product_container(product: str) -> "tuple[bool, str]":
         host_home = spec["session_home_dir_pattern"].format(session=session)
         cmd += ["-v", f"{host_home}:/homes/{session}:rw"]
     # Log dir — Phase 2c uses a flat mount; Phase 9 will restructure to
-    # ~/.amux/logs/<product>/<session>.log with a per-product subdir mount.
+    # ~/.amux/logs/<product>/<session>.log with a per-org subdir mount.
     cmd += ["-v", f"{CC_LOGS}:/logs:rw"]
     # Product-level env vars, if any
     for k, v in (spec.get("env") or {}).items():
@@ -1607,12 +1612,12 @@ def ensure_product_container(product: str) -> "tuple[bool, str]":
     return False, f"docker run failed: {r.stderr.strip() or r.stdout.strip()}"
 
 
-def stop_product_container(product: str) -> "tuple[bool, str]":
-    """Stop and remove the amux-product-<name> container. Sessions inside must
+def stop_org_container(org: str) -> "tuple[bool, str]":
+    """Stop and remove the amux-org-<name> container. Sessions inside must
     be exited first — this does not check. Safe to call when the container is
     already stopped or missing."""
-    container = _product_container_name(product)
-    state = _product_container_state(product)
+    container = _org_container_name(org)
+    state = _org_container_state(org)
     if state == "missing":
         return True, "not present"
     r = subprocess.run(
@@ -1989,7 +1994,7 @@ def _yolo_auto_respond():
     # Fetch running tmux sessions once to avoid spawning a subprocess per session
     running_sessions = set()
     try:
-        # Union host tmux + running product containers so docker sessions are
+        # Union host tmux + running org containers so docker sessions are
         # included in the auto-respond/rate-limit scans.
         running_sessions = set(_tmux_info_map().keys())
     except Exception:
@@ -2306,7 +2311,7 @@ def _rate_limit_auto_respond():
     now = time.time()
     running_sessions = set()
     try:
-        # Union host tmux + running product containers so docker sessions are
+        # Union host tmux + running org containers so docker sessions are
         # included in the auto-respond/rate-limit scans.
         running_sessions = set(_tmux_info_map().keys())
     except Exception:
@@ -2404,7 +2409,7 @@ def _rate_limit_auto_resume():
 
     running_sessions = set()
     try:
-        # Union host tmux + running product containers so docker sessions are
+        # Union host tmux + running org containers so docker sessions are
         # included in the auto-respond/rate-limit scans.
         running_sessions = set(_tmux_info_map().keys())
     except Exception:
@@ -2786,7 +2791,7 @@ def _snapshot_all_sessions():
 
 def _snapshot_all_sessions_inner():
     # Fetch running tmux sessions once to avoid spawning a subprocess per session.
-    # Use _tmux_info_map so container-mode sessions (in amux-product-* containers)
+    # Use _tmux_info_map so container-mode sessions (in amux-org-* containers)
     # are unioned in with host tmux — otherwise this whole monitoring loop
     # (auto-restart, thinking-block recovery, hibernate, spinner detection,
     # etc.) skips every docker session.
@@ -4003,8 +4008,8 @@ def _auto_trust_dir(work_dir: str, home_dir: "str | None" = None):
     folder trust dialog.
 
     home_dir defaults to the server's own $HOME (host-mode sessions). For
-    container-mode sessions, pass the product's shared home (e.g.
-    ~/.amux/products/RTG/home) — that's where the container's Claude Code
+    container-mode sessions, pass the org's shared home (e.g.
+    ~/.amux/orgs/RTG/home) — that's where the container's Claude Code
     will actually read .claude.json from."""
     import json as _json
     import pathlib as _pathlib
@@ -4027,7 +4032,7 @@ def _auto_trust_dir(work_dir: str, home_dir: "str | None" = None):
     # Sync all skills from SQLite. Targets host commands dir + each product's
     # shared home so container sessions get the same /skill-name library.
     # (Full logic in _sync_skills_to_commands — this per-start call keeps
-    # skills fresh even if the API-side sync missed a product home.)
+    # skills fresh even if the API-side sync missed a org home.)
     try:
         _sync_skills_to_commands()
     except Exception:
@@ -4273,7 +4278,7 @@ esac
 def _auto_trust_codex_dir(work_dir: str, home_dir: "str | None" = None):
     """Pre-trust a directory in <home>/.codex/config.toml so Codex starts noninteractively.
     home_dir defaults to the server's own $HOME; for container-mode Codex sessions,
-    pass the product's shared home (e.g. ~/.amux/products/RTG/home)."""
+    pass the org's shared home (e.g. ~/.amux/orgs/RTG/home)."""
     try:
         base = Path(home_dir) if home_dir else Path.home()
         config_file = base / ".codex" / "config.toml"
@@ -4294,7 +4299,7 @@ def _sync_skills_to_commands():
     """Write all skills as slash commands.
 
     Targets: host ~/.claude/commands/ (for host-mode sessions) PLUS every
-    product's shared home commands dir (for container sessions). A CD-*
+    org's shared home commands dir (for container sessions). A CD-*
     agent that adds a new skill via /api/skills triggers this sync; the
     next time any session in any container (or on host) starts, it sees
     the new /skill-name available.
@@ -4307,11 +4312,11 @@ def _sync_skills_to_commands():
     try:
         db = get_db()
         rows = db.execute("SELECT name, content FROM skills").fetchall()
-        # Host commands dir + one per product shared home
+        # Host commands dir + one per org shared home
         targets = [Path.home() / ".claude" / "commands"]
         try:
-            for spec in _list_product_specs():
-                targets.append(CC_PRODUCTS / spec["name"] / "home" / ".claude" / "commands")
+            for spec in _list_org_specs():
+                targets.append(CC_ORGS / spec["name"] / "home" / ".claude" / "commands")
         except Exception:
             pass
         for tgt in targets:
@@ -4323,7 +4328,7 @@ def _sync_skills_to_commands():
                     except Exception:
                         pass
             except Exception:
-                # One target failing (e.g. product home not yet created) must
+                # One target failing (e.g. org home not yet created) must
                 # not stop the others.
                 continue
     except Exception:
@@ -4689,7 +4694,7 @@ def _report_fetch_mixpeek_ops_all(cfg):
 
 
 def _report_fetch_posthog_all(cfg):
-    """Fetch PostHog product analytics from the Mixpeek ops server.
+    """Fetch PostHog org analytics from the Mixpeek ops server.
 
     Returns {metric_id: {name, monthly, weekly, daily, error}} where each
     metric contains user/event counts (not dollar amounts).
@@ -6382,15 +6387,15 @@ def _detect_claude_status(raw_output: str) -> str:
 _TMUX_INFO_FMT = "#{session_name}\t#{window_activity}\t#{session_created}\t#{pane_title}"
 
 
-def _running_product_containers() -> list:
-    """Return the names of currently running amux-product-* containers.
+def _running_org_containers() -> list:
+    """Return the names of currently running amux-org-* containers.
     Called by _tmux_info_map to know which containers to union into the
     tmux enumeration. Returns [] if docker is missing or errors \u2014 the
     caller degrades to host-only enumeration."""
     try:
         r = subprocess.run(
             ["docker", "ps", "--format", "{{.Names}}",
-             "--filter", "status=running", "--filter", "name=amux-product-"],
+             "--filter", "status=running", "--filter", "name=amux-org-"],
             capture_output=True, text=True, timeout=5,
         )
         if r.returncode != 0:
@@ -6426,7 +6431,7 @@ def _parse_tmux_info_output(text: str, result: dict) -> None:
 def _tmux_info_map() -> dict:
     """Get activity, creation time, and pane title for all tmux sessions.
 
-    Unions the host tmux daemon with every running amux-product-* container's
+    Unions the host tmux daemon with every running amux-org-* container's
     tmux daemon. Host takes precedence for duplicate session names (shouldn't
     happen: session names are globally unique across the AMUX box)."""
     result = {}
@@ -6440,8 +6445,8 @@ def _tmux_info_map() -> dict:
             _parse_tmux_info_output(r.stdout, result)
     except Exception:
         pass
-    # Union with each running product container
-    for ctr in _running_product_containers():
+    # Union with each running org container
+    for ctr in _running_org_containers():
         try:
             r = subprocess.run(
                 ["docker", "exec", ctr, "tmux", "list-panes", "-a", "-F", _TMUX_INFO_FMT],
@@ -8243,12 +8248,12 @@ def _container_context_preamble(name: str) -> str:
     Two things a docker-mode agent can't figure out on its own that shape
     their behaviour: they share a Claude account with their sibling sessions
     in the same container, and their filesystem view is limited to whatever
-    the product spec mounts. Everything else about the API + amux CLI +
+    the org spec mounts. Everything else about the API + amux CLI +
     coordination pattern is unchanged from host mode."""
-    prod = _session_product(name)
+    prod = _session_docker_org(name)
     if not prod:
         return ""
-    spec = _load_product_spec(prod)
+    spec = _load_org_spec(prod)
     if not spec:
         return ""
     # Enumerate siblings + mounted paths so the note is concrete
@@ -8264,7 +8269,7 @@ def _container_context_preamble(name: str) -> str:
     return (
         f"# ─ Container context (docker:{prod}) ─\n"
         f"\n"
-        f"You are running inside container `amux-product-{prod}`. This is auto-added — "
+        f"You are running inside container `amux-org-{prod}`. This is auto-added — "
         f"do not remove.\n"
         f"\n"
         f"**Shared Claude account.** The `/home/amux/.claude/` OAuth token and "
@@ -8280,7 +8285,7 @@ def _container_context_preamble(name: str) -> str:
         f"\n"
         f"Everything else on the host is invisible. If you need read access to another "
         f"product's code (springboard pattern), ask Jeremy to add it to "
-        f"`~/.amux/products/{prod}.yml` under `readonly_cross_mounts:` — do not try to work "
+        f"`~/.amux/orgs/{prod}.yml` under `readonly_cross_mounts:` — do not try to work "
         f"around this.\n"
         f"\n"
         f"**Coordination with sessions in other containers still works the same** — "
@@ -8296,7 +8301,7 @@ def _container_context_preamble(name: str) -> str:
 
 def _write_claude_memory(name: str, work_dir: str):
     """Write composed (global + session) memory to Claude's project memory dir.
-    Runtime-aware: docker sessions write into their product's shared home so
+    Runtime-aware: docker sessions write into their org's shared home so
     the container's Claude Code actually sees the MEMORY.md when it starts."""
     pname = _project_name(work_dir)
     session_file = CC_MEMORY / f"{name}.md"
@@ -8817,13 +8822,13 @@ def start_session(name: str, extra_flags: str = "", _skip_conv_id: bool = False)
 
         # ── Container runtime prep (isolation Phase 2d) ──────────────────────
         # If this session is CC_RUNTIME=docker:<product>, bring up its product
-        # container BEFORE any tmux call. ensure_product_container is idempotent —
+        # container BEFORE any tmux call. ensure_org_container is idempotent —
         # cheap when already running.
-        _product = _session_product(name)
-        if _product:
-            _ok, _msg = ensure_product_container(_product)
+        _org = _session_docker_org(name)
+        if _org:
+            _ok, _msg = ensure_org_container(_org)
             if not _ok:
-                return False, f"product container prep failed: {_msg}"
+                return False, f"org container prep failed: {_msg}"
 
         work_dir = str(Path(cfg.get("CC_DIR", str(Path.home()))).expanduser().resolve())
         # Stamp this session's commits with its name (durable git trailer).
@@ -8832,12 +8837,12 @@ def start_session(name: str, extra_flags: str = "", _skip_conv_id: bool = False)
         # Claude Code v2.1.69+ rejects --dangerously-skip-permissions when running as root.
         if os.getuid() == 0 and "--dangerously-skip-permissions" in flags:
             flags = flags.replace("--dangerously-skip-permissions", "").strip()
-        # For container-mode sessions, write the trust entry into the product's
-        # shared home ~/.amux/products/<product>/home/.claude.json — that's the
+        # For container-mode sessions, write the trust entry into the org's
+        # shared home ~/.amux/orgs/<product>/home/.claude.json — that's the
         # .claude.json the container's Claude Code will read from. Host trust
         # entry is irrelevant to a container process.
-        if _product:
-            _auto_trust_dir(work_dir, home_dir=str(CC_PRODUCTS / _product / "home"))
+        if _org:
+            _auto_trust_dir(work_dir, home_dir=str(CC_ORGS / _org / "home"))
         else:
             _auto_trust_dir(work_dir)
         _ensure_memory(name, work_dir)
@@ -8849,7 +8854,7 @@ def start_session(name: str, extra_flags: str = "", _skip_conv_id: bool = False)
         if not _skip_conv_id and provider == "claude":
             cc_session_name = meta.get("cc_session_name", "")
             conv_id = meta.get("cc_conversation_id", "")
-            # For docker sessions, look up JSONLs in the product's shared home
+            # For docker sessions, look up JSONLs in the org's shared home
             # (that's where the container's Claude Code writes them). Falls
             # back to CLAUDE_HOME/projects for host sessions.
             _projects_dir_for_lookup = _claude_projects_dir_for_session(name)
@@ -8930,8 +8935,8 @@ def start_session(name: str, extra_flags: str = "", _skip_conv_id: bool = False)
         if provider == "codex":
             # Container-mode codex sessions need trust in their product's
             # shared home, not on host.
-            if _product:
-                _auto_trust_codex_dir(work_dir, home_dir=str(CC_PRODUCTS / _product / "home"))
+            if _org:
+                _auto_trust_codex_dir(work_dir, home_dir=str(CC_ORGS / _org / "home"))
             else:
                 _auto_trust_codex_dir(work_dir)
             # Resume from stored codex session ID (per amux session), not by cwd
@@ -9178,15 +9183,15 @@ def start_session(name: str, extra_flags: str = "", _skip_conv_id: bool = False)
                 #   AMUX_URL host → host.docker.internal (the container hostname
                 #     mapped to the docker bridge gateway; agents still curl -sk).
                 #   HOME defaults to /home/amux (the container-shared HOME bind-
-                #     mounted from ~/.amux/products/<product>/home) so every
+                #     mounted from ~/.amux/orgs/<product>/home) so every
                 #     session in the same container shares its ~/.claude/ (one
                 #     /login per container). If the session opts out with
                 #     CC_CLAUDE_AUTH_SHARED=0, HOME=/homes/<session> instead,
                 #     giving that session its own ~/.claude/.
                 _scheme = "http" if "--no-tls" in sys.argv else "https"
-                _api_host = "host.docker.internal" if _product else "localhost"
+                _api_host = "host.docker.internal" if _org else "localhost"
                 _extra_env = []
-                if _product:
+                if _org:
                     _auth_shared = (cfg.get("CC_CLAUDE_AUTH_SHARED", "1") or "1").strip()
                     if _auth_shared in ("0", "false", "no"):
                         _extra_env += ["-e", f"HOME=/homes/{name}"]
@@ -9441,14 +9446,14 @@ def _hard_kill_claude(name: str):
     For docker sessions the Claude process lives inside the container's PID
     namespace — host pgrep/kill can't reach it. Route the kill through
     docker exec pkill instead."""
-    _prod = _session_product(name)
+    _prod = _session_docker_org(name)
     if _prod:
         # Docker session: pkill inside the container by claude cmdline pattern
         # (matches the `claude ... --name <session>` invocation). Container's
         # PID namespace is separate; can't reach it from host.
         try:
             subprocess.run(
-                ["docker", "exec", _product_container_name(_prod),
+                ["docker", "exec", _org_container_name(_prod),
                  "pkill", "-9", "-f", f"claude .* --name {name}"],
                 capture_output=True, timeout=10,
             )

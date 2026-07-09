@@ -1,19 +1,19 @@
-# Product spec example — a copy of this file, renamed to <product>.yml, goes
-# in ~/.amux/products/ to enable a per-product container.
+# Org spec example — a copy of this file, renamed to <org>.yml, goes
+# in ~/.amux/orgs/ to enable a per-org container.
 #
 # The AMUX server reads this on demand via _load_product_spec(name). One
-# container per product runs the amux-agent-base image (see agent-container/
-# Dockerfile), and every session whose CC_RUNTIME=docker:<product-name>
+# container per org runs the amux-agent-base image (see agent-container/
+# Dockerfile), and every session whose CC_RUNTIME=docker:<org-name>
 # spawns tmux inside that container via `docker exec`.
 #
 # The MINIMUM valid spec is:
 #   name: RTG
 # Every other field defaults per the loader (see _load_product_spec docstring).
 
-name: RTG                              # matches the filename (RTG.yml)
-image: amux-agent-base:latest          # override to a per-product image if needed
+name: RTG                              # matches the filename (RTG.yml — org name)
+image: amux-agent-base:latest          # override to a per-org image if needed
 
-# Sessions that belong to this product. Informational: the loader cross-checks
+# Sessions that belong to this org. Informational: the loader cross-checks
 # against each session's CC_RUNTIME, so if a session listed here doesn't have
 # CC_RUNTIME=docker:RTG on its env, that's a divergence worth logging.
 sessions:
@@ -42,7 +42,7 @@ mounts:
     mode: rw
 
 # Explicit read-only cross-product access. Add entries here when Jeremy
-# wants an agent in this product to see another product's code as reference
+# wants an agent in this product to see another org's code as reference
 # (springboard pattern). Everything not listed is invisible.
 readonly_cross_mounts: []
 # Example (once needed):
@@ -62,7 +62,7 @@ env: {}
 #   <pattern>/.claude/         — Claude Code OAuth store, per-session
 #   <pattern>/.bashrc          — minimal shell profile
 # The container sees this at /homes/<session>/ (bind-mounted by
-# ensure_product_container). Default is ~/.amux/homes/{session} which is
+# ensure_org_container). Default is ~/.amux/homes/{session} which is
 # jwesley-writable — override to a shared path if you need multi-user
 # provisioning.
 session_home_dir_pattern: ~/.amux/homes/{session}
