@@ -1601,7 +1601,31 @@ def ensure_org_container(org: str) -> "tuple[bool, str]":
     # Log dir — Phase 2c uses a flat mount; Phase 9 will restructure to
     # ~/.amux/logs/<product>/<session>.log with a per-org subdir mount.
     cmd += ["-v", f"{CC_LOGS}:/logs:rw"]
-    # Product-level env vars, if any
+
+    # Seed the org's shared home with the shared MCP config on first spawn.
+    # /mnt/gitdata/amux/mcp.json is the source of truth (checked into the amux
+    # repo). Claude Code inside the container looks at ~/.claude/settings.json
+    # + ~/.claude/.mcp.json for user-level MCP servers. We copy the file into
+    # both places under the shared org home so /login isn't the only setup step.
+    # Env-var substitution (${MIXPEEK_API_KEY} etc.) resolves against the
+    # container's env — set per-org values via the spec's env: block below.
+    _shared_mcp_src = Path("/mnt/gitdata/amux/mcp.json")
+    if _shared_mcp_src.exists():
+        _org_claude = CC_ORGS / org / "home" / ".claude"
+        try:
+            _org_claude.mkdir(parents=True, exist_ok=True)
+            _mcp_target = _org_claude.parent / ".mcp.json"
+            if not _mcp_target.exists():
+                _mcp_target.write_text(_shared_mcp_src.read_text())
+            _mcp_alt = _org_claude / ".mcp.json"
+            if not _mcp_alt.exists():
+                _mcp_alt.write_text(_shared_mcp_src.read_text())
+        except Exception as _e:
+            print(f"[org-spec] {org}: mcp.json seed failed: {_e}")
+
+    # Org-level env vars pushed into every tmux new-session and available to
+    # MCP subprocesses spawned by Claude Code inside the container. Put per-org
+    # MCP credentials here: MIXPEEK_API_KEY, GDRIVE_CLIENT_ID, etc.
     for k, v in (spec.get("env") or {}).items():
         cmd += ["-e", f"{k}={v}"]
     cmd.append(spec["image"])
