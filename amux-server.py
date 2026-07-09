@@ -27907,6 +27907,14 @@ let _boardColSortable = null;
 let boardTimer = null;
 let schedules = [];
 let _schedEditId = null;
+// Search query for the homepage Schedules tab — matches the pattern used by
+// boardSearchQuery. renderScheduler() reads it as a fallback when opts.searchQuery
+// isn't passed (line ~29985) and the empty-state message echoes it back
+// (line ~30127). Declaration was dropped by the fresh-main overlay along with
+// the search-input widget that used to set it; keep the declaration so the
+// reads don't throw ReferenceError and break the Schedules tab on open. When
+// someone restores the search-input widget, they'll re-hook oninput to this.
+let schedSearchQuery = '';
 let boardEditId = null;
 let boardEditStatus = 'todo';
 let lastBoardJSON = '';
