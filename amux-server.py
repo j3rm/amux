@@ -18109,6 +18109,14 @@ let _peekMatches = [];
 let lastPeekHTML = '';
 let _lastPeekRaw = '';   // raw output from last peek — skip re-render if unchanged
 let _peekEtag = null;    // ETag of last peek response — enables conditional 304 fetches
+// Hold-until timestamp: while performance.now() < _peekGeoHold, refreshPeek()'s
+// status-line updater is suppressed (used to keep transient status messages
+// visible without them being clobbered by the "Updated HH:MM" line every poll).
+// Read at line ~22970 in the 304 branch; declaration got dropped in the
+// fresh-main overlay, so every efficient (304) peek refresh threw
+// ReferenceError. Baseline 0 = never held → status always updates (matches
+// pre-hold behavior; individual features can still assign later).
+let _peekGeoHold = 0;
 // Adaptive peek polling: fast while the session generates, back off when idle
 // (each idle poll is a cheap 304 anyway), and pause entirely when the tab is hidden.
 function _peekPollInterval() {
