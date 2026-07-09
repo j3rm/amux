@@ -9195,6 +9195,10 @@ def list_sessions() -> list:
             "worktree_repo": cfg.get("CC_WORKTREE_REPO", ""),
             "icon": cfg.get("CC_ICON", ""),
             "color": cfg.get("CC_COLOR", ""),
+            # Runtime badge (visual container-org identifier) — expose the
+            # docker:<org> tag or "host" so the card can render a chip
+            # showing which container the session belongs to.
+            "runtime": cfg.get("CC_RUNTIME", "host") or "host",
         })
     status_order = {"active": 0, "waiting": 0, "idle": 1, "": 1}
     sessions.sort(key=lambda s: (not s["pinned"], not s["running"], status_order.get(s["status"], 1), -s["last_activity"]))
@@ -12934,6 +12938,12 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
   .badge.codex { background: rgba(16,185,129,0.2); color: #10b981; }
   .badge.gemini { background: rgba(168,85,247,0.2); color: #c084fc; }
   .badge.iterm2 { background: rgba(0,200,160,0.18); color: #00c8a0; }
+  /* Runtime badge — shows which docker container the session lives in.
+     Distinct color (purple) so it visually separates from provider/model. */
+  .badge.runtime {
+    background: rgba(168,85,247,0.16); color: #c084fc;
+    text-transform: none; letter-spacing: 0.02em;
+  }
 
   /* Expanded panel */
   .panel { display: none; margin-top: 12px; }
@@ -19730,8 +19740,9 @@ function render() {
           `<div class="card-log-hit" onclick="event.stopPropagation();openPeek('${s.name}',{query:'${sq}',hitIdx:${hi}})"><span class="log-hit-loc">${esc(s.name)}:${h.line}</span> <span class="log-hit-text">${esc(h.text.slice(0, 80))}</span></div>`
         ).join('') + (hits.length > 2 ? `<div class="card-log-hit" style="color:var(--dim);font-style:italic;" onclick="event.stopPropagation();openPeek('${s.name}',{query:'${sq}'})">+${hits.length - 2} more matches</div>` : '');
       })() : ''}
-      ${(isYolo || model || s.tags.length || provider) ? `<div class="badges">
+      ${(isYolo || model || s.tags.length || provider || (s.runtime && s.runtime !== 'host')) ? `<div class="badges">
         <span class="badge provider ${provider}" onclick="event.stopPropagation();editField('${s.name}','provider','${esc(provider)}')" title="Change provider">${pLabel}</span>
+        ${s.runtime && s.runtime.startsWith('docker:') ? `<span class="badge runtime" title="Container: amux-org-${esc(s.runtime.slice(7))}">&#x1F4E6; ${esc(s.runtime.slice(7))}</span>` : ''}
         ${isYolo ? '<span class="badge yolo">YOLO</span>' : ''}
         ${model ? `<span class="badge model" onclick="event.stopPropagation();editField('${s.name}','model','${esc(model)}','${esc(provider)}')" title="Change model">${esc(model)}</span>` : ''}
         ${s.tags.map(t => `<span class="tag" data-tag="${esc(t)}" onclick="event.stopPropagation();toggleTagFilter('${esc(t)}')">${esc(t)}</span>`).join('')}
