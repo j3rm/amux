@@ -7646,9 +7646,11 @@ def _detect_session_status(name: str, raw_output: str) -> str:
     return raw  # 'waiting' passes through untouched
 
 
-def _tmux_info_map() -> dict:
-    """Get activity, creation time, and pane title for all tmux sessions."""
-    result = {}
+def _running_org_containers() -> list:
+    """Return the names of currently running amux-org-* containers.
+    Used by _tmux_info_map to know which containers to union into the tmux
+    enumeration. Returns [] if docker is missing or errors — the caller
+    degrades to host-only enumeration."""
     try:
         r = subprocess.run(
             ["docker", "ps", "--format", "{{.Names}}",
