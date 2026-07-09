@@ -4024,18 +4024,12 @@ def _auto_trust_dir(work_dir: str, home_dir: "str | None" = None):
 
 
     # ── ~/.claude/commands/ — skills as slash commands ────────────────────────
-    # Sync all skills from SQLite into ~/.claude/commands/ so they're available
-    # as /skill-name slash commands in every Claude session.
+    # Sync all skills from SQLite. Targets host commands dir + each product's
+    # shared home so container sessions get the same /skill-name library.
+    # (Full logic in _sync_skills_to_commands — this per-start call keeps
+    # skills fresh even if the API-side sync missed a product home.)
     try:
-        commands_dir = _pathlib.Path.home() / ".claude" / "commands"
-        commands_dir.mkdir(parents=True, exist_ok=True)
-        db = get_db()
-        rows = db.execute("SELECT name, content FROM skills").fetchall()
-        for row in rows:
-            try:
-                (commands_dir / (row["name"] + ".md")).write_text(row["content"])
-            except Exception:
-                pass
+        _sync_skills_to_commands()
     except Exception:
         pass
 
@@ -4297,18 +4291,41 @@ def _auto_trust_codex_dir(work_dir: str, home_dir: "str | None" = None):
 
 
 def _sync_skills_to_commands():
-    """Write a single skill to ~/.claude/commands/ after save."""
+    """Write all skills as slash commands.
+
+    Targets: host ~/.claude/commands/ (for host-mode sessions) PLUS every
+    product's shared home commands dir (for container sessions). A CD-*
+    agent that adds a new skill via /api/skills triggers this sync; the
+    next time any session in any container (or on host) starts, it sees
+    the new /skill-name available.
+
+    Deletions: if a skill row was removed from SQL, this function does NOT
+    delete the corresponding .md — that's handled by the delete-skill API
+    endpoint via a separate call. Renames rely on the API removing the old
+    file. This function is purely an additive/overwrite sync of what's in
+    SQL right now."""
     try:
-        import pathlib as _p
-        commands_dir = _p.Path.home() / ".claude" / "commands"
-        commands_dir.mkdir(parents=True, exist_ok=True)
         db = get_db()
         rows = db.execute("SELECT name, content FROM skills").fetchall()
-        for row in rows:
+        # Host commands dir + one per product shared home
+        targets = [Path.home() / ".claude" / "commands"]
+        try:
+            for spec in _list_product_specs():
+                targets.append(CC_PRODUCTS / spec["name"] / "home" / ".claude" / "commands")
+        except Exception:
+            pass
+        for tgt in targets:
             try:
-                (commands_dir / (row["name"] + ".md")).write_text(row["content"])
+                tgt.mkdir(parents=True, exist_ok=True)
+                for row in rows:
+                    try:
+                        (tgt / (row["name"] + ".md")).write_text(row["content"])
+                    except Exception:
+                        pass
             except Exception:
-                pass
+                # One target failing (e.g. product home not yet created) must
+                # not stop the others.
+                continue
     except Exception:
         pass
 
