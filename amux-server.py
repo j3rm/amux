@@ -10737,12 +10737,21 @@ def start_session(name: str, extra_flags: str = "", _skip_conv_id: bool = False)
                     pass
                 if _has_oauth:
                     shell_rc += "unset ANTHROPIC_API_KEY; "
-            for rc in [Path.home() / ".zprofile", Path.home() / ".bash_profile", Path.home() / ".profile"]:
-                if rc.exists():
-                    shell_rc += f"source {rc} 2>/dev/null; cd {shlex.quote(work_dir)}; "
-                    break
-            else:
+            # Source the host shell profile ONLY when the session runs on the
+            # host. Docker sessions have their own container /home/amux/.profile
+            # (installed by the image); embedding a host path like
+            # `source /home/jwesley/.profile` into a container shell_rc runs
+            # `source` against a path that doesn't exist inside the container.
+            # The 2>/dev/null hid the error, but the sourcing was dead code.
+            if _session_docker_org(name):
                 shell_rc += f"cd {shlex.quote(work_dir)}; "
+            else:
+                for rc in [Path.home() / ".zprofile", Path.home() / ".bash_profile", Path.home() / ".profile"]:
+                    if rc.exists():
+                        shell_rc += f"source {rc} 2>/dev/null; cd {shlex.quote(work_dir)}; "
+                        break
+                else:
+                    shell_rc += f"cd {shlex.quote(work_dir)}; "
             if provider not in ("codex", "gemini") and _has_oauth:
                 shell_rc += "unset ANTHROPIC_API_KEY; "
             # Forward select env vars into the tmux session.
