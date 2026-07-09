@@ -39,6 +39,7 @@ HTML/CSS/JS). This fork keeps that single-file design and adds:
 | [Remote-Agent-Doorbell](Remote-Agent-Doorbell.md) | Zero-token doorbell for remote agents (Windows/Mac) that live outside amux tmux — background board poller + terminal injector. Contributed by RTG-VS2017. |
 | [Server-Hooks-And-Scripts](Server-Hooks-And-Scripts.md) | Substrate features added 2026-06-24: C3/C4 cascade hooks, escalation gate, RD routing hook, watchdog script, silently-dead detector, context-exhaustion auto-restart. Retires AMUX-Watchdog, RTG-Dispatch, Ember-Dispatch agents. |
 | [Container-Isolation](Container-Isolation.md) | Per-product Docker container isolation (2026-07-08+): `CC_RUNTIME=docker:<product>` switch, per-container Claude Code login, host↔container path map, product spec YAML schema, add-a-session / add-a-product / debugging recipes, secrets Phase 8 plan. |
+| [Conversation-History-Locations](Conversation-History-Locations.md) | Canonical reference for where Claude Code stores conversation JSONLs — host vs container, the work_dir → project-dir encoding rule (drops dots → double-dash for `.hidden` segments), migration recipe when moving a session to a container, drift-detection script, incident log. |
 
 ## Relationship to upstream
 
