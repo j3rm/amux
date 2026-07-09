@@ -11372,19 +11372,28 @@ def send_text(name: str, text: str) -> tuple[bool, str]:
                 subprocess.run([*_tmux_prefix(name), "send-keys", "-t", tmux_target(name), "C-u"], capture_output=True, timeout=5)
                 time.sleep(0.05)
             if len(text) > 400:
-                import tempfile, os as _os
-                # Use a named buffer to avoid races between concurrent sends
+                # Feed text via stdin (path "-") instead of a host tmp file.
+                # A host tmp path isn't visible inside a docker container's
+                # tmux (different mount namespace), so the previous path-based
+                # approach failed HTTP 500 for every container send >400
+                # chars with "/tmp/…: No such file or directory".
+                #
+                # For docker sessions we also need `docker exec -i` so stdin
+                # is actually forwarded to tmux; the standard _tmux_prefix
+                # omits -i because most tmux calls don't take input. Only
+                # the load-buffer call needs it.
                 buf_name = f"amux-{name}-{int(time.time()*1000)}"
-                with tempfile.NamedTemporaryFile(mode='w', delete=False, suffix='.txt', encoding='utf-8') as f:
-                    f.write(text)
-                    tmp = f.name
-                try:
-                    subprocess.run([*_tmux_prefix(name), "load-buffer", "-b", buf_name, tmp], check=True, capture_output=True, timeout=10)
-                    # -p flag pastes literally without interpreting newlines as Enter
-                    subprocess.run([*_tmux_prefix(name), "paste-buffer", "-p", "-b", buf_name, "-t", t], check=True, capture_output=True, timeout=10)
-                    subprocess.run([*_tmux_prefix(name), "delete-buffer", "-b", buf_name], capture_output=True, timeout=5)
-                finally:
-                    _os.unlink(tmp)
+                _pfx_load = _tmux_prefix(name)
+                if _pfx_load[:2] == ["docker", "exec"]:
+                    _pfx_load = ["docker", "exec", "-i"] + _pfx_load[2:]
+                subprocess.run(
+                    [*_pfx_load, "load-buffer", "-b", buf_name, "-"],
+                    input=text.encode("utf-8"),
+                    check=True, capture_output=True, timeout=10,
+                )
+                # -p flag pastes literally without interpreting newlines as Enter
+                subprocess.run([*_tmux_prefix(name), "paste-buffer", "-p", "-b", buf_name, "-t", t], check=True, capture_output=True, timeout=10)
+                subprocess.run([*_tmux_prefix(name), "delete-buffer", "-b", buf_name], capture_output=True, timeout=5)
             else:
                 # Send text literally (-l) then Enter separately
                 subprocess.run(
