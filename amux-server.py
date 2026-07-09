@@ -4017,8 +4017,18 @@ def _snapshot_all_sessions_inner():
                                 capture_output=True, text=True, timeout=5)
                             if r_pp.returncode == 0 and r_pp.stdout.strip():
                                 shell_pid = r_pp.stdout.strip().split("\n")[0]
+                                # shell_pid came out of the session's runtime — for docker
+                                # sessions it's the container-internal PID and must be
+                                # queried inside the container. A host pgrep against a
+                                # container PID returns empty and false-triggers the OOM
+                                # restart on every check (fires every 90s per session).
+                                _rt = _session_runtime(name)
+                                _pgrep_pfx = (
+                                    ["docker", "exec", f"amux-org-{_rt.split(':', 1)[1]}"]
+                                    if _rt.startswith("docker:") else []
+                                )
                                 r_ch = subprocess.run(
-                                    ["pgrep", "-P", shell_pid],
+                                    [*_pgrep_pfx, "pgrep", "-P", shell_pid],
                                     capture_output=True, text=True, timeout=5)
                                 if not r_ch.stdout.strip():
                                     # Shell has no children — Claude is gone
