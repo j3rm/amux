@@ -173,6 +173,44 @@ print(d.get('id','error'),'flagged=',d.get('flagged',0))" ;;
          echo "  try: reply | finalize | new | list | show | flag | unflag | read" >&2
          exit 1 ;;
     esac ;;
+  skills)
+    sub="$1"; shift 2>/dev/null || true
+    case "$sub" in
+      list|ls|"")
+        curl -sk "$AMUX_URL/api/skills" | python3 -c "
+import json,sys
+for s in json.load(sys.stdin):
+    n=s.get('name','')
+    d=(s.get('description','') or '').split('\\n')[0][:80]
+    print(n + ('  — ' + d if d else ''))" ;;
+      get|show|read)
+        name="$1"
+        if [ -z "$name" ]; then echo "Usage: amux skills get <name>" >&2; exit 1; fi
+        curl -sk "$AMUX_URL/api/skills/$name" | python3 -c "
+import json,sys; d=json.load(sys.stdin); print(d.get('content','') or d.get('error','not found'))" ;;
+      set|add|update|save)
+        name="$1"; shift 2>/dev/null || true
+        if [ -z "$name" ]; then
+          echo "Usage: amux skills set <name> [content]     — from arg" >&2
+          echo "       amux skills set <name> < file.md    — from stdin" >&2
+          exit 1
+        fi
+        content="$*"
+        if [ -z "$content" ] && [ ! -t 0 ]; then content=$(cat); fi
+        if [ -z "$content" ]; then echo "content required (arg or stdin)" >&2; exit 1; fi
+        payload=$(python3 -c "import json,sys; print(json.dumps({'content':sys.argv[1]}))" "$content")
+        curl -sk -X POST -H 'Content-Type: application/json' \
+          -d "$payload" "$AMUX_URL/api/skills/$name" | python3 -c "
+import json,sys; d=json.load(sys.stdin); print(d.get('name','error: '+d.get('error','?')))" ;;
+      delete|rm|del)
+        name="$1"
+        if [ -z "$name" ]; then echo "Usage: amux skills delete <name>" >&2; exit 1; fi
+        curl -sk -X DELETE "$AMUX_URL/api/skills/$name" | python3 -c "
+import json,sys; d=json.load(sys.stdin); print('deleted' if d.get('ok') else 'error: '+str(d.get('error','?')))" ;;
+      *) echo "amux skills: unknown subcommand: $sub" >&2
+         echo "  try: list | get <name> | set <name> [content|<file] | delete <name>" >&2
+         exit 1 ;;
+    esac ;;
   restart)
     session="$1"
     if [ -z "$session" ]; then echo "Usage: amux restart <session>" >&2; exit 1; fi
@@ -216,6 +254,10 @@ for s in json.load(sys.stdin): print(s['name'], '(running)' if s.get('running') 
     echo "amux threads list                       — list active threads"
     echo "amux threads flag|unflag <M-N>          — flag/unflag a message"
     echo "amux threads read <M-N>                 — mark a message read"
+    echo "amux skills list                        — list all skills"
+    echo "amux skills get <name>                  — print a skill's content"
+    echo "amux skills set <name> [content|<file]  — create or update a skill (propagates to every org's container + host on save)"
+    echo "amux skills delete <name>               — delete a skill"
     echo "amux sessions                           — list sessions"
     echo "amux restart <session>                  — stop and restart a session"
     echo "amux share <session> [perms]            — create a public share link (perms: output, output+files, output+files+notes)"
