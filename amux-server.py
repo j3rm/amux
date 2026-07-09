@@ -40830,7 +40830,12 @@ class CCHandler(BaseHTTPRequestHandler):
             text = f"SMS from {sender}: {message}"
             ok, msg = send_text(session_name, text)
             slog(f"[sms-webhook] session={session_name} from={sender} ok={ok}")
-            code = 200 if ok else (409 if msg == "not running" else 500)
+            # 409 for user-caused send-blocked states so upstream doesn't
+            # treat them as retryable 5xx server errors and duplicate the
+            # message. Same set as the primary /send handler.
+            code = 200 if ok else (
+                409 if msg in ("not running", "session is in resume picker") else 500
+            )
             return self._json({"ok": ok, "message": msg}, code)
 
         # GET|POST /api/webhooks/smartertrack/<session> — SmarterTrack new-chat webhook
@@ -40872,7 +40877,10 @@ class CCHandler(BaseHTTPRequestHandler):
             text = "\n".join(parts)
             ok, msg = send_text(session_name, text)
             slog(f"[smartertrack-webhook] session={session_name} customer={customer} ok={ok}")
-            code = 200 if ok else (409 if msg == "not running" else 500)
+            # See sms-webhook 409 comment — same reason.
+            code = 200 if ok else (
+                409 if msg in ("not running", "session is in resume picker") else 500
+            )
             return self._json({"ok": ok, "message": msg}, code)
 
         # GET /api/metrics — system + per-session resource metrics
