@@ -6389,6 +6389,44 @@ def _load_session_gates() -> dict:
     return out
 
 
+def _effective_gate(item: dict, status_id: str) -> list:
+    """Resolve the gate list for `item` at `status_id`. Mirrors the client
+    _effectiveGate (amux-server.py inline JS, line ~31187): item-level gate
+    wins if non-empty, then per-session override, then status default. Called
+    by the board PATCH handler on any status transition. Was never defined
+    in this file — the reference would raise NameError, HTTP 500 the whole
+    board PATCH, and (dormant today because no item.gate is populated in
+    practice) that failure would land the moment anyone set a gate on a
+    card. Restored from the client's semantics."""
+    # 1. Item-level override
+    ig = item.get("gate")
+    if isinstance(ig, str):
+        try:
+            ig = json.loads(ig) if ig else []
+        except Exception:
+            ig = []
+    if isinstance(ig, list) and ig:
+        return [str(x) for x in ig if str(x).strip()]
+    # 2. Session override
+    sess = item.get("session")
+    if sess:
+        so = _load_session_gates().get(sess, {}).get(status_id)
+        if isinstance(so, list) and so:
+            return [str(x) for x in so if str(x).strip()]
+    # 3. Status default
+    try:
+        row = get_db().execute(
+            "SELECT gate FROM statuses WHERE id = ?", (status_id,)
+        ).fetchone()
+        if row and row["gate"]:
+            g = json.loads(row["gate"])
+            if isinstance(g, list):
+                return [str(x) for x in g if str(x).strip()]
+    except Exception:
+        pass
+    return []
+
+
 def _item_by_id(bid: str) -> dict | None:
     """Fetch a single non-deleted issue by id."""
     db = get_db()
