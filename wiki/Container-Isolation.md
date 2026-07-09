@@ -255,6 +255,23 @@ Without this, everything about a docker session looks "not running" to the serve
 | Per-container `~/.claude/` (auth + JSONLs) | `~/.amux/products/<product>/home/.claude/` | **NOT backed up.** OAuth tokens shouldn't sync anyway. Conversation JSONLs would fit in a snapshot to R2 or similar. |
 | Per-session logs | `~/.amux/logs/<name>.log` | not backed up — 10 MB rolling |
 
+## Agent orientation: how they know they're in a container
+
+Zero per-agent `CLAUDE.md` edits needed. The server auto-injects a container-context preamble into every docker-mode session's composed `MEMORY.md` at spawn time (`_container_context_preamble` in `amux-server.py`, prepended by `_write_claude_memory`).
+
+The preamble is regenerated on every `_ensure_memory` call (i.e. every session start), so any change to `~/.amux/products/<product>.yml` — new sibling session added, new mount, new cross-mount — is picked up on the next wake without touching anything else.
+
+What each docker session sees at the top of its `MEMORY.md`:
+- Its container name (`amux-product-<X>`)
+- The list of sibling sessions sharing its `~/.claude/` (so agents know their Claude account is shared and can be mindful of tokens)
+- The exact mounted paths with modes — establishes "nothing else on the host is visible"
+- Where to hit the AMUX API (`host.docker.internal:8822`) and that the `amux` CLI + board/threads/channels are unchanged
+- Instruction: if you need a cross-product read-only view, ask Jeremy to add to `readonly_cross_mounts:` — don't work around it
+
+Host-mode sessions get an empty string prepended (no-op). Their behaviour is unchanged.
+
+Commit: `bdfb43c feat(isolation): container-context preamble in composed memory`.
+
 ## Related memory
 
 - [[amux-isolation-plan]] — decision quotes from Jeremy, phase-by-phase commits, list of known limitations at first wake
