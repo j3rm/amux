@@ -21,8 +21,19 @@ import time
 import uuid
 from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
 from pathlib import Path
-import urllib.request, urllib.error
 from urllib.parse import urlparse, parse_qs, unquote
+
+# PyYAML is used by the org-spec loader (isolation Phase 2b). It's a
+# soft dependency: without it, the server still starts and every session
+# runs on host runtime — the only thing that stops working is loading
+# container-mode org specs (~/.amux/orgs/*.yml). Fine for a box
+# that hasn't set up isolation yet.
+try:
+    import yaml as _yaml
+    _YAML_AVAILABLE = True
+except ImportError:
+    _yaml = None
+    _YAML_AVAILABLE = False
 
 # Strip Claude Code env vars so child processes (new sessions) don't inherit them
 for _cv in ("CLAUDECODE", "CLAUDE_CODE_ENTRYPOINT"):
@@ -60,6 +71,11 @@ CC_MEMORY = CC_HOME / "memory"
 CC_BOARD_DIR = CC_HOME / "board"
 CC_UPLOADS = CC_HOME / "uploads"
 CC_BLOCKED_SESSIONS = CC_HOME / "blocked-sessions.txt"
+CC_ORGS = CC_HOME / "orgs"  # per-org container specs (isolation Phase 2)
+CC_SESSION_HOMES = CC_HOME / "homes"  # per-session HOMEs bind-mounted into containers
+# ^ Was /opt/amux/homes originally (mirrored the cloud pattern), but AMUX runs
+# as jwesley and doesn't own /opt. Under ~/.amux/ everything is user-writable
+# and the whole isolation surface is inside one dir.
 CC_NOTES = Path(os.environ.get("AMUX_NOTES_DIR", "")) if os.environ.get("AMUX_NOTES_DIR") else CC_HOME / "notes"
 CC_NOTES_PINS = CC_HOME / "notes" / ".pins.json"
 CC_NOTES_TRASH = CC_HOME / "notes" / ".trash"
@@ -205,7 +221,7 @@ def _posthog_emit(event: str, props: dict = None, distinct_id: str = ""):
 _PUBLIC_PATHS = frozenset({"/", "/manifest.json", "/sw.js", "/icon.svg", "/icon.png",
                            "/icon-192.png", "/icon-512.png", "/ca", "/release-notes",
                            "/api/release-notes", "/api/calendar.ics"})
-_PUBLIC_PREFIXES = ("/s/", "/api/share/", "/invite/", "/proxy/", "/api/branding/")
+_PUBLIC_PREFIXES = ("/s/", "/api/share/", "/invite/", "/proxy/", "/api/branding/", "/api/webhooks/")
 
 CC_LOGS.mkdir(parents=True, exist_ok=True)
 CC_MEMORY.mkdir(parents=True, exist_ok=True)
@@ -227,9 +243,6 @@ _S3_KEY = os.environ.get("AMUX_S3_KEY", "amux/calendar.ics")
 _S3_REGION = os.environ.get("AMUX_S3_REGION", "us-east-1")
 # Google Calendar push sync (optional — set AMUX_GCAL_ID to enable)
 _GCAL_ID = os.environ.get("AMUX_GCAL_ID", "")
-_GCAL_TZ = os.environ.get("AMUX_GCAL_TZ", "America/New_York")
-_GCAL_SCOPES = ["https://www.googleapis.com/auth/calendar"]
-_GCAL_TOKEN_PATH = CC_HOME / "gcal-token.json"   # OAuth token (amux's own client, not ADC)
 _S3_CAL_URL = (
     f"https://{_S3_BUCKET}.s3.{_S3_REGION}.amazonaws.com/{_S3_KEY}"
     if _S3_BUCKET else ""
@@ -294,27 +307,9 @@ def _build_proc_info() -> dict:
     except Exception:
         pass
     try:
-        # Use current RSS (not peak) so the watchdog reacts to actual pressure,
-        # not a one-time spike that has since been reclaimed.
         import resource as _res
         ru = _res.getrusage(_res.RUSAGE_SELF)
-        peak_mb = round(ru.ru_maxrss / (1024 * 1024), 1) if sys.platform == "darwin" else round(ru.ru_maxrss / 1024, 1)
-        info["peak_memory_mb"] = peak_mb
-        # Current RSS from /proc or ps
-        import subprocess as _sp
-        current_mb = None
-        try:
-            with open(f"/proc/{os.getpid()}/status") as f:
-                for line in f:
-                    if line.startswith("VmRSS:"):
-                        current_mb = round(int(line.split()[1]) / 1024, 1)
-                        break
-        except FileNotFoundError:
-            r = _sp.run(["ps", "-o", "rss=", "-p", str(os.getpid())],
-                        capture_output=True, text=True, timeout=3)
-            if r.returncode == 0 and r.stdout.strip():
-                current_mb = round(int(r.stdout.strip()) / 1024, 1)
-        info["memory_mb"] = current_mb if current_mb is not None else peak_mb
+        info["memory_mb"] = round(ru.ru_maxrss / (1024 * 1024), 1) if sys.platform == "darwin" else round(ru.ru_maxrss / 1024, 1)
     except Exception:
         pass
     try:
@@ -505,33 +500,18 @@ def _bu_call(args: list, timeout_s: int = 30, session: str = "amux") -> dict:
         if args and args[0] != "close":
             _browser_touch(session)
         cmd = [_BROWSER_USE_BIN, "--json", "--session", session] + args
-        # Self-heal the transient "SessionManager not initialized" race: the
-        # persistent browser-use session server can lag a beat behind /start, so
-        # the next action/screenshot lands before it's ready. Retry ONLY that
-        # (and empty-output) transient — real command errors return immediately.
-        last = None
-        for attempt in range(3):
-            try:
-                r = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout_s)
-            except subprocess.TimeoutExpired:
-                return {"error": "browser operation timed out"}
-            except Exception as e:
-                return {"error": str(e)}
+        try:
+            r = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout_s)
             out = r.stdout.strip()
             if not out:
-                last = {"error": r.stderr.strip() or f"browser-use exited {r.returncode}"}
-            else:
-                try:
-                    res = json.loads(out)
-                except json.JSONDecodeError:
-                    return {"error": out[:200]}
-                err = (res.get("error") or "") if isinstance(res, dict) else ""
-                if not (err and ("SessionManager" in err or "not initialized" in err)):
-                    return res  # success, or a real (non-transient) error
-                last = res
-            if attempt < 2:
-                time.sleep(1.2)
-        return last or {"error": "browser call failed"}
+                return {"error": r.stderr.strip() or f"browser-use exited {r.returncode}"}
+            return json.loads(out)
+        except subprocess.TimeoutExpired:
+            return {"error": "browser operation timed out"}
+        except json.JSONDecodeError:
+            return {"error": r.stdout.strip()[:200] if r.stdout else "invalid JSON"}
+        except Exception as e:
+            return {"error": str(e)}
     finally:
         lock.release()
 
@@ -555,186 +535,6 @@ def _bu_list_profiles() -> list:
     except Exception:
         return []
 
-# ── Browser profile registry ──────────────────────────────────────────────────
-# A "profile" is a named persistent Chrome context: browser-use runs it via
-# `-b real --profile <name>`, which reuses the real Chrome user-data-dir with
-# <name> as the profile sub-directory. Logging in once under a name persists —
-# so the whole game is to ALWAYS run under a named profile and remember which
-# domains each is logged into. The registry below is that memory: a small JSON
-# mapping profile name -> {domains, label, updated}. It lets us AUTO-SELECT the
-# right (already-logged-in) profile from a target URL's host. An agent only has
-# to call /api/browser/start with a URL — the matching profile loads itself.
-_PROFILES_REGISTRY = CC_HOME / "playwright-auth" / "profiles.json"
-_registry_lock = threading.Lock()
-
-def _bu_registry_load() -> dict:
-    try:
-        if _PROFILES_REGISTRY.exists():
-            data = json.loads(_PROFILES_REGISTRY.read_text())
-            return data if isinstance(data, dict) else {}
-    except Exception:
-        pass
-    return {}
-
-def _bu_registry_save(reg: dict) -> bool:
-    try:
-        _PROFILES_REGISTRY.parent.mkdir(parents=True, exist_ok=True)
-        tmp = _PROFILES_REGISTRY.with_name(_PROFILES_REGISTRY.name + ".tmp")
-        tmp.write_text(json.dumps(reg, indent=2, sort_keys=True))
-        tmp.replace(_PROFILES_REGISTRY)
-        return True
-    except Exception:
-        return False
-
-def _host_of(url: str) -> str:
-    """Return the lowercase hostname of a URL (tolerates missing scheme)."""
-    try:
-        from urllib.parse import urlparse
-        u = url if "://" in url else "https://" + url
-        return (urlparse(u).hostname or "").lower()
-    except Exception:
-        return ""
-
-def _domain_matches(host: str, domain: str) -> bool:
-    """Suffix match: host equals domain or is a sub-domain of it."""
-    host = (host or "").lower().lstrip(".")
-    domain = (domain or "").lower().lstrip(".")
-    if not host or not domain:
-        return False
-    return host == domain or host.endswith("." + domain)
-
-def _bu_registry_register(name: str, host: str = "", label: str = "") -> dict:
-    """Ensure a profile is registered; add host to its domains. Returns the entry."""
-    with _registry_lock:
-        reg = _bu_registry_load()
-        entry = reg.get(name) if isinstance(reg.get(name), dict) else None
-        if entry is None:
-            entry = {"domains": [], "label": "", "updated": 0}
-        if host and host not in entry["domains"]:
-            entry["domains"].append(host)
-        if label:
-            entry["label"] = label
-        entry["updated"] = int(time.time())
-        reg[name] = entry
-        _bu_registry_save(reg)
-        return entry
-
-def _bu_pick_profile(url: str, explicit: str = "") -> tuple:
-    """Resolve which profile to use for a URL.
-
-    Explicit wins. Otherwise auto-select the registered profile whose domains
-    best (longest / most specific) match the URL's host. Falls back to 'default'.
-    Returns (name, auto_selected_bool).
-    """
-    if explicit:
-        return explicit, False
-    host = _host_of(url)
-    reg = _bu_registry_load()
-    best, best_len = None, -1
-    for name, meta in reg.items():
-        if not isinstance(meta, dict):
-            continue
-        for dom in (meta.get("domains") or []):
-            if _domain_matches(host, dom) and len(dom) > best_len:
-                best, best_len = name, len(dom)
-    if best:
-        return best, True
-    return "default", False
-
-def _bu_session_profile(session: str) -> str:
-    """Profile the running browser-use session was created with (from its meta), or ''."""
-    try:
-        import tempfile
-        meta = Path(tempfile.gettempdir()) / f"browser-use-{session}.meta"
-        if meta.exists():
-            return json.loads(meta.read_text()).get("profile") or ""
-    except Exception:
-        pass
-    return ""
-
-def _bu_open(url: str, session: str = "amux", explicit_profile: str = "",
-             fresh: bool = False, timeout_s: int = 30) -> dict:
-    """Open a URL under the correct profile.
-
-    Auto-selects a registered profile by domain when explicit_profile is empty,
-    so callers/agents stay logged in without tracking cookies themselves. The
-    session is (re)created with the resolved profile when the currently running
-    session uses a different one — that's what makes `-b real --profile` login
-    persistence actually take effect. Same-profile navigation reuses the session.
-    The response carries `profile` (chosen) and `auto_profile` (was it inferred).
-    """
-    profile, auto = _bu_pick_profile(url, explicit_profile)
-    cur = _bu_session_profile(session)
-    if cur and cur == profile and not fresh:
-        res = _bu_call(["open", url], session=session, timeout_s=timeout_s)
-    else:
-        if cur:  # existing session runs a different profile — close before reopening
-            _bu_call(["close"], session=session, timeout_s=10)
-        res = _bu_call(["-b", "real", "--profile", profile, "open", url],
-                       session=session, timeout_s=timeout_s)
-        # Graceful fallback: if real-Chrome mode can't launch, browse anyway
-        if isinstance(res, dict) and res.get("error"):
-            fb = _bu_call(["open", url], session=session, timeout_s=timeout_s)
-            if isinstance(fb, dict) and not fb.get("error"):
-                fb["profile"] = profile
-                fb["auto_profile"] = auto
-                fb["profile_fallback"] = True
-                return fb
-    if isinstance(res, dict):
-        res = dict(res)
-        res["profile"] = profile
-        res["auto_profile"] = auto
-        # Re-install the console/network capture shim on every navigation (page
-        # globals reset on load) so /api/browser/inspect can troubleshoot the page.
-        if not res.get("error"):
-            try: _bu_inject_capture(session)
-            except Exception: pass
-    return res
-
-def _bu_parse_elements(raw_text: str, limit: int = 120) -> dict:
-    """Parse browser-use `state` _raw_text into {viewport, elements[]}.
-
-    _raw_text lines look like:  [1102]<button />   then an indented label line.
-    Returns numbered, index-addressable elements for ref-based clicking — the
-    structured (accessibility-first) perception surface, more reliable than
-    pixel clicking.
-    """
-    vp = None
-    els = []
-    if not raw_text:
-        return {"viewport": vp, "elements": els}
-    el_re = re.compile(r"^(\s*)\*?\[(\d+)\]<([a-zA-Z0-9\-]+)([^>]*?)/?>\s*$")
-    attr_label_re = re.compile(r'(?:aria-label|id|role|name|placeholder|value)=([^\s/>]+)')
-    lines = raw_text.splitlines()
-    for i, line in enumerate(lines):
-        if vp is None and line.startswith("viewport:"):
-            m = re.search(r"(\d+)\s*x\s*(\d+)", line)
-            if m:
-                vp = {"w": int(m.group(1)), "h": int(m.group(2))}
-            continue
-        m = el_re.match(line)
-        if not m:
-            continue
-        indent, idx, tag, attrs = m.groups()
-        # Label: prefer a following deeper-indented text (non-bracket) line
-        label = ""
-        for j in range(i + 1, min(i + 4, len(lines))):
-            nxt = lines[j]
-            if "[" in nxt and "]<" in nxt:
-                break
-            t = nxt.strip()
-            if t and not t.startswith("|") and not t.startswith("<"):
-                label = t
-                break
-        if not label:
-            am = attr_label_re.search(attrs or "")
-            if am:
-                label = am.group(1)
-        els.append({"index": int(idx), "tag": tag, "label": label[:80]})
-        if len(els) >= limit:
-            break
-    return {"viewport": vp, "elements": els}
-
 def _bu_screenshot(session: str = "amux", path: str = "", retries: int = 3) -> dict:
     """Take a screenshot, return {path, size}. Retries on SessionManager errors."""
     dest = path or str(CC_HOME / "browser-screenshots" / "latest.jpg")
@@ -753,116 +553,6 @@ def _bu_screenshot(session: str = "amux", path: str = "", retries: int = 3) -> d
             continue
         return result
     return result
-
-# ── Browser troubleshooting: console / network / error capture ────────────────
-# browser-use is subprocess-per-action, so we can't hold a live CDP listener.
-# Instead we inject an idempotent capture shim into the page (re-injected on every
-# navigation by _bu_open) that mirrors console.*, fetch, and XHR into page-global
-# ring buffers, plus window error/unhandledrejection. Network is additionally
-# back-filled from the Resource Timing API (performance.getEntriesByType), which
-# retroactively lists EVERY request — even ones that fired before injection.
-_BROWSER_CAPTURE_JS = r"""
-(function(){
-  if (window.__amux && window.__amux.__installed) return 'already';
-  var CAP = 500;
-  var S = window.__amux = window.__amux || {};
-  S.console = S.console || []; S.net = S.net || []; S.errors = S.errors || [];
-  S.__installed = true;
-  var now = function(){ return Date.now(); };
-  function push(a, x){ a.push(x); if (a.length > CAP) a.shift(); }
-  function fmt(a){
-    try {
-      if (a instanceof Error) return a.stack || (a.name + ': ' + a.message);
-      if (typeof a === 'object' && a !== null) { try { return JSON.stringify(a); } catch(e){ return String(a); } }
-      return String(a);
-    } catch(e){ return '[unserializable]'; }
-  }
-  ['log','info','warn','error','debug'].forEach(function(level){
-    var orig = console[level]; if (!orig) return;
-    console[level] = function(){
-      try { push(S.console, { level: level, text: [].map.call(arguments, fmt).join(' '), ts: now() }); } catch(e){}
-      return orig.apply(console, arguments);
-    };
-  });
-  window.addEventListener('error', function(e){
-    push(S.errors, { text: (e.message || 'error') + (e.filename ? (' @ ' + e.filename + ':' + e.lineno + ':' + e.colno) : ''),
-                     stack: (e.error && e.error.stack) || '', ts: now() });
-  });
-  window.addEventListener('unhandledrejection', function(e){
-    var r = e.reason; push(S.errors, { text: 'unhandledrejection: ' + ((r && r.message) || fmt(r)), stack: (r && r.stack) || '', ts: now() });
-  });
-  if (window.fetch) {
-    var of = window.fetch;
-    window.fetch = function(input, init){
-      var url = (typeof input === 'string') ? input : (input && input.url) || '';
-      var method = (init && init.method) || (input && input.method) || 'GET';
-      var t0 = now();
-      return of.apply(this, arguments).then(function(res){
-        push(S.net, { type:'fetch', method:method, url:url, status:res.status, ok:res.ok, ms: now()-t0, ts: t0 }); return res;
-      }, function(err){
-        push(S.net, { type:'fetch', method:method, url:url, status:0, ok:false, error:String(err), ms: now()-t0, ts: t0 }); throw err;
-      });
-    };
-  }
-  var OX = window.XMLHttpRequest;
-  if (OX) {
-    var NX = function(){
-      var xhr = new OX();
-      var rec = { type:'xhr', method:'GET', url:'', status:0, ok:false, ms:0, ts: now() };
-      var open = xhr.open;
-      xhr.open = function(m, u){ rec.method = m; rec.url = u; return open.apply(xhr, arguments); };
-      var send = xhr.send;
-      xhr.send = function(){ var t0 = now();
-        xhr.addEventListener('loadend', function(){ rec.status = xhr.status; rec.ok = (xhr.status >= 200 && xhr.status < 400); rec.ms = now()-t0; push(S.net, rec); });
-        return send.apply(xhr, arguments); };
-      return xhr;
-    };
-    NX.prototype = OX.prototype; window.XMLHttpRequest = NX;
-  }
-  return 'installed';
-})()
-"""
-
-_BROWSER_INSPECT_JS = r"""
-(function(){
-  var S = window.__amux || {};
-  var L = __LIMIT__;
-  function tail(a){ a = a || []; return a.slice(Math.max(0, a.length - L)); }
-  var res = [];
-  try {
-    res = performance.getEntriesByType('resource').slice(-L).map(function(e){
-      return { url:e.name, type:e.initiatorType, ms:Math.round(e.duration), size:e.transferSize||0, start:Math.round(e.startTime) };
-    });
-  } catch(e){}
-  var out = { url: location.href, title: document.title, installed: !!S.__installed,
-    console: tail(S.console), network: tail(S.net), errors: tail(S.errors), resources: res,
-    counts: { console:(S.console||[]).length, network:(S.net||[]).length, errors:(S.errors||[]).length, resources:res.length } };
-  if (__CLEAR__) { if (S.console) S.console.length = 0; if (S.net) S.net.length = 0; if (S.errors) S.errors.length = 0; }
-  return out;
-})()
-"""
-
-def _bu_inject_capture(session: str = "amux") -> dict:
-    """Inject the console/network/error capture shim (idempotent per page)."""
-    return _bu_call(["eval", _BROWSER_CAPTURE_JS], session=session, timeout_s=15)
-
-def _bu_inspect(session: str = "amux", clear: bool = False, limit: int = 200) -> dict:
-    """Read captured console/network/errors (+ Resource Timing) from the page."""
-    js = (_BROWSER_INSPECT_JS
-          .replace("__LIMIT__", str(int(limit)))
-          .replace("__CLEAR__", "true" if clear else "false"))
-    res = _bu_call(["eval", js], session=session, timeout_s=15)
-    if not isinstance(res, dict) or res.get("error"):
-        return res if isinstance(res, dict) else {"error": "inspect failed"}
-    data = (res.get("data") or {}).get("result")
-    if isinstance(data, str):
-        try: data = json.loads(data)
-        except Exception: pass
-    if isinstance(data, dict):
-        # If the shim isn't installed (e.g. page navigated), still return Resource Timing.
-        return data
-    return {"error": "no capture data", "raw": data}
-
 
 def _resolve_claude_bin() -> str:
     """Locate the claude CLI binary (PATH first, then common install locations)."""
@@ -1154,41 +844,6 @@ def _term_read(tid: str, max_bytes: int = 65536) -> bytes:
         pass
     return b""
 
-def _term_read_wait(tid: str, timeout: float, max_bytes: int = 262144) -> bytes:
-    """Long-poll read: block up to `timeout`s for the FIRST output byte, then
-    briefly coalesce a burst (e.g. a screen redraw) into one response. Returns
-    the instant the PTY produces data, so the client gets near-real-time output
-    instead of waiting out a fixed polling interval. Empty bytes on timeout.
-    """
-    with _term_lock:
-        t = _terminals.get(tid)
-    if not t:
-        return b""
-    fd = t["fd"]
-    try:
-        ready, _, _ = select.select([fd], [], [], max(0.0, timeout))
-        if not ready:
-            return b""
-        chunks: list[bytes] = []
-        total = 0
-        # Drain what's available, coalescing a short burst to cut round-trips.
-        while total < max_bytes:
-            try:
-                buf = os.read(fd, 65536)
-            except (OSError, IOError):
-                break
-            if not buf:
-                break
-            chunks.append(buf)
-            total += len(buf)
-            more, _, _ = select.select([fd], [], [], 0.015)
-            if not more:
-                break
-        return b"".join(chunks)
-    except (OSError, IOError):
-        return b""
-
-
 def _term_write(tid: str, data: bytes):
     """Write input to terminal."""
     with _term_lock:
@@ -1251,6 +906,7 @@ def _term_alive(tid: str) -> bool:
 _sse_cache = {
     "sessions": {"data": None, "json": "", "time": 0},
     "board": {"data": None, "json": "", "time": 0},
+    "repos": {"data": None, "json": "", "time": 0},
 }
 _sse_cache_lock = threading.Lock()  # prevents thundering herd on cache refresh
 _SSE_CACHE_TTL = 2  # seconds
@@ -1348,6 +1004,7 @@ _sse_alerts: list = []           # ring buffer of alert dicts pushed to all SSE 
 _notes_version: int = 0             # bumped on any notes write; triggers SSE invalidation
 _crm_version: int = 0               # bumped on any CRM write; triggers SSE invalidation
 _journal_version: int = 0           # bumped on any journal write; triggers SSE invalidation
+_threads_version: int = 0           # bumped on any threads/messages write; triggers SSE invalidation
 _sse_alert_lock = threading.Lock()
 _send_locks: dict = {}          # per-session locks for serializing send_text/send_keys
 _send_locks_lock = threading.Lock()  # protects _send_locks dict itself
@@ -1372,7 +1029,7 @@ def _get_session_lock(name: str) -> threading.RLock:
 def _find_claude_pid(name: str) -> int:
     """Find Claude's PID as a child of the tmux pane's shell process."""
     try:
-        r = subprocess.run(["tmux", "list-panes", "-t", tmux_target(name), "-F", "#{pane_pid}"],
+        r = subprocess.run([*_tmux_prefix(name), "list-panes", "-t", tmux_target(name), "-F", "#{pane_pid}"],
                            capture_output=True, text=True, timeout=5)
         if r.returncode != 0 or not r.stdout.strip():
             return 0
@@ -1415,9 +1072,20 @@ def _validate_cc_session_name(name: str) -> bool:
     return bool(name and len(name) <= 64 and _VALID_CC_SESSION_NAME.match(name))
 
 
-def _cc_session_exists_in_project(session_name: str, work_dir: str) -> bool:
+def _claude_projects_dir_for_session(session: str) -> Path:
+    """Which host filesystem path holds this session's Claude Code JSONL files?
+    Host runtime → ~/.claude/projects (CLAUDE_HOME/projects, shared jwesley account).
+    Docker runtime → ~/.amux/orgs/<product>/home/.claude/projects (that product
+    container's shared home, per-container-account isolation)."""
+    prod = _session_docker_org(session)
+    if prod:
+        return CC_ORGS / prod / "home" / ".claude" / "projects"
+    return CLAUDE_HOME / "projects"
+
+
+def _cc_session_exists_in_project(session_name: str, work_dir: str, projects_dir: "Path | None" = None) -> bool:
     """Check if a Claude Code session with this name exists in the project directory."""
-    proj_dir = CLAUDE_HOME / "projects" / _project_name(work_dir)
+    proj_dir = (projects_dir or CLAUDE_HOME / "projects") / _project_name(work_dir)
     if not proj_dir.is_dir():
         return False
     try:
@@ -1436,13 +1104,18 @@ def _cc_session_exists_in_project(session_name: str, work_dir: str) -> bool:
     return False
 
 
-def _cc_session_id_for_name(session_name: str, work_dir: str) -> str:
+def _cc_session_id_for_name(session_name: str, work_dir: str, projects_dir: "Path | None" = None) -> str:
     """Return the UUID of a uniquely-named Claude Code session, or '' if ambiguous/missing.
 
     When exactly one session matches, return its UUID so we can --resume <uuid>
     (which bypasses the interactive picker). When multiple match, return '' to
-    force a fresh --name start instead of opening the picker."""
-    proj_dir = CLAUDE_HOME / "projects" / _project_name(work_dir)
+    force a fresh --name start instead of opening the picker.
+
+    projects_dir defaults to CLAUDE_HOME/projects (host-shared, jwesley account).
+    For container-mode sessions callers pass the org's shared home projects
+    dir — new conversations created inside a container land there, not in host
+    ~/.claude/, so this lookup must follow the container's location."""
+    proj_dir = (projects_dir or CLAUDE_HOME / "projects") / _project_name(work_dir)
     if not proj_dir.is_dir():
         return ""
     matches = []
@@ -1488,7 +1161,7 @@ def _refresh_token_cache():
             cfg = parse_env_file(f)
             raw_dir = cfg.get("CC_DIR", "")
             if raw_dir:
-                needed_proj_keys.add(_project_name(raw_dir))
+                needed_proj_keys.add(str(Path(raw_dir).expanduser().resolve()).replace("/", "-"))
     for proj_dir in projects_dir.iterdir():
         if not proj_dir.is_dir():
             continue
@@ -1674,9 +1347,9 @@ def tmux_name(session: str) -> str:
         _tmux_name_migrated.add(session)
         for old in [f"cmux-{session}", f"cc-{session}"]:
             try:
-                r = subprocess.run(["tmux", "has-session", "-t", old], capture_output=True, timeout=3)
+                r = subprocess.run([*_tmux_prefix(session), "has-session", "-t", old], capture_output=True, timeout=3)
                 if r.returncode == 0:
-                    subprocess.run(["tmux", "rename-session", "-t", old, new], capture_output=True, timeout=5)
+                    subprocess.run([*_tmux_prefix(session), "rename-session", "-t", old, new], capture_output=True, timeout=5)
                     break
             except Exception:
                 pass
@@ -1688,18 +1361,329 @@ def tmux_target(session: str) -> str:
     return tmux_name(session)
 
 
+# ── Session runtime abstraction (isolation Phase 1) ──────────────────────────
+# CC_RUNTIME in each session's env file selects where its tmux+claude live:
+#   "host" (default, or CC_RUNTIME unset) — spawn tmux locally, as today
+#   "docker:<product>"                    — spawn tmux inside amux-org-<product>
+# Phase 1 default is host for every session — behaviour is unchanged. Phase 2
+# adds the docker backend + per-org containers; wiring is already in place
+# so that migration is opt-in per session via CC_RUNTIME, not a big-bang cut.
+def _session_runtime(session: str) -> str:
+    """Return this session's runtime tag ("host" or "docker:<product>")."""
+    try:
+        f = CC_SESSIONS / f"{session}.env"
+        if not f.exists():
+            return "host"
+        cfg = parse_env_file(f)
+        rt = (cfg.get("CC_RUNTIME") or "").strip()
+        # Do NOT lowercase — org names are case-sensitive in docker:<product>
+        # (RTG not rtg; the container name amux-org-RTG must match exactly).
+        return rt if rt else "host"
+    except Exception:
+        # Any failure to read env: fall back to host. Never break the session
+        # because we couldn't parse a runtime hint.
+        return "host"
+
+
+def _tmux_prefix(session: str) -> list:
+    """Return the argv prefix that invokes tmux in this session's runtime.
+
+    host → ["tmux"]. docker:<p> → ["docker", "exec", "amux-org-<p>", "tmux"].
+    Callers append the tmux subcommand + flags. See _tmux_cmd for the sugared
+    single-call form."""
+    rt = _session_runtime(session)
+    if rt == "host":
+        return ["tmux"]
+    if rt.startswith("docker:"):
+        org = rt.split(":", 1)[1]
+        # amux-org-<product> is the container name convention set by the
+        # org-spec lifecycle (Phase 2). Container must be running before
+        # any docker exec fires; ensured by ensure_org_container(org).
+        return ["docker", "exec", f"amux-org-{org}", "tmux"]
+    # Unknown runtime: log once and degrade to host so the session stays alive.
+    print(f"[runtime] {session}: unknown CC_RUNTIME={rt!r}, falling back to host")
+    return ["tmux"]
+
+
+def _tmux_cmd(session: str, *args) -> list:
+    """Return the full argv for a tmux invocation in this session's runtime.
+
+    Example: _tmux_cmd("RTG-Research", "list-panes", "-t", tmux_target("RTG-Research"))
+    → host:   ["tmux", "list-panes", "-t", "amux-RTG-Research"]
+    → docker: ["docker", "exec", "amux-org-RTG", "tmux", "list-panes", "-t", "amux-RTG-Research"]
+
+    Only for SESSION-SCOPED tmux calls. Host-wide enumeration (`tmux list-sessions`
+    across all runtimes) is not in scope here — that's a Phase 2 union across the
+    host tmux socket + each running org container's socket."""
+    return [*_tmux_prefix(session), *args]
+
+
+# ── Product spec loader (isolation Phase 2b) ─────────────────────────────────
+# A org spec at ~/.amux/orgs/<name>.yml describes a per-org
+# container: its image, sessions, host→container mounts, secrets, env, and
+# any read-only cross-product mounts. Loaded on demand; no caching yet —
+# the specs are small and reads are infrequent.
+#
+# Schema (minimum required in bold):
+#   **name**        str          org identifier (must match filename)
+#   image           str          container image (default: amux-agent-base:latest)
+#   sessions        [str]        session names owned by this org (informational
+#                                cross-check against CC_RUNTIME on each session)
+#   mounts          [dict]       [{source, target, mode}] — bind mounts, host→container
+#   readonly_cross_mounts [dict] same shape, always ro — explicit inter-product access
+#   env             {str:str}    tmux new-session -e KEY=VAL entries
+#   session_home_dir_pattern str default "/opt/amux/homes/{session}" — the per-session
+#                                HOME bind-mounted at /homes/{session} in container
+_PRODUCT_NAME_RE = re.compile(r'^[a-zA-Z0-9_.\-]+$')
+
+
+def _load_org_spec(product_name: str) -> "dict | None":
+    """Load ~/.amux/orgs/<name>.yml. Returns dict on success, None on failure.
+    Never raises — logs and returns None so the caller can degrade gracefully."""
+    if not _PRODUCT_NAME_RE.match(product_name):
+        print(f"[org-spec] invalid org name: {product_name!r}")
+        return None
+    if not _YAML_AVAILABLE:
+        print(f"[org-spec] PyYAML not installed — cannot load {product_name}")
+        return None
+    f = CC_ORGS / f"{product_name}.yml"
+    if not f.exists():
+        return None
+    try:
+        with f.open() as fh:
+            spec = _yaml.safe_load(fh) or {}
+    except Exception as e:
+        print(f"[org-spec] {product_name}: parse error: {e}")
+        return None
+    if not isinstance(spec, dict):
+        print(f"[org-spec] {product_name}: top level must be a mapping, got {type(spec).__name__}")
+        return None
+    # Validate + default
+    if spec.get("name") and spec["name"] != product_name:
+        print(f"[org-spec] {product_name}: 'name' field {spec['name']!r} does not match filename")
+        return None
+    spec.setdefault("name", product_name)
+    spec.setdefault("image", "amux-agent-base:latest")
+    spec.setdefault("sessions", [])
+    spec.setdefault("mounts", [])
+    spec.setdefault("readonly_cross_mounts", [])
+    spec.setdefault("env", {})
+    spec.setdefault("session_home_dir_pattern", str(CC_SESSION_HOMES / "{session}"))
+    # Type sanity — refuse silently-wrong specs
+    for field, want_type in (
+        ("sessions", list), ("mounts", list),
+        ("readonly_cross_mounts", list), ("env", dict),
+        ("image", str), ("session_home_dir_pattern", str),
+    ):
+        if not isinstance(spec[field], want_type):
+            print(f"[org-spec] {product_name}: field {field!r} must be {want_type.__name__}")
+            return None
+    for mount_list_name in ("mounts", "readonly_cross_mounts"):
+        for i, m in enumerate(spec[mount_list_name]):
+            if not (isinstance(m, dict) and "source" in m and "target" in m):
+                print(f"[org-spec] {product_name}: {mount_list_name}[{i}] must have source+target")
+                return None
+            m.setdefault("mode", "ro" if mount_list_name == "readonly_cross_mounts" else "rw")
+            # docker -v does NOT expand ~ — do it here so specs can write
+            # ~/.amux/... as a source path naturally.
+            m["source"] = str(Path(m["source"]).expanduser())
+            m["target"] = str(Path(m["target"]).expanduser())
+    return spec
+
+
+def _list_org_specs() -> "list[dict]":
+    """Enumerate all loadable org specs, sorted by name. Broken specs are skipped."""
+    if not CC_ORGS.exists() or not _YAML_AVAILABLE:
+        return []
+    specs = []
+    for f in sorted(CC_ORGS.glob("*.yml")):
+        spec = _load_org_spec(f.stem)
+        if spec:
+            specs.append(spec)
+    return specs
+
+
+def _session_docker_org(session: str) -> "str | None":
+    """Return the org that this session's docker container runs under
+    (parsed from CC_RUNTIME=docker:<org>), or None for host-mode sessions.
+
+    NOTE: distinct from _session_org (defined later in the file) which reads
+    the CC_ORG env-file field for board partitioning. A session with
+    CC_ORG=RTG but no CC_RUNTIME is a HOST session tagged for the RTG fleet
+    — this function returns None for it; _session_org returns "RTG"."""
+    rt = _session_runtime(session)
+    if rt.startswith("docker:"):
+        return rt.split(":", 1)[1]
+    return None
+
+
+# ── Product container lifecycle (isolation Phase 2c) ────────────────────────
+# amux-org-<name> is the container that runs one product's agents. Its
+# entrypoint is tini+tail so it stays up idle; the AMUX server uses docker
+# exec to spawn tmux new-session inside for each of the org's agent
+# sessions. Lifecycle is idempotent: ensure_org_container(p) is safe to
+# call before every session start in that org — creates on first hit,
+# starts on subsequent hits, no-ops when already running.
+def _org_container_name(org: str) -> str:
+    return f"amux-org-{org}"
+
+
+def _org_container_state(org: str) -> str:
+    """Return docker inspect state ('running', 'exited', 'created', 'paused',
+    or 'missing' if the container doesn't exist)."""
+    r = subprocess.run(
+        ["docker", "inspect", "-f", "{{.State.Status}}", _org_container_name(org)],
+        capture_output=True, text=True, timeout=10,
+    )
+    if r.returncode != 0:
+        return "missing"
+    return r.stdout.strip() or "missing"
+
+
+def _ensure_session_home_dir(spec: dict, session: str) -> str:
+    """Create /opt/amux/homes/<session>/ on host if absent. Returns the path.
+    The dir is where the session's ~/.claude/ (OAuth, projects, settings) lives —
+    bind-mounted into the container at /homes/<session>/ and referenced by
+    HOME=/homes/<session> at tmux new-session time."""
+    pattern = spec.get("session_home_dir_pattern") or str(CC_SESSION_HOMES / "{session}")
+    home = Path(pattern.format(session=session))
+    home.mkdir(parents=True, exist_ok=True)
+    return str(home)
+
+
+def ensure_org_container(org: str) -> "tuple[bool, str]":
+    """Bring up amux-org-<name> if it's not already running. Idempotent.
+    Reads the org spec, materializes per-session HOMEs, and constructs the
+    docker run command with product+session bind mounts."""
+    spec = _load_org_spec(org)
+    if not spec:
+        return False, f"no valid spec at ~/.amux/orgs/{org}.yml"
+    container = _org_container_name(org)
+
+    state = _org_container_state(org)
+    if state == "running":
+        return True, "already running"
+    if state in ("exited", "created", "paused"):
+        r = subprocess.run(
+            ["docker", "start", container],
+            capture_output=True, text=True, timeout=30,
+        )
+        if r.returncode == 0:
+            return True, "restarted"
+        return False, f"docker start failed: {r.stderr.strip() or r.stdout.strip()}"
+    if state != "missing":
+        return False, f"container in unexpected state: {state}"
+
+    # Missing — create. Pre-create the shared org HOME (Claude auth lives
+    # here, shared across every session in the container by default) AND per-
+    # session HOMEs (only used when a session opts out with
+    # CC_CLAUDE_AUTH_SHARED=0). Both mounts always attach — the choice of
+    # which HOME wins is made at tmux new-session -e time.
+    product_home = CC_ORGS / org / "home"
+    try:
+        product_home.mkdir(parents=True, exist_ok=True)
+    except Exception as e:
+        return False, f"failed to prep org home {product_home}: {e}"
+    for session in spec["sessions"]:
+        try:
+            _ensure_session_home_dir(spec, session)
+        except Exception as e:
+            return False, f"failed to prep session home for {session}: {e}"
+
+    cmd = [
+        "docker", "run", "-d",
+        "--name", container,
+        "--add-host=host.docker.internal:host-gateway",
+        "--restart", "unless-stopped",
+    ]
+    # Product-spec mounts (working repos, client data)
+    for m in spec["mounts"]:
+        cmd += ["-v", f"{m['source']}:{m['target']}:{m['mode']}"]
+    # Explicit read-only cross-product mounts
+    for m in spec["readonly_cross_mounts"]:
+        cmd += ["-v", f"{m['source']}:{m['target']}:{m['mode']}"]
+    # Shared org HOME → /home/amux (the container's default user home).
+    # This is where every session's ~/.claude/ lives by default: first session
+    # to /login populates the OAuth store; every subsequent session in this
+    # container is authenticated automatically. Sessions can opt out via
+    # CC_CLAUDE_AUTH_SHARED=0 to get their own HOME (per-session isolation).
+    cmd += ["-v", f"{product_home}:/home/amux:rw"]
+    # Per-session HOMEs (opt-in isolation via CC_CLAUDE_AUTH_SHARED=0)
+    for session in spec["sessions"]:
+        host_home = spec["session_home_dir_pattern"].format(session=session)
+        cmd += ["-v", f"{host_home}:/homes/{session}:rw"]
+    # Log dir — Phase 2c uses a flat mount; Phase 9 will restructure to
+    # ~/.amux/logs/<product>/<session>.log with a per-org subdir mount.
+    cmd += ["-v", f"{CC_LOGS}:/logs:rw"]
+
+    # Seed the org's shared home with the shared MCP config on first spawn.
+    # /mnt/gitdata/amux/mcp.json is the source of truth (checked into the amux
+    # repo). Claude Code inside the container looks at ~/.claude/settings.json
+    # + ~/.claude/.mcp.json for user-level MCP servers. We copy the file into
+    # both places under the shared org home so /login isn't the only setup step.
+    # Env-var substitution (${MIXPEEK_API_KEY} etc.) resolves against the
+    # container's env — set per-org values via the spec's env: block below.
+    _shared_mcp_src = Path("/mnt/gitdata/amux/mcp.json")
+    if _shared_mcp_src.exists():
+        _org_claude = CC_ORGS / org / "home" / ".claude"
+        try:
+            _org_claude.mkdir(parents=True, exist_ok=True)
+            _mcp_target = _org_claude.parent / ".mcp.json"
+            if not _mcp_target.exists():
+                _mcp_target.write_text(_shared_mcp_src.read_text())
+            _mcp_alt = _org_claude / ".mcp.json"
+            if not _mcp_alt.exists():
+                _mcp_alt.write_text(_shared_mcp_src.read_text())
+        except Exception as _e:
+            print(f"[org-spec] {org}: mcp.json seed failed: {_e}")
+
+    # Org-level env vars pushed into every tmux new-session and available to
+    # MCP subprocesses spawned by Claude Code inside the container. Put per-org
+    # MCP credentials here: MIXPEEK_API_KEY, GDRIVE_CLIENT_ID, etc.
+    for k, v in (spec.get("env") or {}).items():
+        cmd += ["-e", f"{k}={v}"]
+    cmd.append(spec["image"])
+
+    r = subprocess.run(cmd, capture_output=True, text=True, timeout=90)
+    if r.returncode == 0:
+        return True, "created and running"
+    return False, f"docker run failed: {r.stderr.strip() or r.stdout.strip()}"
+
+
+def stop_org_container(org: str) -> "tuple[bool, str]":
+    """Stop and remove the amux-org-<name> container. Sessions inside must
+    be exited first — this does not check. Safe to call when the container is
+    already stopped or missing."""
+    container = _org_container_name(org)
+    state = _org_container_state(org)
+    if state == "missing":
+        return True, "not present"
+    r = subprocess.run(
+        ["docker", "rm", "-f", container],
+        capture_output=True, text=True, timeout=30,
+    )
+    if r.returncode == 0:
+        return True, "removed"
+    return False, f"docker rm failed: {r.stderr.strip() or r.stdout.strip()}"
+
+
 def is_running(session: str) -> bool:
     """Check if Claude is running in this session's tmux pane."""
     iterm2_id = _session_iterm2_id(session)
     if iterm2_id:
         return _iterm2_session_exists(iterm2_id)
     try:
+        # Route via _tmux_cmd so container-mode sessions ask their own
+        # container's tmux daemon. Host-mode sessions get the plain
+        # `tmux list-sessions` as before.
+        # NOTE: if the session's container isn't running, docker exec fails —
+        # treat that as "not running" (returncode != 0 → empty stdout).
         r = subprocess.run(
-            ["tmux", "list-sessions", "-F", "#{session_name}"],
+            _tmux_cmd(session, "list-sessions", "-F", "#{session_name}"),
             capture_output=True, text=True,
         )
         tmux_sess = tmux_name(session)
-        if tmux_sess not in r.stdout.splitlines():
+        if r.returncode != 0 or tmux_sess not in r.stdout.splitlines():
             return False
         # Tmux exists -- check if Claude is actually running (not at shell prompt)
         output = tmux_capture(session, 10)
@@ -1712,7 +1696,7 @@ def is_running(session: str) -> bool:
         # shell actually has a child process (Claude).
         try:
             r_pp = subprocess.run(
-                ["tmux", "list-panes", "-t", tmux_sess, "-F", "#{pane_pid}"],
+                [*_tmux_prefix(name), "list-panes", "-t", tmux_sess, "-F", "#{pane_pid}"],
                 capture_output=True, text=True, timeout=5)
             if r_pp.returncode == 0 and r_pp.stdout.strip():
                 shell_pid = r_pp.stdout.strip().split("\n")[0]
@@ -1734,7 +1718,7 @@ def tmux_capture(session: str, lines: int = 500) -> str:
         return _iterm2_capture(iterm2_id)
     try:
         r = subprocess.run(
-            ["tmux", "capture-pane", "-t", tmux_target(session), "-p", "-e", "-S", f"-{lines}"],
+            [*_tmux_prefix(session), "capture-pane", "-t", tmux_target(session), "-p", "-e", "-S", f"-{lines}"],
             capture_output=True, text=True, timeout=5,
         )
         # Strip leading/trailing blank lines so content isn't cut off
@@ -1805,7 +1789,7 @@ def _tmux_alt_screen(session: str) -> bool:
         return False
     try:
         r = subprocess.run(
-            ["tmux", "display-message", "-t", tmux_target(session), "-p", "#{alternate_on}"],
+            [*_tmux_prefix(session), "display-message", "-t", tmux_target(session), "-p", "#{alternate_on}"],
             capture_output=True, text=True, timeout=5,
         )
         return r.stdout.strip() == "1"
@@ -1961,6 +1945,18 @@ def _session_iterm2_id(name: str) -> str:
 
 def _log_path(session: str) -> Path:
     return CC_LOGS / f"{session}.log"
+
+
+def _log_path_in_runtime(session: str) -> str:
+    """Path to this session's log file as visible from inside its tmux pane.
+
+    Host runtime → the host absolute path (same as _log_path).
+    Docker runtime → /logs/<session>.log inside the container, which is bind-
+    mounted from the same host file so the server on host reads the same
+    bytes the pane writes."""
+    if _session_runtime(session).startswith("docker:"):
+        return f"/logs/{session}.log"
+    return str(_log_path(session))
 
 
 _last_log_save: dict[str, float] = {}  # session -> monotonic time of last save
@@ -2371,24 +2367,8 @@ def _session_jsonl_path_uncached(name: str):
                 continue
             if rec.get("customTitle") == name or rec.get("sessionName") == name:
                 return jf
-        # No titled match. Do NOT fall back to the newest file — in a shared
-        # workdir that's a SIBLING session's transcript bleeding into this one
-        # (e.g. a freshly-created session that has no conversation of its own
-        # yet). Exclude conversations already claimed by other amux sessions
-        # (their meta records cc_conversation_id); only return a file if exactly
-        # one plausibly-ours candidate remains, else show live-only (None).
-        owned = set()
-        try:
-            for oenv in CC_SESSIONS.glob("*.env"):
-                if oenv.stem == name:
-                    continue
-                ocid = (_load_meta(oenv.stem).get("cc_conversation_id") or "").strip()
-                if ocid:
-                    owned.add(ocid)
-        except Exception:
-            pass
-        unclaimed = [jf for jf in files if jf.stem not in owned]
-        return unclaimed[0] if len(unclaimed) == 1 else None
+        # No titled match (older Claude, or title not written yet) — best effort.
+        return files[0]
     except Exception:
         return None
 
@@ -2571,16 +2551,9 @@ def _render_session_transcript(name: str, max_chars: int = 40000) -> str:
     path = _session_jsonl_path(name)
     if not path:
         return ""
-    try:
-        st = path.stat()
-    except OSError:
-        return ""
-    cache_key = (str(path), max_chars)
-    cached = _transcript_render_cache.get(cache_key)
-    if cached and cached[0] == st.st_mtime and cached[1] == st.st_size:
-        return cached[2]
     # Read only the tail of the file — JSONL entries are much larger than their
     # rendered form, so 5x max_chars (min 5MB) is a safe overread estimate.
+    # This avoids loading 50+ MB files into memory on every peek poll.
     max_read = max(max_chars * 5, 5_000_000)
     out: list[str] = []
     for o in _iter_jsonl_tail(path, max_bytes=max_read):
@@ -2639,47 +2612,25 @@ def _render_session_transcript(name: str, max_chars: int = 40000) -> str:
                     # highlight block, near-white text — captured from a live pane
                     out.append(_USER_ECHO_ANSI(txt))
                 else:
-                    # Claude Code prefixes each assistant message with a white
-                    # ⏺ bullet and renders prose in the default fg (not dim);
-                    # continuation lines indent 2 cols under the bullet.
-                    body = _md_to_ansi(txt).replace("\n", "\n  ")
-                    out.append("\x1b[38;5;231m⏺\x1b[39m " + body + "\x1b[0m")
+                    out.append("\x1b[38;5;252m" + txt + "\x1b[0m")
                 out.append("")
             elif bt == "tool_use":
                 nm = b.get("name", "tool")
                 arg = _tool_brief(nm, b.get("input"))
-                # Claude's tool line: green ⏺ + bold ToolName + (args) in default fg
-                out.append("\x1b[38;5;114m⏺\x1b[39m \x1b[1m" + str(nm) + "\x1b[0m"
-                           + ("(" + arg + ")" if arg else ""))
+                out.append("\x1b[38;5;39m⏺ " + str(nm) + "\x1b[0m"
+                           + ("\x1b[38;5;246m " + arg + "\x1b[0m" if arg else ""))
             elif bt == "tool_result":
-                # Preserve multi-line tool output (tables, query results, logs)
-                # as indented continuation lines — matching Claude Code's own ⎿
-                # display — instead of flattening newlines into one dense run-on
-                # line, which rendered as garbled "logs" in the peek.
-                raw = _tool_result_text(b.get("content"))
-                rlines = [ln.rstrip() for ln in raw.split("\n")]
-                while rlines and not rlines[0].strip():
-                    rlines.pop(0)
-                while rlines and not rlines[-1].strip():
-                    rlines.pop()
-                if rlines:
-                    MAXL, MAXW = 6, 200
-                    for k, ln in enumerate(rlines[:MAXL]):
-                        if len(ln) > MAXW:
-                            ln = ln[:MAXW] + "…"
-                        prefix = "  ⎿  " if k == 0 else "     "
-                        out.append("\x1b[38;5;246m" + prefix + ln + "\x1b[0m")
-                    extra = len(rlines) - MAXL
-                    if extra > 0:
-                        out.append("\x1b[38;5;246m     … +" + str(extra)
-                                   + (" more lines" if extra != 1 else " more line") + "\x1b[0m")
+                s = _tool_result_text(b.get("content")).strip().replace("\n", " ")
+                if s:
+                    if len(s) > 220:
+                        s = s[:220] + "…"
+                    out.append("\x1b[38;5;240m  ⎿ " + s + "\x1b[0m")
     text = "\n".join(out).strip("\n")
     if len(text) > max_chars:
         text = text[-max_chars:]
         nl = text.find("\n")
         if nl > 0:
             text = text[nl + 1:]
-    _transcript_render_cache[cache_key] = (st.st_mtime, st.st_size, text)
     return text
 
 
@@ -2785,7 +2736,8 @@ def backup_session_jsonl(session: str, reason: str = "manual") -> str | None:
     wd = _session_work_dir_early(session)
     if not wd:
         return None
-    project_dir = CLAUDE_HOME / "projects" / _project_name(wd)
+    resolved = str(Path(wd).expanduser().resolve())
+    project_dir = CLAUDE_HOME / "projects" / resolved.replace("/", "-")
     if not project_dir.is_dir():
         return None
     jsonl_files = sorted(project_dir.glob("*.jsonl"), key=lambda f: f.stat().st_mtime, reverse=True)
@@ -2861,12 +2813,9 @@ def _yolo_auto_respond():
     # Fetch running tmux sessions once to avoid spawning a subprocess per session
     running_sessions = set()
     try:
-        r = subprocess.run(
-            ["tmux", "list-sessions", "-F", "#{session_name}"],
-            capture_output=True, text=True, timeout=5,
-        )
-        if r.returncode == 0:
-            running_sessions = set(r.stdout.splitlines())
+        # Union host tmux + running org containers so docker sessions are
+        # included in the auto-respond/rate-limit scans.
+        running_sessions = set(_tmux_info_map().keys())
     except Exception:
         return  # tmux not available, nothing to do
     for f in CC_SESSIONS.glob("*.env"):
@@ -3257,12 +3206,9 @@ def _rate_limit_auto_respond():
     now = time.time()
     running_sessions = set()
     try:
-        r = subprocess.run(
-            ["tmux", "list-sessions", "-F", "#{session_name}"],
-            capture_output=True, text=True, timeout=5,
-        )
-        if r.returncode == 0:
-            running_sessions = set(r.stdout.splitlines())
+        # Union host tmux + running org containers so docker sessions are
+        # included in the auto-respond/rate-limit scans.
+        running_sessions = set(_tmux_info_map().keys())
     except Exception:
         return  # tmux not available
     for f in CC_SESSIONS.glob("*.env"):
@@ -3436,12 +3382,9 @@ def _rate_limit_auto_resume():
 
     running_sessions = set()
     try:
-        r = subprocess.run(
-            ["tmux", "list-sessions", "-F", "#{session_name}"],
-            capture_output=True, text=True, timeout=5,
-        )
-        if r.returncode == 0:
-            running_sessions = set(r.stdout.splitlines())
+        # Union host tmux + running org containers so docker sessions are
+        # included in the auto-respond/rate-limit scans.
+        running_sessions = set(_tmux_info_map().keys())
     except Exception:
         return
 
@@ -3537,307 +3480,45 @@ def _rate_limit_loop():
 
 
 def _push_alert(alert_type: str, session: str, message: str):
-    """Enqueue an alert to be streamed to all SSE clients, and fan it out to
-    any registered Web Push subscriptions so it reaches phones even when the
-    app/tab is closed."""
+    """Enqueue an alert to be streamed to all SSE clients.
+
+    Pushover blast is suppressed for alert types listed in
+    AMUX_PUSHOVER_MUTED_ALERTS (CSV, set in ~/.amux/server.env). The SSE
+    event is always emitted so the dashboard still sees it — only the phone
+    push is filtered."""
     global _sse_alerts
     with _sse_alert_lock:
         _sse_alerts.append({"type": alert_type, "session": session, "message": message, "ts": int(time.time())})
         if len(_sse_alerts) > 50:
             _sse_alerts = _sse_alerts[-50:]
-    try:
-        # iOS notification format (no emojis): title = session, body = "<type>\n<description>"
-        _web_push_broadcast(session or "amux",
-                            _ALERT_TYPE_LABELS.get(alert_type, alert_type) + "\n" + message,
-                            session=session, tag=alert_type)
-    except Exception:
-        pass
+    muted = {t.strip() for t in os.environ.get("AMUX_PUSHOVER_MUTED_ALERTS", "").split(",") if t.strip()}
+    if alert_type in muted:
+        return
+    _send_pushover(f"amux — {alert_type}", message)
 
 
-# ── Web Push (RFC 8030/8291/8292) — background notifications to phones ────────
-# Implemented with stdlib + `cryptography` only (no pywebpush dependency), so it
-# stays inside amux's single-file model. Delivers to the browser push service
-# (Apple/Mozilla/Google) which forwards to the device even when the PWA is shut.
-# Human-readable type label shown on the notification's first body line.
-_ALERT_TYPE_LABELS = {
-    "scheduler": "schedule", "auto_restart": "auto-restart", "auto_continue": "auto-continue",
-    "auto_compact": "compact", "rate_limit_manual": "rate limit", "task_pickup": "task",
-    "steering_delivered": "steering", "uncommitted": "uncommitted", "thinking_reset": "thinking reset",
-    "urgent": "URGENT",
-}
-
-
-def _env_set(key: str, value: str):
-    """Upsert KEY=value in ~/.amux/server.env and apply it live to os.environ."""
-    lines = _server_env_file.read_text().splitlines() if _server_env_file.exists() else []
-    found = False
-    for i, l in enumerate(lines):
-        if l.startswith(key + "=") or l.startswith(key + " ="):
-            lines[i] = f"{key}={value}"; found = True; break
-    if not found:
-        lines.append(f"{key}={value}")
-    _server_env_file.parent.mkdir(parents=True, exist_ok=True)
-    _server_env_file.write_text("\n".join(lines) + "\n")
-    if value:
-        os.environ[key] = value
-    else:
-        os.environ.pop(key, None)
-
-
-def _send_sms(phone: str, text: str):
-    """Best-effort SMS to the owner. Twilio if TWILIO_* configured, else macOS
-    Messages (timeout-guarded so a permission/TCC wall can't hang the server).
-    Returns (ok, detail)."""
-    if not phone:
-        return False, "no phone configured"
-    sid = os.environ.get("TWILIO_ACCOUNT_SID", ""); tok = os.environ.get("TWILIO_AUTH_TOKEN", "")
-    frm = os.environ.get("TWILIO_FROM", "")
-    if sid and tok and frm:
+def _send_pushover(title: str, message: str, priority: int = 0) -> None:
+    """Fire-and-forget Pushover notification in a background thread."""
+    token = os.environ.get("AMUX_PUSHOVER_TOKEN", "")
+    user  = os.environ.get("AMUX_PUSHOVER_USER", "")
+    if not token or not user:
+        return
+    def _send():
         try:
             import urllib.request, urllib.parse
-            data = urllib.parse.urlencode({"From": frm, "To": phone, "Body": text}).encode()
-            req = urllib.request.Request(
-                f"https://api.twilio.com/2010-04-01/Accounts/{sid}/Messages.json",
-                data=data, method="POST",
-                headers={"Authorization": "Basic " + base64.b64encode(f"{sid}:{tok}".encode()).decode()})
-            urllib.request.urlopen(req, timeout=15).read()
-            return True, "twilio"
+            data = urllib.parse.urlencode({
+                "token":    token,
+                "user":     user,
+                "title":    title,
+                "message":  message,
+                "priority": priority,
+            }).encode()
+            urllib.request.urlopen(
+                "https://api.pushover.net/1/messages.json", data, timeout=10
+            )
         except Exception as e:
-            return False, f"twilio error: {str(e)[:120]}"
-    # macOS Messages fallback — guarded by a hard timeout (Messages scripting can
-    # block on an Automation-permission prompt).
-    try:
-        r = subprocess.run([
-            "osascript",
-            "-e", "on run {msg, ph}",
-            "-e", 'tell application "Messages"',
-            "-e", "set svc to 1st service whose service type = iMessage",
-            "-e", "send msg to participant ph of svc",
-            "-e", "end tell",
-            "-e", "end run",
-            "--", text, phone,
-        ], capture_output=True, text=True, timeout=12)
-        if r.returncode == 0:
-            return True, "imessage"
-        return False, f"imessage error: {(r.stderr or '').strip()[:100]}"
-    except subprocess.TimeoutExpired:
-        return False, "imessage timed out — grant Automation permission for Messages, or set TWILIO_* creds"
-    except Exception as e:
-        return False, f"imessage error: {str(e)[:100]}"
-
-
-_urgent_alert_last = {}  # message-hash → ts, for a light flood guard
-
-
-def _send_urgent_alert(message: str, session: str = "", reason: str = ""):
-    """Owner URGENT alert — fan out to enabled channels (in-app push + SMS).
-    Meant to be used *sparingly*; a soft 60s dedupe blocks accidental repeats."""
-    msg = (message or "").strip()
-    if not msg:
-        return {"ok": False, "error": "empty message"}
-    if reason:
-        msg = f"{msg}\n({reason})"
-    key = _hashlib.sha256((session + "|" + msg).encode()).hexdigest()[:16]
-    now = time.time()
-    if now - _urgent_alert_last.get(key, 0) < 60:
-        return {"ok": True, "deduped": True, "channels": {}, "message": msg}
-    _urgent_alert_last[key] = now
-    channels = {}
-    if os.environ.get("AMUX_URGENT_PUSH", "1") != "0":
-        try:
-            _push_alert("urgent", session or "amux", msg)
-            channels["push"] = "sent"
-        except Exception as e:
-            channels["push"] = f"error: {str(e)[:80]}"
-    phone = os.environ.get("AMUX_OWNER_PHONE", "")
-    if os.environ.get("AMUX_URGENT_SMS", "1") != "0" and phone:
-        ok, detail = _send_sms(phone, "amux URGENT: " + msg.replace("\n", " — "))
-        channels["sms"] = detail if ok else ("failed: " + detail)
-    slog(f"[urgent-alert] session={session!r} reason={reason!r} channels={channels} msg={message[:120]!r}")
-    return {"ok": True, "channels": channels, "message": msg}
-_VAPID_CACHE = None
-_VAPID_PATH = CC_HOME / "vapid_private.pem"
-_PUSH_SUBS_PRESENT = None  # None=unknown, False=confirmed empty (skip), True=have subs
-
-
-_PUSH_SSL_CTX = None
-
-
-def _push_ssl_context():
-    """SSL context for outbound calls to push services. macOS' bundled Python
-    doesn't read the system keychain, so plain urlopen fails Apple's cert with
-    'unable to get local issuer certificate' — back it with certifi's CA bundle."""
-    global _PUSH_SSL_CTX
-    if _PUSH_SSL_CTX is not None:
-        return _PUSH_SSL_CTX
-    try:
-        import certifi
-        _PUSH_SSL_CTX = ssl.create_default_context(cafile=certifi.where())
-    except Exception:
-        _PUSH_SSL_CTX = ssl.create_default_context()
-    return _PUSH_SSL_CTX
-
-
-def _b64url(data: bytes) -> str:
-    return base64.urlsafe_b64encode(data).rstrip(b"=").decode("ascii")
-
-
-def _b64url_decode(s: str) -> bytes:
-    return base64.urlsafe_b64decode(s + "=" * (-len(s) % 4))
-
-
-def _vapid_keys():
-    """Return (private_key_obj, public_key_b64url). Generated once and persisted."""
-    global _VAPID_CACHE
-    if _VAPID_CACHE:
-        return _VAPID_CACHE
-    from cryptography.hazmat.primitives.asymmetric import ec
-    from cryptography.hazmat.primitives import serialization
-    if _VAPID_PATH.exists():
-        pk = serialization.load_pem_private_key(_VAPID_PATH.read_bytes(), password=None)
-    else:
-        pk = ec.generate_private_key(ec.SECP256R1())
-        _VAPID_PATH.write_bytes(pk.private_bytes(
-            serialization.Encoding.PEM,
-            serialization.PrivateFormat.PKCS8,
-            serialization.NoEncryption()))
-        try:
-            _VAPID_PATH.chmod(0o600)
-        except Exception:
-            pass
-    pub = pk.public_key().public_bytes(
-        serialization.Encoding.X962,
-        serialization.PublicFormat.UncompressedPoint)
-    _VAPID_CACHE = (pk, _b64url(pub))
-    return _VAPID_CACHE
-
-
-def _vapid_jwt(audience: str) -> str:
-    """Signed ES256 JWT for the VAPID Authorization header."""
-    from cryptography.hazmat.primitives import hashes
-    from cryptography.hazmat.primitives.asymmetric import ec
-    from cryptography.hazmat.primitives.asymmetric.utils import decode_dss_signature
-    pk, _ = _vapid_keys()
-    sub = os.environ.get("AMUX_VAPID_SUBJECT", "mailto:amux@localhost")
-    header = _b64url(json.dumps({"alg": "ES256", "typ": "JWT"}, separators=(",", ":")).encode())
-    claims = _b64url(json.dumps(
-        {"aud": audience, "exp": int(time.time()) + 12 * 3600, "sub": sub},
-        separators=(",", ":")).encode())
-    signing_input = (header + "." + claims).encode("ascii")
-    der = pk.sign(signing_input, ec.ECDSA(hashes.SHA256()))
-    r, s = decode_dss_signature(der)
-    raw = r.to_bytes(32, "big") + s.to_bytes(32, "big")
-    return header + "." + claims + "." + _b64url(raw)
-
-
-def _encrypt_web_push(p256dh_b64: str, auth_b64: str, payload: bytes) -> bytes:
-    """Encrypt payload with aes128gcm content coding (RFC 8291). Returns the
-    full message body (salt+rs+keyid header followed by the GCM ciphertext)."""
-    from cryptography.hazmat.primitives.asymmetric import ec
-    from cryptography.hazmat.primitives import serialization, hashes
-    from cryptography.hazmat.primitives.kdf.hkdf import HKDF
-    from cryptography.hazmat.primitives.ciphers.aead import AESGCM
-
-    ua_public_bytes = _b64url_decode(p256dh_b64)
-    auth_secret = _b64url_decode(auth_b64)
-    ua_public = ec.EllipticCurvePublicKey.from_encoded_point(ec.SECP256R1(), ua_public_bytes)
-
-    as_private = ec.generate_private_key(ec.SECP256R1())
-    as_public_bytes = as_private.public_key().public_bytes(
-        serialization.Encoding.X962, serialization.PublicFormat.UncompressedPoint)
-    shared = as_private.exchange(ec.ECDH(), ua_public)
-
-    # PRK / IKM per RFC 8291 §3.4
-    key_info = b"WebPush: info\x00" + ua_public_bytes + as_public_bytes
-    ikm = HKDF(algorithm=hashes.SHA256(), length=32, salt=auth_secret, info=key_info).derive(shared)
-
-    salt = os.urandom(16)
-    cek = HKDF(algorithm=hashes.SHA256(), length=16, salt=salt,
-               info=b"Content-Encoding: aes128gcm\x00").derive(ikm)
-    nonce = HKDF(algorithm=hashes.SHA256(), length=12, salt=salt,
-                 info=b"Content-Encoding: nonce\x00").derive(ikm)
-
-    # Single record: plaintext + 0x02 delimiter (last-record marker), then GCM.
-    ciphertext = AESGCM(cek).encrypt(nonce, payload + b"\x02", None)
-    rs = (4096).to_bytes(4, "big")
-    header = salt + rs + bytes([len(as_public_bytes)]) + as_public_bytes
-    return header + ciphertext
-
-
-def _send_one_push(endpoint: str, p256dh_b64: str, auth_b64: str, payload: bytes):
-    """Send one encrypted push. Returns (status, detail). status is the HTTP code
-    (0 on transport error); detail carries the push service's error body so we can
-    surface why Apple/Mozilla/Google rejected it."""
-    import urllib.request as _ur
-    from urllib.parse import urlparse as _urlparse
-    try:
-        body = _encrypt_web_push(p256dh_b64, auth_b64, payload)
-        parts = _urlparse(endpoint)
-        aud = f"{parts.scheme}://{parts.netloc}"
-        _, vapid_pub = _vapid_keys()
-        req = _ur.Request(endpoint, data=body, method="POST", headers={
-            "TTL": "2419200",
-            "Urgency": "high",            # wake the device promptly (iOS)
-            "Content-Encoding": "aes128gcm",
-            "Content-Type": "application/octet-stream",
-            "Content-Length": str(len(body)),
-            "Authorization": f"vapid t={_vapid_jwt(aud)},k={vapid_pub}",
-        })
-    except Exception as e:
-        slog(f"[webpush] build error: {e}")
-        return 0, f"build error: {e}"
-    try:
-        with _ur.urlopen(req, timeout=10, context=_push_ssl_context()) as resp:
-            return resp.status, ""
-    except _ur.HTTPError as e:
-        detail = ""
-        try:
-            detail = e.read().decode("utf-8", "replace")[:300]
-        except Exception:
-            pass
-        slog(f"[webpush] {endpoint[:50]}… -> {e.code} {detail}")
-        return e.code, detail
-    except Exception as e:
-        slog(f"[webpush] transport error: {e}")
-        return 0, f"transport error: {e}"
-
-
-def _web_push_send_all(title: str, body: str, session: str = "", tag: str = "amux", url: str = "/"):
-    """Send synchronously to every subscription. Returns a list of per-endpoint
-    {host, status, detail} results. Prunes dead (404/410) subscriptions."""
-    global _PUSH_SUBS_PRESENT
-    from urllib.parse import urlparse as _urlparse
-    payload = json.dumps({"title": title, "body": body, "session": session, "tag": tag, "url": url}).encode()
-    try:
-        db = get_db()
-        rows = db.execute("SELECT endpoint, p256dh, auth FROM push_subscriptions").fetchall()
-    except Exception as e:
-        return [{"host": "", "status": 0, "detail": f"db error: {e}"}]
-    _PUSH_SUBS_PRESENT = len(rows) > 0
-    results = []
-    for r in rows:
-        status, detail = _send_one_push(r["endpoint"], r["p256dh"], r["auth"], payload)
-        results.append({"host": _urlparse(r["endpoint"]).netloc, "status": status, "detail": detail})
-        if status in (404, 410):
-            try:
-                db.execute("DELETE FROM push_subscriptions WHERE endpoint=?", (r["endpoint"],))
-                db.commit()
-                slog("[webpush] pruned expired subscription")
-            except Exception:
-                pass
-    return results
-
-
-def _web_push_broadcast(title: str, body: str, session: str = "", tag: str = "amux", url: str = "/"):
-    """Fan out a notification to every registered subscription (in a background
-    thread so callers never block on the network)."""
-    # Fast path: if a prior broadcast confirmed there are no subscriptions, skip
-    # spawning a thread for every alert. Reset to True on subscribe.
-    if _PUSH_SUBS_PRESENT is False:
-        return
-    threading.Thread(target=lambda: _web_push_send_all(title, body, session, tag, url), daemon=True).start()
-
-    threading.Thread(target=_run, daemon=True).start()
+            slog(f"[pushover] send failed: {e}")
+    threading.Thread(target=_send, daemon=True).start()
 
 
 def _read_jsonl_tail(filepath: Path, max_bytes: int = 5_000_000) -> list:
@@ -3895,7 +3576,8 @@ def _last_meaningful_user_message(work_dir: str) -> str:
     """Extract the last meaningful user message (>20 chars) from the session's JSONL history."""
     if not work_dir:
         return ""
-    project_dir = CLAUDE_HOME / "projects" / _project_name(work_dir)
+    resolved = str(Path(work_dir).expanduser().resolve())
+    project_dir = CLAUDE_HOME / "projects" / resolved.replace("/", "-")
     if not project_dir.is_dir():
         return ""
     jsonl_files = sorted(project_dir.glob("*.jsonl"), key=lambda f: f.stat().st_mtime, reverse=True)
@@ -3997,15 +3679,19 @@ def _at_resume_picker(clean_output: str) -> bool:
                 "⌕" in clean_output)  # ⌕ search icon in the picker
 
 
-def _at_compact_resume_prompt(clean_output: str) -> bool:
-    """Return True if Claude is showing the 'Resume from summary' compaction dialog.
+def _at_feedback_prompt(clean_output: str) -> bool:
+    """Return True if Claude Code's end-of-session feedback modal is showing.
 
-    This appears when a session's context is large and Claude Code asks whether to
-    compact before resuming. Option 1 (Resume from summary) is pre-selected.
+    Blocks the terminal on '1: Bad  2: Fine  3: Good  0: Dismiss' — auto_continue
+    can't type into it because it's a UI modal, not a text prompt. Symptom seen
+    on RTG-ActCloudPortal (2026-07-01, ~45min silent stall). We auto-dismiss
+    with '0' from the session-status sweep so headless workers don't get stuck.
     """
-    return bool(clean_output and
-                "Resume from summary" in clean_output and
-                "Resume full session" in clean_output)
+    if not clean_output:
+        return False
+    tail = "\n".join(clean_output.splitlines()[-15:])
+    return ("How is Claude doing this session?" in tail
+            and "0: Dismiss" in tail)
 
 
 def _at_shell_prompt(clean_output: str) -> bool:
@@ -4023,6 +3709,33 @@ def _at_shell_prompt(clean_output: str) -> bool:
         if re.match(r'\S+[$%]\s', ls) and "\u276f" not in ls:
             return True
     return False
+
+
+def _detect_context_exhaustion(clean_output: str) -> str | None:
+    """Detect Claude Code's terminal banners for context/token-limit exhaustion.
+
+    Both banners mean Claude has exited; the session is dead until restart.
+    Returns the matched banner text if found in the last ~30 lines, else None.
+
+    Banners observed in the wild (2026-06-24, RTG-Dispatch):
+      "CONVERSATION ENDED — TOKEN LIMIT EXCEEDED"
+      "CONTEXT WINDOW EXHAUSTED — PREVIOUS SESSION ENDED"
+    """
+    if not clean_output:
+        return None
+    # Tail-only — older occurrences in scrollback may be from a prior session
+    # whose log streamed through; we only care about the current state.
+    tail = "\n".join(clean_output.splitlines()[-30:])
+    for marker in (
+        "CONVERSATION ENDED — TOKEN LIMIT EXCEEDED",
+        "CONTEXT WINDOW EXHAUSTED — PREVIOUS SESSION ENDED",
+        # Tolerate ASCII hyphen-minus too, in case the UI ever substitutes
+        "CONVERSATION ENDED - TOKEN LIMIT EXCEEDED",
+        "CONTEXT WINDOW EXHAUSTED - PREVIOUS SESSION ENDED",
+    ):
+        if marker in tail:
+            return marker
+    return None
 
 
 _snapshot_running = False
@@ -4102,15 +3815,13 @@ def _steering_fast_tick():
 
 
 def _snapshot_all_sessions_inner():
-    # Fetch running tmux sessions once to avoid spawning a subprocess per session
-    running_sessions = set()
+    # Fetch running tmux sessions once to avoid spawning a subprocess per session.
+    # Use _tmux_info_map so container-mode sessions (in amux-org-* containers)
+    # are unioned in with host tmux — otherwise this whole monitoring loop
+    # (auto-restart, thinking-block recovery, hibernate, spinner detection,
+    # etc.) skips every docker session.
     try:
-        r = subprocess.run(
-            ["tmux", "list-sessions", "-F", "#{session_name}"],
-            capture_output=True, text=True, timeout=5,
-        )
-        if r.returncode == 0:
-            running_sessions = set(r.stdout.splitlines())
+        running_sessions = set(_tmux_info_map().keys())
     except Exception:
         return
     _HIBERNATE_IDLE_SECS = 1800  # 30 minutes
@@ -4187,25 +3898,25 @@ def _snapshot_all_sessions_inner():
             elif not _img_corrupt_error:
                 actions.pop("img_corrupt_compacted", None)
 
-            # ── 1d. Reactive: compact/resume dialog → auto-select "Resume from summary" ──
-            # When a session's context is large, CC shows an interactive dialog:
-            #   ❯ 1. Resume from summary (recommended)
-            #     2. Resume full session as-is
-            #     3. Don't ask me again
-            # Option 1 is pre-selected; pressing Enter confirms it.
-            # Guard: 120s cooldown to avoid double-firing if the dialog lingers.
-            if (_at_compact_resume_prompt(clean) and
-                    now - actions.get("last_compact_prompt", 0) > 120):
-                _ac_row2 = get_db().execute("SELECT value FROM prefs WHERE key='auto_compact_enabled'").fetchone()
-                _ac_enabled2 = (_ac_row2 is None) or (_ac_row2[0] != "0")
-                if _ac_enabled2:
-                    actions["last_compact_prompt"] = now
-                    subprocess.run(
-                        ["tmux", "send-keys", "-t", tmux_target(name), "Enter"],
-                        capture_output=True, timeout=5,
-                    )
-                    _push_alert("auto_compact", name,
-                                f"Auto-selected 'Resume from summary' for '{name}'")
+            # ── 1d. Reactive: Claude Code end-of-session feedback modal ─────
+            # "How is Claude doing this session? 1: Bad 2: Fine 3: Good 0: Dismiss"
+            # blocks the terminal for headless worker sessions — auto_continue
+            # can't type into a UI modal. Any auto_continue session that hits
+            # this modal is stuck until a human presses 0.
+            # Fix: for CC_AUTO_CONTINUE=1 sessions, send "0" to dismiss.
+            # Rate-limited to once per 60s to prevent runaway keystrokes if
+            # the detector false-positives.
+            if (_at_feedback_prompt(clean)
+                    and now - actions.get("last_feedback_dismiss", 0) > 60):
+                cfg_fb = parse_env_file(f)
+                if (cfg_fb.get("CC_AUTO_CONTINUE") in ("1", "true", "yes")
+                        and cfg_fb.get("CC_ARCHIVED") != "1"):
+                    actions["last_feedback_dismiss"] = now
+                    try:
+                        send_text(name, "0")
+                        slog(f"[feedback-dismiss] {name}: auto-dismissed feedback modal")
+                    except Exception:
+                        pass
 
             # ── 2. Reactive: thinking-block corruption → restart + replay ───
             if ("redacted_thinking" in clean and
@@ -4302,7 +4013,7 @@ def _snapshot_all_sessions_inner():
                         try:
                             tmux_sess = tmux_name(name)
                             r_pp = subprocess.run(
-                                ["tmux", "list-panes", "-t", tmux_sess, "-F", "#{pane_pid}"],
+                                [*_tmux_prefix(name), "list-panes", "-t", tmux_sess, "-F", "#{pane_pid}"],
                                 capture_output=True, text=True, timeout=5)
                             if r_pp.returncode == 0 and r_pp.stdout.strip():
                                 shell_pid = r_pp.stdout.strip().split("\n")[0]
@@ -4335,6 +4046,102 @@ def _snapshot_all_sessions_inner():
                     else:
                         pass  # rate-limited (restart < 90s ago)
 
+            # ── 4d. Silently-dead session detector (2026-06-24) ──────────────
+            # Section 4b above catches "Claude exited under tmux shell" via a
+            # pgrep on the SHELL pid, but its conditions (UI-stale heuristic,
+            # _at_shell_prompt match, rate-limit window) let real incidents
+            # slip past. Today's RTG-AzureBackup + RTG-ActCloudPortal cases
+            # both had tmux alive, scrollback noise that wasn't a shell prompt,
+            # and no live claude process — none of the existing detectors
+            # fired and the sessions sat dead for hours.
+            #
+            # This detector is intentionally broader and not status-gated:
+            # for every session whose tmux pane is alive, look for ANY
+            # `claude --name <session>` process. If none for >60s, the session
+            # is silently dead. Push alert always; auto-restart only when
+            # CC_AUTO_CONTINUE=1.
+            if running and not actions.get("restarting") and not actions.get("hibernated"):
+                cfg_d = parse_env_file(f)
+                if cfg_d.get("CC_ARCHIVED") != "1":
+                    last_seen = actions.get("last_claude_pid_seen", now)
+                    try:
+                        r_pg = subprocess.run(
+                            ["pgrep", "-f", f"claude .* --name {name}( |$)"],
+                            capture_output=True, text=True, timeout=5,
+                        )
+                        # If exit 0 with output → claude is alive (refresh last_seen)
+                        # If exit 1 (no match) → claude is dead (don't refresh)
+                        alive = bool(r_pg.stdout.strip())
+                    except Exception:
+                        alive = True  # uncertain → don't flag
+                    if alive:
+                        actions["last_claude_pid_seen"] = now
+                    else:
+                        # Only act if claude has been gone for >60s — debounces
+                        # against the brief window during legitimate auto-restart.
+                        dead_for = now - last_seen
+                        last_alert = actions.get("last_session_dead_alert", 0)
+                        if dead_for > 60 and now - last_alert > 90:
+                            actions["last_session_dead_alert"] = now
+                            _push_alert("session_dead", name,
+                                        f"'{name}' has no claude process for {int(dead_for)}s — "
+                                        f"likely died silently")
+                            slog(f"[4d] {name}: silently dead for {int(dead_for)}s")
+                            if cfg_d.get("CC_AUTO_CONTINUE") in ("1", "true", "yes"):
+                                actions["restarting"] = True
+                                actions["last_auto_restart"] = now
+                                def _do_silent_restart(sname=name, _actions=actions, _gone=int(dead_for)):
+                                    time.sleep(3)
+                                    start_session(sname)
+                                    for _w in range(30):
+                                        time.sleep(1)
+                                        _o = tmux_capture(sname, 10)
+                                        if _o and _claude_ui_visible(_o):
+                                            break
+                                    _actions.pop("restarting", None)
+                                    _actions["last_claude_pid_seen"] = int(time.time())
+                                    slog(f"[4d] {sname}: restarted after {_gone}s silent death")
+                                threading.Thread(target=_do_silent_restart, daemon=True).start()
+                                _push_alert("auto_restart", name,
+                                            f"'{name}' auto-restarted after silent death ({int(dead_for)}s)")
+
+            # ── 4c. Context / token-limit exhaustion — Claude printed the hard-stop banner
+            # "CONVERSATION ENDED — TOKEN LIMIT EXCEEDED" or
+            # "CONTEXT WINDOW EXHAUSTED — PREVIOUS SESSION ENDED" means Claude
+            # has exited and the session is dead until restarted. The session's
+            # next scheduled tick will silently no-op until we restart.
+            #
+            # Push the alert ALWAYS. Auto-restart only when the session explicitly
+            # opts in via CC_AUTO_RESTART_ON_CTX_LIMIT=1 — for stateless schedule
+            # consumers like dispatchers/watchdogs this is safe (each wake is a
+            # fresh prompt). For long-context interactive sessions it would just
+            # blow away the conversation, so default OFF.
+            ctx_banner = _detect_context_exhaustion(clean)
+            if ctx_banner and not actions.get("restarting"):
+                cfg_ctx = parse_env_file(f)
+                last_ctx_alert = actions.get("last_ctx_exhaust_alert", 0)
+                # Throttle to one alert / one restart attempt per 90s per session.
+                if now - last_ctx_alert > 90 and cfg_ctx.get("CC_ARCHIVED") != "1":
+                    actions["last_ctx_exhaust_alert"] = now
+                    _push_alert("context_exhausted", name,
+                                f"'{name}': {ctx_banner} — session is dead until restart")
+                    slog(f"[4c] {name}: context-exhaust banner detected: {ctx_banner}")
+                    if cfg_ctx.get("CC_AUTO_RESTART_ON_CTX_LIMIT") in ("1", "true", "yes"):
+                        actions["restarting"] = True
+                        def _do_ctx_restart(sname=name, _actions=actions, _banner=ctx_banner):
+                            time.sleep(3)
+                            start_session(sname)
+                            for _w in range(30):
+                                time.sleep(1)
+                                _o = tmux_capture(sname, 10)
+                                if _o and _claude_ui_visible(_o):
+                                    break
+                            _actions.pop("restarting", None)
+                            slog(f"[4c] {sname}: restarted after context exhaustion ({_banner})")
+                        threading.Thread(target=_do_ctx_restart, daemon=True).start()
+                        _push_alert("auto_restart", name,
+                                    f"'{name}' auto-restarted after context exhaustion ({ctx_banner[:40]})")
+
             # ── 5. Stale process reaper: restart idle sessions with old Claude processes
             # Claude processes lose their API connection after ~2 days but stay running.
             # Sends succeed (tmux delivers text) but Claude never processes them.
@@ -4345,7 +4152,7 @@ def _snapshot_all_sessions_inner():
                     actions["last_stale_check"] = now
                     try:
                         tmux_sess = tmux_name(name)
-                        r = subprocess.run(["tmux", "list-panes", "-t", tmux_sess, "-F", "#{pane_pid}"],
+                        r = subprocess.run([*_tmux_prefix(name), "list-panes", "-t", tmux_sess, "-F", "#{pane_pid}"],
                                            capture_output=True, text=True, timeout=5)
                         if r.returncode == 0 and r.stdout.strip():
                             shell_pid = r.stdout.strip().split("\n")[0]
@@ -4365,24 +4172,45 @@ def _snapshot_all_sessions_inner():
                                     elif len(_parts) == 4: elapsed_secs = _parts[0]*86400 + _parts[1]*3600 + _parts[2]*60 + _parts[3]
                                     else: elapsed_secs = 0
                                     if elapsed_secs > 48 * 3600:  # > 48 hours
-                                        last_restart = actions.get("last_auto_restart", 0)
-                                        if now - last_restart > 300:
-                                            actions["restarting"] = True
-                                            actions["last_auto_restart"] = now
-                                            def _do_stale_restart(sname=name, _actions=actions, _age=elapsed_secs):
-                                                _hard_kill_claude(sname)
-                                                time.sleep(3)
-                                                start_session(sname)
-                                                for _w in range(30):
-                                                    time.sleep(1)
-                                                    _o = tmux_capture(sname, 10)
-                                                    if _o and _claude_ui_visible(_o):
-                                                        break
-                                                _actions.pop("restarting", None)
-                                            threading.Thread(target=_do_stale_restart, daemon=True).start()
-                                            _push_alert("auto_restart", name,
-                                                        f"Recycled stale session '{name}' — Claude process was "
-                                                        f"{elapsed_secs // 3600}h old")
+                                        # WHY: skip if session was active within the last hour —
+                                        # a session mid-task briefly looks idle between tool calls.
+                                        # BREAKS IF BYPASSED: restarts sessions while agents are working.
+                                        last_alive = actions.get("last_claude_alive", 0)
+                                        if last_alive and now - last_alive < 3600:
+                                            pass  # recently active — skip this cycle
+                                        else:
+                                            last_restart = actions.get("last_auto_restart", 0)
+                                            if now - last_restart > 300:
+                                                actions["restarting"] = True
+                                                actions["last_auto_restart"] = now
+                                                def _do_stale_restart(sname=name, _actions=actions, _age=elapsed_secs):
+                                                    # WHY: capture live UUID before killing so start_session
+                                                    # can resume the exact conversation via --resume <uuid>.
+                                                    # BREAKS IF BYPASSED: loses conversation on stale recycle
+                                                    # when multiple sessions share the same name.
+                                                    try:
+                                                        _cfg = parse_env_file(CC_SESSIONS / f"{sname}.env")
+                                                        _wdir = str(Path(_cfg.get("CC_DIR", str(Path.home()))).expanduser().resolve())
+                                                        _cid = _live_conv_id(sname, _wdir)
+                                                        if _cid:
+                                                            _m = _load_meta(sname)
+                                                            _m["cc_conversation_id"] = _cid
+                                                            _save_meta(sname, _m)
+                                                    except Exception:
+                                                        pass
+                                                    _hard_kill_claude(sname)
+                                                    time.sleep(3)
+                                                    start_session(sname)
+                                                    for _w in range(30):
+                                                        time.sleep(1)
+                                                        _o = tmux_capture(sname, 10)
+                                                        if _o and _claude_ui_visible(_o):
+                                                            break
+                                                    _actions.pop("restarting", None)
+                                                threading.Thread(target=_do_stale_restart, daemon=True).start()
+                                                _push_alert("auto_restart", name,
+                                                            f"Recycled stale session '{name}' — Claude process was "
+                                                            f"{elapsed_secs // 3600}h old")
                     except Exception:
                         pass
 
@@ -4605,7 +4433,7 @@ def get_claude_stats(work_dir: str) -> dict:
     if not work_dir:
         return {"tokens": 0, "last_active": ""}
     # Map dir path to Claude project directory name
-    project_name = _project_name(work_dir)
+    project_name = work_dir.replace("/", "-")
     project_dir = CLAUDE_HOME / "projects" / project_name
     if not project_dir.is_dir():
         return {"tokens": 0, "last_active": ""}
@@ -4640,7 +4468,8 @@ def detect_active_model(work_dir: str, conversation_id: str = "") -> str:
     """Detect the model in use from the session's own JSONL conversation file."""
     if not work_dir:
         return ""
-    project_name = _project_name(work_dir)
+    resolved = str(Path(work_dir).expanduser().resolve())
+    project_name = resolved.replace("/", "-")
     project_dir = CLAUDE_HOME / "projects" / project_name
     if not project_dir.is_dir():
         return ""
@@ -4799,7 +4628,59 @@ CREATE TABLE IF NOT EXISTS tasks (
     created     INTEGER NOT NULL,
     updated     INTEGER NOT NULL
 );
-CREATE INDEX IF NOT EXISTS idx_tasks_session ON tasks(session);
+-- after the migration runs. See the ALTER statements in _init_db().
+-- Threads + messages — the successor to the questions table. A thread is a
+-- conversation (T-N); a message is one entry within it (M-N). Old model
+-- muddled the two: each questions row held a question and its answer on the
+-- same row. In the new model every entry is its own message, and threads are
+-- just the group. The questions table stays in place for now as read-only
+-- history — see Phase 2 for a per-item "Move to Threads" migration.
+CREATE TABLE IF NOT EXISTS threads (
+    id            TEXT PRIMARY KEY,
+    title         TEXT NOT NULL,
+    starred       INTEGER NOT NULL DEFAULT 0,
+    created       INTEGER NOT NULL,
+    updated       INTEGER NOT NULL,
+    discarded     INTEGER NOT NULL DEFAULT 0
+);
+CREATE INDEX IF NOT EXISTS idx_threads_updated ON threads(updated DESC);
+-- One row per message. Every message belongs to exactly one thread via
+-- thread_id. parent_id is the specific message this one replies to (empty
+-- for the first message in a thread); the renderer stays flat for now, but
+-- the pointer is preserved so we can add reply-chain indentation later.
+--   from_session : who sent it. '' means Jeremy.
+--   to_session   : who should reply. '' means Jeremy owes the next move.
+-- Status flow:
+--   working  → partial content, sender still writing (agents stream partial replies here)
+--   complete → delivered
+--   discarded → dropped
+-- `read` is orthogonal to status — flips to 1 when the recipient opens it.
+-- kind='choice' + options JSON drives AskUserQuestion-style dialogs; set_id
+-- groups a batch posted together.
+CREATE TABLE IF NOT EXISTS messages (
+    id            TEXT PRIMARY KEY,
+    thread_id     TEXT NOT NULL,
+    parent_id     TEXT NOT NULL DEFAULT '',
+    from_session  TEXT NOT NULL DEFAULT '',
+    to_session    TEXT NOT NULL DEFAULT '',
+    body          TEXT NOT NULL DEFAULT '',
+    blocking      INTEGER NOT NULL DEFAULT 0,
+    status        TEXT NOT NULL DEFAULT 'complete',
+    read          INTEGER NOT NULL DEFAULT 0,
+    kind          TEXT NOT NULL DEFAULT 'text',
+    options       TEXT NOT NULL DEFAULT '',
+    multi_select  INTEGER NOT NULL DEFAULT 0,
+    position      INTEGER NOT NULL DEFAULT 0,
+    set_id        TEXT NOT NULL DEFAULT '',
+    flagged       INTEGER NOT NULL DEFAULT 0,
+    created       INTEGER NOT NULL,
+    updated       INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_messages_thread  ON messages(thread_id, position, created);
+CREATE INDEX IF NOT EXISTS idx_messages_parent  ON messages(parent_id);
+CREATE INDEX IF NOT EXISTS idx_messages_from    ON messages(from_session);
+CREATE INDEX IF NOT EXISTS idx_messages_to      ON messages(to_session);
+CREATE INDEX IF NOT EXISTS idx_messages_set     ON messages(set_id);
 CREATE TABLE IF NOT EXISTS schedules (
     id          TEXT PRIMARY KEY,
     title       TEXT NOT NULL,
@@ -4839,13 +4720,23 @@ CREATE TABLE IF NOT EXISTS prefs (
     key   TEXT PRIMARY KEY,
     value TEXT NOT NULL
 );
-CREATE TABLE IF NOT EXISTS push_subscriptions (
-    endpoint TEXT PRIMARY KEY,
-    p256dh   TEXT NOT NULL,
-    auth     TEXT NOT NULL,
-    ua       TEXT,
-    created  INTEGER NOT NULL
+-- Workflow runs — Python workflow modules under /mnt/gitdata/amux/workflows/
+-- are deterministic multi-step choreographies (see AH-workflows, 2026-07-04).
+-- Each invocation logs its inputs, outputs, per-step events, and duration
+-- so we can inspect a run after the fact and answer questions like
+-- "why did this auto-adjudicate as stale-cascade?".
+CREATE TABLE IF NOT EXISTS workflow_runs (
+    id          TEXT PRIMARY KEY,
+    name        TEXT NOT NULL,
+    ctx_in      TEXT NOT NULL DEFAULT '{}',
+    result      TEXT NOT NULL DEFAULT '{}',
+    events      TEXT NOT NULL DEFAULT '[]',
+    status      TEXT NOT NULL DEFAULT 'running',    -- running | ok | error
+    error       TEXT NOT NULL DEFAULT '',
+    started_at  INTEGER NOT NULL,
+    finished_at INTEGER
 );
+CREATE INDEX IF NOT EXISTS idx_workflow_runs_name ON workflow_runs(name, started_at DESC);
 CREATE TABLE IF NOT EXISTS logs (
     id       INTEGER PRIMARY KEY AUTOINCREMENT,
     ts       INTEGER NOT NULL,
@@ -5179,11 +5070,17 @@ def _ensure_no_native_artifacts():
         print(f"[artifact-block] failed to write settings.json: {e}", flush=True)
 
 
-def _auto_trust_dir(work_dir: str):
-    """Pre-trust a directory in ~/.claude.json so Claude doesn't show the folder trust dialog."""
+def _auto_trust_dir(work_dir: str, home_dir: "str | None" = None):
+    """Pre-trust a directory in <home>/.claude.json so Claude doesn't show the
+    folder trust dialog. home_dir defaults to the server's own $HOME (host-mode
+    sessions). For container-mode sessions, callers pass the org's shared home
+    (e.g. ~/.amux/orgs/RTG/home) so the trust entry lands where the container's
+    Claude Code will actually read it."""
     import json as _json
     import pathlib as _pathlib
-    claude_json = _pathlib.Path.home() / ".claude.json"
+    base = _pathlib.Path(home_dir) if home_dir else _pathlib.Path.home()
+    base.mkdir(parents=True, exist_ok=True)
+    claude_json = base / ".claude.json"
     try:
         cfg = _json.loads(claude_json.read_text()) if claude_json.exists() else {}
     except Exception:
@@ -5200,16 +5097,12 @@ def _sync_skills_and_cli():
     """Sync skills to ~/.claude/commands/ and install the amux CLI stub (once at startup)."""
     import pathlib as _pathlib
     # ── ~/.claude/commands/ — skills as slash commands ────────────────────────
+    # Sync all skills from SQLite. Targets host commands dir + each product's
+    # shared home so container sessions get the same /skill-name library.
+    # (Full logic in _sync_skills_to_commands — this per-start call keeps
+    # skills fresh even if the API-side sync missed a org home.)
     try:
-        commands_dir = _pathlib.Path.home() / ".claude" / "commands"
-        commands_dir.mkdir(parents=True, exist_ok=True)
-        db = get_db()
-        rows = db.execute("SELECT name, content FROM skills").fetchall()
-        for row in rows:
-            try:
-                (commands_dir / (row["name"] + ".md")).write_text(row["content"])
-            except Exception:
-                pass
+        _sync_skills_to_commands()
     except Exception:
         pass
 
@@ -5224,14 +5117,7 @@ case "$cmd" in
     sub="$1"; shift 2>/dev/null || true
     case "$sub" in
       done|doing|todo|backlog|review|verified|discarded)
-        # The server enforces per-status gates: a move into a gated status returns
-        # 409 unless acknowledged. Surface that gate to the agent so it can satisfy
-        # the criteria; pass --force to override (same escape hatch as the UI).
-        force=""; ids=""
-        for a in "$@"; do
-          if [ "$a" = "--force" ]; then force=",\"force\":true"; else ids="$ids $a"; fi
-        done
-        for id in $ids; do
+        for id in "$@"; do
           curl -sk -X PATCH -H 'Content-Type: application/json' \
             -d "{\"status\":\"$sub\"$force}" "$AMUX_URL/api/board/$id" | python3 -c "
 import json,sys
@@ -5318,6 +5204,96 @@ if not cs: print('No contacts yet')
 for c in cs: print(c.get('id',''),c.get('name',''),c.get('company',''))" ;;
       *) echo "amux crm: unknown subcommand: $sub" >&2; exit 1 ;;
     esac ;;
+  threads)
+    sub="$1"; shift 2>/dev/null || true
+    case "$sub" in
+      reply)
+        # amux threads reply <parent_mid> [body]     — final reply
+        # amux threads reply --partial <parent_mid> [body]  — start streaming; prints new M-id
+        # Body can come from $2 or from stdin (piping).
+        partial=false
+        if [ "$1" = "--partial" ]; then partial=true; shift 2>/dev/null || true; fi
+        pmid="$1"; shift 2>/dev/null || true
+        if [ -z "$pmid" ]; then echo "Usage: amux threads reply [--partial] <parent_mid> [body]" >&2; exit 1; fi
+        body="$*"
+        if [ -z "$body" ] && [ ! -t 0 ]; then body=$(cat); fi
+        # Resolve the parent's thread_id via the API.
+        tid=$(curl -sk "$AMUX_URL/api/messages/$pmid" | python3 -c "import json,sys; d=json.load(sys.stdin); print(d.get('thread_id') or '')")
+        if [ -z "$tid" ]; then echo "amux threads reply: parent $pmid not found" >&2; exit 1; fi
+        payload=$(python3 -c "
+import json,sys
+print(json.dumps({'body':sys.argv[1],'parent_id':sys.argv[2],'partial':sys.argv[3]=='true'}))" "$body" "$pmid" "$partial")
+        curl -sk -X POST -H 'Content-Type: application/json' \
+          -H "X-Amux-Session: ${AMUX_SESSION:-}" \
+          -d "$payload" "$AMUX_URL/api/threads/$tid/messages" | python3 -c "
+import json,sys; d=json.load(sys.stdin)
+print(d.get('id','error: '+str(d.get('error','?'))))" ;;
+      finalize|patch)
+        # amux threads finalize <mid> [body]  — mark a working message complete
+        mid="$1"; shift 2>/dev/null || true
+        if [ -z "$mid" ]; then echo "Usage: amux threads finalize <mid> [body]" >&2; exit 1; fi
+        body="$*"
+        if [ -z "$body" ] && [ ! -t 0 ]; then body=$(cat); fi
+        payload=$(python3 -c "
+import json,sys; print(json.dumps({'body':sys.argv[1]}))" "$body")
+        curl -sk -X PATCH -H 'Content-Type: application/json' \
+          -d "$payload" "$AMUX_URL/api/messages/$mid" | python3 -c "
+import json,sys; d=json.load(sys.stdin)
+print(d.get('id','error: '+str(d.get('error','?'))),d.get('status',''))" ;;
+      new)
+        # amux threads new <session> <title> [body]  — start a new thread with an agent
+        target="$1"; title="$2"; shift 2 2>/dev/null || true
+        if [ -z "$target" ] || [ -z "$title" ]; then
+          echo "Usage: amux threads new <session> <title> [body]" >&2; exit 1
+        fi
+        body="$*"
+        if [ -z "$body" ] && [ ! -t 0 ]; then body=$(cat); fi
+        payload=$(python3 -c "
+import json,sys; print(json.dumps({'title':sys.argv[1],'body':sys.argv[2],'to_session':sys.argv[3]}))" "$title" "$body" "$target")
+        curl -sk -X POST -H 'Content-Type: application/json' \
+          -d "$payload" "$AMUX_URL/api/threads" | python3 -c "
+import json,sys; d=json.load(sys.stdin)
+print(d.get('id','error: '+str(d.get('error','?'))))" ;;
+      list|ls|"")
+        curl -sk "$AMUX_URL/api/threads" | python3 -c "
+import json,sys
+for t in json.load(sys.stdin):
+    unread=sum(1 for m in t['messages'] if not m['to_session'] and not m['read'] and m['status']=='complete')
+    tag='UNREAD' if unread else '     '
+    print(t['id'],tag,'msgs='+str(len(t['messages'])),'-',t['title'])" ;;
+      show)
+        tid="$1"; shift 2>/dev/null || true
+        if [ -z "$tid" ]; then echo "Usage: amux threads show <T-N>" >&2; exit 1; fi
+        curl -sk "$AMUX_URL/api/threads/$tid" | python3 -c "
+import json,sys
+d=json.load(sys.stdin)
+if 'error' in d: print('error:',d['error']); sys.exit(1)
+print(d['id'],'-',d['title'])
+print()
+for m in d['messages']:
+    who=(m['from_session'] or 'Jeremy')+' → '+(m['to_session'] or 'Jeremy')
+    tag=('★' if m.get('flagged') else ' ')+(' unread' if not m['to_session'] and not m['read'] and m['status']=='complete' else '')
+    print(f\"{m['id']:>6s}  [{m['status']:>8s}]{tag}  {who}\")
+    if m['body']: print('    '+m['body'][:200].replace(chr(10),chr(10)+'    '))
+    print()" ;;
+      flag|unflag)
+        mid="$1"
+        if [ -z "$mid" ]; then echo "Usage: amux threads $sub <M-N>" >&2; exit 1; fi
+        val=$([ "$sub" = "flag" ] && echo "true" || echo "false")
+        curl -sk -X PATCH -H 'Content-Type: application/json' \
+          -d "{\"flagged\":$val}" "$AMUX_URL/api/messages/$mid" | python3 -c "
+import json,sys; d=json.load(sys.stdin)
+print(d.get('id','error'),'flagged=',d.get('flagged',0))" ;;
+      read)
+        mid="$1"
+        if [ -z "$mid" ]; then echo "Usage: amux threads read <M-N>" >&2; exit 1; fi
+        curl -sk -X PATCH -H 'Content-Type: application/json' \
+          -d '{"read":true}' "$AMUX_URL/api/messages/$mid" >/dev/null
+        echo "read $mid" ;;
+      *) echo "amux threads: unknown subcommand: $sub" >&2
+         echo "  try: reply | finalize | new | list | show | flag | unflag | read" >&2
+         exit 1 ;;
+    esac ;;
   restart)
     session="$1"
     if [ -z "$session" ]; then echo "Usage: amux restart <session>" >&2; exit 1; fi
@@ -5353,6 +5329,14 @@ for s in json.load(sys.stdin): print(s['name'], '(running)' if s.get('running') 
     echo "amux crm log <PPL-id> <notes>           — log an interaction"
     echo "amux crm followups                      — show upcoming follow-ups"
     echo "amux crm list                           — list all contacts"
+    echo "amux threads reply <M-N> \"<body>\"      — reply to a message in a thread"
+    echo "amux threads reply --partial <M-N> \"<body>\" — start a streaming reply; prints new M-id"
+    echo "amux threads finalize <M-N> \"<body>\"   — finalize a streaming reply"
+    echo "amux threads new <session> <title> [body] — start a new thread with an agent"
+    echo "amux threads show <T-N>                 — show a thread with all messages"
+    echo "amux threads list                       — list active threads"
+    echo "amux threads flag|unflag <M-N>          — flag/unflag a message"
+    echo "amux threads read <M-N>                 — mark a message read"
     echo "amux sessions                           — list sessions"
     echo "amux restart <session>                  — stop and restart a session"
     echo "amux share <session> [perms]            — create a public share link (perms: output, output+files, output+files+notes)"
@@ -5369,10 +5353,13 @@ esac
         pass  # may not have write permission on local dev machines
 
 
-def _auto_trust_codex_dir(work_dir: str):
-    """Pre-trust a directory in ~/.codex/config.toml so Codex starts noninteractively."""
+def _auto_trust_codex_dir(work_dir: str, home_dir: "str | None" = None):
+    """Pre-trust a directory in <home>/.codex/config.toml so Codex starts noninteractively.
+    home_dir defaults to the server's own $HOME; for container-mode Codex sessions,
+    pass the org's shared home (e.g. ~/.amux/orgs/RTG/home)."""
     try:
-        config_file = Path.home() / ".codex" / "config.toml"
+        base = Path(home_dir) if home_dir else Path.home()
+        config_file = base / ".codex" / "config.toml"
         config_file.parent.mkdir(parents=True, exist_ok=True)
         text = config_file.read_text() if config_file.exists() else ""
         header = f"[projects.{json.dumps(work_dir)}]"
@@ -5387,18 +5374,41 @@ def _auto_trust_codex_dir(work_dir: str):
 
 
 def _sync_skills_to_commands():
-    """Write a single skill to ~/.claude/commands/ after save."""
+    """Write all skills as slash commands.
+
+    Targets: host ~/.claude/commands/ (for host-mode sessions) PLUS every
+    org's shared home commands dir (for container sessions). A CD-*
+    agent that adds a new skill via /api/skills triggers this sync; the
+    next time any session in any container (or on host) starts, it sees
+    the new /skill-name available.
+
+    Deletions: if a skill row was removed from SQL, this function does NOT
+    delete the corresponding .md — that's handled by the delete-skill API
+    endpoint via a separate call. Renames rely on the API removing the old
+    file. This function is purely an additive/overwrite sync of what's in
+    SQL right now."""
     try:
-        import pathlib as _p
-        commands_dir = _p.Path.home() / ".claude" / "commands"
-        commands_dir.mkdir(parents=True, exist_ok=True)
         db = get_db()
         rows = db.execute("SELECT name, content FROM skills").fetchall()
-        for row in rows:
+        # Host commands dir + one per org shared home
+        targets = [Path.home() / ".claude" / "commands"]
+        try:
+            for spec in _list_org_specs():
+                targets.append(CC_ORGS / spec["name"] / "home" / ".claude" / "commands")
+        except Exception:
+            pass
+        for tgt in targets:
             try:
-                (commands_dir / (row["name"] + ".md")).write_text(row["content"])
+                tgt.mkdir(parents=True, exist_ok=True)
+                for row in rows:
+                    try:
+                        (tgt / (row["name"] + ".md")).write_text(row["content"])
+                    except Exception:
+                        pass
             except Exception:
-                pass
+                # One target failing (e.g. org home not yet created) must
+                # not stop the others.
+                continue
     except Exception:
         pass
 
@@ -5493,6 +5503,12 @@ def _get_slash_commands():
 def _init_db():
     """Create SQLite tables if they don't exist."""
     db = get_db()
+    # Retired module: the questions table was replaced by threads+messages in
+    # July 2026. Jeremy migrated all live threads via Move-to-Threads then
+    # asked to drop the legacy module. A backup lives at
+    # ~/.amux/amux.db.pre-questions-drop.<ts>.
+    db.execute("DROP TABLE IF EXISTS questions")
+    db.commit()
     db.executescript(_DB_SCHEMA)
     # Ensure built-in statuses have correct positions (idempotent for existing DBs)
     for pos, (sid, label) in enumerate([
@@ -5521,7 +5537,6 @@ def _init_db():
         "ALTER TABLE schedules ADD COLUMN watch_timeout INTEGER NOT NULL DEFAULT 120",
         "ALTER TABLE schedules ADD COLUMN done_pattern TEXT",
         "ALTER TABLE schedules ADD COLUMN done_action TEXT NOT NULL DEFAULT 'disable'",
-        "ALTER TABLE schedules ADD COLUMN gcal_event_id TEXT",
         # Event triggers: wake a schedule's session when something changes (closed-loop
         # orchestration), in addition to (not instead of) the cron schedule_expr heartbeat.
         # trigger_on is a comma-separated set of event names (e.g. 'session_idle,board').
@@ -5534,6 +5549,10 @@ def _init_db():
         "ALTER TABLE graph_nodes ADD COLUMN source_path TEXT NOT NULL DEFAULT ''",
         "ALTER TABLE issues ADD COLUMN gcal_event_id TEXT",
         "ALTER TABLE issues ADD COLUMN pos REAL NOT NULL DEFAULT 0",
+        # org partitions the board between agent fleets (RTG/Ember/Cypra/...).
+        # Set from the assigned session's CC_ORG at create/assign; filterable
+        # via GET /api/board?org=X so each org's Dispatch only sees its own items.
+        "ALTER TABLE issues ADD COLUMN org TEXT",
         "ALTER TABLE issues ADD COLUMN notified INTEGER NOT NULL DEFAULT 0",
         "ALTER TABLE schedules ADD COLUMN kind TEXT NOT NULL DEFAULT 'tmux'",
         "ALTER TABLE saved_messages ADD COLUMN session TEXT NOT NULL DEFAULT ''",
@@ -5545,17 +5564,6 @@ def _init_db():
             db.commit()
         except Exception:
             pass  # column already exists
-    for _sid, _items in {
-        "doing":    ["Scope & acceptance criteria are clear", "No blocking dependency", "Has an owner"],
-        "review":   ["Implemented and self-tested", "Diff / PR is up", "Ready for another set of eyes"],
-        "done":     ["Implemented and merged", "Tests / lint pass"],
-        "verified": ["CI/CD green (incl. e2e)", "Deployed to prod", "Confirmed working in prod", "Zero regressions"],
-    }.items():
-        try:
-            db.execute("UPDATE statuses SET gate=? WHERE id=? AND (gate IS NULL OR gate='')", (json.dumps(_items), _sid))
-        except Exception:
-            pass
-    db.commit()
     _load_steering_from_db()
     # One-time migration: import existing flat skill files into SQLite
     skills_dir = CC_HOME / "skills"
@@ -5777,7 +5785,7 @@ def _report_fetch_mixpeek_ops_all(cfg):
 
 
 def _report_fetch_posthog_all(cfg):
-    """Fetch PostHog product analytics from the Mixpeek ops server.
+    """Fetch PostHog org analytics from the Mixpeek ops server.
 
     Returns {metric_id: {name, monthly, weekly, daily, error}} where each
     metric contains user/event counts (not dollar amounts).
@@ -5968,42 +5976,20 @@ def _session_instructions(name: str) -> str:
     return (_load_meta(name).get("instructions") or "").strip()
 
 
-_VAGUE_INPUTS = {
-    "continue", "cont", "go", "ok", "okay", "yes", "yeah", "yep", "yup", "no",
-    "done", "hi", "hello", "hey", "thanks", "thank you", "great", "good", "nice",
-    "sure", "proceed", "next", "more", "again", "retry", "stop", "wait", "do it",
-    "sounds good", "looks good", "perfect", "lgtm", "go ahead", "keep going",
-}
-
 def _summarize_task_bg(session_name: str, text: str):
-    """Summarize a message into a 3-word task label via `claude -p`, then auto-create a board issue.
-    For vague one-word inputs (continue, yeah, etc.) supplements with recent terminal output."""
+    """Call Claude Haiku in a background thread to summarize a message into a 3-word task label,
+    then auto-create a board issue for the session."""
     def _run():
         try:
-            # Strip timestamp prefix like "[03:47 PM] " before checking vagueness
-            stripped = re.sub(r'^\[.*?\]\s*', '', text).strip().lower().rstrip(".")
-            is_vague = stripped in _VAGUE_INPUTS or len(stripped) <= 4
-            if is_vague:
-                # Pull last 25 lines of terminal output for real context
-                raw = tmux_capture(session_name, 50)
-                clean = re.sub(r'\x1b\[[0-9;]*[mK]', '', raw)
-                ctx_lines = [l.strip() for l in clean.splitlines() if l.strip()
-                             and not l.strip().startswith('─') and '❯' not in l][-20:]
-                context = " ".join(ctx_lines)[:600]
-                prompt = f"Based on this terminal output, summarize what task is being worked on in 3 words: {context}"
-            else:
-                prompt = f"Summarize this task in 3 words: {text[:400]}"
-            result = subprocess.run(
-                [
-                    "claude", "-p",
-                    "--model", "haiku",
-                    "--system-prompt", "You are a task labeler. Output ONLY 3 words in title case. No punctuation, no explanation.",
-                    "--no-session-persistence",
-                    prompt,
-                ],
-                capture_output=True, text=True, timeout=60,
+            import anthropic
+            client = anthropic.Anthropic()
+            msg = client.messages.create(
+                model="claude-haiku-4-5-20251001",
+                max_tokens=20,
+                messages=[{"role": "user", "content":
+                    f"Summarize this task in 3 words or fewer (title case, no punctuation): {text[:500]}"}],
             )
-            summary = result.stdout.strip().rstrip(".") if result.returncode == 0 else ""
+            summary = msg.content[0].text.strip().rstrip(".")
             if summary:
                 _update_meta(session_name, task_summary=summary)
                 _auto_create_board_issue(session_name, summary, text)
@@ -6087,19 +6073,24 @@ def _session_board_issue_id(session_name: str) -> str | None:
 
 
 def _complete_session_board_issue(session_name: str):
-    """DISABLED (2026-07-02) — this used to move a session's 'doing' board issues
-    to 'done' whenever the session went idle or was stopped. That corrupts the
-    ledger: a session goes idle after EVERY turn (and can be stopped mid-task),
-    which is NOT the same as the work being done. It silently reverted in-flight
-    items to 'done' (BACKE-2459/2461/2462 incident) — and done != implemented/
-    verified, so a false 'done' can make someone skip a live prod step
-    (BACKE-2462 was a scheduled prod-quiesce change).
+    """DISABLED — permanently a no-op.
 
-    A move to 'done' must be a deliberate act by whoever did the work, never an
-    automatic side effect of a session's run-state. This is now a no-op; board
-    items only transition to 'done' via an explicit PATCH. All existing callers
-    are intentionally left as harmless no-ops.
-    """
+    Original (2026-06-12): this used to move a session's open board items to
+    'done' whenever the session went idle or exited. An idle transition is NOT
+    evidence of work — it marked never-touched items done (RA-514/516/517/518/
+    520, RR-311, AW-1 had zero corresponding commits) and, combined with
+    auto-pickup, formed a loop that churned the whole queue to fictional 'done'.
+
+    Reinforced (upstream e2447bb, 2026-07-02, BACKE-2459/2461/2462): a session
+    goes idle after every turn and can be stopped mid-task. A false 'done' can
+    make someone skip a live prod step (BACKE-2462 was a scheduled prod-quiesce
+    change).
+
+    Rule: 'done' must be a deliberate act by whoever did the work, never an
+    automatic side effect. Status only changes when an agent or Jeremy PATCHes
+    the item itself. Sessions idling with open items are handled by the
+    watchdog/commit-guard, not by silent completion. All existing callers are
+    intentionally left as harmless no-ops."""
     return
 
 
@@ -6116,22 +6107,35 @@ def _pickup_next_board_task(session_name: str):
     a mid-implementation todo was re-picked and a 06:00Z prod item risked early
     re-injection).
 
-    Only auto-runs owner_type='agent' tasks. A session-tagged human
-    commitment/tracker must never be silently executed by the agent — it's a
-    thing the human owns, queued to the session only for visibility. See
-    AMUX-1471 (footgun hit by MO-2029 / MS-921)."""
+    Guardrail (2026-06-12): items that declare sequencing or a hold are NOT
+    auto-pickable — 'SEQUENCE AFTER', 'BLOCKED', 'ON HOLD', 'DO NOT AUTO',
+    'TRUE-STATE' in title/desc means a human or orchestrator must release it
+    explicitly. Auto-pickup previously dispatched dependency-ordered tasks
+    out of order (RR-311) and re-dispatched items reset with true-state notes.
+
+    Guardrail (upstream 6b07347): only auto-runs owner_type='agent' tasks.
+    A session-tagged human commitment/tracker must never be silently executed
+    by the agent — it's a thing the human owns, queued to the session only
+    for visibility. See AMUX-1471 (MO-2029 / MS-921)."""
     try:
         cfg = parse_env_file(CC_SESSIONS / f"{session_name}.env")
         if cfg.get("CC_AUTO_PICKUP", "").strip().lower() not in ("1", "true", "yes"):
             return  # not opted into the autonomous loop
         time.sleep(3)
         db = get_db()
-        row = db.execute(
+        rows = db.execute(
             "SELECT id, title, desc FROM issues "
             "WHERE session=? AND status='todo' AND owner_type='agent' AND deleted IS NULL "
-            "ORDER BY created ASC LIMIT 1",
+            "ORDER BY created ASC",
             (session_name,)
-        ).fetchone()
+        ).fetchall()
+        row = None
+        _hold = re.compile(r'SEQUENCE\s+AFTER|BLOCKED|ON\s+HOLD|DO\s+NOT\s+AUTO|TRUE-STATE', re.I)
+        for r in rows:
+            if _hold.search(f"{r['title']} {r['desc'] or ''}"):
+                continue
+            row = r
+            break
         if not row:
             return
         item_id, title, desc = row["id"], row["title"], row["desc"] or ""
@@ -6187,6 +6191,36 @@ def _notify_session_of_task(session_name: str, item_id: str, title: str):
     threading.Thread(target=_run, daemon=True).start()
 
 
+# process restart — that's fine, a re-delivery after a restart is
+# vanishingly unlikely (would require the set to still be open at restart).
+
+
+def _notify_session_of_retake(session_name: str, item_id: str, title: str,
+                              verdict: str, source_id: str, source: str):
+    """Push a re-take notice into the target session's tmux pane after C3
+    (adjudication) or C4 (audit-pair FAIL/FAIL) flips a target back to
+    'doing'. Distinct from _notify_session_of_task because the target row's
+    notified=1 flag from the original mint would suppress the fresh-mint
+    helper — re-takes reuse the same board id. Best-effort background thread.
+
+    Motivation: RTG-Research 2026-07-01 — a re-take on RA-668 sat silent for
+    45min because the worker relied on polling to see the review->doing flip.
+    """
+    def _run():
+        try:
+            text = (
+                f"Re-take: {item_id} — {(title or '')[:120]} flipped back to "
+                f"doing ({source} {source_id}: {verdict}). Check `amux board "
+                f"show {item_id}` for the adjudication note when you're ready."
+            )
+            send_text(session_name, text)
+            slog(f"[retake-nudge] {session_name}: notified re-take of {item_id} "
+                 f"({source}={source_id}, verdict={verdict})")
+        except Exception:
+            pass
+    threading.Thread(target=_run, daemon=True).start()
+
+
 _DEFAULT_STATUSES = [
     {"id": "backlog",   "label": "Backlog"},
     {"id": "todo",      "label": "To Do"},
@@ -6198,105 +6232,43 @@ _DEFAULT_STATUSES = [
 ]
 
 
-# ── Board staleness (in-progress cards on idle sessions) ────────────────────
-_BOARD_STALE_AGE = 1800                # 30 min without an update → stale
-_BOARD_STALE_STATUSES = ("doing", "review")
-_BOARD_NUDGE_COOLDOWN = 6 * 3600       # min seconds between nudges for the same item
-_board_stale_nudged: dict[str, float] = {}   # item_id -> last nudge epoch
+def _session_org(session_name: str | None) -> str | None:
+    """The org a session belongs to, from CC_ORG in its env file.
 
-
-def _board_item_stale(item: dict, now: float, working_sessions=None) -> bool:
-    """True when a card is parked in an in-progress status but its owning session
-    isn't actively working and it hasn't been touched in a while.
-
-    `working` means the session is actively generating (raw status 'active').
-    When `working_sessions` is None the cheap cached `_session_prev_status` view is
-    used (safe for the frequently-called _load_board path); the nudge job does a
-    fresh live check before actually steering.
-    """
+    Orgs partition the board between agent fleets — each org's Dispatch only
+    routes/audits its own items (ruled by Jeremy 2026-06-12 after Ember
+    auditors audited an RTG item). Explicit env var, no name heuristics:
+    set CC_ORG in the session's env file or the session contributes no org."""
+    if not session_name:
+        return None
     try:
-        if item.get("status") not in _BOARD_STALE_STATUSES:
-            return False
-        sess = item.get("session")
-        if not sess:
-            return False
-        upd = item.get("updated") or 0
-        if not upd or (now - upd) < _BOARD_STALE_AGE:
-            return False
-        if working_sessions is None:
-            working = (_session_prev_status.get(sess) == "active")
-        else:
-            working = sess in working_sessions
-        return not working
+        cfg = parse_env_file(CC_SESSIONS / f"{session_name}.env")
+        return (cfg.get("CC_ORG") or "").strip() or None
     except Exception:
-        return False
+        return None
 
 
-def _board_stale_nudge():
-    """Periodic: steer a concise nudge to any session sitting on a stale
-    in-progress card. Only nudges sessions that are RUNNING and IDLE (so the
-    message can be received and acted on), never changes status itself (the
-    agent must do the work + satisfy the gate), and throttles per item.
-    Fully guarded so a failure can never take down the scheduler."""
-    try:
-        now = time.time()
-        items = _load_board(done_limit=0)
-    except Exception:
-        return
-    for item in items:
-        try:
-            if not _board_item_stale(item, now):
-                continue
-            sess = item.get("session")
-            iid = item.get("id")
-            if not sess or not iid:
-                continue
-            if now - _board_stale_nudged.get(iid, 0) < _BOARD_NUDGE_COOLDOWN:
-                continue
-            # Must be running AND idle (not actively generating) to receive + act.
-            if not is_running(sess):
-                continue
-            raw = tmux_capture(sess, 60)
-            if raw and _detect_claude_status(raw) == "active":
-                continue  # working — leave it alone
-            title = (item.get("title") or "")[:60]
-            status = item.get("status", "")
-            idle_min = int((now - (item.get("updated") or now)) / 60)
-            msg = (f"[board] {iid} (\"{title}\") is still '{status}' but this session "
-                   f"is idle — advance it to done/verified per its gate, or move it back "
-                   f"to todo if blocked.")
-            try:
-                msg_id = f"steer-{int(now * 1000)}"
-                entry = {"id": msg_id, "text": msg, "queued_at": now}
-                with _steering_lock:
-                    _steering_queue.setdefault(sess, []).append(entry)
-                gdb = get_db()
-                gdb.execute(
-                    "INSERT OR REPLACE INTO steering_queue(id, session, text, queued_at) VALUES(?,?,?,?)",
-                    (msg_id, sess, msg, now),
-                )
-                gdb.commit()
-                _board_stale_nudged[iid] = now
-                slog(f"[board-stale] nudged {sess} about {iid} ('{title}', {status}, idle {idle_min}m)")
-            except Exception as _e:
-                slog(f"[board-stale] failed to nudge {sess} about {iid}: {_e}")
-        except Exception:
-            continue
-
-
-def _load_board(done_limit: int = 100) -> list:
+def _load_board(done_limit: int = 100, org: str | None = None) -> list:
     """Load non-deleted issues from SQLite, with tags joined.
 
     To keep payloads manageable, only the most recent `done_limit` items in
     terminal statuses (done/verified/discarded) are returned.  Pass done_limit=0 for
     unlimited (all items).
-    """
+
+    org filters to one fleet's items: org='RTG' returns items whose org is
+    exactly RTG; org='none' returns unpartitioned items (org IS NULL).
+    No org param = everything (dashboard view)."""
     db = get_db()
+    org_clause, org_params = "", []
+    if org == "none":
+        org_clause = " AND i.org IS NULL"
+    elif org:
+        org_clause = " AND i.org = ?"
+        org_params = [org]
     _COLS = """i.id, i.title, i.desc, i.status, i.session, i.creator,
-               i.due, i.due_time, i.created, i.updated, i.owner_type,
+               i.due, i.due_time, i.created, i.updated, i.owner_type, i.org,
                COALESCE(i.pinned, 0) AS pinned,
                COALESCE(i.pos, 0) AS pos,
-               i.gate,
                GROUP_CONCAT(t.tag) AS tags_csv"""
     if done_limit > 0:
         # Active items (unlimited), plus the most recent terminal items. `verified`
@@ -6308,13 +6280,13 @@ def _load_board(done_limit: int = 100) -> list:
         rows = db.execute(
             f"""SELECT {_COLS}
                 FROM issues i LEFT JOIN issue_tags t ON t.issue_id = i.id
-                WHERE i.deleted IS NULL AND i.status NOT IN ('done','verified','discarded')
+                WHERE i.deleted IS NULL AND i.status NOT IN ('done','verified','discarded'){org_clause}
                 GROUP BY i.id
               UNION ALL
               SELECT * FROM (
                 SELECT {_COLS}
                 FROM issues i LEFT JOIN issue_tags t ON t.issue_id = i.id
-                WHERE i.deleted IS NULL AND i.status = 'verified'
+                WHERE i.deleted IS NULL AND i.status = 'verified'{org_clause}
                 GROUP BY i.id
                 ORDER BY i.updated DESC
                 LIMIT ?
@@ -6323,36 +6295,27 @@ def _load_board(done_limit: int = 100) -> list:
               SELECT * FROM (
                 SELECT {_COLS}
                 FROM issues i LEFT JOIN issue_tags t ON t.issue_id = i.id
-                WHERE i.deleted IS NULL AND i.status IN ('done','discarded')
+                WHERE i.deleted IS NULL AND i.status IN ('done','discarded'){org_clause}
                 GROUP BY i.id
                 ORDER BY i.updated DESC
                 LIMIT ?
               )""",
-            (verified_limit, done_limit),
+            (*org_params, *org_params, verified_limit, *org_params, done_limit),
         ).fetchall()
     else:
         rows = db.execute(
             f"""SELECT {_COLS}
                 FROM issues i LEFT JOIN issue_tags t ON t.issue_id = i.id
-                WHERE i.deleted IS NULL
+                WHERE i.deleted IS NULL{org_clause}
                 GROUP BY i.id""",
+            org_params,
         ).fetchall()
     # Sort in Python: pinned first, then by pos, then by updated
     result = []
-    _now = time.time()
     for row in rows:
         item = dict(row)
         tags_csv = item.pop("tags_csv") or ""
         item["tags"] = [t for t in tags_csv.split(",") if t]
-        g = item.get("gate")
-        try:
-            item["gate"] = json.loads(g) if g else []
-        except Exception:
-            item["gate"] = []
-        # Cheap staleness flag (in-progress card on a non-working session, untouched
-        # for a while) so the UI can surface it; uses the cached session-status view.
-        if _board_item_stale(item, _now):
-            item["stale"] = True
         result.append(item)
     result.sort(key=lambda x: (-x.get("pinned", 0),
                                 0 if x.get("pos", 0) == 0 else -1,
@@ -6362,20 +6325,10 @@ def _load_board(done_limit: int = 100) -> list:
 
 
 def _load_board_statuses() -> list:
-    """Load kanban statuses from SQLite (with parsed gate checklists)."""
+    """Load kanban statuses from SQLite."""
     db = get_db()
-    rows = db.execute("SELECT id, label, gate FROM statuses ORDER BY position").fetchall()
-    if not rows:
-        return list(_DEFAULT_STATUSES)
-    out = []
-    for r in rows:
-        d = {"id": r["id"], "label": r["label"]}
-        try:
-            d["gate"] = json.loads(r["gate"]) if r["gate"] else []
-        except Exception:
-            d["gate"] = []
-        out.append(d)
-    return out
+    rows = db.execute("SELECT id, label FROM statuses ORDER BY position").fetchall()
+    return [dict(r) for r in rows] if rows else list(_DEFAULT_STATUSES)
 
 
 def _load_session_gates() -> dict:
@@ -6407,9 +6360,9 @@ def _item_by_id(bid: str) -> dict | None:
     row = db.execute(
         """SELECT i.id, i.title, i.desc, i.status, i.session, i.creator,
                   i.due, i.due_time, i.created, i.updated, i.owner_type,
+                  i.org,
                   COALESCE(i.pinned, 0) AS pinned,
                   COALESCE(i.pos, 0) AS pos,
-                  i.gate,
                   GROUP_CONCAT(t.tag) AS tags_csv
            FROM issues i
            LEFT JOIN issue_tags t ON t.issue_id = i.id
@@ -6422,54 +6375,7 @@ def _item_by_id(bid: str) -> dict | None:
     item = dict(row)
     tags_csv = item.pop("tags_csv") or ""
     item["tags"] = [t for t in tags_csv.split(",") if t]
-    g = item.get("gate")
-    try:
-        item["gate"] = json.loads(g) if g else []
-    except Exception:
-        item["gate"] = []
     return item
-
-
-def _effective_gate(item, target_status: str) -> list:
-    """Resolve the effective gate checklist for moving `item` into `target_status`.
-
-    Mirrors the client's _effectiveGate resolution order:
-      1. card-level override (issues.gate, if non-empty)
-      2. per-session override (session_gates[session][status], if non-empty)
-      3. global status default (statuses.gate[status])
-
-    `item` may be an issue id (str) or a dict/row with at least `session` and
-    (optionally) `gate`. Returns a list of criterion strings (possibly empty).
-    """
-    if isinstance(item, str):
-        item = _item_by_id(item) or {}
-    else:
-        try:
-            item = dict(item) if item else {}
-        except Exception:
-            item = {}
-    # 1. Card-level override
-    g = item.get("gate")
-    if isinstance(g, str):
-        try:
-            g = json.loads(g) if g else []
-        except Exception:
-            g = []
-    if isinstance(g, list) and g:
-        return [str(x) for x in g if str(x).strip()]
-    # 2. Per-session override for the target status
-    session = item.get("session")
-    if session:
-        sg = _load_session_gates().get(session, {})
-        gs = sg.get(target_status)
-        if isinstance(gs, list) and gs:
-            return [str(x) for x in gs if str(x).strip()]
-    # 3. Global status default
-    for st in _load_board_statuses():
-        if st.get("id") == target_status:
-            d = st.get("gate")
-            return [str(x) for x in d if str(x).strip()] if isinstance(d, list) else []
-    return []
 
 
 def _prefix_from_session(session: str) -> str:
@@ -6496,190 +6402,56 @@ def _next_issue_id(prefix: str) -> str:
     return f"{prefix}-{row[0] if row else 1}"
 
 
-def _ical_escape(text) -> str:
-    """Escape a TEXT value per RFC 5545 §3.3.11 — backslash first, then ; , and newlines."""
-    if text is None:
-        return ""
-    return (str(text)
-            .replace("\\", "\\\\")
-            .replace("\r\n", "\\n").replace("\n", "\\n").replace("\r", "")
-            .replace(",", "\\,")
-            .replace(";", "\\;"))
-
-
-def _ical_fold(line: str) -> str:
-    """Fold a content line to <=75 octets per RFC 5545 §3.1 — continuation lines start
-    with a single space. Folds on character boundaries so multi-byte UTF-8 isn't split."""
-    segments, cur, cur_len, first = [], [], 0, True
-    for ch in line:
-        clen = len(ch.encode("utf-8"))
-        limit = 75 if first else 74   # continuation lines carry a leading space (1 octet)
-        if cur_len + clen > limit:
-            segments.append("".join(cur))
-            cur, cur_len, first = [ch], clen, False
-        else:
-            cur.append(ch)
-            cur_len += clen
-    segments.append("".join(cur))
-    return "\r\n ".join(segments)
-
-
-def _ical_dtstart(val):
-    """Convert a stored next_run/run_at into a floating-local DTSTART (YYYYMMDDTHHMMSS).
-    Floating (no Z/TZID) preserves wall-clock semantics across DST, matching a scheduler
-    that fires at a local wall time."""
-    if not val:
-        return None
-    s = str(val).strip()
-    m = re.match(r"^(\d{4})-(\d{2})-(\d{2})[T ](\d{2}):(\d{2})(?::(\d{2}))?", s)
-    if m:
-        y, mo, d, hh, mm, ss = m.groups()
-        return f"{y}{mo}{d}T{hh}{mm}{ss or '00'}"
-    m = re.match(r"^(\d{4})-(\d{2})-(\d{2})$", s)
-    if m:
-        y, mo, d = m.groups()
-        return f"{y}{mo}{d}T090000"
-    return None
-
-
-def _cron_to_rrule(parts):
-    """Best-effort 5-field cron -> RRULE (day-or-coarser only; time comes from DTSTART).
-    Returns None for sub-daily cadences (hour='*', steps, lists) so they show as a
-    single upcoming event rather than a misleading daily projection."""
-    minute, hour, dom, _mon, dow = parts
-    if not re.match(r'^\d+$', minute) or not re.match(r'^\d+$', hour):
-        return None
-    _CD = {'0':'SU','7':'SU','1':'MO','2':'TU','3':'WE','4':'TH','5':'FR','6':'SA',
-           'sun':'SU','mon':'MO','tue':'TU','wed':'WE','thu':'TH','fri':'FR','sat':'SA'}
-    def _days(field):
-        out = []
-        for tok in field.split(','):
-            tok = tok.strip().lower()
-            if '-' in tok:
-                a, b = tok.split('-', 1)
-                try:
-                    for dnum in range(int(a), int(b) + 1):
-                        out.append(_CD.get(str(dnum % 7)))
-                except ValueError:
-                    return None
-            else:
-                out.append(_CD.get(tok))
-        out = [d for d in out if d]
-        return out or None
-    if dow != '*':
-        dl = _days(dow)
-        if dl:
-            return "FREQ=WEEKLY;BYDAY=" + ",".join(dict.fromkeys(dl))
-    if dom != '*':
-        try:
-            return "FREQ=MONTHLY;BYMONTHDAY=" + str(int(dom))
-        except ValueError:
-            pass
-    return "FREQ=DAILY"
-
-
-def _schedule_rrule(sched):
-    """Derive an RRULE for a schedule. Returns None for one-shots and sub-daily
-    cadences (those show as a single upcoming event so the calendar stays readable —
-    the exact cadence still appears in the event description)."""
-    if sched.get("sched_type", "once") == "once":
-        return None
-    expr = (sched.get("schedule_expr") or "").strip()
-    low = expr.lower()
-    _DAY_ICAL = ['MO', 'TU', 'WE', 'TH', 'FR', 'SA', 'SU']
-    if re.match(r'^every\s+\d+\s*(m|min|minutes?|h|hr|hours?)$', low):
-        return None   # sub-daily heartbeat — single event only
-    if re.match(r'^every\s+(\d+\s*)?(d|days?)$', low) or low == 'every day':
-        return "FREQ=DAILY"
-    if low.startswith('every weekday'):
-        return "FREQ=WEEKLY;BYDAY=MO,TU,WE,TH,FR"
-    parts = expr.split()
-    if len(parts) == 5:
-        return _cron_to_rrule(parts)   # authoritative — None (sub-daily) must NOT fall through to daily
-    rec = sched.get("recurrence")
-    run_at = sched.get("run_at") or ""
-    if rec == 'hourly':
-        return None
-    if rec == 'daily':
-        return "FREQ=DAILY"
-    if rec == 'weekly':
-        try:
-            return "FREQ=WEEKLY;BYDAY=" + _DAY_ICAL[int(run_at.split(':', 1)[0])]
-        except (ValueError, IndexError):
-            return "FREQ=WEEKLY"
-    if rec == 'monthly':
-        try:
-            return "FREQ=MONTHLY;BYMONTHDAY=" + str(int(run_at.split(':', 1)[0]))
-        except (ValueError, IndexError):
-            return "FREQ=MONTHLY"
-    return "FREQ=DAILY"
-
-
 def _generate_ical() -> str:
-    """RFC 5545 iCalendar feed built from amux **schedules** (recurring & one-shot
-    scheduled tasks). Board issues are intentionally excluded — a calendar of every
-    due date was too noisy; the calendar now reflects when things actually run."""
-    from datetime import datetime, timezone
-    try:
-        db = get_db()
-        rows = db.execute(
-            "SELECT * FROM schedules WHERE deleted IS NULL AND enabled=1 "
-            "ORDER BY next_run ASC, created ASC"
-        ).fetchall()
-        cols = [d[1] for d in db.execute("PRAGMA table_info(schedules)").fetchall()]
-        scheds = [dict(zip(cols, r)) for r in rows]
-    except Exception:
-        scheds = []
-    dtstamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    """Generate iCal text from board items that have due dates."""
+    items = [i for i in _load_board() if i.get("due")]
     lines = [
         "BEGIN:VCALENDAR",
         "VERSION:2.0",
-        "PRODID:-//amux//amux scheduler//EN",
+        "PRODID:-//amux//amux calendar//EN",
         "CALSCALE:GREGORIAN",
         "METHOD:PUBLISH",
-        "X-WR-CALNAME:amux Schedules",
-        "X-WR-CALDESC:amux scheduled & recurring tasks",
+        "X-WR-CALNAME:amux Board",
+        "X-WR-CALDESC:amux board items with due dates",
         "REFRESH-INTERVAL;VALUE=DURATION:PT15M",
         "X-PUBLISHED-TTL:PT15M",
     ]
-    for s in scheds:
-        dtstart = _ical_dtstart(s.get("next_run") or s.get("run_at"))
-        if not dtstart:
-            continue
-        uid = f"{s.get('id', 'sched')}@amux"
-        summary = _ical_escape("⏰ " + (s.get("title") or "Scheduled task"))
-        parts = []
-        if s.get("session"):
-            parts.append("Session: " + str(s["session"]))
-        if s.get("command"):
-            cmd = str(s["command"])
-            parts.append("Command: " + (cmd[:200] + "…" if len(cmd) > 200 else cmd))
-        if s.get("schedule_expr"):
-            parts.append("Schedule: " + str(s["schedule_expr"]))
-        description = _ical_escape("\n".join(parts))
-        ev = [
-            "BEGIN:VEVENT",
-            f"UID:{uid}",
-            f"DTSTAMP:{dtstamp}",
-            f"DTSTART:{dtstart}",
-            "DURATION:PT30M",
-            f"SUMMARY:{summary}",
-        ]
-        if description:
-            ev.append(f"DESCRIPTION:{description}")
-        rrule = _schedule_rrule(s)
-        if rrule:
-            ev.append(f"RRULE:{rrule}")
-        ev += [
-            "CATEGORIES:amux,schedule",
-            "STATUS:CONFIRMED",
-            "TRANSP:TRANSPARENT",
-            "SEQUENCE:0",
-            "END:VEVENT",
-        ]
-        lines += ev
+    status_map = {"todo": "NEEDS-ACTION", "doing": "IN-PROCESS", "done": "COMPLETED"}
+    for item in items:
+        due = item["due"]
+        due_time = (item.get("due_time") or "").strip()
+        date_val = due.replace("-", "")
+        uid = item["id"] + "@amux"
+        summary = item.get("title", "").replace(",", "\\,").replace(";", "\\;").replace("\n", "\\n")
+        idesc = item.get("desc", "").replace(",", "\\,").replace(";", "\\;").replace("\n", "\\n")
+        vstatus = status_map.get(item.get("status", "todo"), "NEEDS-ACTION")
+        if due_time and re.match(r"^\d{2}:\d{2}$", due_time):
+            hh, mm = due_time.split(":")
+            dt_start = f"{date_val}T{hh}{mm}00"
+            ev_lines = [
+                "BEGIN:VEVENT",
+                f"UID:{uid}",
+                f"DTSTART:{dt_start}",
+                "DURATION:PT1H",
+                f"SUMMARY:{summary}",
+                f"DESCRIPTION:{idesc}",
+                f"STATUS:{vstatus}",
+                "END:VEVENT",
+            ]
+        else:
+            ev_lines = [
+                "BEGIN:VEVENT",
+                f"UID:{uid}",
+                f"DTSTART;VALUE=DATE:{date_val}",
+                f"DTEND;VALUE=DATE:{date_val}",
+                f"SUMMARY:{summary}",
+                f"DESCRIPTION:{idesc}",
+                f"STATUS:{vstatus}",
+                "END:VEVENT",
+            ]
+        lines += ev_lines
     lines.append("END:VCALENDAR")
-    return "\r\n".join(_ical_fold(l) for l in lines) + "\r\n"
+    return "\r\n".join(lines) + "\r\n"
 
 
 def _upload_ical_to_s3():
@@ -6710,12 +6482,9 @@ def _upload_ical_to_s3():
 
 def _gcal_sync_item(item_id: str, title: str = "", due: str = "", due_time: str = "",
                     desc: str = "", status: str = "", deleted: bool = False):
-    """Retired — board issues no longer belong on the calendar (too noisy). The
-    calendar is now driven by amux *schedules* via the iCal feed (_generate_ical).
-    Kept as a no-op so existing board call sites stay harmless; use _gcal_purge_board
-    to clear any stale board events previously pushed to Google Calendar."""
-    return
-    if not _GCAL_ID:  # noqa: unreachable — retained for the optional purge path below
+    """Sync a single board item to Google Calendar (if AMUX_GCAL_ID is set).
+    Creates, updates, or deletes the corresponding GCal event."""
+    if not _GCAL_ID:
         return
     try:
         import google.auth, google.auth.transport.requests
@@ -6769,108 +6538,6 @@ def _gcal_sync_item(item_id: str, title: str = "", due: str = "", due_time: str 
     except Exception as e:
         slog(f"[gcal] sync failed for {item_id}: {e}")
 
-
-def _gcal_service():
-    """Build a Google Calendar API client from amux's OAuth calendar token (its own
-    OAuth client — avoids the block Google now applies to gcloud's default client for
-    the calendar scope). Raises if not connected."""
-    from googleapiclient.discovery import build
-    creds = _gcal_creds()
-    if not creds:
-        raise RuntimeError("calendar not connected — start the OAuth flow via /api/gcal/auth")
-    return build("calendar", "v3", credentials=creds, cache_discovery=False)
-
-
-def _gcal_sync_schedule(sched_id: str, deleted: bool = False):
-    """Real-time push of a schedule to Google Calendar (if AMUX_GCAL_ID set).
-    Create/update/delete the event and track gcal_event_id on the schedule row.
-    This is the near-instant alternative to Google's slow iCal polling."""
-    if not _GCAL_ID:
-        return
-    try:
-        db = get_db()
-        cols = [d[1] for d in db.execute("PRAGMA table_info(schedules)").fetchall()]
-        row = db.execute("SELECT * FROM schedules WHERE id=?", (sched_id,)).fetchone()
-        sched = dict(zip(cols, row)) if row else None
-        event_id = sched.get("gcal_event_id") if sched else None
-        service = _gcal_service()
-        # Delete when removed / disabled / no next_run
-        if (not sched) or deleted or sched.get("deleted") or not sched.get("enabled") or not sched.get("next_run"):
-            if event_id:
-                try:
-                    service.events().delete(calendarId=_GCAL_ID, eventId=event_id).execute()
-                except Exception:
-                    pass
-                db.execute("UPDATE schedules SET gcal_event_id=NULL WHERE id=?", (sched_id,))
-                db.commit()
-                slog(f"[gcal] deleted schedule event for {sched_id}")
-            return
-        dtstart = _ical_dtstart(sched.get("next_run"))
-        if not dtstart:
-            return
-        from datetime import datetime as _dt, timedelta as _td
-        start = _dt.strptime(dtstart, "%Y%m%dT%H%M%S")
-        end = start + _td(minutes=30)
-        parts = []
-        if sched.get("session"):
-            parts.append("Session: " + str(sched["session"]))
-        if sched.get("command"):
-            parts.append("Command: " + str(sched["command"])[:400])
-        if sched.get("schedule_expr"):
-            parts.append("Schedule: " + str(sched["schedule_expr"]))
-        body = {
-            "summary": "⏰ " + (sched.get("title") or "Scheduled task"),
-            "description": "\n".join(parts) + f"\n\namux schedule {sched_id}",
-            "start": {"dateTime": start.strftime("%Y-%m-%dT%H:%M:%S"), "timeZone": _GCAL_TZ},
-            "end": {"dateTime": end.strftime("%Y-%m-%dT%H:%M:%S"), "timeZone": _GCAL_TZ},
-        }
-        rrule = _schedule_rrule(sched)
-        if rrule:
-            body["recurrence"] = ["RRULE:" + rrule]
-        if event_id:
-            try:
-                service.events().update(calendarId=_GCAL_ID, eventId=event_id, body=body).execute()
-                slog(f"[gcal] updated schedule event for {sched_id}")
-                return
-            except Exception:
-                pass   # event vanished — fall through to recreate
-        ev = service.events().insert(calendarId=_GCAL_ID, body=body).execute()
-        db.execute("UPDATE schedules SET gcal_event_id=? WHERE id=?", (ev["id"], sched_id))
-        db.commit()
-        slog(f"[gcal] created schedule event {ev['id']} for {sched_id}")
-    except Exception as e:
-        slog(f"[gcal] schedule sync failed for {sched_id}: {e}")
-
-
-def _gcal_sync_schedule_bg(sched_id: str, deleted: bool = False):
-    """Fire-and-forget schedule→GCal sync (skips entirely when GCal isn't configured)."""
-    if not _GCAL_ID or not sched_id:
-        return
-    threading.Thread(target=_gcal_sync_schedule, args=(sched_id,),
-                     kwargs={"deleted": deleted}, daemon=True).start()
-
-
-def _gcal_backfill():
-    """Push every enabled schedule into the configured Google Calendar. Returns count."""
-    if not _GCAL_ID:
-        return 0
-    db = get_db()
-    rows = db.execute("SELECT id FROM schedules WHERE deleted IS NULL AND enabled=1").fetchall()
-    n = 0
-    for r in rows:
-        try:
-            _gcal_sync_schedule(r[0]); n += 1
-        except Exception:
-            pass
-    slog(f"[gcal] backfilled {n} schedules")
-    return n
-
-
-def _gcal_set_id(cal_id: str):
-    """Persist + apply the target Google Calendar id (module global + server.env)."""
-    global _GCAL_ID
-    _env_set("AMUX_GCAL_ID", cal_id or "")
-    _GCAL_ID = cal_id or ""
 
 
 def _cron_next_run(parts: list, base) -> str | None:
@@ -7025,46 +6692,6 @@ def _parse_next_run(expr: str, from_ts: float | None = None) -> str | None:
             pass
 
     return None
-
-
-def _skip_next_run(sched):
-    """Compute the run time AFTER a recurring schedule's current next_run — i.e. skip
-    one occurrence. Returns 'YYYY-MM-DDTHH:MM' or None if it can't be advanced."""
-    import re as _re
-    from datetime import datetime, timedelta
-    try:
-        base = datetime.strptime((sched.get("next_run") or "")[:16], "%Y-%m-%dT%H:%M")
-    except Exception:
-        return None
-    expr = (sched.get("schedule_expr") or "").strip()
-    low = expr.lower()
-    m = _re.match(r'^every\s+(\d+)\s*(m|min|minutes?|h|hr|hours?|d|days?)$', low)
-    if m:
-        n, unit = int(m.group(1)), m.group(2)[0]
-        step = {'m': timedelta(minutes=n), 'h': timedelta(hours=n), 'd': timedelta(days=n)}[unit]
-        return (base + step).strftime("%Y-%m-%dT%H:%M")
-    if low.startswith('every weekday'):
-        d = base + timedelta(days=1)
-        while d.weekday() >= 5:
-            d += timedelta(days=1)
-        return d.strftime("%Y-%m-%dT%H:%M")
-    parts = expr.split()
-    if len(parts) == 5:
-        nxt = _cron_next_run(parts, base + timedelta(minutes=1))
-        if nxt:
-            return nxt
-    rec = (sched.get("recurrence") or "").lower()
-    if rec == 'hourly':
-        return (base + timedelta(hours=1)).strftime("%Y-%m-%dT%H:%M")
-    if rec == 'weekly' or low.startswith('weekly') or _re.match(r'^every\s+\w+\s+at\b', low):
-        return (base + timedelta(weeks=1)).strftime("%Y-%m-%dT%H:%M")
-    if rec == 'monthly' or low.startswith('monthly'):
-        import calendar as _cal
-        y = base.year + (1 if base.month == 12 else 0)
-        mo = 1 if base.month == 12 else base.month + 1
-        day = min(base.day, _cal.monthrange(y, mo)[1])
-        return base.replace(year=y, month=mo, day=day).strftime("%Y-%m-%dT%H:%M")
-    return (base + timedelta(days=1)).strftime("%Y-%m-%dT%H:%M")
 
 
 def _next_run_dt(sched):
@@ -7257,7 +6884,8 @@ def _run_schedule(sched):
         db.commit()
     except Exception as log_err:
         slog(f"[sched] failed to log run: {log_err}")
-    _push_alert("scheduler", session, f"Ran schedule: {sched['title']}")
+    if sched.get("notify", 1):
+        _push_alert("scheduler", session, f"Ran schedule: {sched['title']}")
     # If watch mode is enabled (tmux only), monitor response in background
     if (sched.get("kind") or "tmux") == "tmux" and sched.get("watch") and status == "ok":
         threading.Thread(
@@ -7444,7 +7072,7 @@ def get_daily_token_stats() -> dict:
         cfg = parse_env_file(f)
         d = cfg.get("CC_DIR", "")
         if d:
-            resolved = _project_name(d)
+            resolved = str(Path(d).expanduser().resolve()).replace("/", "-")
             amux_dirs.setdefault(resolved, []).append(f.stem)
 
     total_in = 0
@@ -8022,34 +7650,77 @@ def _detect_session_status(name: str, raw_output: str) -> str:
     return raw  # 'waiting' passes through untouched
 
 
-def _tmux_info_map() -> dict:
-    """Get activity, creation time, and pane title for all tmux sessions."""
-    result = {}
+def _running_org_containers() -> list:
+    """Return the names of currently running amux-org-* containers.
+    Used by _tmux_info_map to know which containers to union into the tmux
+    enumeration. Returns [] if docker is missing or errors — the caller
+    degrades to host-only enumeration."""
     try:
         r = subprocess.run(
-            ["tmux", "list-panes", "-a", "-F",
-             "#{session_name}\t#{window_activity}\t#{session_created}\t#{pane_title}"],
+            ["docker", "ps", "--format", "{{.Names}}",
+             "--filter", "status=running", "--filter", "name=amux-org-"],
             capture_output=True, text=True, timeout=5,
         )
         if r.returncode != 0:
-            return {}
-        for line in r.stdout.strip().splitlines():
-            parts = line.split("\t", 3)
-            if len(parts) >= 3:
-                name = parts[0]
-                # Only keep first pane per session
-                if name not in result:
-                    title = parts[3].strip() if len(parts) >= 4 else ""
-                    # Strip leading braille/dingbat status chars from pane title
-                    clean_title = re.sub(r'^[\u2800-\u28ff\u2700-\u27bf\s]+', '', title).strip()
-                    result[name] = {
-                        "activity": int(parts[1]),
-                        "created": int(parts[2]),
-                        "pane_title": clean_title,
-                    }
-        return result
+            return []
+        return [ln.strip() for ln in r.stdout.splitlines() if ln.strip()]
     except Exception:
-        return {}
+        return []
+
+
+def _parse_tmux_info_output(text: str, result: dict) -> None:
+    """Merge tmux list-panes output (in _TMUX_INFO_FMT) into result dict.
+    Only the first pane per session is kept (matches host enumeration behaviour)."""
+    for line in text.strip().splitlines():
+        parts = line.split("\t", 3)
+        if len(parts) < 3:
+            continue
+        name = parts[0]
+        if name in result:
+            continue
+        title = parts[3].strip() if len(parts) >= 4 else ""
+        clean_title = re.sub(r'^[\u2800-\u28ff\u2700-\u27bf\s]+', '', title).strip()
+        try:
+            result[name] = {
+                "activity": int(parts[1]),
+                "created": int(parts[2]),
+                "pane_title": clean_title,
+            }
+        except ValueError:
+            # Malformed activity/created \u2014 skip this pane silently.
+            pass
+
+
+def _tmux_info_map() -> dict:
+    """Get activity, creation time, and pane title for all tmux sessions.
+
+    Unions the host tmux daemon with every running amux-org-* container's
+    tmux daemon. Host takes precedence for duplicate session names (shouldn't
+    happen: session names are globally unique across the AMUX box)."""
+    result = {}
+    # Host tmux first
+    try:
+        r = subprocess.run(
+            ["tmux", "list-panes", "-a", "-F", _TMUX_INFO_FMT],
+            capture_output=True, text=True, timeout=5,
+        )
+        if r.returncode == 0:
+            _parse_tmux_info_output(r.stdout, result)
+    except Exception:
+        pass
+    # Union with each running org container
+    for ctr in _running_org_containers():
+        try:
+            r = subprocess.run(
+                ["docker", "exec", ctr, "tmux", "list-panes", "-a", "-F", _TMUX_INFO_FMT],
+                capture_output=True, text=True, timeout=5,
+            )
+            if r.returncode == 0:
+                _parse_tmux_info_output(r.stdout, result)
+        except Exception:
+            # A single container failing must not break the whole enumeration.
+            continue
+    return result
 
 
 def _parse_task_time(raw_output: str) -> str:
@@ -8082,6 +7753,822 @@ def _parse_task_time(raw_output: str) -> str:
 
 _session_prev_status: dict[str, str] = {}  # track status changes for board auto-updates
 _commit_guard_nudged: dict[str, bool] = {}  # session -> nudged this dirty episode (re-armed when clean)
+
+
+# ── Server-side routing hook for RD-* items (Dispatch retirement, 2026-06-24)
+# ─────────────────────────────────────────────────────────────────────────────
+#
+# Replaces the bulk of RTG-Dispatch's responsibilities. When an RD-* item is
+# POSTed with a `ROUTE_TO: <session>` line in the first 200 chars of its desc,
+# the server mints the worker child task and marks the RD done. No agent
+# required for the mechanical routing.
+#
+# Spec (agreed with RTG-Research 2026-06-24):
+#  - ROUTE_TO must appear within the first 200 chars (or first 5 lines).
+#  - Accepts bare or quoted form: `ROUTE_TO: RTG-ActAS` or `ROUTE_TO: "RTG-ActAS"`.
+#  - Missing ROUTE_TO → silently leave the RD alone (the absence signals to
+#    the author that the item was a category error and should have been a
+#    channel/note instead).
+#  - Optional `BLOCKED_BY: <id list>` — if any listed dep is not verified/done,
+#    child starts in `backlog` instead of `todo`.
+#  - Optional `CHILD_TITLE:` and `CHILD_PREFIX:` (default RA) for fine control.
+#  - Idempotent: if the RD desc already contains `server-routed`, hook skips.
+
+_ROUTE_TO_RE = re.compile(r'^[ \t]*ROUTE_TO:\s*"?([A-Za-z0-9_-]+)"?\s*$', re.MULTILINE)
+_BLOCKED_BY_RE = re.compile(r'^[ \t]*BLOCKED_BY:\s*(.+?)\s*$', re.MULTILINE)
+_CHILD_TITLE_RE = re.compile(r'^[ \t]*CHILD_TITLE:\s*(.+?)\s*$', re.MULTILINE)
+_CHILD_PREFIX_RE = re.compile(r'^[ \t]*CHILD_PREFIX:\s*([A-Z]+)\s*$', re.MULTILINE)
+_SERVER_ROUTED_MARKER = "[server-routed"
+
+
+def _try_route_rd(rd_id: str, rd_title: str, rd_desc: str, rd_org: str | None, db) -> dict | None:
+    """Hook fired after a routing-directive item is POSTed. Parses ROUTE_TO
+    and mints the child worker task if conditions are met. Returns a dict
+    describing the cascade if it acted, or None.
+
+    Trigger is desc-based (ROUTE_TO presence) rather than id-prefix-based so
+    this works for any org's routing-directive naming convention — RTG RD-*,
+    Ember ED-*, future orgs. The hook is invoked unconditionally from POST
+    /api/board; if the desc has no ROUTE_TO line, the function silently
+    short-circuits.
+
+    Idempotent: skips if `[server-routed` already in desc.
+    Silent: returns None on missing ROUTE_TO (no error, no mint).
+    Defensive: returns None on invalid session or self-route attempts.
+    """
+    if not rd_desc:
+        return None
+    if _SERVER_ROUTED_MARKER in rd_desc:
+        return None
+    # Only scan the FIRST 200 chars / first 5 lines for routing fields, per the
+    # spec. Sugar fields (BLOCKED_BY, CHILD_*) scan the whole desc.
+    head = "\n".join(rd_desc.split("\n", 6)[:5])[:200]
+    m = _ROUTE_TO_RE.search(head)
+    if not m:
+        return None  # silent — author missed it on purpose or made a category error
+    target_session = m.group(1).strip()
+
+    # Validate target session exists (env file presence is the source of truth)
+    env_file = CC_SESSIONS / f"{target_session}.env"
+    if not env_file.exists():
+        _push_alert(
+            "routing_error", rd_id,
+            f"'{rd_id}' ROUTE_TO names unknown session '{target_session}' — RD left untouched",
+        )
+        slog(f"[route-rd] {rd_id}: ROUTE_TO unknown session {target_session!r}")
+        return None
+
+    # Don't self-route: if the RD itself is somehow assigned to the same session
+    # as ROUTE_TO names, that's a config error.
+    me_row = db.execute(
+        "SELECT session FROM issues WHERE id = ? AND deleted IS NULL", (rd_id,),
+    ).fetchone()
+    if me_row and (me_row["session"] or "") == target_session:
+        slog(f"[route-rd] {rd_id}: ROUTE_TO points to same session as the RD itself — skipping")
+        return None
+
+    # Parse BLOCKED_BY (full desc, not just head)
+    blocked_by: list[str] = []
+    bm = _BLOCKED_BY_RE.search(rd_desc)
+    if bm:
+        # Split on whitespace and/or commas, keep ID-shaped tokens
+        for raw in re.split(r'[\s,]+', bm.group(1)):
+            tok = raw.strip().strip(".,;:")
+            if re.match(r'^[A-Z]+-\d+$', tok):
+                blocked_by.append(tok)
+
+    # Determine child status: backlog if any listed dep is not verified/done, else todo
+    child_status = "todo"
+    unmet_deps: list[tuple[str, str]] = []
+    for dep in blocked_by:
+        dep_row = db.execute(
+            "SELECT status FROM issues WHERE id = ? AND deleted IS NULL", (dep,),
+        ).fetchone()
+        if not dep_row:
+            unmet_deps.append((dep, "not-found"))
+        elif dep_row["status"] not in ("verified", "done"):
+            unmet_deps.append((dep, dep_row["status"] or "(no status)"))
+    if unmet_deps:
+        child_status = "backlog"
+
+    # Optional title + prefix overrides
+    child_title = rd_title
+    tm = _CHILD_TITLE_RE.search(rd_desc)
+    if tm:
+        child_title = tm.group(1).strip()
+    child_prefix = "RA"
+    pm = _CHILD_PREFIX_RE.search(rd_desc)
+    if pm:
+        child_prefix = pm.group(1).strip()
+
+    # Mint the child — mirror the POST /api/board insert logic
+    child_id = _next_issue_id(child_prefix)
+    now = int(time.time())
+    # Place new card at top of its column
+    min_pos_row = db.execute(
+        "SELECT COALESCE(MIN(NULLIF(pos, 0)), 0) AS m FROM issues "
+        "WHERE status = ? AND deleted IS NULL",
+        (child_status,),
+    ).fetchone()
+    new_pos = (min_pos_row["m"] if min_pos_row else 0) - 1024.0
+    # The child carries the full RD desc so the worker sees the spec verbatim,
+    # plus a header pointer back to the RD.
+    child_desc = (
+        f"[routed from {rd_id} on {time.strftime('%Y-%m-%d %H:%M', time.localtime(now))}]"
+        + (f" — BLOCKED_BY unmet: {', '.join(f'{d}({s})' for d, s in unmet_deps)}"
+           if unmet_deps else "")
+        + "\n\n" + rd_desc
+    )
+    child_org = rd_org or _session_org(target_session)
+    db.execute(
+        """INSERT INTO issues (id, title, desc, status, session, creator, due, due_time,
+                               created, updated, owner_type, pos, org)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+        (child_id, child_title, child_desc, child_status, target_session,
+         "server-routed", None, None, now, now, "agent", new_pos, child_org),
+    )
+
+    # PATCH the RD: append the server-routed marker + child id to desc, set done
+    marker = (
+        f"\n\n{_SERVER_ROUTED_MARKER} "
+        f"{time.strftime('%Y-%m-%d %H:%M', time.localtime(now))} → child={child_id}"
+        + (f" (child status={child_status} — unmet deps {', '.join(d for d,_ in unmet_deps)})"
+           if unmet_deps else "")
+        + "]"
+    )
+    new_rd_desc = rd_desc + marker
+    db.execute(
+        "UPDATE issues SET status = 'done', desc = ?, updated = ? WHERE id = ?",
+        (new_rd_desc, now, rd_id),
+    )
+    db.commit()
+
+    # Notify the target session (idempotent on the issues.notified flag)
+    if child_status == "todo":
+        _notify_session_of_task(target_session, child_id, child_title)
+
+    return {
+        "action": "routed",
+        "rd": rd_id,
+        "child": child_id,
+        "target": target_session,
+        "child_status": child_status,
+        "unmet_deps": unmet_deps,
+    }
+
+
+# ── Auto-apply hooks for adjudications and audit pairs (RTG-Research's C3/C4,
+# 2026-06-24) ────────────────────────────────────────────────────────────────
+#
+# C3 — adjudication-already-applied: when an RR-* escalation item is PATCHed
+# with a VERDICT (RTG-Research closing an adjudication), the server auto-PATCHes
+# the target item to verified (PASS/PASS-WITH-WARNINGS) or doing (FAIL).
+#
+# C4 — audit-pair-complete-triggers-verify: when both audit items (RAC + RAO
+# targeting the same target) have closed with verdicts, the server auto-PATCHes
+# the target: both ACCEPT → verified, both FAIL → doing. Mixed verdicts leave
+# the pair for the escalation path (gated by the RR-* cooldown in board POST).
+#
+# Both hooks rely on the conventional verdict marker "VERDICT: <PASS|
+# PASS-WITH-WARNINGS|FAIL>" at or near the start of the item desc — the format
+# Codex/Opus48/RTG-Research already use consistently. If a writer omits the
+# marker, the hook short-circuits (no auto-action; manual flow continues).
+
+# Prefixes that are NEVER valid targets — control-plane items (escalations,
+# routing directives, audit items, system items). Anything else is a candidate
+# work-item target. Negative-list approach lets the extractor work across orgs
+# without enumerating worker prefixes per-org (Ember alone uses
+# ECI/EMBER/EAAC/EO/EF/ED/EAC and more, depending on session naming).
+_CONTROL_PLANE_PREFIXES = frozenset({
+    "RR", "ER",          # *-Research adjudication escalations
+    "RD", "ED",          # *-Dispatch routing directives (Dispatch retired but ids persist)
+    "RAC", "RAO",        # RTG-Audit-Codex / RTG-Audit-Opus48 audit items
+    "AH", "AW",          # amux-helper / AMUX-Watchdog items
+})
+# Note: EAC-/EAO- aren't blanket excluded — Ember-Audit-Codex AND
+# EmberCRM_API_Core both produce 'EAC' from _prefix_from_session, so the
+# prefix alone is ambiguous. Disambiguation happens at the target-lookup
+# stage via the item's session field, not here.
+
+# VERDICT marker: must be at the START OF LINE (re.MULTILINE) so paragraph-
+# embedded quotes of other people's verdicts don't accidentally trigger.
+# When multiple matches exist, the caller takes the LAST one — because the
+# author's summary verdict comes AFTER any analysis prose or quoted excerpts.
+_VERDICT_RE = re.compile(r'^[ \t]*VERDICT\s*:\s*(PASS-WITH-WARNINGS|PASS|FAIL)\b', re.IGNORECASE | re.MULTILINE)
+
+# Permissive id-shape pattern: any uppercase-or-digit prefix + dash + digits.
+# Callers must filter out control-plane prefixes themselves.
+_ANY_ID_RE = re.compile(r'\b([A-Z][A-Z0-9]*)-(\d+)\b')
+
+
+def _is_research_session(session: str) -> bool:
+    """True if the session is an audit-split adjudicator: either <Org>-Research
+    (RTG, Ember) or <Org>-Reviewer (iSchedule and later). Session-based
+    detection lets the C3 hook work across orgs without depending on item-id
+    prefix conventions, which collide across orgs (e.g. Ember EAC- is both
+    auditor items AND EmberCRM_API_Core worker items).
+
+    Kept as `_is_research_session` (not renamed) to avoid churn across the
+    many call sites; the name is historical. Any new suffix an org wants to
+    use for its adjudicator lives in the tuple below.
+    """
+    if not session:
+        return False
+    return session.endswith(("-Research", "-Reviewer"))
+
+
+def _resolve_adjudicator_session(org: str) -> str | None:
+    """Return the adjudicator session name for `org`, preferring the newer
+    -Reviewer convention over -Research when both exist. Returns None if
+    neither env file exists — caller should skip escalation minting."""
+    if not org:
+        return None
+    for suffix in ("-Reviewer", "-Research"):
+        name = f"{org}{suffix}"
+        if (CC_SESSIONS / f"{name}.env").exists():
+            return name
+    return None
+
+
+def _is_audit_session(session: str) -> bool:
+    """True if the session is one of the *-Audit-* auditors (RTG-Audit-Codex,
+    RTG-Audit-Opus48, Ember-Audit-Codex, Ember-Audit-Opus48, etc.)."""
+    if not session:
+        return False
+    return "-Audit-" in session
+
+
+def _extract_verdict(desc: str) -> str:
+    """Return 'PASS' / 'PASS-WITH-WARNINGS' / 'FAIL' from a VERDICT marker, or ''.
+    Marker must be at start-of-line (so paragraph-embedded quotes don't fire).
+    When multiple markers exist, the LAST one wins — author's summary verdict
+    typically follows any quoted analysis."""
+    if not desc:
+        return ""
+    matches = _VERDICT_RE.findall(desc)
+    return matches[-1].upper() if matches else ""
+
+
+def _extract_target_id(text: str, exclude_id: str = "", title_text: str = "") -> str:
+    """Return the first work-item id found in `text`, or ''.
+
+    Prefers `title_text` over `text` when given — the audit/adjudication title
+    convention is 'AUDIT <TARGET>: ...' or 'ESCALATE <TARGET>: ...' / 'ESC-
+    <TARGET>: ...', so the target is unambiguously the first id in the title.
+    The desc body often quotes other ids (cross-refs to prior audits, related
+    work items) so title-first beats desc-first reliability.
+
+    Control-plane prefixes (RR/ER/RD/ED/RAC/RAO/AH/AW) are skipped — they're
+    never valid targets. Note: EAC-/EAO- aren't blanket-skipped because Ember
+    has a prefix collision (Ember-Audit-Codex audits AND EmberCRM_API_Core
+    workers both produce EAC). If those collide in practice the caller can
+    disambiguate via target-lookup."""
+    def _scan(s: str) -> str:
+        if not s:
+            return ""
+        for m in _ANY_ID_RE.finditer(s):
+            prefix, num = m.group(1), m.group(2)
+            tid = f"{prefix}-{num}"
+            if tid == exclude_id:
+                continue
+            if prefix in _CONTROL_PLANE_PREFIXES:
+                continue
+            return tid
+        return ""
+    # Prefer title (short, deterministic) over desc (noisy with cross-refs)
+    if title_text:
+        t = _scan(title_text)
+        if t:
+            return t
+    return _scan(text)
+
+
+def _mint_audit_pair_unguarded(target_item: dict, db) -> dict | None:
+    """Internal: actually mint the RAC + RAO audit pair, with no build-verify
+    gate. Called both by _auto_mint_audit_pair (after the gate passes) and by
+    _auto_on_build_verify_close (after a build-verify PASSes)."""
+    tid = target_item.get("id", "")
+    org = (target_item.get("org") or "").strip()
+    if not org:
+        s = target_item.get("session") or ""
+        if "-" in s:
+            org = s.split("-", 1)[0]
+    if not org or org in ("amux",):
+        return None
+    codex_session = f"{org}-Audit-Codex"
+    opus_session = f"{org}-Audit-Opus48"
+    if not (CC_SESSIONS / f"{codex_session}.env").exists():
+        return None
+    if not (CC_SESSIONS / f"{opus_session}.env").exists():
+        return None
+
+    target_updated = int(target_item.get("updated") or 0)
+
+    def _existing(auditor: str):
+        return db.execute(
+            "SELECT id, created FROM issues "
+            "WHERE session = ? AND deleted IS NULL AND status != 'discarded' "
+            "  AND title LIKE ? ORDER BY created DESC LIMIT 1",
+            (auditor, f"AUDIT {tid}:%"),
+        ).fetchone()
+
+    fresh_threshold = target_updated - 60
+    codex_existing = _existing(codex_session)
+    opus_existing = _existing(opus_session)
+    if codex_existing and int(codex_existing["created"]) >= fresh_threshold:
+        return None
+    if opus_existing and int(opus_existing["created"]) >= fresh_threshold:
+        return None
+
+    title = f"AUDIT {tid}: {target_item.get('title', '')[:200]}"
+    now = int(time.time())
+    minted = []
+    for auditor in (codex_session, opus_session):
+        min_pos = db.execute(
+            "SELECT COALESCE(MIN(NULLIF(pos, 0)), 0) AS m FROM issues "
+            "WHERE status = 'todo' AND deleted IS NULL"
+        ).fetchone()
+        new_pos = (min_pos["m"] if min_pos else 0) - 1024.0
+        prefix = _prefix_from_session(auditor)
+        audit_id = _next_issue_id(prefix)
+        desc = (
+            f"[auto-minted {time.strftime('%Y-%m-%d %H:%M', time.localtime(now))} "
+            f"on {tid} review-enter]"
+        )
+        db.execute(
+            """INSERT INTO issues (id, title, desc, status, session, creator, due, due_time,
+                                   created, updated, owner_type, pos, org)
+               VALUES (?, ?, ?, 'todo', ?, 'server-audit-mint', NULL, NULL, ?, ?, 'agent', ?, ?)""",
+            (audit_id, title, desc, auditor, now, now, new_pos, org),
+        )
+        minted.append(audit_id)
+    db.commit()
+    for audit_id, auditor in zip(minted, (codex_session, opus_session)):
+        _notify_session_of_task(auditor, audit_id, title)
+    return {"action": "audit-minted", "target": tid, "audits": minted,
+            "auditors": [codex_session, opus_session]}
+
+
+def _mint_build_verify(target_item: dict, build_gate_session: str, db) -> dict | None:
+    """Internal: mint a BUILD-VERIFY item assigned to the build-gate session.
+    The build-verify session (e.g. RTG-VS2017 remote Windows agent) runs the
+    Framework build and PATCHes the item to status=done with a VERDICT:
+    marker. The close hook then chains the audit-pair mint on PASS or
+    bounces the target on FAIL."""
+    tid = target_item["id"]
+    prefix = _prefix_from_session(build_gate_session) or "RV"
+    bv_id = _next_issue_id(prefix)
+    now = int(time.time())
+    target_title = (target_item.get("title", "") or "")[:140]
+    title = f"BUILD-VERIFY {tid}: {target_title}"
+    desc = (
+        f"[auto-minted {time.strftime('%Y-%m-%d %H:%M', time.localtime(now))} "
+        f"as build-verify precondition for audit pair on {tid}]\n\n"
+        f"Build the source for {tid} on Windows (Framework). PATCH this item to status=done "
+        f"with a VERDICT: <PASS|PASS-WITH-WARNINGS|FAIL> marker in the desc. "
+        f"The dual-audit pair on {tid} will be auto-minted on PASS; on FAIL "
+        f"the target returns to status=doing for the worker to address."
+    )
+    min_pos_row = db.execute(
+        "SELECT COALESCE(MIN(NULLIF(pos, 0)), 0) AS m FROM issues "
+        "WHERE status = 'todo' AND deleted IS NULL"
+    ).fetchone()
+    new_pos = (min_pos_row["m"] if min_pos_row else 0) - 1024.0
+    # Org fallback chain: target's explicit org → derive from target session
+    # prefix → derive from creator session prefix. Avoids NULL org when the
+    # caller passes a dict missing the org key (which used to bite us before
+    # _item_by_id was patched to SELECT i.org).
+    org = (target_item.get("org") or "").strip()
+    if not org:
+        ts = target_item.get("session") or ""
+        if "-" in ts:
+            org = ts.split("-", 1)[0]
+    if not org:
+        org = _session_org(target_item.get("creator", "")) or None
+    db.execute(
+        """INSERT INTO issues (id, title, desc, status, session, creator, due, due_time,
+                               created, updated, owner_type, pos, org)
+           VALUES (?, ?, ?, 'todo', ?, 'server-build-verify-mint', NULL, NULL, ?, ?, 'agent', ?, ?)""",
+        (bv_id, title, desc, build_gate_session, now, now, new_pos, org),
+    )
+    db.commit()
+    _notify_session_of_task(build_gate_session, bv_id, title)
+    return {"action": "build-verify-minted", "build_verify": bv_id,
+            "target": tid, "build_gate": build_gate_session}
+
+
+def _auto_on_build_verify_close(item: dict, db) -> dict | None:
+    """When a BUILD-VERIFY item PATCHes to done/verified with a VERDICT marker,
+    cascade to the original target work item:
+      PASS / PASS-WITH-WARNINGS → mint the audit pair (was held by the gate)
+      FAIL → bounce the target back to status=doing (worker re-takes)
+    Triggered by title prefix `BUILD-VERIFY <target>:` so any agent assigned
+    to the build-gate session can complete one."""
+    title = item.get("title", "") or ""
+    if not title.startswith("BUILD-VERIFY "):
+        return None
+    if item.get("status") not in ("done", "verified"):
+        return None
+    verdict = _extract_verdict(item.get("desc", "") or "")
+    if not verdict:
+        return None
+    m = re.match(r'^BUILD-VERIFY ([A-Z][A-Z0-9]*-\d+)[:\s]', title)
+    if not m:
+        return None
+    target_id = m.group(1)
+    target = db.execute(
+        "SELECT id, status, session, title, desc, org, updated FROM issues "
+        "WHERE id = ? AND deleted IS NULL", (target_id,),
+    ).fetchone()
+    if not target:
+        return None
+    now = int(time.time())
+    if verdict == "FAIL":
+        if target["status"] != "review":
+            return None  # already moved on
+        bounce_note = (
+            f"\n\n[build-verify FAIL — bounced from review {time.strftime('%Y-%m-%d %H:%M', time.localtime(now))} "
+            f"by {item['id']}. See its desc for build errors.]"
+        )
+        new_desc = (target["desc"] or "") + bounce_note
+        db.execute(
+            "UPDATE issues SET status = 'doing', desc = ?, updated = ? WHERE id = ?",
+            (new_desc, now, target_id),
+        )
+        db.commit()
+        _board_changed()
+        return {"action": "build-verify-failed", "target": target_id,
+                "build_verify": item["id"], "verdict": verdict}
+    if verdict in ("PASS", "PASS-WITH-WARNINGS"):
+        # Build passed — mint the audit pair now (skip the build-gate)
+        target_dict = {k: target[k] for k in target.keys()}
+        return _mint_audit_pair_unguarded(target_dict, db)
+    return None
+
+
+def _maybe_auto_mint_writeup_handoff(item: dict, db) -> dict | None:
+    """When a Nightly billable-notes writeup source item PATCHes to review,
+    fire the writeup_handoff_auto_mint workflow to auto-mint the Cypra-PAA
+    handoff. Removes step 4 (post CP-* to Cypra-PAA) from agent responsibility.
+
+    Only fires when:
+      - title starts with 'Nightly billable-notes writeup:'
+      - source session is a CD-* session (client-data agents only — matches
+        the nightly script's dispatch scope)
+      - status is 'review' (the workflow is idempotent, so accidental
+        double-fires are safe, but this narrows scope for the hook)
+
+    Runs the workflow in a background thread so the PATCH that triggered
+    this doesn't block on the classifier's fetch-and-POST. Failures never
+    fail the PATCH — worst case is the CP-* doesn't mint and the PAA
+    silence audit surfaces it 8h later (same as pre-hook behavior).
+
+    Returns a dict marking the cascade, or None. The dict is informational
+    only — the actual mint happens async in the thread.
+    """
+    title = item.get("title", "") or ""
+    if not title.startswith("Nightly billable-notes writeup:"):
+        return None
+    session = item.get("session", "") or ""
+    if not session.startswith("CD-"):
+        return None
+    if item.get("status") != "review":
+        return None
+    source_id = item.get("id", "")
+    try:
+        threading.Thread(
+            target=_run_workflow,
+            args=("writeup_handoff_auto_mint", {"source_item_id": source_id}),
+            daemon=True,
+            name=f"wf-writeup-handoff-{source_id}",
+        ).start()
+    except Exception as _e:
+        slog(f"[writeup-handoff] {source_id}: workflow spawn failed: {_e}")
+        return None
+    return {"action": "writeup-handoff-mint-spawned", "source": source_id}
+
+
+def _auto_mint_audit_pair(target_item: dict, db) -> dict | None:
+    """Called when a worker item PATCHes to status=review. Eligibility-checks,
+    then enforces the build-verify gate (if CC_BUILD_GATE is set in the target
+    session's env), then delegates to _mint_audit_pair_unguarded.
+
+    Build-verify gate (Framework workers): when the target session's env has
+    `CC_BUILD_GATE=<bv-session>` set (e.g. RTG-VS2017), check for an existing
+    BUILD-VERIFY item for this target on that session:
+      - PASS / PASS-WITH-WARNINGS → proceed to audit-mint
+      - FAIL → don't mint audits (the build-verify close hook should have
+        already bounced the target to status=doing)
+      - todo/doing (still running) → don't mint, hold
+      - none → mint a BUILD-VERIFY item instead of audit pair. The audit pair
+        gets minted later by _auto_on_build_verify_close on PASS.
+    """
+    tid = target_item.get("id", "")
+    tprefix = tid.split("-", 1)[0] if "-" in tid else ""
+    if tprefix in _CONTROL_PLANE_PREFIXES:
+        return None
+    if _is_audit_session(target_item.get("session", "")):
+        return None
+    if _is_research_session(target_item.get("session", "")):
+        return None
+
+    # Build-verify gate (per-target-session env var)
+    target_session = target_item.get("session") or ""
+    if target_session:
+        env_file = CC_SESSIONS / f"{target_session}.env"
+        if env_file.exists():
+            try:
+                cfg = parse_env_file(env_file)
+            except Exception:
+                cfg = {}
+            build_gate = (cfg.get("CC_BUILD_GATE") or "").strip()
+            if build_gate:
+                if not (CC_SESSIONS / f"{build_gate}.env").exists():
+                    slog(f"[build-gate] {tid}: CC_BUILD_GATE={build_gate!r} but no env file — proceeding without gate")
+                else:
+                    bv = db.execute(
+                        "SELECT id, status, desc, created FROM issues "
+                        "WHERE title LIKE ? AND session = ? AND deleted IS NULL "
+                        "  AND status != 'discarded' "
+                        "ORDER BY created DESC LIMIT 1",
+                        (f"BUILD-VERIFY {tid}:%", build_gate),
+                    ).fetchone()
+                    if bv:
+                        # Freshness rule: a BUILD-VERIFY only covers the
+                        # commit it was minted against. The target's `updated`
+                        # bumps on every review-PATCH, so if BV was minted
+                        # BEFORE the target's last update, the target has
+                        # likely re-shipped (post-FAIL re-take, new commit)
+                        # and the old BV is stale. Mint a fresh one.
+                        # RTG-Research caught this 2026-06-27 on RA-651: the
+                        # gate considered RV-10 (V1 commit) as satisfying V3.
+                        target_updated = int(target_item.get("updated") or 0)
+                        bv_created = int(bv["created"])
+                        if bv_created < target_updated - 60:
+                            slog(f"[build-gate] {tid}: BV {bv['id']} stale "
+                                 f"(created {bv_created} < target.updated-60 {target_updated-60}) "
+                                 f"— minting fresh BV")
+                            return _mint_build_verify(target_item, build_gate, db)
+                        if bv["status"] in ("todo", "doing"):
+                            return None  # build in flight; hold
+                        if bv["status"] in ("done", "verified"):
+                            verdict = _extract_verdict(bv["desc"] or "")
+                            if verdict in ("PASS", "PASS-WITH-WARNINGS"):
+                                pass  # proceed to audit-mint
+                            else:
+                                return None  # FAIL or no verdict — close hook handles
+                    else:
+                        # No BUILD-VERIFY exists; mint one instead of audit pair.
+                        return _mint_build_verify(target_item, build_gate, db)
+
+    return _mint_audit_pair_unguarded(target_item, db)
+
+
+def _auto_mint_escalation(target_id: str, org: str, my_audit_id: str,
+                          my_verdict: str, other_audit_id: str, other_verdict: str,
+                          db) -> dict | None:
+    """Called from C4 when an audit pair completes with mixed verdicts (one
+    ACCEPT + one FAIL). Mints an RR-/ER- escalation to the org's *-Research
+    session. The existing server-side escalation-mint gate (in POST handler)
+    catches duplicate attempts in the same 24h window.
+
+    Returns the minted item dict if successful, else None (gate blocked or
+    adjudicator session missing)."""
+    if not org:
+        return None
+    research_session = _resolve_adjudicator_session(org)
+    if not research_session:
+        return None
+    prefix = _prefix_from_session(research_session)
+    now = int(time.time())
+
+    # Re-run the same escalate-mint guard inline so we don't double-mint.
+    # (The POST-handler gate covers explicit POSTs; this is an internal mint.)
+    # Match TITLE only — desc bodies often contain cross-references to other
+    # target ids that would false-positive as prior escalations. Aligns with
+    # the same fix in the POST-handler gate (2026-07-01).
+    # Session LIKE covers both '-Research' and '-Reviewer' suffixes.
+    prior = db.execute(
+        "SELECT id FROM issues WHERE (session LIKE '%-Research' OR session LIKE '%-Reviewer') AND deleted IS NULL "
+        "  AND status != 'discarded' AND created > ? "
+        "  AND title LIKE ? "
+        "ORDER BY created DESC LIMIT 1",
+        (now - 86400, f"%{target_id}%"),
+    ).fetchone()
+    if prior:
+        return {"action": "escalation-skipped-cooldown", "target": target_id,
+                "prior": prior["id"]}
+
+    rr_id = _next_issue_id(prefix)
+    title = f"ESC-{target_id}: split verdict ({my_verdict} vs {other_verdict})"
+    desc = (
+        f"[auto-minted {time.strftime('%Y-%m-%d %H:%M', time.localtime(now))} "
+        f"on audit-pair completion]\n\n"
+        f"Audit pair on {target_id} closed with disagreement:\n"
+        f"  {my_audit_id}: VERDICT: {my_verdict}\n"
+        f"  {other_audit_id}: VERDICT: {other_verdict}\n\n"
+        f"Read both audit reports and adjudicate. Apply C3 by adding a "
+        f"`VERDICT: <PASS|PASS-WITH-WARNINGS|FAIL>` line to your desc when done."
+    )
+    min_pos = db.execute(
+        "SELECT COALESCE(MIN(NULLIF(pos, 0)), 0) AS m FROM issues "
+        "WHERE status = 'todo' AND deleted IS NULL"
+    ).fetchone()
+    new_pos = (min_pos["m"] if min_pos else 0) - 1024.0
+    db.execute(
+        """INSERT INTO issues (id, title, desc, status, session, creator, due, due_time,
+                               created, updated, owner_type, pos, org)
+           VALUES (?, ?, ?, 'todo', ?, 'server-escalation-mint', NULL, NULL, ?, ?, 'agent', ?, ?)""",
+        (rr_id, title, desc, research_session, now, now, new_pos, org),
+    )
+    db.commit()
+    _notify_session_of_task(research_session, rr_id, title)
+
+    # Deterministic pre-adjudication: for orgs where the audit_pair_adjudicate
+    # workflow has been certified, classify the split immediately. If it lands
+    # in a known-safe class (stale-cascade with BUILD-VERIFY fact, deploy-status
+    # with source-clean co-signal), the workflow PATCHes the RR-* with a
+    # VERDICT: line — _auto_apply_adjudication cascades to the target and the
+    # RR-* stays in review (sampling_mode) so the Research adjudicator can
+    # certify the first N auto-closes against HEAD. Everything else no-ops
+    # and the RR-* stays as a fresh todo for manual adjudication.
+    #
+    # Runs in a background thread so the audit PATCH that triggered this
+    # mint doesn't block on the classifier's fetch-and-PATCH round-trip.
+    # If the workflow errors, the RR-* stays as-minted — same as if this
+    # code path weren't wired at all.
+    if org == "RTG":
+        try:
+            threading.Thread(
+                target=_run_workflow,
+                args=("audit_pair_adjudicate",
+                      {"rr_id": rr_id, "target_id": target_id, "org": org}),
+                daemon=True,
+                name=f"wf-adjudicate-{rr_id}",
+            ).start()
+        except Exception as _e:
+            slog(f"[audit-adjudicate] failed to spawn workflow for {rr_id}: {_e}")
+
+    return {"action": "escalation-minted", "rr": rr_id, "target": target_id,
+            "research": research_session}
+
+
+def _auto_apply_adjudication(rr_item: dict, db) -> dict | None:
+    """C3. Called after a *-Research-assigned item is PATCHed. If the item
+    carries a verdict in its desc, apply the verdict to the target work item.
+    Returns a dict describing the cascaded action, or None.
+
+    Session-based detection (not prefix-based) so this works for any
+    *-Research session (RTG-Research RR-*, Ember-Research ER-*, etc.)
+    without per-org id-prefix configuration."""
+    rid = rr_item.get("id", "")
+    if not _is_research_session(rr_item.get("session", "")):
+        return None
+    desc = rr_item.get("desc", "") or ""
+    verdict = _extract_verdict(desc)
+    if not verdict:
+        return None
+    target_id = _extract_target_id(
+        desc,
+        exclude_id=rid,
+        title_text=(rr_item.get("title", "") or ""),
+    )
+    if not target_id:
+        return None
+    target = db.execute(
+        "SELECT id, title, status, desc, session, org FROM issues WHERE id = ? AND deleted IS NULL",
+        (target_id,),
+    ).fetchone()
+    if not target:
+        return None
+    # Only act on in-flight targets — never overwrite a settled state.
+    if target["status"] not in ("review", "doing"):
+        return None
+    new_status = "verified" if verdict in ("PASS", "PASS-WITH-WARNINGS") else "doing"
+    if target["status"] == new_status:
+        return None  # already there, nothing to do
+    now = int(time.time())
+    stamp = time.strftime("%Y-%m-%d %H:%M", time.localtime())
+    note = f"\n\n[auto-applied {stamp} by C3: {rid} adjudicated {verdict} → {new_status}]"
+    new_desc = (target["desc"] or "") + note
+    db.execute(
+        "UPDATE issues SET status = ?, desc = ?, updated = ? WHERE id = ?",
+        (new_status, new_desc, now, target_id),
+    )
+    db.commit()
+    _board_changed()
+    # Re-take nudge: FAIL adjudication flipping the target back to 'doing'
+    # is a fresh-work event for the assigned worker — mirror the fresh-mint
+    # notification so it doesn't have to poll to notice. Fresh mint's
+    # notified=1 flag would suppress _notify_session_of_task, so use the
+    # dedicated retake helper.
+    if new_status == "doing" and target["session"]:
+        _notify_session_of_retake(target["session"], target_id,
+                                  target["title"] or "", verdict, rid, "C3")
+    return {"action": "auto-applied", "rr": rid, "target": target_id,
+            "verdict": verdict, "new_status": new_status}
+
+
+def _auto_verify_from_audit_pair(audit_item: dict, db) -> dict | None:
+    """C4. Called after an audit item (assigned to a *-Audit-* session) is
+    PATCHed. If both audit items targeting the same target have closed with
+    verdicts, apply: both ACCEPT → verified, both FAIL → doing. Mixed
+    verdicts → leave for escalation.
+
+    Session-based detection (not prefix-based) so this works for any audit
+    session across orgs (RTG-Audit-*, Ember-Audit-*). The cross-org prefix
+    collisions (Ember EAC- is shared with EmberCRM_API_Core worker items)
+    are avoided entirely by checking session field, not id prefix."""
+    aid = audit_item.get("id", "")
+    my_session = audit_item.get("session", "")
+    if not _is_audit_session(my_session):
+        return None
+    # Audit must be in a closed-ish state to count.
+    if audit_item.get("status") not in ("done", "verified", "review"):
+        return None
+    my_verdict = _extract_verdict(audit_item.get("desc", "") or "")
+    if not my_verdict:
+        return None
+    target_id = _extract_target_id(
+        audit_item.get("desc", "") or "",
+        exclude_id=aid,
+        title_text=(audit_item.get("title", "") or ""),
+    )
+    if not target_id:
+        return None
+    target = db.execute(
+        "SELECT id, title, status, desc, session, org FROM issues WHERE id = ? AND deleted IS NULL",
+        (target_id,),
+    ).fetchone()
+    if not target or target["status"] != "review":
+        return None
+    # Find the OTHER audit — same target, same org's OTHER auditor.
+    # The two auditors in any org pair as (-Audit-Codex) and (-Audit-Opus48).
+    # Derive the sibling session by swapping that suffix.
+    if my_session.endswith("-Audit-Codex"):
+        other_session = my_session[:-len("-Audit-Codex")] + "-Audit-Opus48"
+    elif my_session.endswith("-Audit-Opus48"):
+        other_session = my_session[:-len("-Audit-Opus48")] + "-Audit-Codex"
+    else:
+        return None  # unknown auditor session shape
+    # CRITICAL: anchor the title prefix — `LIKE '%target%'` previously matched
+    # cross-target audits whose desc mentioned the target as a cross-reference,
+    # producing wrong pairings (RTG-Research caught RAO-7235 paired with
+    # RAC-7141 for different targets, 2026-06-25). Audit titles are
+    # canonically `AUDIT <target>: <body>` — match the prefix only.
+    other = db.execute(
+        "SELECT id, status, desc FROM issues "
+        "WHERE session = ? AND deleted IS NULL AND status != 'discarded' "
+        "  AND title LIKE ? "
+        "ORDER BY created DESC LIMIT 1",
+        (other_session, f"AUDIT {target_id}:%"),
+    ).fetchone()
+    if not other or other["status"] not in ("done", "verified", "review"):
+        return None
+    their_verdict = _extract_verdict(other["desc"] or "")
+    if not their_verdict:
+        return None
+    accept = {"PASS", "PASS-WITH-WARNINGS"}
+    if my_verdict in accept and their_verdict in accept:
+        new_status = "verified"
+    elif my_verdict == "FAIL" and their_verdict == "FAIL":
+        new_status = "doing"
+    else:
+        # SPLIT verdict (one ACCEPT, one FAIL). Mint the escalation to the
+        # org's *-Research session for adjudication. Server-side gate
+        # prevents duplicate mints in the same 24h window.
+        return _auto_mint_escalation(
+            target_id=target_id,
+            org=(target["org"] if "org" in target.keys() else None) or _session_org(my_session),
+            my_audit_id=aid, my_verdict=my_verdict,
+            other_audit_id=other["id"], other_verdict=their_verdict,
+            db=db,
+        )
+    if target["status"] == new_status:
+        return None
+    now = int(time.time())
+    stamp = time.strftime("%Y-%m-%d %H:%M", time.localtime())
+    note = (f"\n\n[auto-applied {stamp} by C4: pair complete "
+            f"({aid}={my_verdict}, {other['id']}={their_verdict}) → {new_status}]")
+    new_desc = (target["desc"] or "") + note
+    db.execute(
+        "UPDATE issues SET status = ?, desc = ?, updated = ? WHERE id = ?",
+        (new_status, new_desc, now, target_id),
+    )
+    db.commit()
+    _board_changed()
+    # Re-take nudge: FAIL/FAIL audit pair flipping the target back to 'doing'
+    # is a fresh-work event for the assigned worker. Notify the same way C3
+    # does so the worker doesn't have to poll.
+    if new_status == "doing" and target["session"]:
+        pair_verdict = f"{my_verdict}/{their_verdict}"
+        pair_source = f"{aid}+{other['id']}"
+        _notify_session_of_retake(target["session"], target_id,
+                                  target["title"] or "", pair_verdict,
+                                  pair_source, "C4")
+    return {"action": "auto-applied", "audits": [aid, other["id"]],
+            "verdicts": [my_verdict, their_verdict],
+            "target": target_id, "new_status": new_status}
 
 
 def _session_dirty_files(name: str, work_dir: str) -> list:
@@ -8385,9 +8872,8 @@ def list_sessions() -> list:
                 _fire_schedule_event("session_idle", source_session=name)
                 def _on_idle(sname=name):
                     nudged = _commit_guard(sname)        # remind to commit dirty work
-                    task_nudged = _task_guard(sname)     # remind to log untracked work on the board
                     _complete_session_board_issue(sname)
-                    if not nudged and not task_nudged:   # don't pile a new task on a nudge
+                    if not nudged:                       # don't pile a new task on a commit nudge
                         _pickup_next_board_task(sname)
                 threading.Thread(target=_on_idle, daemon=True).start()
             elif status == "idle" and prev == "idle" and not running:
@@ -8395,8 +8881,15 @@ def list_sessions() -> list:
             elif status == "" and prev in ("active", "waiting", "idle"):
                 # Session went from running to not running
                 threading.Thread(target=_complete_session_board_issue, args=(name,), daemon=True).start()
-            if status == "active":
-                _task_guard_nudged.pop(name, None)       # re-arm task-guard for the next idle episode
+            # Pushover notification when session needs input
+            if status == "waiting" and prev in ("active", ""):
+                _cfg_notif = parse_env_file(CC_SESSIONS / f"{name}.env")
+                _auto_cont = _cfg_notif.get("CC_AUTO_CONTINUE", "") in ("1", "true", "yes")
+                if not _auto_cont:
+                    threading.Thread(target=_send_pushover, args=(
+                        f"amux — {name} needs input",
+                        "Session is waiting for your response.",
+                    ), daemon=True).start()
             _session_prev_status[name] = status if running else ""
             # Filter for intelligible content lines
             intelligible = []
@@ -8432,7 +8925,7 @@ def list_sessions() -> list:
         # Token count from JSONL cache (refreshed once above the loop).
         # Prefer per-conversation lookup (avoids sharing counts across sessions
         # that share the same CC_DIR, common in cloud where all sessions run in /root/).
-        proj_key = _project_name(raw_dir) if raw_dir else ""
+        proj_key = resolved_dir.replace("/", "-") if resolved_dir else ""
         conv_id = meta.get("cc_conversation_id", "")
         if conv_id and proj_key:
             tokens = _token_cache["data"].get((proj_key, conv_id), 0)
@@ -8474,6 +8967,8 @@ def list_sessions() -> list:
             "mcp": cfg.get("CC_MCP", ""),
             "worktree": cfg.get("CC_WORKTREE", "") == "1",
             "worktree_repo": cfg.get("CC_WORKTREE_REPO", ""),
+            "icon": cfg.get("CC_ICON", ""),
+            "color": cfg.get("CC_COLOR", ""),
         })
     status_order = {"active": 0, "waiting": 0, "idle": 1, "": 1}
     sessions.sort(key=lambda s: (not s["pinned"], not s["running"], status_order.get(s["status"], 1), -s["last_activity"]))
@@ -8502,7 +8997,8 @@ def get_session_info(name: str) -> dict | None:
 def _find_latest_session_id(work_dir: str) -> str:
     """Find the most recent Claude Code conversation session ID for a working directory.
     Skips snapshot-only files that have no user/assistant messages (claude --resume exits on those)."""
-    project_name = _project_name(work_dir)
+    resolved = str(Path(work_dir).expanduser().resolve())
+    project_name = resolved.replace("/", "-")
     project_dir = CLAUDE_HOME / "projects" / project_name
     if not project_dir.is_dir():
         return ""
@@ -8533,14 +9029,9 @@ def _ascript_str(s: str) -> str:
 
 
 def _project_name(work_dir: str) -> str:
-    """Return the Claude project folder name for a given work dir (mirrors
-    Claude's own encoding). Claude replaces EVERY non-alphanumeric character
-    with '-', not just slashes — a workdir containing a space or dot (e.g.
-    '~/Obsidian Vault/Self' -> '-Users-ethan-Obsidian-Vault-Self') otherwise
-    resolves to a project dir Claude never writes, silently breaking
-    transcripts, token counts, and model/resume detection for that session."""
+    """Return the Claude project folder name for a given work dir (mirrors Claude's own encoding)."""
     resolved = str(Path(work_dir).expanduser().resolve())
-    return re.sub(r"[^A-Za-z0-9]", "-", resolved)
+    return resolved.replace("/", "-")
 
 
 def _live_conv_id(name: str, work_dir: str = "") -> str:
@@ -8557,7 +9048,7 @@ def _live_conv_id(name: str, work_dir: str = "") -> str:
     """
     try:
         r = subprocess.run(
-            ["tmux", "list-panes", "-t", tmux_target(name), "-F", "#{pane_pid}"],
+            [*_tmux_prefix(name), "list-panes", "-t", tmux_target(name), "-F", "#{pane_pid}"],
             capture_output=True, text=True, timeout=5,
         )
         pane_pid = r.stdout.strip().split("\n")[0] if r.returncode == 0 else ""
@@ -8649,6 +9140,72 @@ curl -sk -X PATCH -H 'Content-Type: application/json' \\
   -d '{"status":"done","desc":"Result: ..."}' \\
   $AMUX_URL/api/board/TASK-ID
 ```
+
+### Threads — conversations with Jeremy or between agents
+
+Threads replaced the old Questions/Inbox module in July 2026. A **thread** is
+a conversation; a **message** is one entry inside it. Every message can be
+replied to individually — `parent_id` points at the specific message.
+
+**How to route questions and updates for Jeremy — this is the main rule:**
+
+1. **Any question for Jeremy goes into Threads.** Not a board task, not
+   `/send`, not a channel — Threads. That's where he sees his inbox and
+   responds. Board tasks are for discrete work items; Threads are for
+   conversation and questions where you expect a reply.
+2. **Reuse an existing thread if the question relates to one.** Before
+   starting a new thread, run `amux threads list` and check whether Jeremy
+   already has an open thread with you on the same topic. If yes, reply
+   into that thread with `amux threads reply <M-id>` so context stays
+   together. Reserve new threads for genuinely unrelated topics.
+3. **Start a new thread only when the topic is new.** e.g. a fresh
+   escalation, a deploy blocker, a status/decision request on something not
+   already in flight.
+4. **Flag any incoming message that contains something you need to run
+   later** (a SQL statement, a command, a file path) with
+   `amux threads flag <M-id>` — Jeremy uses the Flagged summary at the top
+   of the Threads UI, so flagging makes actionable content easy to find.
+
+**Use the `amux threads` CLI** rather than raw curl — it fills in the
+X-Amux-Session header automatically so message direction stays correct.
+
+```bash
+# Reply to a specific message. The CLI resolves the parent's thread for you.
+amux threads reply M-42 "here's the answer..."
+
+# Streaming (long answer): start partial, do work, finalize.
+MID=$(amux threads reply --partial M-42 "working on it...")
+# ...do the work...
+amux threads finalize $MID "final answer"
+
+# Start a new thread (e.g. escalate a question to Jeremy or another agent)
+amux threads new Jeremy "Deploy blocked" "Migration script hit an ERROR on step 3..."
+
+# List / show / flag / read
+amux threads list
+amux threads show T-12
+amux threads flag M-42       # bookmark actionable content
+amux threads read M-42       # mark a message read
+```
+
+**Direction rules:**
+- If `AMUX_SESSION` is set (any agent session), the CLI puts your name in
+  `X-Amux-Session` and the message is recorded as coming from you.
+- Without that header, the server treats the sender as Jeremy — so agents
+  MUST use the `amux` CLI (or set the header explicitly), not raw curl.
+
+When Jeremy sends you a message via Threads, you'll get a board task with
+title `Thread T-N: <thread title>` and a `desc` containing the `amux threads
+reply` command pre-filled with the parent message ID. Just paste + fill in
+your answer.
+
+**When to use Threads vs. board vs. notes vs. channels:**
+- **Threads** — back-and-forth conversation with Jeremy or another agent
+  where you expect replies. Every message can be flagged, read, replied to.
+- **Board** — discrete tasks and results. Not conversation. Mark done when
+  finished.
+- **Notes** — reference documents, research, write-ups meant to be read.
+- **Channels** — persistent two-way threads between two agent sessions.
 
 ### Notes vs board issues — when to use each
 
@@ -8990,7 +9547,10 @@ def _auto_resume_sessions():
 
 
 def _log_pipe_command(log_path: Path) -> str:
-    """Return a tmux pipe-pane command that redacts API keys before logging."""
+    """Return a tmux pipe-pane command that redacts API keys before logging.
+    log_path is the path as seen from INSIDE the tmux pane's shell (host
+    absolute path for host sessions, /logs/<name>.log for docker sessions —
+    _log_path_in_runtime resolves this)."""
     redactor = (
         "import re,sys\n"
         "pat=re.compile(rb'((?:mxp|usr|ret)_sk)_[A-Za-z0-9_-]+|((?:AMUX_MIXPEEK_OPS_TOKEN|ANTHROPIC_API_KEY|OPENAI_API_KEY|GOOGLE_MAPS_API_KEY|GOOGLE_API_KEY|CLOUDFLARE_API_TOKEN|ELEVENLABS_API_KEY|POSTHOG_KEY|POSTHOG_PERSONAL_API_KEY)=)[^\\s\\r\\n]+|(?:ghp|gho|ghu|ghs|ghr)_[A-Za-z0-9_]{20,}|github_pat_[A-Za-z0-9_]+|sk-ant-[A-Za-z0-9_-]+|sk-proj-[A-Za-z0-9_-]+|sk[_-][A-Za-z0-9]{32,}|AIza[0-9A-Za-z_-]{30,}|(?:phx|phc)_[A-Za-z0-9]+')\n"
@@ -9024,14 +9584,15 @@ def _attach_log_streaming():
                 lf.write(f"\n\n=== Server restarted: {ts} ===\n\n".encode())
         except Exception:
             pass
-        try:
-            subprocess.run(
-                ["tmux", "pipe-pane", "-t", tmux_name(name), "-o",
-                 _log_pipe_command(lp)],
-                capture_output=True, timeout=5,
-            )
-        except (subprocess.TimeoutExpired, subprocess.SubprocessError, OSError):
-            pass
+        # pipe-pane runs inside the tmux pane's shell — for docker sessions
+        # that shell is inside the container and only sees /logs/<name>.log
+        # (bind-mounted to the same host file); for host sessions the pane's
+        # shell sees the host absolute path directly.
+        subprocess.run(
+            [*_tmux_prefix(name), "pipe-pane", "-t", tmux_name(name), "-o",
+             _log_pipe_command(_log_path_in_runtime(name))],
+            capture_output=True, timeout=5,
+        )
 
 
 def _migrate_memory_files():
@@ -9094,9 +9655,10 @@ def _compose_memory(global_content: str, session_content: str) -> str:
 
 
 def _capture_claude_memory_changes(name: str, work_dir: str):
-    """Capture changes Claude made to MEMORY.md during the previous session."""
+    """Capture changes Claude made to MEMORY.md during the previous session.
+    Runtime-aware: reads from the same location _write_claude_memory writes to."""
     pname = _project_name(work_dir)
-    claude_mem_file = CLAUDE_HOME / "projects" / pname / "memory" / "MEMORY.md"
+    claude_mem_file = _claude_projects_dir_for_session(name) / pname / "memory" / "MEMORY.md"
     session_file = CC_MEMORY / f"{name}.md"
     if not claude_mem_file.exists() or claude_mem_file.is_symlink():
         return
@@ -9114,14 +9676,82 @@ def _capture_claude_memory_changes(name: str, work_dir: str):
         pass
 
 
+def _container_context_preamble(name: str) -> str:
+    """Container-mode agent orientation, auto-prepended to composed memory.
+
+    Two things a docker-mode agent can't figure out on its own that shape
+    their behaviour: they share a Claude account with their sibling sessions
+    in the same container, and their filesystem view is limited to whatever
+    the org spec mounts. Everything else about the API + amux CLI +
+    coordination pattern is unchanged from host mode."""
+    prod = _session_docker_org(name)
+    if not prod:
+        return ""
+    spec = _load_org_spec(prod)
+    if not spec:
+        return ""
+    # Enumerate siblings + mounted paths so the note is concrete
+    siblings = [s for s in spec.get("sessions", []) if s != name]
+    mount_lines = []
+    for m in spec.get("mounts", []):
+        mode = m.get("mode", "rw")
+        mount_lines.append(f"- `{m['target']}` ({mode})")
+    for m in spec.get("readonly_cross_mounts", []):
+        mount_lines.append(f"- `{m['target']}` (ro, cross-product)")
+    mount_lines.append("- `/home/amux/` (your shared HOME — includes `~/.claude/`)")
+    mount_lines.append("- `/logs/` (session logs, bind-mount of `~/.amux/logs/` on host)")
+    return (
+        f"# ─ Container context (docker:{prod}) ─\n"
+        f"\n"
+        f"You are running inside container `amux-org-{prod}`. This is auto-added — "
+        f"do not remove.\n"
+        f"\n"
+        f"**Shared Claude account.** The `/home/amux/.claude/` OAuth token and "
+        f"`projects/*.jsonl` history are shared with "
+        + (f"{len(siblings)} other AMUX session" + ("s" if len(siblings) != 1 else "")
+           + f" in this container: {', '.join(siblings) if siblings else '(none)'}. "
+             f"Whichever of you /logged in first is who all of you are talking to Anthropic as. "
+             f"Rate limits and usage quotas are shared — be mindful of token spend, and if you "
+             f"hit a limit every sibling session stops too.\n"
+             f"\n") +
+        f"**Filesystem is scoped.** From inside this container you can only see:\n"
+        + "\n".join(mount_lines) + "\n"
+        f"\n"
+        f"Everything else on the host is invisible. If you need read access to another "
+        f"product's code (springboard pattern), ask Jeremy to add it to "
+        f"`~/.amux/orgs/{prod}.yml` under `readonly_cross_mounts:` — do not try to work "
+        f"around this.\n"
+        f"\n"
+        f"**Coordination with sessions in other containers still works the same** — "
+        f"the board / threads / channels / notes / skills API is at `$AMUX_URL` "
+        f"(`host.docker.internal:8822` from your side). Use the `amux` CLI as always. "
+        f"Filesystem is NOT a coordination channel — other containers' HOMEs and work "
+        f"dirs are simply not mounted.\n"
+        f"\n"
+        f"**Skills that YOU add propagate to every org's container** — if you discover "
+        f"a repeatable pattern, `amux skills set <name>` (see the Skills section of "
+        f"your composed memory for details) saves it to SQLite and the server syncs "
+        f"the .md into every org's shared home + host `~/.claude/commands/`. Next "
+        f"wake of any agent anywhere sees `/name` available. This is how a CD-Wattco "
+        f"agent's Zoho recipe reaches RTG-AccountingLink without a filesystem sync.\n"
+        f"\n"
+        f"─────────────────────────────────────────────────────────────────────────────\n"
+        f"\n"
+    )
+
+
 def _write_claude_memory(name: str, work_dir: str):
-    """Write composed (global + session) memory to Claude's project memory dir."""
+    """Write composed (global + session) memory to Claude's project memory dir.
+    Runtime-aware: docker sessions write into their org's shared home so
+    the container's Claude Code actually sees the MEMORY.md when it starts."""
     pname = _project_name(work_dir)
     session_file = CC_MEMORY / f"{name}.md"
     global_content = _GLOBAL_MEM_FILE.read_text(errors="replace") if _GLOBAL_MEM_FILE.exists() else ""
     session_content = session_file.read_text(errors="replace") if session_file.exists() else ""
     composed = _compose_memory(global_content, session_content)
-    claude_mem_dir = CLAUDE_HOME / "projects" / pname / "memory"
+    # Prepend container-context preamble for docker sessions. No-op for host.
+    composed = _container_context_preamble(name) + composed
+    claude_mem_dir = _claude_projects_dir_for_session(name) / pname / "memory"
     claude_mem_file = claude_mem_dir / "MEMORY.md"
     try:
         claude_mem_dir.mkdir(parents=True, exist_ok=True)
@@ -9253,61 +9883,6 @@ def _validate_model_name(value) -> tuple[bool, str, str]:
     return True, normalized, ""
 
 
-# Claude Code reasoning-effort levels (the --effort CLI flag). Empty = clear.
-_VALID_EFFORTS = ("low", "medium", "high", "xhigh", "max")
-
-
-def _validate_effort(value) -> tuple[bool, str, str]:
-    """Validate a reasoning-effort field from a PATCH body.
-
-    Returns (ok, normalized_value, error_message). Empty string is allowed
-    and means "clear the --effort override". Mirrors _validate_model_name's
-    contract so callers handle both the same way.
-    """
-    if not isinstance(value, str):
-        return False, "", "effort must be a string"
-    normalized = value.strip().lower()
-    if normalized and normalized not in _VALID_EFFORTS:
-        return False, "", f"invalid effort (allowed: {', '.join(_VALID_EFFORTS)})"
-    return True, normalized, ""
-
-
-def _strip_effort_from_flags(flags: str) -> str:
-    """Remove any --effort X or --effort=X tokens from a flag string.
-
-    Mirrors _strip_model_from_flags. Raises ValueError on malformed input
-    so callers can surface a clear error instead of wiping the user's flags.
-    """
-    if not flags:
-        return ""
-    tokens = shlex.split(flags)  # raises ValueError on malformed input
-    filtered = []
-    i = 0
-    while i < len(tokens):
-        t = tokens[i]
-        if t == "--effort" and i + 1 < len(tokens):
-            i += 2
-            continue
-        if t.startswith("--effort="):
-            i += 1
-            continue
-        filtered.append(t)
-        i += 1
-    return " ".join(shlex.quote(t) for t in filtered)
-
-
-def _set_effort_flag(flags: str, effort: str) -> str:
-    """Return `flags` with --effort set to `effort` (or removed if empty).
-
-    Strips any existing --effort first, then appends the new one. Assumes
-    `effort` has already passed _validate_effort.
-    """
-    base = _strip_effort_from_flags(flags)
-    if not effort:
-        return base
-    return f"{base} --effort {effort}".strip() if base else f"--effort {effort}"
-
-
 _SESSION_PROVIDERS = ("claude", "codex", "gemini", "iterm2")
 
 
@@ -9410,14 +9985,14 @@ def _capture_log_tail_for_reload(name: str, reason: str) -> bool:
     if is_running(name):
         try:
             subprocess.run(
-                ["tmux", "pipe-pane", "-t", tmux_name(name)],
+                [*_tmux_prefix(name), "pipe-pane", "-t", tmux_name(name)],
                 capture_output=True, timeout=5,
             )
         except Exception:
             pass
         try:
             r = subprocess.run(
-                ["tmux", "capture-pane", "-t", tmux_target(name), "-p", "-S", "-"],
+                [*_tmux_prefix(name), "capture-pane", "-t", tmux_target(name), "-p", "-S", "-"],
                 capture_output=True, text=True, timeout=30,
             )
             if r.stdout.strip():
@@ -9486,26 +10061,26 @@ def _stop_session_for_restart(name: str, provider: str) -> tuple[bool, str]:
         return stop_session(name)
     try:
         subprocess.run(
-            ["tmux", "pipe-pane", "-t", tmux_name(name)],
+            [*_tmux_prefix(name), "pipe-pane", "-t", tmux_name(name)],
             capture_output=True, timeout=5,
         )
     except Exception:
         pass
     try:
         subprocess.run(
-            ["tmux", "send-keys", "-t", tmux_target(name), "C-c"],
+            [*_tmux_prefix(name), "send-keys", "-t", tmux_target(name), "C-c"],
             capture_output=True, timeout=5,
         )
         time.sleep(1)
         if _at_shell_prompt(tmux_capture(name, 10)):
             return True, "stopped"
         subprocess.run(
-            ["tmux", "respawn-pane", "-k", "-t", tmux_target(name), _USER_SHELL],
+            [*_tmux_prefix(name), "respawn-pane", "-k", "-t", tmux_target(name), _USER_SHELL],
             capture_output=True, timeout=5,
         )
         time.sleep(0.2)
         subprocess.run(
-            ["tmux", "send-keys", "-t", tmux_target(name), "Enter"],
+            [*_tmux_prefix(name), "send-keys", "-t", tmux_target(name), "Enter"],
             capture_output=True, timeout=5,
         )
         _poll_shell_prompt(name, timeout=3.0)
@@ -9565,6 +10140,24 @@ def _shell_quote_flags(s: str) -> str:
         # shell as one literal argument. claude will reject it with a
         # clearer error than aborting spawn would give us.
         return shlex.quote(s)
+
+
+# CD-* client agents (Zoho client-data sessions) must not use communication
+# MCP servers meant for Cypra/Ember/marketing agents. Injected as
+# --disallowedTools at session launch — see start_session(). If more
+# communication MCP servers get added later, extend this list.
+_CD_MCP_DENY_PATTERNS = (
+    "mcp__gmail__*",
+    "mcp__claude_ai_Gmail__*",
+    "mcp__claude_ai_Google_Calendar__*",
+    "mcp__claude_ai_Google_Drive__*",
+    "mcp__gdocs__*",
+    "mcp__apple-reminders__*",
+    "mcp__smartermail-calendar-j3software__*",
+    "mcp__smartermail-calendar-nwddi__*",
+    "mcp__smartermail-calendar-rtgroup__*",
+)
+_CD_MCP_DENY_ARG = " ".join(shlex.quote(p) for p in _CD_MCP_DENY_PATTERNS)
 
 
 def _get_default_model() -> str:
@@ -9671,6 +10264,17 @@ def start_session(name: str, extra_flags: str = "", _skip_conv_id: bool = False)
         cfg = parse_env_file(f)
         if cfg.get("CC_ARCHIVED") == "1":
             return False, "session is archived; wake it first"
+
+        # ── Container runtime prep (isolation Phase 2d) ──────────────────────
+        # If this session is CC_RUNTIME=docker:<product>, bring up its product
+        # container BEFORE any tmux call. ensure_org_container is idempotent —
+        # cheap when already running.
+        _org = _session_docker_org(name)
+        if _org:
+            _ok, _msg = ensure_org_container(_org)
+            if not _ok:
+                return False, f"org container prep failed: {_msg}"
+
         work_dir = str(Path(cfg.get("CC_DIR", str(Path.home()))).expanduser().resolve())
         # Stamp this session's commits with its name (durable git trailer).
         _install_amux_commit_hook(work_dir)
@@ -9678,7 +10282,14 @@ def start_session(name: str, extra_flags: str = "", _skip_conv_id: bool = False)
         # Claude Code v2.1.69+ rejects --dangerously-skip-permissions when running as root.
         if os.getuid() == 0 and "--dangerously-skip-permissions" in flags:
             flags = flags.replace("--dangerously-skip-permissions", "").strip()
-        _auto_trust_dir(work_dir)
+        # For container-mode sessions, write the trust entry into the org's
+        # shared home ~/.amux/orgs/<product>/home/.claude.json — that's the
+        # .claude.json the container's Claude Code will read from. Host trust
+        # entry is irrelevant to a container process.
+        if _org:
+            _auto_trust_dir(work_dir, home_dir=str(CC_ORGS / _org / "home"))
+        else:
+            _auto_trust_dir(work_dir)
         _ensure_memory(name, work_dir)
 
         # Determine session resume strategy: name-based (new) > UUID (migration) > fresh
@@ -9688,16 +10299,20 @@ def start_session(name: str, extra_flags: str = "", _skip_conv_id: bool = False)
         if not _skip_conv_id and provider == "claude":
             cc_session_name = meta.get("cc_session_name", "")
             conv_id = meta.get("cc_conversation_id", "")
+            # For docker sessions, look up JSONLs in the org's shared home
+            # (that's where the container's Claude Code writes them). Falls
+            # back to CLAUDE_HOME/projects for host sessions.
+            _projects_dir_for_lookup = _claude_projects_dir_for_session(name)
             if cc_session_name and _validate_cc_session_name(cc_session_name):
-                _sid = _cc_session_id_for_name(cc_session_name, work_dir)
+                _sid = _cc_session_id_for_name(cc_session_name, work_dir, projects_dir=_projects_dir_for_lookup)
                 if _sid:
                     # Use UUID to resume — bypasses interactive picker
                     session_flag = f'--resume {_sid}'
                     print(f"[start] {name}: resume={cc_session_name} (uuid={_sid})")
-                elif _cc_session_exists_in_project(cc_session_name, work_dir):
+                elif _cc_session_exists_in_project(cc_session_name, work_dir, projects_dir=_projects_dir_for_lookup):
                     # Multiple sessions with this name — fall back to UUID if available
                     if conv_id and _uuid_re.match(conv_id):
-                        conv_file = CLAUDE_HOME / "projects" / _project_name(work_dir) / f"{conv_id}.jsonl"
+                        conv_file = _projects_dir_for_lookup / _project_name(work_dir) / f"{conv_id}.jsonl"
                         if conv_file.exists():
                             session_flag = f'--resume {conv_id}'
                             print(f"[start] {name}: resume via UUID fallback (ambiguous name '{cc_session_name}', uuid={conv_id})")
@@ -9714,9 +10329,9 @@ def start_session(name: str, extra_flags: str = "", _skip_conv_id: bool = False)
                     session_flag = f'--name {shlex.quote(name)}'
                     print(f"[start] {name}: fresh start (session '{cc_session_name}' not found in project)")
             elif conv_id and _uuid_re.match(conv_id):
-                # Migration path: old UUID-based session
+                # Migration path: old UUID-based session (per-runtime projects dir)
                 conv_file = (
-                    CLAUDE_HOME / "projects" / _project_name(work_dir) / f"{conv_id}.jsonl"
+                    _projects_dir_for_lookup / _project_name(work_dir) / f"{conv_id}.jsonl"
                 )
                 if conv_file.exists():
                     session_flag = f"--resume {conv_id}"
@@ -9763,7 +10378,12 @@ def start_session(name: str, extra_flags: str = "", _skip_conv_id: bool = False)
             default_flags = dcfg.get("CC_DEFAULT_FLAGS", "")
 
         if provider == "codex":
-            _auto_trust_codex_dir(work_dir)
+            # Container-mode codex sessions need trust in their product's
+            # shared home, not on host.
+            if _org:
+                _auto_trust_codex_dir(work_dir, home_dir=str(CC_ORGS / _org / "home"))
+            else:
+                _auto_trust_codex_dir(work_dir)
             # Resume from stored codex session ID (per amux session), not by cwd
             codex_session_id = meta.get("codex_session_id", "")
             _codex_yolo = False
@@ -9879,14 +10499,15 @@ def start_session(name: str, extra_flags: str = "", _skip_conv_id: bool = False)
                 mcp_chrome = mcp_dir / "mcp-chrome.json"
                 if mcp_chrome.exists():
                     cmd += f" --mcp-config {shlex.quote(str(mcp_chrome))}"
+            # CD-* client agents are Zoho-only. Deny communication MCP tools
+            # (Gmail, Google Calendar/Drive, Apple Reminders/Calendar,
+            # SmarterMail) meant for Cypra/Ember/marketing agents.
+            if name.startswith("CD-"):
+                cmd += " --disallowedTools " + _CD_MCP_DENY_ARG
             # Default to sonnet if no --model specified anywhere
             if "--model" not in cmd:
                 cmd += " --model sonnet"
-            # Only log when a custom executable is active — avoids leaking
-            # flags (e.g. --system-prompt, paths) into server logs, matching
-            # the codex/gemini paths which log provider+action only.
-            if _custom_claude:
-                print(f"[start] {name}: AMUX_CLAUDE_CMD={_custom_claude}")
+            print(f"[start] {name}: cmd={cmd}")
         try:
             tmux_sess = tmux_name(name)
             # Build shell setup string — skip Claude env cleanup for codex
@@ -9921,7 +10542,6 @@ def start_session(name: str, extra_flags: str = "", _skip_conv_id: bool = False)
                 if _api_key_val:
                     _env_args += ["-e", f"ANTHROPIC_API_KEY={_api_key_val}"]
             for _ekey in [
-                "ANTHROPIC_API_BASE",
                 "OPENAI_API_KEY",
                 "GEMINI_API_KEY",
                 "GOOGLE_API_KEY",
@@ -9933,126 +10553,157 @@ def start_session(name: str, extra_flags: str = "", _skip_conv_id: bool = False)
                 if _eVal:
                     _env_args += ["-e", f"{_ekey}={_eVal}"]
     
-            # Check if tmux session already exists
-            r_tmux = subprocess.run(["tmux", "list-sessions", "-F", "#{session_name}"],
+            # Check if tmux session already exists — route via _tmux_prefix so
+            # docker sessions ask their own container's tmux daemon (host tmux
+            # wouldn't know about them).
+            r_tmux = subprocess.run(_tmux_cmd(name, "list-sessions", "-F", "#{session_name}"),
                                     capture_output=True, text=True)
-            tmux_exists = tmux_sess in r_tmux.stdout.splitlines()
+            tmux_exists = r_tmux.returncode == 0 and tmux_sess in r_tmux.stdout.splitlines()
     
             if tmux_exists:
                 # Existing tmux session -- reuse it
                 output = tmux_capture(name, 10)
                 if _at_shell_prompt(output):
                     # At shell prompt -- clear and send Claude command
-                    subprocess.run(["tmux", "send-keys", "-t", tmux_target(name), "C-c"],
+                    subprocess.run([*_tmux_prefix(name), "send-keys", "-t", tmux_target(name), "C-c"],
                                    capture_output=True, timeout=5)
                     time.sleep(0.1)
-                    subprocess.run(["tmux", "send-keys", "-t", tmux_target(name), "C-u"],
+                    subprocess.run([*_tmux_prefix(name), "send-keys", "-t", tmux_target(name), "C-u"],
                                    capture_output=True, timeout=5)
                     time.sleep(0.1)
                     # Set HISTFILE to avoid leaking launch command to bash history
-                    subprocess.run(["tmux", "send-keys", "-t", tmux_target(name), "-l",
+                    subprocess.run([*_tmux_prefix(name), "send-keys", "-t", tmux_target(name), "-l",
                                     "HISTFILE=/dev/null"],
                                    capture_output=True, timeout=5)
                     time.sleep(0.1)
-                    subprocess.run(["tmux", "send-keys", "-t", tmux_target(name), "Enter"],
+                    subprocess.run([*_tmux_prefix(name), "send-keys", "-t", tmux_target(name), "Enter"],
                                    capture_output=True, timeout=5)
                     _poll_shell_prompt(name, timeout=3.0)
                     # cd to work_dir
-                    subprocess.run(["tmux", "send-keys", "-t", tmux_target(name), "-l",
+                    subprocess.run([*_tmux_prefix(name), "send-keys", "-t", tmux_target(name), "-l",
                                     f"cd {shlex.quote(work_dir)}"],
                                    capture_output=True, timeout=5)
                     time.sleep(0.1)
-                    subprocess.run(["tmux", "send-keys", "-t", tmux_target(name), "Enter"],
+                    subprocess.run([*_tmux_prefix(name), "send-keys", "-t", tmux_target(name), "Enter"],
                                    capture_output=True, timeout=5)
                     _poll_shell_prompt(name, timeout=3.0)
                 else:
                     # Not at prompt -- try Ctrl+C, wait, then respawn if needed
-                    subprocess.run(["tmux", "send-keys", "-t", tmux_target(name), "C-c"],
+                    subprocess.run([*_tmux_prefix(name), "send-keys", "-t", tmux_target(name), "C-c"],
                                    capture_output=True, timeout=5)
                     time.sleep(3)
                     output2 = tmux_capture(name, 10)
                     if not _at_shell_prompt(output2):
                         # Still not at prompt -- respawn pane
-                        subprocess.run(["tmux", "respawn-pane", "-k", "-t", tmux_target(name), _USER_SHELL],
+                        subprocess.run([*_tmux_prefix(name), "respawn-pane", "-k", "-t", tmux_target(name), _USER_SHELL],
                                        capture_output=True, timeout=5)
                         time.sleep(1)
                         # Source profile in the new pane
-                        subprocess.run(["tmux", "send-keys", "-t", tmux_target(name), "-l", shell_rc],
+                        subprocess.run([*_tmux_prefix(name), "send-keys", "-t", tmux_target(name), "-l", shell_rc],
                                        capture_output=True, timeout=5)
                         time.sleep(0.1)
-                        subprocess.run(["tmux", "send-keys", "-t", tmux_target(name), "Enter"],
+                        subprocess.run([*_tmux_prefix(name), "send-keys", "-t", tmux_target(name), "Enter"],
                                        capture_output=True, timeout=5)
                         _poll_shell_prompt(name, timeout=3.0)
                     else:
                         # Got to prompt after Ctrl+C -- cd to work_dir
-                        subprocess.run(["tmux", "send-keys", "-t", tmux_target(name), "C-u"],
+                        subprocess.run([*_tmux_prefix(name), "send-keys", "-t", tmux_target(name), "C-u"],
                                        capture_output=True, timeout=5)
                         time.sleep(0.1)
-                        subprocess.run(["tmux", "send-keys", "-t", tmux_target(name), "-l",
+                        subprocess.run([*_tmux_prefix(name), "send-keys", "-t", tmux_target(name), "-l",
                                         "HISTFILE=/dev/null"],
                                        capture_output=True, timeout=5)
                         time.sleep(0.1)
-                        subprocess.run(["tmux", "send-keys", "-t", tmux_target(name), "Enter"],
+                        subprocess.run([*_tmux_prefix(name), "send-keys", "-t", tmux_target(name), "Enter"],
                                        capture_output=True, timeout=5)
                         _poll_shell_prompt(name, timeout=3.0)
-                        subprocess.run(["tmux", "send-keys", "-t", tmux_target(name), "-l",
+                        subprocess.run([*_tmux_prefix(name), "send-keys", "-t", tmux_target(name), "-l",
                                         f"cd {shlex.quote(work_dir)}"],
                                        capture_output=True, timeout=5)
                         time.sleep(0.1)
-                        subprocess.run(["tmux", "send-keys", "-t", tmux_target(name), "Enter"],
+                        subprocess.run([*_tmux_prefix(name), "send-keys", "-t", tmux_target(name), "Enter"],
                                        capture_output=True, timeout=5)
                         _poll_shell_prompt(name, timeout=3.0)
             else:
-                # New tmux session -- start bash shell (not Claude directly)
+                # New tmux session -- start bash shell (not Claude directly).
+                # For container-mode sessions, override:
+                #   AMUX_URL host → host.docker.internal (the container hostname
+                #     mapped to the docker bridge gateway; agents still curl -sk).
+                #   HOME defaults to /home/amux (the container-shared HOME bind-
+                #     mounted from ~/.amux/orgs/<product>/home) so every
+                #     session in the same container shares its ~/.claude/ (one
+                #     /login per container). If the session opts out with
+                #     CC_CLAUDE_AUTH_SHARED=0, HOME=/homes/<session> instead,
+                #     giving that session its own ~/.claude/.
+                _scheme = "http" if "--no-tls" in sys.argv else "https"
+                _api_host = "host.docker.internal" if _org else "localhost"
+                _extra_env = []
+                if _org:
+                    _auth_shared = (cfg.get("CC_CLAUDE_AUTH_SHARED", "1") or "1").strip()
+                    if _auth_shared in ("0", "false", "no"):
+                        _extra_env += ["-e", f"HOME=/homes/{name}"]
+                    # else: default HOME=/home/amux from the container image +
+                    # shared-home bind mount handles the "one login per
+                    # container" case with no per-session override.
                 subprocess.run(
-                    ["tmux", "new-session", "-d", "-s", tmux_sess, "-n", name, "-c", work_dir,
+                    [*_tmux_prefix(name), "new-session", "-d", "-s", tmux_sess, "-n", name, "-c", work_dir,
                      "-x", str(_TMUX_COLS), "-y", str(_TMUX_ROWS),
                      "-e", "TMUX_SESSION_NAME=" + name,
                      "-e", "AMUX_SESSION=" + name,
-                     "-e", ("AMUX_URL=http" if "--no-tls" in sys.argv else "AMUX_URL=https") + "://localhost:8822",
+                     "-e", f"AMUX_URL={_scheme}://{_api_host}:8822",
+                     *_extra_env,
                      *_env_args,
                      _USER_SHELL],
                     check=True, capture_output=True, timeout=10,
                 )
                 # Set remain-on-exit so pane survives if bash crashes
-                subprocess.run(["tmux", "set-option", "-t", tmux_sess, "remain-on-exit", "on"],
+                subprocess.run([*_tmux_prefix(name), "set-option", "-t", tmux_sess, "remain-on-exit", "on"],
                                capture_output=True, timeout=5)
                 # Lock the window name immediately
                 subprocess.run(
-                    ["tmux", "set-option", "-t", tmux_sess, "allow-rename", "off"],
+                    [*_tmux_prefix(name), "set-option", "-t", tmux_sess, "allow-rename", "off"],
                     capture_output=True, timeout=5,
                 )
                 subprocess.run(
-                    ["tmux", "set-window-option", "-t", tmux_sess, "automatic-rename", "off"],
+                    [*_tmux_prefix(name), "set-window-option", "-t", tmux_sess, "automatic-rename", "off"],
                     capture_output=True, timeout=5,
                 )
                 subprocess.run(
-                    ["tmux", "rename-window", "-t", tmux_sess, name],
+                    [*_tmux_prefix(name), "rename-window", "-t", tmux_sess, name],
                     capture_output=True, timeout=5,
                 )
                 # Source profile and cd to work_dir
-                subprocess.run(["tmux", "send-keys", "-t", tmux_target(name), "-l", shell_rc],
+                subprocess.run([*_tmux_prefix(name), "send-keys", "-t", tmux_target(name), "-l", shell_rc],
                                capture_output=True, timeout=5)
                 time.sleep(0.1)
-                subprocess.run(["tmux", "send-keys", "-t", tmux_target(name), "Enter"],
+                subprocess.run([*_tmux_prefix(name), "send-keys", "-t", tmux_target(name), "Enter"],
                                capture_output=True, timeout=5)
                 _poll_shell_prompt(name, timeout=3.0)  # let profile source complete
     
             # Ensure ANTHROPIC_API_KEY is unset when OAuth is available
             if _has_oauth and provider not in ("codex", "gemini"):
-                subprocess.run(["tmux", "send-keys", "-t", tmux_target(name), "-l",
+                subprocess.run([*_tmux_prefix(name), "send-keys", "-t", tmux_target(name), "-l",
                                 "unset ANTHROPIC_API_KEY"],
                                capture_output=True, timeout=5)
                 time.sleep(0.1)
-                subprocess.run(["tmux", "send-keys", "-t", tmux_target(name), "Enter"],
+                subprocess.run([*_tmux_prefix(name), "send-keys", "-t", tmux_target(name), "Enter"],
                                capture_output=True, timeout=5)
                 _poll_shell_prompt(name, timeout=3.0)
 
+            # Apply per-session status bar color (CC_COLOR)
+            _sess_color = cfg.get("CC_COLOR", "").strip()
+            if _sess_color:
+                subprocess.run(
+                    [*_tmux_prefix(name), "set-option", "-t", tmux_sess, "status-style",
+                     f"bg={_sess_color},fg=white"],
+                    capture_output=True, timeout=5,
+                )
+
             # Send the Claude command
-            subprocess.run(["tmux", "send-keys", "-t", tmux_target(name), "-l", cmd],
+            subprocess.run([*_tmux_prefix(name), "send-keys", "-t", tmux_target(name), "-l", cmd],
                            capture_output=True, timeout=5)
             time.sleep(0.15)
-            subprocess.run(["tmux", "send-keys", "-t", tmux_target(name), "Enter"],
+            subprocess.run([*_tmux_prefix(name), "send-keys", "-t", tmux_target(name), "Enter"],
                            capture_output=True, timeout=5)
     
             # Wait for Claude's UI to appear (not shell prompt) for up to 10s
@@ -10075,10 +10726,10 @@ def start_session(name: str, extra_flags: str = "", _skip_conv_id: bool = False)
                 if _at_resume_picker(_out_check):
                     print(f"[start] {name}: stuck in resume picker, escaping and starting fresh")
                     # Send Escape to close picker, then Ctrl-C to exit claude
-                    subprocess.run(["tmux", "send-keys", "-t", tmux_target(name), "Escape"],
+                    subprocess.run([*_tmux_prefix(name), "send-keys", "-t", tmux_target(name), "Escape"],
                                    capture_output=True, timeout=5)
                     time.sleep(0.5)
-                    subprocess.run(["tmux", "send-keys", "-t", tmux_target(name), "C-c"],
+                    subprocess.run([*_tmux_prefix(name), "send-keys", "-t", tmux_target(name), "C-c"],
                                    capture_output=True, timeout=5)
                     time.sleep(2)
                     # Wait for shell prompt
@@ -10102,10 +10753,10 @@ def start_session(name: str, extra_flags: str = "", _skip_conv_id: bool = False)
                     meta.pop("cc_conversation_id", None)
                     _save_meta(name, meta)
                     # Clear prompt and send fresh start command
-                    subprocess.run(["tmux", "send-keys", "-t", tmux_target(name), "C-c"],
+                    subprocess.run([*_tmux_prefix(name), "send-keys", "-t", tmux_target(name), "C-c"],
                                    capture_output=True, timeout=5)
                     time.sleep(0.1)
-                    subprocess.run(["tmux", "send-keys", "-t", tmux_target(name), "C-u"],
+                    subprocess.run([*_tmux_prefix(name), "send-keys", "-t", tmux_target(name), "C-u"],
                                    capture_output=True, timeout=5)
                     time.sleep(0.1)
                     # Rebuild cmd with --name instead of --resume
@@ -10122,12 +10773,14 @@ def start_session(name: str, extra_flags: str = "", _skip_conv_id: bool = False)
                         mcp_chrome = mcp_dir / "mcp-chrome.json"
                         if mcp_chrome.exists():
                             cmd_fresh += f" --mcp-config {shlex.quote(str(mcp_chrome))}"
+                    if name.startswith("CD-"):
+                        cmd_fresh += " --disallowedTools " + _CD_MCP_DENY_ARG
                     if "--model" not in cmd_fresh:
                         cmd_fresh += " --model sonnet"
-                    subprocess.run(["tmux", "send-keys", "-t", tmux_target(name), "-l", cmd_fresh],
+                    subprocess.run([*_tmux_prefix(name), "send-keys", "-t", tmux_target(name), "-l", cmd_fresh],
                                    capture_output=True, timeout=5)
                     time.sleep(0.15)
-                    subprocess.run(["tmux", "send-keys", "-t", tmux_target(name), "Enter"],
+                    subprocess.run([*_tmux_prefix(name), "send-keys", "-t", tmux_target(name), "Enter"],
                                    capture_output=True, timeout=5)
                     # Wait for fallback to launch
                     for _j in range(10):
@@ -10154,8 +10807,8 @@ def start_session(name: str, extra_flags: str = "", _skip_conv_id: bool = False)
             except Exception:
                 pass
             subprocess.run(
-                ["tmux", "pipe-pane", "-t", tmux_name(name), "-o",
-                 _log_pipe_command(lp)],
+                [*_tmux_prefix(name), "pipe-pane", "-t", tmux_name(name), "-o",
+                 _log_pipe_command(_log_path_in_runtime(name))],
                 capture_output=True, timeout=5,
             )
             # Migration: if we resumed via UUID and Claude is running, read session name
@@ -10187,8 +10840,6 @@ def start_session(name: str, extra_flags: str = "", _skip_conv_id: bool = False)
                 _start_pending_log_reload_thread(name, pending_log_reload_reason)
             # Re-send this session's standing instruction once it's booted and ready,
             # so directives survive restarts/compaction (closed-loop autonomy config).
-            # When the board-awareness system is on, also brief the session on the
-            # current cross-session board state so it starts aware of all sessions' work.
             _instr = _session_instructions(name)
             _digest = _board_digest(name) if _task_guard_enabled() else ""
             if _instr or _digest:
@@ -10248,7 +10899,37 @@ def _wait_for_claude_prompt(name: str, timeout: int = 5) -> bool:
 
 
 def _hard_kill_claude(name: str):
-    """Kill the Claude process in a session without graceful /exit. Tmux survives."""
+    """Kill the Claude process in a session without graceful /exit. Tmux survives.
+
+    For docker sessions the Claude process lives inside the container's PID
+    namespace — host pgrep/kill can't reach it. Route the kill through
+    docker exec pkill instead."""
+    _prod = _session_docker_org(name)
+    if _prod:
+        # Docker session: pkill inside the container by claude cmdline pattern
+        # (matches the `claude ... --name <session>` invocation). Container's
+        # PID namespace is separate; can't reach it from host.
+        try:
+            subprocess.run(
+                ["docker", "exec", _org_container_name(_prod),
+                 "pkill", "-9", "-f", f"claude .* --name {name}"],
+                capture_output=True, timeout=10,
+            )
+        except Exception:
+            pass
+        time.sleep(1)
+        # Reset terminal (send-keys routes through docker exec).
+        try:
+            subprocess.run([*_tmux_prefix(name), "send-keys", "-t", tmux_target(name), "-l", "stty sane"],
+                           capture_output=True, timeout=5)
+            time.sleep(0.1)
+            subprocess.run([*_tmux_prefix(name), "send-keys", "-t", tmux_target(name), "Enter"],
+                           capture_output=True, timeout=5)
+        except Exception:
+            pass
+        return
+
+    # Host session
     claude_pid = _find_claude_pid(name)
     if claude_pid and claude_pid > 1:
         try:
@@ -10259,17 +10940,17 @@ def _hard_kill_claude(name: str):
         time.sleep(1)
         # Reset terminal
         try:
-            subprocess.run(["tmux", "send-keys", "-t", tmux_target(name), "-l", "stty sane"],
+            subprocess.run([*_tmux_prefix(name), "send-keys", "-t", tmux_target(name), "-l", "stty sane"],
                            capture_output=True, timeout=5)
             time.sleep(0.1)
-            subprocess.run(["tmux", "send-keys", "-t", tmux_target(name), "Enter"],
+            subprocess.run([*_tmux_prefix(name), "send-keys", "-t", tmux_target(name), "Enter"],
                            capture_output=True, timeout=5)
         except Exception:
             pass
     else:
         # Can't find Claude PID -- respawn pane to get a clean shell (keep tmux alive)
         try:
-            subprocess.run(["tmux", "respawn-pane", "-k", "-t", tmux_target(name), _USER_SHELL],
+            subprocess.run([*_tmux_prefix(name), "respawn-pane", "-k", "-t", tmux_target(name), _USER_SHELL],
                            capture_output=True, timeout=5)
         except Exception:
             pass
@@ -10281,11 +10962,12 @@ def stop_session(name: str) -> tuple[bool, str]:
         return False, "invalid session name"
     with _get_session_lock(name):
         tmux_sess = tmux_name(name)
-        # Check tmux exists at all
+        # Check tmux exists at all — routed so docker sessions ask their
+        # own container's tmux (their container may already be stopped).
         try:
-            r = subprocess.run(["tmux", "list-sessions", "-F", "#{session_name}"],
+            r = subprocess.run(_tmux_cmd(name, "list-sessions", "-F", "#{session_name}"),
                                capture_output=True, text=True)
-            if tmux_sess not in r.stdout.splitlines():
+            if r.returncode != 0 or tmux_sess not in r.stdout.splitlines():
                 return True, "not running"
         except FileNotFoundError:
             return True, "not running"
@@ -10311,10 +10993,10 @@ def stop_session(name: str) -> tuple[bool, str]:
             # Wait for Claude prompt before sending /rename
             _wait_for_claude_prompt(name, timeout=5)
             try:
-                subprocess.run(["tmux", "send-keys", "-t", tmux_target(name), "-l", f"/rename {name}"],
+                subprocess.run([*_tmux_prefix(name), "send-keys", "-t", tmux_target(name), "-l", f"/rename {name}"],
                                check=True, capture_output=True, timeout=5)
                 time.sleep(0.15)
-                subprocess.run(["tmux", "send-keys", "-t", tmux_target(name), "Enter"],
+                subprocess.run([*_tmux_prefix(name), "send-keys", "-t", tmux_target(name), "Enter"],
                                check=True, capture_output=True, timeout=5)
                 _wait_for_claude_prompt(name, timeout=3)  # let rename settle
             except Exception:
@@ -10325,20 +11007,20 @@ def stop_session(name: str) -> tuple[bool, str]:
     
         # Detach pipe-pane before sending shell-visible commands
         try:
-            subprocess.run(["tmux", "pipe-pane", "-t", tmux_sess],
+            subprocess.run([*_tmux_prefix(name), "pipe-pane", "-t", tmux_sess],
                            capture_output=True, timeout=5)
         except Exception:
             pass
     
         # Send /exit
         try:
-            subprocess.run(["tmux", "send-keys", "-t", tmux_target(name), "C-u"],
+            subprocess.run([*_tmux_prefix(name), "send-keys", "-t", tmux_target(name), "C-u"],
                            capture_output=True, timeout=5)
             time.sleep(0.1)
-            subprocess.run(["tmux", "send-keys", "-t", tmux_target(name), "-l", "/exit"],
+            subprocess.run([*_tmux_prefix(name), "send-keys", "-t", tmux_target(name), "-l", "/exit"],
                            check=True, capture_output=True, timeout=5)
             time.sleep(0.15)
-            subprocess.run(["tmux", "send-keys", "-t", tmux_target(name), "Enter"],
+            subprocess.run([*_tmux_prefix(name), "send-keys", "-t", tmux_target(name), "Enter"],
                            check=True, capture_output=True, timeout=5)
         except Exception as e:
             print(f"[graceful-stop] {name}: failed to send /exit: {e}")
@@ -10361,10 +11043,10 @@ def stop_session(name: str) -> tuple[bool, str]:
                 pass
         # Reset terminal state
         try:
-            subprocess.run(["tmux", "send-keys", "-t", tmux_target(name), "-l", "stty sane"],
+            subprocess.run([*_tmux_prefix(name), "send-keys", "-t", tmux_target(name), "-l", "stty sane"],
                            capture_output=True, timeout=5)
             time.sleep(0.1)
-            subprocess.run(["tmux", "send-keys", "-t", tmux_target(name), "Enter"],
+            subprocess.run([*_tmux_prefix(name), "send-keys", "-t", tmux_target(name), "Enter"],
                            capture_output=True, timeout=5)
         except Exception:
             pass
@@ -10376,7 +11058,7 @@ def _kill_tmux_session(name: str) -> None:
     """Best-effort removal of the tmux session backing an archived amux session."""
     try:
         subprocess.run(
-            ["tmux", "kill-session", "-t", tmux_name(name)],
+            [*_tmux_prefix(name), "kill-session", "-t", tmux_name(name)],
             capture_output=True,
             timeout=5,
         )
@@ -10393,7 +11075,7 @@ def archive_session(name: str) -> tuple[bool, str]:
     if is_running(name):
         try:
             r = subprocess.run(
-                ["tmux", "capture-pane", "-t", tmux_target(name), "-p", "-S", "-"],
+                [*_tmux_prefix(name), "capture-pane", "-t", tmux_target(name), "-p", "-S", "-"],
                 capture_output=True, text=True, timeout=30,
             )
             if r.stdout.strip():
@@ -10405,10 +11087,7 @@ def archive_session(name: str) -> tuple[bool, str]:
         except Exception:
             pass
         stop_session(name)
-    # Always tear down the tmux session — even if the process already died
-    # (is_running False), so an archived session never leaves an orphan idle
-    # shell holding memory. kill-session is a no-op if it's already gone.
-    _kill_tmux_session(name)
+        _kill_tmux_session(name)
     cfg = parse_env_file(f)
     cfg["CC_ARCHIVED"] = "1"
     _write_env(f, cfg)
@@ -10493,7 +11172,7 @@ def send_text(name: str, text: str) -> tuple[bool, str]:
                 # Extract suggested prompt from the pane and send it as real text
                 try:
                     cap = subprocess.run(
-                        ["tmux", "capture-pane", "-t", tmux_target(name), "-p"],
+                        [*_tmux_prefix(name), "capture-pane", "-t", tmux_target(name), "-p"],
                         capture_output=True, text=True, timeout=5
                     )
                     for line in reversed(cap.stdout.splitlines()):
@@ -10508,7 +11187,7 @@ def send_text(name: str, text: str) -> tuple[bool, str]:
                 if not text:
                     return True, "no suggestion found"
                 # Clear any ghost text in the input before typing
-                subprocess.run(["tmux", "send-keys", "-t", tmux_target(name), "C-u"], capture_output=True, timeout=5)
+                subprocess.run([*_tmux_prefix(name), "send-keys", "-t", tmux_target(name), "C-u"], capture_output=True, timeout=5)
                 time.sleep(0.05)
             if len(text) > 400:
                 import tempfile, os as _os
@@ -10518,16 +11197,16 @@ def send_text(name: str, text: str) -> tuple[bool, str]:
                     f.write(text)
                     tmp = f.name
                 try:
-                    subprocess.run(["tmux", "load-buffer", "-b", buf_name, tmp], check=True, capture_output=True, timeout=10)
+                    subprocess.run([*_tmux_prefix(name), "load-buffer", "-b", buf_name, tmp], check=True, capture_output=True, timeout=10)
                     # -p flag pastes literally without interpreting newlines as Enter
-                    subprocess.run(["tmux", "paste-buffer", "-p", "-b", buf_name, "-t", t], check=True, capture_output=True, timeout=10)
-                    subprocess.run(["tmux", "delete-buffer", "-b", buf_name], capture_output=True, timeout=5)
+                    subprocess.run([*_tmux_prefix(name), "paste-buffer", "-p", "-b", buf_name, "-t", t], check=True, capture_output=True, timeout=10)
+                    subprocess.run([*_tmux_prefix(name), "delete-buffer", "-b", buf_name], capture_output=True, timeout=5)
                 finally:
                     _os.unlink(tmp)
             else:
                 # Send text literally (-l) then Enter separately
                 subprocess.run(
-                    ["tmux", "send-keys", "-t", t, "-l", text],
+                    [*_tmux_prefix(name), "send-keys", "-t", t, "-l", text],
                     check=True, capture_output=True, timeout=10,
                 )
             # Give readline time to process all queued characters before Enter arrives.
@@ -10535,7 +11214,7 @@ def send_text(name: str, text: str) -> tuple[bool, str]:
             # needs even less, but we use the same value for simplicity.
             time.sleep(0.02)
             subprocess.run(
-                ["tmux", "send-keys", "-t", t, "Enter"],
+                [*_tmux_prefix(name), "send-keys", "-t", t, "Enter"],
                 check=True, capture_output=True, timeout=5,
             )
             # A message containing an @file-path mention (e.g. an attached image
@@ -10548,7 +11227,7 @@ def send_text(name: str, text: str) -> tuple[bool, str]:
             if re.search(r'@\S*/\S', text):
                 time.sleep(0.2)
                 subprocess.run(
-                    ["tmux", "send-keys", "-t", t, "Enter"],
+                    [*_tmux_prefix(name), "send-keys", "-t", t, "Enter"],
                     capture_output=True, timeout=5,
                 )
             return True, "sent"
@@ -10688,7 +11367,7 @@ def send_keys(name: str, keys: str) -> tuple[bool, str]:
     with lock:
         try:
             subprocess.run(
-                ["tmux", "send-keys", "-t", tmux_target(name), keys],
+                [*_tmux_prefix(name), "send-keys", "-t", tmux_target(name), keys],
                 check=True, capture_output=True, timeout=5,
             )
             return True, "sent"
@@ -10763,104 +11442,6 @@ def schedule_job(func, interval: float, *, name: str | None = None, initial_dela
         "interval": interval,
         "next_run": time.time() + (initial_delay if initial_delay is not None else interval),
     })
-
-
-EMAIL_SEND_LOG = os.path.join(os.path.expanduser("~/.amux"), "logs", "email-sent.jsonl")
-
-
-def _email_log(record: dict) -> None:
-    """Append a one-line JSON audit record for every email SENT via the API.
-
-    Captures who/what went out so a send can always be traced (e.g. "did an agent
-    send X?"). Fail-safe: a logging error must never break or block a send.
-    NOTE: this only sees sends that go THROUGH this API. Emails sent from a human
-    client (Mail.app, Spark, Gmail web) bypass it and won't appear here.
-    """
-    try:
-        import datetime as _dt
-        record = dict(record)
-        record.setdefault("ts", _dt.datetime.now(_dt.timezone.utc).isoformat())
-        os.makedirs(os.path.dirname(EMAIL_SEND_LOG), exist_ok=True)
-        with open(EMAIL_SEND_LOG, "a") as _f:
-            _f.write(json.dumps(record, default=str) + "\n")
-    except Exception:
-        pass
-
-
-CRM_SYNC_PROVIDER = os.getenv("CRM_SYNC_PROVIDER", "auto")  # auto | lightfield | off
-
-
-def _crm_sync_external(kind, cid, name, company, email, notes):
-    """Mirror an amux CRM write to the CONFIGURED external CRM (currently Lightfield).
-
-    kind='create' -> create the external contact + an initial note carrying the full
-    context; kind='update' -> append an activity note (Lightfield contacts have no
-    PATCH and no settable upsert key, so updates are captured as notes rather than
-    duplicating the contact). Config via CRM_SYNC_PROVIDER (auto|lightfield|off);
-    'auto' enables Lightfield whenever LIGHTFIELD_API_KEY is set. Fire-and-forget in
-    a daemon thread — never blocks or breaks the CRM write, and never touches the
-    amux DB (all inputs are passed in, so no cross-thread SQLite handle).
-    """
-    if CRM_SYNC_PROVIDER == "off":
-        return
-    key = os.getenv("LIGHTFIELD_API_KEY")
-    if not key or CRM_SYNC_PROVIDER not in ("auto", "lightfield"):
-        return
-
-    def _run():
-        try:
-            import ssl as _ssl
-            import urllib.request
-
-            base = os.getenv("LIGHTFIELD_API_URL", "https://api.lightfield.app/v1")
-            ver = os.getenv("LIGHTFIELD_VERSION", "2026-03-01")
-            # Verify TLS — we're sending contact PII to a third party; a MITM must
-            # not be able to intercept it. If the cert can't be verified the request
-            # raises and the fail-safe below silently skips the sync (safer than
-            # shipping PII over an unverified connection).
-            ctx = _ssl.create_default_context()
-            try:
-                import certifi
-                ctx.load_verify_locations(certifi.where())
-            except Exception:
-                pass
-            hdr = {"Authorization": "Bearer " + key,
-                   "Lightfield-Version": ver, "Content-Type": "application/json"}
-
-            def _post(path, payload):
-                req = urllib.request.Request(
-                    base + path, data=json.dumps(payload).encode(),
-                    method="POST", headers=hdr)
-                with urllib.request.urlopen(req, context=ctx, timeout=15) as resp:
-                    return json.loads(resp.read().decode())
-
-            if kind == "create":
-                parts = (name or "Unknown").split(" ", 1)
-                fields = {"$name": {"firstName": parts[0],
-                                    "lastName": parts[1] if len(parts) > 1 else ""}}
-                if email:
-                    fields["$email"] = [email]
-                try:
-                    _post("/contacts", {"fields": fields})
-                except Exception:
-                    pass
-            # The note carries the amux context ($notes is not a create field on a
-            # Lightfield contact, so it lives as a separate note entity).
-            if notes or kind == "create":
-                suffix = " (amux CRM)" if kind == "create" else " (amux update)"
-                title = f"{company or name or 'contact'} [{cid}]{suffix}"
-                header = (f"Contact: {name}\nCompany: {company}\nEmail: {email}\n\n"
-                          if kind == "create" else "")
-                try:
-                    _post("/notes", {"fields": {
-                        "$title": title[:200],
-                        "$content": (header + (notes or ""))[:6000]}})
-                except Exception:
-                    pass
-        except Exception:
-            pass
-
-    threading.Thread(target=_run, daemon=True).start()
 
 
 def _email_last_synced() -> int:
@@ -11147,9 +11728,6 @@ def _email_sync_job() -> None:
 _GMAIL_SCOPES = [
     "https://www.googleapis.com/auth/gmail.modify",
     "https://www.googleapis.com/auth/gmail.send",
-    # settings.basic lets us read the account's configured "send-as" signature
-    # (the same one Gmail web appends) so sends/replies can include it.
-    "https://www.googleapis.com/auth/gmail.settings.basic",
     "https://www.googleapis.com/auth/userinfo.email",
 ]
 _GMAIL_DEFAULT_CLIENT = None  # Must supply ~/.amux/gmail-oauth-client.json
@@ -11240,46 +11818,6 @@ def _gmail_auth_url(account: str) -> tuple[str, str] | tuple[None, str]:
             login_hint=account, include_granted_scopes="true"
         )
         _gmail_pending[state] = (account, flow)
-        return url, state
-    except Exception as e:
-        return None, str(e)
-
-
-def _gcal_creds():
-    """Load + refresh the calendar OAuth credentials (amux's own client). None if unconnected."""
-    if not _GCAL_TOKEN_PATH.exists():
-        return None
-    try:
-        from google.oauth2.credentials import Credentials
-        import google.auth.transport.requests
-        data = json.loads(_GCAL_TOKEN_PATH.read_text())
-        creds = Credentials(
-            token=data.get("token"), refresh_token=data.get("refresh_token"),
-            token_uri=data.get("token_uri"), client_id=data.get("client_id"),
-            client_secret=data.get("client_secret"), scopes=_GCAL_SCOPES)
-        if not creds.valid and creds.refresh_token:
-            creds.refresh(google.auth.transport.requests.Request())
-            _GCAL_TOKEN_PATH.write_text(json.dumps({
-                "token": creds.token, "refresh_token": creds.refresh_token,
-                "token_uri": creds.token_uri, "client_id": creds.client_id,
-                "client_secret": creds.client_secret}))
-        return creds
-    except Exception as e:
-        slog(f"[gcal] creds load failed: {e}")
-        return None
-
-
-def _gcal_auth_url():
-    """OAuth authorization URL for the calendar scope, using amux's own OAuth client
-    and the (already-registered) Gmail localhost callback. Returns (url, state) or (None, err)."""
-    cfg = _gmail_client_config()
-    if not cfg:
-        return None, "OAuth client not configured (~/.amux/gmail-oauth-client.json)"
-    try:
-        from google_auth_oauthlib.flow import Flow
-        flow = Flow.from_client_config(cfg, _GCAL_SCOPES, redirect_uri=_GMAIL_REDIRECT_URI)
-        url, state = flow.authorization_url(access_type="offline", prompt="consent")
-        _gmail_pending[state] = ("__gcal__", flow)   # the shared callback saves it to _GCAL_TOKEN_PATH
         return url, state
     except Exception as e:
         return None, str(e)
@@ -11434,184 +11972,6 @@ def _gmail_send_message(account: str, to: str, subject: str, body: str,
         return {"ok": True, "id": result.get("id"), "thread_id": result.get("threadId")}
     except Exception as e:
         slog(f"[gmail] send {account}: {e}")
-        return {"error": str(e)}
-
-
-def _gmail_get_signature(account: str, send_as: str = "") -> str:
-    """Return the configured Gmail "send-as" HTML signature for an account.
-
-    Reads users.settings.sendAs — the same signature Gmail web appends — and
-    returns the HTML signature for the matching send-as address (defaults to the
-    primary). Returns "" if none configured / not connected. Needs the
-    gmail.settings.basic scope.
-    """
-    try:
-        svc = _gmail_service(account)
-        if not svc:
-            return ""
-        target = (send_as or account).lower()
-        sendas = svc.users().settings().sendAs().list(userId="me").execute().get("sendAs", [])
-        chosen = None
-        for sa in sendas:
-            if sa.get("sendAsEmail", "").lower() == target:
-                chosen = sa
-                break
-        if chosen is None:
-            chosen = next((sa for sa in sendas if sa.get("isPrimary")), None)
-        if chosen is None and sendas:
-            chosen = sendas[0]
-        return (chosen or {}).get("signature", "") or ""
-    except Exception as e:
-        slog(f"[gmail] get_signature {account}: {e}")
-        return ""
-
-
-def _sig_html_to_text(sig_html: str) -> str:
-    """Best-effort plain-text rendering of an HTML signature (for the text/plain
-    MIME alternative). Keeps line breaks, drops tags/images."""
-    import re as _re, html as _html
-    if not sig_html:
-        return ""
-    t = _re.sub(r"(?i)<\s*br\s*/?>", "\n", sig_html)
-    t = _re.sub(r"(?i)</\s*(p|div|tr|table|h[1-6])\s*>", "\n", t)
-    t = _re.sub(r"<[^>]+>", "", t)
-    t = _html.unescape(t)
-    t = _re.sub(r"[ \t]+\n", "\n", t)
-    t = _re.sub(r"\n{3,}", "\n\n", t)
-    return t.strip()
-
-
-def _gmail_compose_send(account: str, to: str, subject: str, body: str,
-                         cc: str = "", in_reply_to: str = "", references: str = "",
-                         thread_id: str = "", include_signature: bool = True) -> dict:
-    """Send a Gmail message as multipart/alternative (text + HTML) with the
-    account's configured signature appended. Threads via In-Reply-To /
-    References / threadId when provided. Returns {ok,id,thread_id,...} or {error}.
-    """
-    import base64, html as _html
-    from email.mime.text import MIMEText
-    from email.mime.multipart import MIMEMultipart
-    try:
-        svc = _gmail_service(account)
-        if not svc:
-            return {"error": "not_connected"}
-        sig_html = _gmail_get_signature(account) if include_signature else ""
-        body_html = _html.escape(body).replace("\n", "<br>")
-        html_full = f'<div style="white-space:normal;">{body_html}</div>'
-        if sig_html:
-            html_full += f"<br><br>{sig_html}"
-        sig_text = _sig_html_to_text(sig_html)
-        plain_full = body + (("\n\n" + sig_text) if sig_text else "")
-
-        msg = MIMEMultipart("alternative")
-        msg["To"] = to
-        msg["From"] = account
-        msg["Subject"] = subject
-        if cc:
-            msg["Cc"] = cc
-        if in_reply_to:
-            msg["In-Reply-To"] = in_reply_to
-            msg["References"] = references or in_reply_to
-        msg.attach(MIMEText(plain_full, "plain", "utf-8"))
-        msg.attach(MIMEText(html_full, "html", "utf-8"))
-        raw = base64.urlsafe_b64encode(msg.as_bytes()).decode()
-        send_body: dict = {"raw": raw}
-        if thread_id:
-            send_body["threadId"] = thread_id
-        result = svc.users().messages().send(userId="me", body=send_body).execute()
-        return {"ok": True, "id": result.get("id"), "thread_id": result.get("threadId"),
-                "signature_included": bool(sig_html)}
-    except Exception as e:
-        slog(f"[gmail] compose_send {account}: {e}")
-        return {"error": str(e)}
-
-
-def _gmail_find_message_by_rfc822(account: str, rfc822_id: str) -> dict | None:
-    """Find a Gmail message by its RFC822 Message-ID header. Returns the message
-    resource (metadata headers) or None."""
-    try:
-        svc = _gmail_service(account)
-        if not svc:
-            return None
-        rid = rfc822_id.strip().lstrip("<").rstrip(">")
-        res = svc.users().messages().list(
-            userId="me", q=f"rfc822msgid:{rid}", maxResults=1).execute()
-        msgs = res.get("messages", [])
-        if not msgs:
-            return None
-        return svc.users().messages().get(
-            userId="me", id=msgs[0]["id"], format="metadata",
-            metadataHeaders=["From", "To", "Cc", "Subject", "Message-ID",
-                             "References", "In-Reply-To"]).execute()
-    except Exception as e:
-        slog(f"[gmail] find_rfc822 {account}: {e}")
-        return None
-
-
-def _gmail_reply_send(account: str, rfc822_message_id: str, body: str,
-                       include_signature: bool = True, reply_all: bool = False) -> dict:
-    """Reply in-thread (clean body + signature, correct In-Reply-To/References/
-    threadId) to the message identified by its RFC822 Message-ID header."""
-    orig = _gmail_find_message_by_rfc822(account, rfc822_message_id)
-    if not orig:
-        return {"error": "message not found in this account — check message_id / account"}
-    headers = {h["name"].lower(): h["value"]
-               for h in orig.get("payload", {}).get("headers", [])}
-    thread_id = orig.get("threadId", "")
-    orig_msgid = headers.get("message-id", rfc822_message_id)
-    if not orig_msgid.startswith("<"):
-        orig_msgid = f"<{orig_msgid}>"
-    subject = headers.get("subject", "") or ""
-    if not subject.lower().startswith("re:"):
-        subject = "Re: " + subject
-    to_addr = headers.get("from", "")
-    cc = ""
-    if reply_all:
-        extras = [headers.get("to", ""), headers.get("cc", "")]
-        parts = [p.strip() for chunk in extras for p in chunk.split(",")
-                 if p.strip() and account.lower() not in p.lower()]
-        cc = ", ".join(dict.fromkeys(parts))  # dedup, preserve order
-    references = (headers.get("references", "") + " " + orig_msgid).strip()
-    return _gmail_compose_send(account, to_addr, subject, body, cc=cc,
-                               in_reply_to=orig_msgid, references=references,
-                               thread_id=thread_id, include_signature=include_signature)
-
-
-def _gmail_inbox_messages(account: str, count: int = 20, q: str = "") -> dict:
-    """Return recent messages for the unified /api/email/inbox shape, using the
-    RFC822 Message-ID header as `message_id` so it round-trips into /reply."""
-    try:
-        svc = _gmail_service(account)
-        if not svc:
-            return {"error": "not_connected"}
-        kwargs: dict = {"userId": "me", "maxResults": min(max(count, 1), 100)}
-        if q:
-            kwargs["q"] = q
-        else:
-            kwargs["labelIds"] = ["INBOX"]
-        listed = svc.users().messages().list(**kwargs).execute().get("messages", [])
-        out = []
-        for m in listed:
-            full = svc.users().messages().get(
-                userId="me", id=m["id"], format="metadata",
-                metadataHeaders=["From", "To", "Subject", "Date", "Message-ID"]).execute()
-            h = {hd["name"].lower(): hd["value"]
-                 for hd in full.get("payload", {}).get("headers", [])}
-            out.append({
-                "account": account,
-                "from": h.get("from", ""),
-                "to": h.get("to", ""),
-                "date": h.get("date", ""),
-                "subject": h.get("subject", "(no subject)"),
-                "message_id": h.get("message-id", ""),
-                "thread_id": full.get("threadId", ""),
-                "gmail_id": m["id"],
-                "read": "UNREAD" not in full.get("labelIds", []),
-                "body": full.get("snippet", ""),
-            })
-        return {"messages": out}
-    except Exception as e:
-        slog(f"[gmail] inbox_messages {account}: {e}")
         return {"error": str(e)}
 
 
@@ -12185,42 +12545,24 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
   .archived-footer:hover { border-color: var(--accent); }
   .archived-chevron { font-size: 0.65rem; transition: transform 0.15s; color: var(--dim); }
   .archived-chevron.open { transform: rotate(90deg); }
-  .archived-body { margin-top: 6px; display: flex; flex-direction: column; gap: 5px; }
+  .archived-body { margin-top: 6px; display: flex; flex-direction: column; gap: 4px; }
   .archived-card {
-    display: flex; flex-direction: column; gap: 4px;
-    padding: 8px 11px; border-radius: 8px; border: 1px solid var(--border);
+    display: flex; align-items: center; gap: 8px;
+    padding: 7px 10px; border-radius: 8px; border: 1px solid var(--border);
     background: var(--card); font-size: 0.8rem;
   }
-  .archived-card-top { display: flex; align-items: center; gap: 7px; min-width: 0; }
-  .archived-card-name { font-weight: 600; color: var(--text); flex-shrink: 0; cursor: pointer; }
-  .archived-card-name:hover { color: var(--accent); }
-  .archived-card-chip {
-    font-size: 0.63rem; padding: 1px 6px; border-radius: 9px; flex-shrink: 0;
-    background: var(--bg); border: 1px solid var(--border); color: var(--dim); white-space: nowrap;
-  }
-  .archived-card-chip.model { color: var(--cyan, #39d2c0); }
-  .archived-card-chip.provider-codex { color: #10b981; }
-  .archived-card-chip.provider-gemini { color: #d29922; }
-  .archived-card-spacer { flex: 1; min-width: 8px; }
-  .archived-card-meta {
-    color: var(--dim); font-size: 0.7rem; display: flex; gap: 5px 10px; flex-wrap: wrap;
-    align-items: center; min-width: 0;
-  }
-  .archived-card-meta code { font-size: 0.68rem; background: var(--bg); border: 1px solid var(--border); border-radius: 3px; padding: 0 4px; color: var(--text); }
-  .archived-card-tag { color: var(--accent); font-size: 0.68rem; }
-  .archived-card-preview {
-    color: var(--dim); font-size: 0.72rem; line-height: 1.4; min-width: 0;
-    display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden;
-  }
+  .archived-card-name { font-weight: 600; color: var(--dim); flex-shrink: 0; min-width: 80px; }
+  .archived-card-meta { color: var(--dim); font-size: 0.72rem; flex-shrink: 0; }
+  .archived-card-preview { flex: 1; color: var(--dim); font-size: 0.73rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
   .archived-card-actions { display: flex; gap: 4px; flex-shrink: 0; }
   .archived-wake-btn {
     padding: 3px 10px; border-radius: 5px; font-size: 0.75rem; border: 1px solid var(--accent);
-    color: var(--accent); background: transparent; cursor: pointer; white-space: nowrap; min-height: 28px;
+    color: var(--accent); background: transparent; cursor: pointer; white-space: nowrap;
   }
   .archived-wake-btn:hover { background: var(--accent); color: #000; }
   .archived-del-btn {
     padding: 3px 7px; border-radius: 5px; font-size: 0.75rem; border: 1px solid var(--border);
-    color: var(--dim); background: transparent; cursor: pointer; min-height: 28px;
+    color: var(--dim); background: transparent; cursor: pointer;
   }
   .archived-del-btn:hover { border-color: var(--red); color: var(--red); }
 
@@ -12277,6 +12619,7 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
   .dot.running { background: var(--green); box-shadow: 0 0 6px var(--green); }
   .dot.stopped { background: var(--red); opacity: 0.5; }
   .card-name { font-weight: 600; font-size: 1.05rem; flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .session-icon { font-size: 1.15rem; line-height: 1; vertical-align: middle; display: inline-block; }
   .card-dir { color: var(--dim); font-size: 0.82rem; margin-top: 4px; margin-left: 20px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; display: flex; align-items: center; gap: 5px; }
   .card-dir-path { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .card-dir-edit { flex-shrink: 0; opacity: 0.3; transition: opacity 0.15s; cursor: pointer; font-size: 0.85rem; padding: 0 2px; border-radius: 3px; }
@@ -12312,50 +12655,8 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
     font-weight: 600; text-transform: uppercase; white-space: nowrap; flex-shrink: 0;
   }
   .badge.yolo { background: rgba(210,153,34,0.2); color: var(--yellow); }
-  .card-sched-count { font-size: 0.72rem; color: #a78bfa; padding: 1px 0 2px; cursor: pointer; opacity: 0.85; }
-  .sched-toggle-label { display:flex;align-items:center;cursor:pointer;flex-shrink:0;margin-top:1px;min-width:44px;min-height:44px;justify-content:center; }
-  .sched-actions { display:flex;gap:6px;margin-top:8px;flex-wrap:wrap; }
-  .sched-action-btn { font-size:0.72rem;padding:4px 12px; }
-  .sched-group { margin-bottom:10px; }
-  .sched-group-header { display:flex;align-items:center;gap:6px;font-size:0.68rem;font-weight:700;color:var(--dim);text-transform:uppercase;letter-spacing:0.06em;padding:4px 0 5px;border-bottom:1px solid var(--border);margin-bottom:6px; }
-  .sched-group-count { background:var(--card);border:1px solid var(--border);border-radius:10px;padding:1px 6px;font-size:0.63rem;color:var(--dim); }
-  .sched-cadence-pill { font-size:0.62rem;padding:1px 5px;border-radius:10px;border:1px solid var(--border);color:var(--dim);background:var(--card);font-family:monospace; }
-  .sched-id-badge { font-size:0.6rem;padding:1px 5px;border-radius:4px;border:1px solid var(--border);background:var(--bg);color:var(--accent);font-family:monospace;cursor:pointer;flex-shrink:0;letter-spacing:0.02em; }
-  .sched-id-badge:hover { border-color:var(--accent); }
-  .sched-run-dot { display:inline-block;width:7px;height:7px;border-radius:50%;flex-shrink:0; }
-  .sched-run-dot.ok { background:var(--green,#4ade80); }
-  .sched-run-dot.done { background:var(--accent); }
-  .sched-run-dot.err { background:var(--red,#f87171); }
-  .sched-cmd-expand { margin-top:8px;background:var(--bg);border:1px solid var(--border);border-radius:6px;padding:8px 10px;max-height:180px;overflow-y:auto; }
-  .sched-cmd-expand pre { margin:0;font-size:0.7rem;line-height:1.5;white-space:pre-wrap;word-break:break-word;color:var(--text);font-family:monospace; }
-  .sched-sess-dot { display:inline-block;width:6px;height:6px;border-radius:50%;flex-shrink:0;background:var(--dim); }
-  .sched-sess-dot.active { background:var(--green,#4ade80); }
-  .sched-disabled-details summary { cursor:pointer;font-size:0.72rem;font-weight:600;color:var(--dim);padding:6px 0 4px;list-style:none;display:flex;align-items:center;gap:5px;border-top:1px solid var(--border);margin-top:4px; }
-  .sched-disabled-details summary::-webkit-details-marker { display:none; }
-  .sched-disabled-details[open] summary .sched-disabled-arrow { transform:rotate(90deg); }
-  .sched-disabled-arrow { display:inline-block;font-size:0.6rem;transition:transform 0.15s;color:var(--dim); }
-  /* Schedule modal: mode selector + chips */
-  .sched-mode-seg { display:flex;gap:4px;background:var(--card);border:1px solid var(--border);border-radius:8px;padding:3px; }
-  .sched-mode-btn { flex:1;display:flex;flex-direction:column;align-items:center;gap:2px;padding:6px 3px;border-radius:6px;cursor:pointer;border:none;background:transparent;color:var(--dim);font-size:0.68rem;font-weight:600;min-height:46px;justify-content:center;transition:background 0.12s; }
-  .sched-mode-btn .sched-mode-ico { font-size:1rem;line-height:1; }
-  .sched-mode-btn.active { background:var(--accent);color:#fff; }
-  .sched-mode-btn:not(.active):hover { background:var(--bg); }
-  .sched-chip-row { display:flex;gap:5px;flex-wrap:wrap;margin-top:5px; }
-  .sched-chip { display:inline-flex;align-items:center;padding:5px 11px;border:1px solid var(--border);border-radius:14px;background:var(--card);color:var(--text);font-size:0.72rem;cursor:pointer;min-height:32px;font-family:inherit; }
-  .sched-chip.active { background:var(--accent);border-color:var(--accent);color:#fff; }
-  .sched-chip:not(.active):hover { border-color:var(--accent); }
-  .sched-mode-help { font-size:0.7rem;color:var(--dim);line-height:1.5;margin-top:7px;padding:7px 9px;background:var(--card);border:1px solid var(--border);border-radius:6px; }
-  .sched-mode-help b { color:var(--text);font-weight:600; }
-  .sched-expand-btn { background:transparent;border:1px solid var(--border);color:var(--dim);border-radius:5px;min-width:26px;height:24px;cursor:pointer;font-size:0.9rem;line-height:1;display:flex;align-items:center;justify-content:center;padding:0; }
-  .sched-expand-btn:hover { border-color:var(--accent);color:var(--accent); }
-  #sched-command:focus { border-color:var(--accent);box-shadow:0 0 0 3px rgba(88,166,255,0.12); }
-  /* Fullscreen editor: box fills viewport, command grows, schedule panel stays scrollable below */
-  .board-edit-box.sched-cmd-max { height:92dvh !important; }
-  .board-edit-box.sched-cmd-max #sched-command-section { min-height:0; }
-  .board-edit-box.sched-cmd-max .sched-modal-footer { max-height:190px; }
   .badge.auto-continue { background: rgba(98,160,234,0.2); color: #62a0ea; }
   .badge.model { background: rgba(57,210,192,0.2); color: var(--cyan); }
-  .badge.effort { background: rgba(192,132,252,0.18); color: #c084fc; cursor: pointer; }
   .badge.provider { cursor: pointer; }
   .badge.claude { background: rgba(88,166,255,0.18); color: var(--accent); }
   .badge.codex { background: rgba(16,185,129,0.2); color: #10b981; }
@@ -12480,14 +12781,17 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
   }
   .overlay-header h2 { font-size: 1.1rem; }
   .overlay-body {
-    flex: 1; min-height: 0; overflow-x: hidden; overflow-y: auto;
+    flex: 1; min-height: 0; overflow-x: auto; overflow-y: auto;
     background: #010409; border-radius: 8px;
     padding: 10px; font-family: "SF Mono", "Fira Code", "Cascadia Code", monospace;
-    font-size: 0.78rem; line-height: 1.4; white-space: pre-wrap; word-break: break-word;
+    font-size: 0.78rem; line-height: 1.4; white-space: pre;
     -webkit-overflow-scrolling: touch;
     -webkit-user-select: text; user-select: text;
     -webkit-touch-callout: default; cursor: text;
-    touch-action: pan-y;
+    touch-action: pan-y pan-x;
+  }
+  @media (max-width: 768px) {
+    .overlay-body { white-space: pre-wrap; word-break: break-word; overflow-x: hidden; touch-action: pan-y; }
   }
   .peek-copy-btn {
     position: absolute; top: 6px; right: 6px; z-index: 10;
@@ -12631,13 +12935,6 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
     .csv-search { width:100%;order:10; }
     .csv-resize { width:10px;right:-5px; }
     .csv-table th.csv-rownum,.csv-table td.csv-rownum { width:36px;min-width:36px;max-width:36px;padding:10px 4px; }
-  }
-  /* Phones: the multi-tab chrome strip is desktop furniture — it burned 54px
-     at the top of every view (and pushed the peek down with it). Hide it and
-     zero its offset (JS also forces --chrome-tab-h to 0 below 700px). */
-  @media (max-width: 700px) {
-    .chrome-tabs-bar, .chrome-tab-frames { display: none !important; }
-    .overlay { top: env(safe-area-inset-top, 0px); }
   }
   @media (max-width: 600px) {
     .file-overlay-header { flex-wrap: nowrap; gap: 6px; align-items: center; position: relative; }
@@ -13319,9 +13616,7 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
   /* Peek search highlight */
   .peek-highlight { background: rgba(210,153,34,0.35); color: #fff; border-radius: 2px; }
   .peek-highlight.current { background: rgba(210,153,34,0.85); color: #000; }
-  /* Prompt lines keep their span (block) but no added decoration — the peek
-     should render what tmux renders, not restyle it (user feedback). */
-  .peek-prompt { display: block; }
+  .peek-prompt { display: block; border-left: 3px solid rgba(210,180,60,0.5); padding-left: 8px; margin-left: -11px; background: rgba(210,180,60,0.07); border-radius: 0 3px 3px 0; }
 
   /* Peek overlay — flush to the true screen bottom. In a toolbar-less standalone
      webview window.innerHeight IS the full visible height, so fixed bottom:0 already
@@ -13354,31 +13649,19 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
   .overlay.vv-compact .peek-attach-btn { min-height: 30px; }
 
   /* Peek command bar */
-  .peek-cmd-bar { flex-shrink: 0; padding-bottom: max(4px, env(safe-area-inset-bottom)); }
-  /* Safari-iOS (browser tab, NOT the installed PWA): Safari overlays the
-     bottom of the viewport with its toolbar/pill zone and consumes the first
-     tap there to re-show its chrome — a dead Send tap that never reaches the
-     page (device traces show zero events). Keep the controls clear of that
-     zone; the installed PWA has no Safari chrome and stays flush. */
-  body.safari-tab .peek-cmd-bar { padding-bottom: max(34px, env(safe-area-inset-bottom)); }
+  .peek-cmd-bar { flex-shrink: 0; padding-bottom: max(8px, env(safe-area-inset-bottom)); }
   .peek-cmd-toggle {
-    width: 100%; padding: 3px; border: none; background: transparent;
+    width: 100%; padding: 6px; border: none; background: transparent;
     color: var(--dim); font-size: 0.75rem; cursor: pointer; text-align: center;
     -webkit-tap-highlight-color: transparent;
   }
   .peek-cmd-toggle:active { color: var(--text); }
   .peek-cmd-row {
-    display: none; gap: 8px; padding-top: 4px;
+    display: none; gap: 8px; padding-top: 6px;
   }
   .peek-cmd-row.open { display: flex; min-width: 0; overflow: visible; position: relative; }
-  .peek-cmd-row .send-input { font-size: 0.85rem; padding: 6px 10px; min-height: 30px; min-width: 0; }
-  .peek-cmd-row .btn { min-height: 30px; padding: 5px 11px; font-size: 0.82rem; }
-  /* Mobile: 16px input font stops iOS Safari from zooming in on focus (both the
-     peek command input and the session-card inputs share .send-input). */
-  @media (max-width: 640px) {
-    .send-input,
-    .overlay.vv-compact .peek-cmd-row .send-input { font-size: 16px; }
-  }
+  .peek-cmd-row .send-input { font-size: 0.85rem; padding: 8px 12px; min-height: 36px; min-width: 0; }
+  .peek-cmd-row .btn { min-height: 36px; padding: 6px 12px; font-size: 0.82rem; }
   .send-split { display: flex; flex-shrink: 0; }
   .send-split-main { border-radius: 8px 0 0 8px; padding-right: 8px; }
   .send-split-arrow { border-radius: 0 8px 8px 0; padding: 6px 6px; border-left: 1px solid rgba(255,255,255,0.2); font-size: 0.55rem; min-width: 28px; min-height: 44px; }
@@ -13449,7 +13732,7 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
     overflow-x: auto; overflow-y: hidden; -webkit-overflow-scrolling: touch; scrollbar-width: none; -ms-overflow-style: none;
     overscroll-behavior-x: contain; touch-action: pan-x; }
   .peek-tabs::-webkit-scrollbar { display: none; }
-  .peek-tab { padding: 5px 12px; font-size: 0.8rem; background: none; border: none;
+  .peek-tab { padding: 8px 14px; font-size: 0.82rem; background: none; border: none;
     border-bottom: 2px solid transparent; color: var(--dim); cursor: pointer;
     margin-bottom: -1px; -webkit-tap-highlight-color: transparent; flex-shrink: 0; white-space: nowrap; }
   .peek-tab.active { color: var(--text); border-bottom-color: var(--accent); }
@@ -14031,14 +14314,7 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
     display: flex; align-items: stretch;
     margin: 0 -16px 12px -16px;
     border-bottom: 1px solid var(--border);
-    position: relative; z-index: 39; background: var(--bg);
-  }
-  @media (max-width: 600px) {
-    .header-row { position: relative !important; top: auto !important; }
-    .tab-bar-outer { margin-bottom: 4px; }
-    .board-session-group { margin-bottom: 2px; }
-    .board-session-header { padding: 6px 10px; }
-    .tag-group-body { padding: 0; }
+    position: sticky; top: var(--sticky-nav-top, 60px); z-index: 39; background: var(--bg);
   }
   .tab-bar {
     display: flex; gap: 0; padding: 0 0 0 16px; flex: 1;
@@ -14421,15 +14697,6 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
     -webkit-tap-highlight-color: transparent;
   }
   .col-del-btn:hover, .col-del-btn:active { opacity: 1; color: var(--red); }
-  /* Gate-edit button — its own style (NOT the red delete style) so it reads as an
-     editable checklist, and a bigger tap target for mobile discoverability. */
-  .col-gate-btn { background: none; border: 1px solid transparent; border-radius: 5px;
-    color: var(--dim); cursor: pointer; font-size: 0.82rem; padding: 2px 5px; line-height: 1;
-    opacity: 0.75; transition: opacity 0.15s, color 0.15s, border-color 0.15s;
-    -webkit-tap-highlight-color: transparent; }
-  .col-gate-btn:hover, .col-gate-btn:active { opacity: 1; color: var(--accent); border-color: var(--border); }
-  .col-gate-btn.has-gate { color: var(--accent); opacity: 0.95; }
-  @media (max-width: 600px) { .col-gate-btn { font-size: 0.9rem; padding: 5px 8px; } }
   .board-add-col-btn {
     flex-shrink: 0; align-self: flex-start; min-width: 120px; padding: 10px 14px;
     font-size: 0.8rem; font-weight: 500; border: 1px dashed rgba(255,255,255,0.1);
@@ -14678,48 +14945,6 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
   }
   .gp-close:hover { background: rgba(248,81,73,0.15); color: #f85149; }
   .gp-peek-btn:hover { background: rgba(88,166,255,0.12); color: #58a6ff; }
-  /* Snap-to-fraction width presets in the pane header */
-  .gp-size { display: flex; gap: 1px; flex-shrink: 0; }
-  .gp-size-btn {
-    background: none; border: none; color: var(--dim); cursor: pointer;
-    font-size: 0.72rem; padding: 2px 4px; min-width: 18px; border-radius: 3px;
-    line-height: 1; flex-shrink: 0; -webkit-tap-highlight-color: transparent;
-  }
-  .gp-size-btn:hover { background: rgba(88,166,255,0.12); color: #58a6ff; }
-  .gp-size-btn.active { color: var(--accent); background: rgba(88,166,255,0.16); }
-  /* Session panes embed the full peek view via an iframe (peek-embed mode) */
-  .gp-peek-frame { flex: 1; min-height: 0; width: 100%; border: none; background: var(--bg); display: block; }
-  /* peek-embed mode: this page is loaded inside a Workspace tile — show only the
-     peek overlay, stripped of the app chrome, filling the iframe. Zoom out the
-     embedded peek so the FULL session (terminal + command bar + message box) is
-     visible by default in a workspace pane instead of being cut off. */
-  body.peek-embed { padding: 0 !important; overflow: hidden; zoom: 0.8; }
-  body.peek-embed .chrome-tabs-bar,
-  body.peek-embed .chrome-tab-frames,
-  body.peek-embed .header-row,
-  body.peek-embed .tab-bar-outer,
-  body.peek-embed #session-view,
-  body.peek-embed #peek-close-btn,
-  body.peek-embed #peek-focus-btn { display: none !important; }
-  body.peek-embed #peek-overlay { top: 0 !important; padding-top: 0 !important; }
-  /* Tile chrome diet: the pane header already names the session, so the peek's
-     own header (title/status/find) + task/dir rows are dead space at tile size */
-  body.peek-embed .overlay-header,
-  body.peek-embed #peek-task-row,
-  body.peek-embed .peek-dir-bar { display: none !important; }
-  /* General view-embed mode: ?embed=<view> loads the app inside a dock/grid panel
-     showing a single view, stripped of the app chrome and filling the iframe. */
-  body.embed { padding: 0 !important; margin: 0 !important; overflow: hidden; height: 100dvh; }
-  body.embed .chrome-tabs-bar,
-  body.embed .chrome-tab-frames,
-  body.embed .header-row,
-  body.embed .tab-bar-outer,
-  body.embed #tag-filters,
-  body.embed #offline-banner,
-  body.embed #pinned-notes-home { display: none !important; }
-  /* The JS sizes the active view to fill the iframe (position:fixed inset:0). */
-  body.embed .embed-filled { position: fixed !important; inset: 0 !important; height: 100dvh !important;
-    max-height: none !important; margin: 0 !important; z-index: 30; }
   .gp-body {
     flex: 1; overflow: auto; padding: 10px;
     font-family: "SF Mono","Fira Code","Cascadia Code",monospace;
@@ -14743,11 +14968,6 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
   .gp-note-status { font-size: 0.68rem; color: var(--dim); padding: 4px 10px; border-top: 1px solid var(--border); background: var(--card); flex-shrink: 0; }
   /* Override dark terminal bg for note panes */
   .grid-stack-item:has(.gp-note-body) .grid-stack-item-content { background: var(--card); }
-  /* Workspace terminal pane */
-  .gp-term-body { flex: 1; min-height: 0; background: #0d1117; }
-  .grid-stack-item:has(.gp-term-body) .grid-stack-item-content { background: #0d1117; }
-  .gp-term-reconnect { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; background: rgba(13,17,23,0.85); z-index: 10; }
-  .gp-term-reconnect button { padding: 6px 16px; background: var(--accent); color: #fff; border: none; border-radius: 6px; cursor: pointer; font-size: 0.8rem; }
   /* Note picker dropdown */
   .ws-note-dropdown { position: relative; }
   .ws-note-menu {
@@ -15658,19 +15878,6 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
   #jrnl-map-pane { height: 100%; }
   .jrnl-map-container { width: 100%; height: 100%; }
   @media (max-width: 600px) {
-    .sched-actions { flex-wrap: wrap; gap: 6px; }
-    .sched-action-btn { min-height: 40px; font-size: 0.8rem; padding: 0 14px; flex: 1; min-width: calc(50% - 3px); }
-    #scheduler-view > div:first-child button.btn { min-height: 44px; font-size: 0.82rem; }
-    .sched-toggle-label { min-width: 44px; min-height: 44px; }
-    .sched-mode-btn { min-height: 50px; font-size: 0.66rem; }
-    .sched-chip { min-height: 38px; padding: 7px 13px; font-size: 0.76rem; }
-    /* On mobile: pin to top, let box scroll, cap textarea height */
-    #sched-overlay { align-items: flex-start; padding: 8px; }
-    #sched-overlay .board-edit-box { height: auto !important; max-height: calc(100dvh - 16px); overflow-y: auto !important; overflow-x: hidden; display: block !important; }
-    #sched-overlay #sched-command { min-height: 80px !important; max-height: 140px; resize: none; }
-    .sched-modal-footer { max-height: none; }
-  }
-  @media (max-width: 600px) {
     #journal-view { height: calc(100dvh - 122px - var(--chrome-tab-h, 0px)); position: relative; }
     .jrnl-sidebar {
       position: absolute; top: 0; left: 0; bottom: 0; z-index: 10;
@@ -15688,6 +15895,10 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
 </style>
 </head>
 <body>
+<!-- Safe-area notch cover: iOS Safari lets scrolled body content peek into the
+     region above the sticky nav (behind the notch/status bar). This fixed
+     overlay paints over that region so nothing bleeds through. -->
+<div aria-hidden="true" style="position:fixed;top:0;left:0;right:0;height:env(safe-area-inset-top);background:var(--bg,#0d1117);z-index:9999;pointer-events:none;"></div>
 <div id="js-fallback" style="position:fixed;inset:0;display:flex;align-items:center;justify-content:center;flex-direction:column;gap:16px;z-index:99999;background:var(--bg,#0d1117);color:#8b949e;font-family:-apple-system,system-ui,sans-serif;">
   <div style="font-size:1.1rem;">Loading amux...</div>
   <div id="js-fallback-retry" style="display:none;text-align:center;">
@@ -15702,7 +15913,7 @@ setTimeout(function(){var f=document.getElementById('js-fallback');if(f&&f.style
   No Anthropic API key set — Claude sessions won't work. <a href="#" onclick="event.preventDefault();document.getElementById('no-apikey-banner').style.display='none';toggleSettings()" style="color:#fde68a;font-weight:600;text-decoration:underline;">Add key in Settings</a>
 </div>
 <!-- API key setup modal — shown on cloud when no user key is configured (dismissible) -->
-<div id="apikey-setup-modal" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,0.75);z-index:9999;align-items:center;justify-content:center;">
+<div id="apikey-setup-modal" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,0.75);z-index:9999;display:none;align-items:center;justify-content:center;">
   <div style="background:#1a1a2e;border:1px solid #333;border-radius:12px;padding:32px;max-width:440px;width:90%;box-shadow:0 24px 64px rgba(0,0,0,0.6);position:relative;color:#e8e8e8;">
     <button onclick="document.getElementById('apikey-setup-modal').style.display='none'" style="position:absolute;top:12px;right:14px;background:none;border:none;color:#ccc;font-size:1.2rem;cursor:pointer;padding:4px;" title="Close">&#x2715;</button>
     <div style="font-size:1.4rem;font-weight:700;margin-bottom:8px;color:#fff;">Get started</div>
@@ -15755,10 +15966,8 @@ setTimeout(function(){var f=document.getElementById('js-fallback');if(f&&f.style
         <div class="notif-panel-header">
           <span>Notifications</span>
           <div style="display:flex;gap:8px;align-items:center;">
-            <button onclick="_notifSendTest()" style="background:none;border:1px solid var(--border);color:var(--accent);cursor:pointer;font-size:0.68rem;border-radius:5px;padding:3px 9px;" title="Send a test notification to check native/iOS notifications">Test</button>
             <button onclick="_notifClearAll()" style="background:none;border:none;color:var(--dim);cursor:pointer;font-size:0.7rem;">Clear</button>
-            <button onclick="_notifToggleBanners()" id="notif-banner-btn" style="background:none;border:none;cursor:pointer;font-size:0.75rem;" title="Toggle in-app banner pop-ups">&#x1F4AC;</button>
-            <button onclick="_notifToggleNative()" id="notif-native-btn" style="background:none;border:none;cursor:pointer;font-size:0.75rem;" title="Toggle native (background/lock-screen) notifications">&#x1F50A;</button>
+            <button onclick="_notifToggleNative()" id="notif-native-btn" style="background:none;border:none;cursor:pointer;font-size:0.75rem;" title="Toggle native notifications">&#x1F50A;</button>
           </div>
         </div>
         <div id="notif-panel-list"></div>
@@ -15767,7 +15976,7 @@ setTimeout(function(){var f=document.getElementById('js-fallback');if(f&&f.style
   </div>
   <div style="display:flex;gap:8px;align-items:center;">
     <div id="org-switcher-wrap" style="display:none;"></div>
-    <button class="btn-rate-limit" id="rate-limit-pill" title="" onclick="event.stopPropagation();openBulkActions()">
+    <button class="btn-rate-limit" id="rate-limit-pill" title="" onclick="event.stopPropagation();_scrollToFirstRateLimited()">
       <span id="rate-limit-pill-text">0 rate-limited</span>
     </button>
     <div class="active-wrap">
@@ -15818,24 +16027,6 @@ setTimeout(function(){var f=document.getElementById('js-fallback');if(f&&f.style
         </div>
         <div class="settings-sep"></div>
         <div class="settings-section">
-          <div class="settings-section-label">Alerts</div>
-          <div style="font-size:0.68rem;color:var(--dim);margin-bottom:8px;line-height:1.4;">Routine notifications use in-app amux Alerts. <b>Urgent alerts</b> are reserved for things that need your attention immediately — sessions are told to use them sparingly.</div>
-          <div style="font-weight:600;font-size:0.8rem;margin-bottom:6px;">&#x1F6A8; Urgent alerts</div>
-          <div class="settings-row" style="justify-content:space-between;align-items:center;">
-            <span style="font-size:0.85rem;">In-app push</span>
-            <label class="theme-toggle"><input type="checkbox" id="alert-push-cb" onchange="saveAlertConfig()"><span class="theme-track"><span class="theme-thumb"></span></span></label>
-          </div>
-          <div class="settings-row" style="justify-content:space-between;align-items:center;margin-top:4px;">
-            <span style="font-size:0.85rem;">Text my phone <span id="alert-sms-provider" style="color:var(--dim);font-size:0.7rem;"></span></span>
-            <label class="theme-toggle"><input type="checkbox" id="alert-sms-cb" onchange="saveAlertConfig()"><span class="theme-track"><span class="theme-thumb"></span></span></label>
-          </div>
-          <input id="alert-phone" type="tel" placeholder="+1 410 790 5624" onchange="saveAlertConfig()"
-            style="width:100%;margin-top:6px;font-size:0.82rem;padding:5px 8px;border-radius:6px;border:1px solid var(--border);background:var(--card);color:var(--fg);box-sizing:border-box;">
-          <button onclick="sendTestAlert(this)" class="btn" style="width:100%;margin-top:6px;font-size:0.78rem;">Send test alert</button>
-          <div id="alert-test-status" style="font-size:0.7rem;color:var(--dim);margin-top:4px;min-height:1em;"></div>
-        </div>
-        <div class="settings-sep"></div>
-        <div class="settings-section">
           <div class="settings-section-label">Default Model</div>
           <div style="font-size:0.72rem;color:var(--dim);margin-bottom:6px;">Applied to new sessions without an explicit model</div>
           <select id="settings-default-model" onchange="saveDefaultModel(this.value)"
@@ -15851,6 +16042,7 @@ setTimeout(function(){var f=document.getElementById('js-fallback');if(f&&f.style
             <option value="claude-opus-4-7[1m]">claude-opus-4-7 [1M]</option>
             <option value="claude-opus-4-6">claude-opus-4-6</option>
             <option value="claude-opus-4-6[1m]">claude-opus-4-6 [1M]</option>
+            <option value="claude-sonnet-5">claude-sonnet-5</option>
             <option value="claude-sonnet-4-6">claude-sonnet-4-6</option>
             <option value="claude-sonnet-4-6[1m]">claude-sonnet-4-6 [1M]</option>
             <option value="claude-haiku-4-5-20251001">claude-haiku-4-5-20251001</option>
@@ -15909,13 +16101,28 @@ setTimeout(function(){var f=document.getElementById('js-fallback');if(f&&f.style
           <div id="settings-commitguard-status" style="font-size:0.7rem;color:var(--dim);margin-top:4px;"></div>
         </div>
         <div class="settings-sep"></div>
-        <div class="settings-section" id="settings-taskguard-section">
-          <div class="settings-section-label">Board awareness</div>
-          <label style="display:flex;align-items:center;gap:8px;cursor:pointer;font-size:0.8rem;">
-            <input type="checkbox" id="settings-taskguard-toggle" style="width:auto;accent-color:var(--accent);" onchange="saveTaskGuard(this.checked)">
-            Nudge sessions to log tasks on the board, and brief each session on all sessions' tasks at startup
-          </label>
-          <div id="settings-taskguard-status" style="font-size:0.7rem;color:var(--dim);margin-top:4px;"></div>
+        <div class="settings-section" id="settings-pushover-section">
+          <div class="settings-section-label">Pushover Notifications</div>
+          <div style="font-size:0.72rem;color:var(--dim);margin-bottom:6px;">Receive push notifications on iOS/Android when sessions need attention.</div>
+          <div style="font-size:0.72rem;color:var(--dim);margin-bottom:4px;">App Token</div>
+          <div style="display:flex;gap:6px;align-items:center;margin-bottom:6px;">
+            <input id="settings-pushover-token" type="password" autocomplete="off"
+              class="search-input" placeholder="a…"
+              style="flex:1;font-size:0.78rem;padding:5px 8px;box-sizing:border-box;min-width:0;">
+          </div>
+          <div style="font-size:0.72rem;color:var(--dim);margin-bottom:4px;">User Key</div>
+          <div style="display:flex;gap:6px;align-items:center;margin-bottom:6px;">
+            <input id="settings-pushover-user" type="password" autocomplete="off"
+              class="search-input" placeholder="u…"
+              style="flex:1;font-size:0.78rem;padding:5px 8px;box-sizing:border-box;min-width:0;">
+          </div>
+          <div style="display:flex;gap:6px;">
+            <button class="btn" style="font-size:0.7rem;padding:3px 10px;white-space:nowrap;"
+              onclick="savePushoverKeys()">Save</button>
+            <button class="btn" style="font-size:0.7rem;padding:3px 10px;white-space:nowrap;"
+              onclick="sendPushoverTest()">Send test</button>
+          </div>
+          <div id="settings-pushover-status" style="font-size:0.7rem;color:var(--dim);margin-top:4px;"></div>
         </div>
         <div class="settings-sep"></div>
         <div class="settings-section" id="settings-notes-section">
@@ -15985,6 +16192,7 @@ setTimeout(function(){var f=document.getElementById('js-fallback');if(f&&f.style
 <div class="tab-bar">
   <button id="tab-sessions" class="active" onclick="switchView('sessions')">Sessions</button>
   <button id="tab-board" onclick="switchView('board')">Board</button>
+  <button id="tab-threads" onclick="switchView('threads')">Threads <span id="tab-threads-count" style="display:none;background:#e11;color:#fff;border-radius:10px;padding:1px 7px;font-size:0.7rem;margin-left:3px;">0</span></button>
   <button id="tab-calendar" onclick="switchView('calendar')">Calendar</button>
   <button id="tab-scheduler" onclick="switchView('scheduler')">Scheduler</button>
   <button id="tab-files" onclick="switchView('files')">Files</button>
@@ -15998,7 +16206,7 @@ setTimeout(function(){var f=document.getElementById('js-fallback');if(f&&f.style
   <button id="tab-terminal" onclick="switchView('terminal')">Terminal</button>
   <button id="tab-browser" onclick="switchView('browser')">Browser</button>
   <button id="tab-habits" onclick="switchView('habits')">Habits</button>
-  <button id="tab-skills" onclick="switchView('skills')">Skills</button>
+  <button id="tab-repos" onclick="switchView('repos')">Repos</button>
 </div>
 <div class="tab-customize-wrap">
   <button class="tab-customize-btn" onclick="event.stopPropagation();toggleTabCustomizer()" title="Show/hide tabs">&#x229E;</button>
@@ -16017,9 +16225,12 @@ setTimeout(function(){var f=document.getElementById('js-fallback');if(f&&f.style
     <span class="log-search-label">Logs</span>
   </button>
   <div class="tile-controls">
+    <button class="tile-btn" id="tile-list-btn" onclick="setLayoutMode('list')" title="List view">&#x2630;</button>
+    <button class="tile-btn" id="tile-group-btn" onclick="setLayoutMode('group')" title="Group by status" style="font-size:0.75rem;font-weight:700;">#</button>
+    <button class="tile-btn tile-grid-only" id="tile-grid-btn" onclick="setLayoutMode('grid')" title="Grid view">&#x268F;</button>
     <button class="tile-btn" id="tile-sort-btn" onclick="toggleSortMode()" title="Sort alphabetically (pinned stay on top, order stops shifting)" style="font-size:0.7rem;font-weight:700;">A&#x2193;</button>
-    <button class="tile-btn" id="tile-freeze-btn" onclick="toggleFreeze()" title="Freeze session order — click again to unfreeze and reset">&#x2744;</button>
-    <button class="tile-btn" id="tile-expand-btn" onclick="toggleExpand()" title="Expand active sessions — click again to collapse all">&#x26A1;</button>
+    <button class="tile-btn" id="tile-reset-btn" onclick="resetCardOrder()" title="Reset to default order (pinned → last active)" style="display:none;font-size:0.8rem;">&#x21BA;</button>
+    <button class="tile-btn" id="tile-collapse-btn" onclick="collapseAll()" title="Collapse all sessions" style="display:none;font-size:0.75rem;">&#x2B06;</button>
   </div>
 </div>
 <div id="tag-filters" class="tag-filters"></div>
@@ -16059,25 +16270,16 @@ setTimeout(function(){var f=document.getElementById('js-fallback');if(f&&f.style
 </div>
 <!-- Scheduler view -->
 <div id="scheduler-view" style="display:none;">
-  <div style="padding:10px 12px 8px;display:flex;align-items:center;gap:8px;border-bottom:1px solid var(--border);">
+  <div style="padding:10px 12px 6px;display:flex;align-items:center;gap:8px;border-bottom:1px solid var(--border);">
     <span style="font-weight:600;font-size:0.9rem;">Scheduler</span>
-    <span id="sched-stats" style="font-size:0.7rem;color:var(--dim);flex:1;"></span>
-    <button class="btn" onclick="openSchedModal()" style="font-size:0.78rem;padding:4px 10px;">+ New</button>
+    <div style="flex:1;"></div>
+    <button class="btn" onclick="openSchedModal()" style="font-size:0.78rem;padding:4px 10px;">+ New Schedule</button>
   </div>
-  <div style="padding:8px 12px 0;">
-    <div class="search-wrap" id="sched-search-wrap" style="width:100%;">
-      <input class="search-input" id="sched-search" type="text" placeholder="Search schedules — title, session, command, cadence…" autocomplete="off"
-        oninput="schedSearchQuery=this.value;document.getElementById('sched-search-wrap').classList.toggle('has-value',!!this.value);renderScheduler()">
-      <button class="search-clear" onclick="document.getElementById('sched-search').value='';schedSearchQuery='';document.getElementById('sched-search-wrap').classList.remove('has-value');renderScheduler()">&#x2715;</button>
-    </div>
-  </div>
-  <div id="scheduler-list" style="padding:10px 12px;display:flex;flex-direction:column;gap:6px;overflow-y:auto;"></div>
-  <details id="sched-runs-details" style="border-top:1px solid var(--border);padding:0 12px 10px;">
-    <summary style="cursor:pointer;font-size:0.78rem;font-weight:600;color:var(--dim);padding:8px 0 4px;list-style:none;display:flex;align-items:center;gap:5px;">
-      <span style="font-size:0.6rem;transition:transform 0.15s;display:inline-block;" id="sched-runs-arrow">▶</span> Recent Runs
-    </summary>
+  <div id="scheduler-list" style="padding:10px 12px;display:flex;flex-direction:column;gap:8px;overflow-y:auto;"></div>
+  <div style="padding:0 12px 12px;">
+    <div style="font-size:0.78rem;font-weight:600;color:var(--dim);padding:8px 0 4px;border-top:1px solid var(--border);">Recent Runs</div>
     <div id="scheduler-runs"></div>
-  </details>
+  </div>
 </div>
 
 <div id="files-view" style="display:none;flex-direction:column;flex:1;min-height:0;">
@@ -16228,6 +16430,54 @@ setTimeout(function(){var f=document.getElementById('js-fallback');if(f&&f.style
   </div>
 </div>
 
+
+<!-- Threads view (Phase 1 of successor to Inbox). Every entry is a message
+     inside a thread; per-message Reply button targets a specific message. -->
+<style>
+  @media (max-width: 600px) {
+    #threads-list .t-row-time { display: none; }
+    #threads-list .t-row-title { font-size: 0.95rem; }
+  }
+</style>
+<div id="threads-view" style="display:none;flex-direction:column;overflow:auto;padding:12px 16px;">
+  <div style="display:flex;align-items:center;gap:12px;margin-bottom:8px;flex-wrap:wrap;">
+    <h2 style="margin:0;font-size:1.1rem;">Threads</h2>
+    <button class="btn" onclick="_threadsOpenNew()">+ New thread</button>
+    <span style="color:var(--muted);font-size:0.8rem;">Conversations with agents. Every message can be replied to individually. Star to pin at top.</span>
+  </div>
+  <div id="threads-list"></div>
+</div>
+<!-- New-thread modal — also serves as per-message Reply modal via context flag. -->
+<div id="t-new-modal" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,0.55);z-index:1000;justify-content:center;align-items:center;padding:20px;" onclick="if(event.target===this)_threadsCloseNew()">
+  <div style="background:var(--card-bg,#111);border:1px solid var(--border);border-radius:8px;padding:16px 18px;max-width:640px;width:100%;">
+    <div id="t-new-header" style="font-weight:600;font-size:1.05rem;margin-bottom:10px;">New thread</div>
+    <div id="t-new-target-row">
+      <label style="display:block;font-size:0.75rem;color:var(--muted);margin-bottom:2px;">Target session</label>
+      <select id="t-new-target" style="width:100%;padding:6px 8px;margin-bottom:10px;border:1px solid var(--border);border-radius:5px;background:var(--card-bg,#0a0a0a);color:var(--fg);"></select>
+    </div>
+    <div id="t-new-title-row">
+      <label style="display:block;font-size:0.75rem;color:var(--muted);margin-bottom:2px;">Thread title (one line)</label>
+      <input id="t-new-title" type="text" placeholder="What's this conversation about?" style="width:100%;padding:6px 8px;margin-bottom:10px;border:1px solid var(--border);border-radius:5px;background:var(--card-bg,#0a0a0a);color:var(--fg);box-sizing:border-box;">
+    </div>
+    <label style="display:block;font-size:0.75rem;color:var(--muted);margin-bottom:2px;" id="t-new-body-label">Body (message content)</label>
+    <textarea id="t-new-body" placeholder="..." style="width:100%;min-height:120px;padding:6px 8px;margin-bottom:6px;border:1px solid var(--border);border-radius:5px;background:var(--card-bg,#0a0a0a);color:var(--fg);font-family:inherit;box-sizing:border-box;resize:vertical;" onpaste="_threadsHandlePaste(event)"></textarea>
+    <!-- Attach bar — reuses .peek-attach-chip styling. -->
+    <div class="peek-attach-bar" id="t-new-attach-bar" style="margin-bottom:8px;"></div>
+    <input type="file" id="t-new-file-input" multiple
+      style="position:absolute;width:0;height:0;opacity:0;overflow:hidden;pointer-events:none;" onchange="_threadsHandleFileInput(event)">
+    <label style="display:flex;align-items:center;gap:6px;font-size:0.85rem;margin-bottom:12px;">
+      <input id="t-new-blocking" type="checkbox">
+      Blocking (inject into agent's terminal — interrupts current work)
+    </label>
+    <div style="display:flex;gap:8px;justify-content:space-between;align-items:center;">
+      <button class="peek-attach-btn" title="Attach file" onclick="document.getElementById('t-new-file-input').click()">&#128206;</button>
+      <div style="display:flex;gap:8px;">
+        <button class="btn" style="opacity:0.7;" onclick="_threadsCloseNew()">Cancel</button>
+        <button class="btn" onclick="_threadsSubmitNew()">Send</button>
+      </div>
+    </div>
+  </div>
+</div>
 
 <!-- Notes view -->
 <div id="notes-view" style="display:none;flex-direction:row;overflow:hidden;">
@@ -16530,91 +16780,21 @@ setTimeout(function(){var f=document.getElementById('js-fallback');if(f&&f.style
 </div>
 
 <div id="browser-view" style="display:none;">
-  <style>
-    #browser-view .bw-btn { font-size:0.82rem;padding:5px 10px;background:var(--surface);border:1px solid var(--border);border-radius:6px;cursor:pointer;color:var(--fg);font-family:inherit;line-height:1.1;white-space:nowrap; }
-    #browser-view .bw-btn:hover { border-color:var(--accent); }
-    #browser-view .bw-btn.primary { background:var(--accent);color:#fff;border:none;font-weight:500; }
-    #browser-view .bw-btn.active { background:var(--accent);color:#fff;border-color:var(--accent); }
-    #browser-view .bw-in { font-size:0.82rem;padding:6px 10px;background:var(--surface);border:1px solid var(--border);border-radius:6px;color:var(--fg);font-family:inherit; }
-    #browser-view .bw-row { display:flex;align-items:center;gap:6px;padding:0 8px 8px;flex-wrap:wrap; }
-    #bw-elements-panel .bw-el { padding:4px 8px;border-bottom:1px solid var(--border);cursor:pointer;font-size:0.74rem;display:flex;gap:6px;align-items:baseline; }
-    #bw-elements-panel .bw-el:hover { background:var(--surface); }
-    #bw-elements-panel .bw-el .idx { color:var(--accent);font-family:monospace;font-weight:600;min-width:34px; }
-    #bw-elements-panel .bw-el .tag { color:var(--dim);font-family:monospace; }
-    #browser-view .bw-itab.active { background:var(--accent);color:#fff;border-color:var(--accent); }
-    #bw-inspect-list .il { padding:3px 8px;border-bottom:1px solid var(--border);white-space:pre-wrap;word-break:break-word;display:flex;gap:6px;align-items:baseline; }
-    #bw-inspect-list .il .lv { flex-shrink:0;font-weight:600;min-width:46px;text-transform:uppercase;font-size:0.62rem;padding-top:1px; }
-    #bw-inspect-list .il.error, #bw-inspect-list .il .lv.error { color:#ff6b6b; }
-    #bw-inspect-list .il.warn .lv, #bw-inspect-list .il .lv.warn { color:#e0af68; }
-    #bw-inspect-list .il .lv.log, #bw-inspect-list .il .lv.info, #bw-inspect-list .il .lv.debug { color:var(--dim); }
-    #bw-inspect-list .il .st { flex-shrink:0;font-weight:600;min-width:30px; }
-    #bw-inspect-list .il .st.ok { color:#4ec9b0; } #bw-inspect-list .il .st.bad { color:#ff6b6b; }
-    #bw-inspect-list .il .mth { flex-shrink:0;color:var(--accent);min-width:34px; }
-    #bw-inspect-list .il .ms { flex-shrink:0;color:var(--dim);margin-left:auto; }
-    #bw-inspect-list .il-empty { padding:16px;color:var(--dim);text-align:center;font-family:inherit; }
-    @media (max-width:600px){ #browser-view .bw-btn{ min-height:44px;min-width:44px; } #browser-view .bw-in{ min-height:40px; } }
-  </style>
-  <!-- Nav row -->
-  <div class="bw-row" style="padding-top:8px;">
-    <select id="bw-profile" class="bw-in" style="min-width:120px;" title="Profile — 'Auto' matches the URL to a logged-in profile">
-      <option value="">Auto profile</option>
+  <div style="display:flex;align-items:center;gap:8px;padding:8px;flex-wrap:wrap;">
+    <select id="bw-profile" style="font-size:0.78rem;padding:4px 8px;background:var(--surface);border:1px solid var(--border);border-radius:4px;color:var(--fg);font-family:inherit;min-width:120px;">
+      <option value="">No profile</option>
     </select>
-    <button class="bw-btn" onclick="_bwBack()" title="Back">&larr;</button>
-    <input id="bw-url" type="text" placeholder="https://example.com" class="bw-in" style="flex:1;min-width:180px;" onkeydown="if(event.key==='Enter')_bwGo()">
-    <button class="bw-btn primary" onclick="_bwGo()">Go</button>
-    <button id="bw-live-btn" class="bw-btn" onclick="_bwToggleLive()" title="Live auto-refresh">&#9658; Live</button>
-    <button class="bw-btn" onclick="_bwScreenshot()" title="Snapshot">&#128247;</button>
-    <button class="bw-btn" onclick="_bwSaveProfile()" title="Register current site to a profile">&#128190; Save</button>
-  </div>
-  <!-- Status / logged-in indicator -->
-  <div class="bw-row" style="padding-bottom:4px;">
-    <span id="bw-loggedin" style="font-size:0.7rem;padding:2px 8px;border-radius:10px;display:none;"></span>
+    <button onclick="_bwBack()" style="font-size:0.82rem;padding:4px 10px;background:var(--surface);border:1px solid var(--border);border-radius:6px;cursor:pointer;color:var(--fg);">&larr;</button>
+    <input id="bw-url" type="text" placeholder="https://example.com" style="flex:1;min-width:200px;font-size:0.82rem;padding:6px 10px;background:var(--surface);border:1px solid var(--border);border-radius:6px;color:var(--fg);font-family:inherit;" onkeydown="if(event.key==='Enter')_bwGo()">
+    <button onclick="_bwGo()" style="font-size:0.82rem;padding:4px 14px;background:var(--accent);color:#fff;border:none;border-radius:6px;cursor:pointer;font-weight:500;">Go</button>
+    <button onclick="_bwScreenshot()" style="font-size:0.82rem;padding:4px 10px;background:var(--surface);border:1px solid var(--border);border-radius:6px;cursor:pointer;color:var(--fg);">&#128247; Snap</button>
+    <button onclick="_bwSaveProfile()" style="font-size:0.82rem;padding:4px 10px;background:var(--surface);border:1px solid var(--border);border-radius:6px;cursor:pointer;color:var(--fg);">&#128190; Save Profile</button>
     <span id="bw-status" style="font-size:0.72rem;color:var(--dim);"></span>
   </div>
-  <!-- Interaction row -->
-  <div class="bw-row">
-    <input id="bw-type" type="text" placeholder="Type text into page&hellip;" class="bw-in" style="flex:1;min-width:140px;" onkeydown="if(event.key==='Enter'){event.preventDefault();_bwType(true);}">
-    <button class="bw-btn" onclick="_bwType(false)">Type</button>
-    <button class="bw-btn" onclick="_bwKey('Enter')" title="Press Enter">&#9166;</button>
-    <button class="bw-btn" onclick="_bwKey('Tab')" title="Press Tab">Tab</button>
-    <button class="bw-btn" onclick="_bwKey('Backspace')" title="Backspace">&#9003;</button>
-    <button class="bw-btn" onclick="_bwScroll(-1)" title="Scroll up">&#9650;</button>
-    <button class="bw-btn" onclick="_bwScroll(1)" title="Scroll down">&#9660;</button>
-    <button id="bw-el-btn" class="bw-btn" onclick="_bwToggleElements()" title="Show clickable elements">&#9776; Elements</button>
-    <button id="bw-inspect-btn" class="bw-btn" onclick="_bwToggleInspect()" title="Console, network &amp; JS errors">&#128269; Inspect</button>
-  </div>
-  <!-- Agent task row -->
-  <div class="bw-row">
-    <input id="bw-task" type="text" placeholder="Give the browser agent a task (autonomous, vision)&hellip;" class="bw-in" style="flex:1;min-width:180px;" onkeydown="if(event.key==='Enter')_bwAgentRun()">
-    <button class="bw-btn primary" onclick="_bwAgentRun()">&#9658; Run agent</button>
-    <button id="bw-agent-stop" class="bw-btn" style="display:none;" onclick="_bwAgentStop()">Stop</button>
-  </div>
-  <div id="bw-agent-result" style="display:none;margin:0 8px 8px;padding:8px 10px;background:var(--surface);border:1px solid var(--border);border-radius:6px;font-size:0.76rem;max-height:160px;overflow:auto;white-space:pre-wrap;"></div>
-  <!-- Viewport + elements panel -->
-  <div style="display:flex;gap:8px;padding:0 8px 8px;height:calc(100vh - 260px);min-height:280px;">
-    <div id="bw-viewport" tabindex="0" style="position:relative;flex:1;min-width:0;cursor:crosshair;overflow:auto;outline:none;" onkeydown="_bwViewportKey(event)">
-      <img id="bw-img" style="max-width:100%;border:1px solid var(--border);border-radius:4px;display:none;" onclick="_bwClick(event)">
-      <div id="bw-placeholder" style="display:flex;align-items:center;justify-content:center;height:400px;color:var(--dim);font-size:0.9rem;text-align:center;padding:0 20px;">
-        Enter a URL and click Go to start browsing.<br>Click the page to interact; focus it and type to send keys.
-      </div>
-    </div>
-    <div id="bw-elements-panel" style="display:none;width:280px;flex-shrink:0;border:1px solid var(--border);border-radius:6px;overflow:auto;background:var(--bg);">
-      <div style="padding:6px 8px;border-bottom:1px solid var(--border);font-size:0.74rem;color:var(--dim);display:flex;justify-content:space-between;align-items:center;">
-        <span id="bw-el-count">Elements</span>
-        <button class="bw-btn" style="padding:2px 6px;" onclick="_bwLoadElements()">&#x21bb;</button>
-      </div>
-      <div id="bw-elements-list"></div>
-    </div>
-    <div id="bw-inspect-panel" style="display:none;width:340px;flex-shrink:0;border:1px solid var(--border);border-radius:6px;overflow:hidden;background:var(--bg);flex-direction:column;">
-      <div style="padding:6px 8px;border-bottom:1px solid var(--border);display:flex;gap:4px;align-items:center;">
-        <button class="bw-btn bw-itab active" data-itab="console" onclick="_bwInspTab('console')" style="padding:3px 8px;">Console <span id="bw-ic-console" style="opacity:0.6;"></span></button>
-        <button class="bw-btn bw-itab" data-itab="network" onclick="_bwInspTab('network')" style="padding:3px 8px;">Network <span id="bw-ic-network" style="opacity:0.6;"></span></button>
-        <button class="bw-btn bw-itab" data-itab="errors" onclick="_bwInspTab('errors')" style="padding:3px 8px;">Errors <span id="bw-ic-errors" style="opacity:0.6;"></span></button>
-        <span style="flex:1;"></span>
-        <button class="bw-btn" style="padding:2px 6px;" onclick="_bwLoadInspect()" title="Refresh">&#x21bb;</button>
-        <button class="bw-btn" style="padding:2px 6px;" onclick="_bwClearInspect()" title="Clear buffers">&#128465;</button>
-      </div>
-      <div id="bw-inspect-list" style="flex:1;overflow:auto;font-family:monospace;font-size:0.72rem;line-height:1.4;"></div>
+  <div id="bw-viewport" style="position:relative;padding:0 8px 8px;cursor:crosshair;height:calc(100vh - 160px);overflow:auto;">
+    <img id="bw-img" style="max-width:100%;border:1px solid var(--border);border-radius:4px;display:none;" onclick="_bwClick(event)">
+    <div id="bw-placeholder" style="display:flex;align-items:center;justify-content:center;height:400px;color:var(--dim);font-size:0.9rem;">
+      Enter a URL and click Go to start browsing
     </div>
   </div>
 </div>
@@ -16775,140 +16955,155 @@ setTimeout(function(){var f=document.getElementById('js-fallback');if(f&&f.style
   <button onclick="_habitsAdd()" style="margin-top:12px;background:var(--accent);color:#000;border:none;border-radius:50%;width:48px;height:48px;font-size:1.5rem;cursor:pointer;box-shadow:0 2px 8px rgba(0,0,0,0.3);transition:transform 0.15s;" onmousedown="this.style.transform='scale(0.9)'" onmouseup="this.style.transform=''" ontouchstart="this.style.transform='scale(0.9)'" ontouchend="this.style.transform=''">+</button>
 </div>
 
-<div id="skills-view" style="display:none;flex-direction:column;flex:1;min-height:0;padding:12px 16px;">
-  <div style="display:flex;align-items:center;gap:8px;margin-bottom:12px;flex-shrink:0;">
-    <div class="search-wrap" style="flex:1;">
-      <input class="search-input" id="skills-search" type="text" placeholder="Search skills..." autocomplete="off"
-        oninput="_skillsFilter(this.value)">
-    </div>
-    <span style="font-size:0.78rem;color:var(--dim);white-space:nowrap;" id="skills-count"></span>
-    <button class="btn" onclick="editSkill()" style="font-size:0.75rem;padding:4px 12px;flex-shrink:0;">+ New</button>
+<div id="repos-view" style="display:none;flex-direction:column;padding:12px 16px;overflow-y:auto;-webkit-overflow-scrolling:touch;gap:8px;">
+  <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:4px;">
+    <span style="font-size:0.8rem;color:var(--dim);" id="repos-updated"></span>
+    <button onclick="_reposLoad()" style="background:transparent;border:1px solid var(--border);border-radius:6px;color:var(--dim);padding:4px 10px;font-size:0.75rem;cursor:pointer;">&#x21bb; Refresh</button>
   </div>
-  <div id="skills-tab-sections" style="overflow-y:auto;flex:1;min-height:0;-webkit-overflow-scrolling:touch;"></div>
+  <div id="repos-container">
+    <div style="color:var(--dim);font-size:0.85rem;padding:24px 0;text-align:center;">Loading repositories…</div>
+  </div>
 </div>
 
 <!-- Schedule modal -->
 <div id="sched-overlay" class="board-edit-overlay" onclick="if(event.target===this)closeSchedModal()" style="display:none;">
-  <div class="board-edit-box" style="max-width:640px;width:100%;height:auto;max-height:92dvh;padding:0;overflow:hidden;display:flex;flex-direction:column;">
-    <!-- Header: title, mode, session -->
-    <div style="padding:12px 16px 8px;flex-shrink:0;border-bottom:1px solid var(--border);">
-      <div style="font-weight:600;font-size:0.9rem;margin-bottom:8px;">&#x23F0; Scheduled Task</div>
+  <div class="board-edit-box" style="max-width:640px;width:100%;height:82dvh;padding:0;overflow:hidden;display:flex;flex-direction:column;">
+    <!-- Header: title, kind, session -->
+    <div style="padding:14px 16px 10px;flex-shrink:0;border-bottom:1px solid var(--border);">
+      <div style="font-weight:600;font-size:0.9rem;margin-bottom:10px;">&#x23F0; Scheduled Task</div>
       <div class="field-group" style="margin-bottom:8px;">
         <label class="field-label">Title</label>
         <input id="sched-title" type="text" placeholder="What should run?" autocomplete="off">
       </div>
-      <div class="sched-mode-seg" style="margin-bottom:8px;">
-        <button type="button" class="sched-mode-btn" data-mode="loop" onclick="setSchedMode('loop')"><span class="sched-mode-ico">&#x21BB;</span>Loop</button>
-        <button type="button" class="sched-mode-btn" data-mode="routine" onclick="setSchedMode('routine')"><span class="sched-mode-ico">&#x2600;</span>Routine</button>
-        <button type="button" class="sched-mode-btn" data-mode="trigger" onclick="setSchedMode('trigger')"><span class="sched-mode-ico">&#x26A1;</span>Trigger</button>
-        <button type="button" class="sched-mode-btn" data-mode="once" onclick="setSchedMode('once')"><span class="sched-mode-ico">&#x25B6;</span>Once</button>
-      </div>
-      <div style="display:flex;gap:10px;align-items:flex-end;">
+      <div style="display:flex;gap:12px;">
+        <div style="flex:1;">
+          <label class="field-label">Kind</label>
+          <select id="sched-kind" class="board-detail-session-select" style="width:100%;margin-bottom:0;" onchange="updateSchedKindUI()">
+            <option value="tmux">Send to session (Claude)</option>
+            <option value="shell">Run shell command</option>
+          </select>
+        </div>
         <div id="sched-session-group" style="flex:1;">
           <label class="field-label">Session</label>
           <select id="sched-session" class="board-detail-session-select" style="width:100%;margin-bottom:0;"></select>
         </div>
-        <label style="display:flex;align-items:center;gap:5px;cursor:pointer;font-size:0.72rem;color:var(--dim);white-space:nowrap;padding-bottom:7px;" title="Run a shell command on the host instead of sending to a Claude session">
-          <input type="checkbox" id="sched-kind-shell" style="width:auto;accent-color:var(--accent);" onchange="updateSchedKindUI()">
-          shell cmd
-        </label>
-        <select id="sched-kind" style="display:none;"><option value="tmux"></option><option value="shell"></option></select>
       </div>
     </div>
-    <!-- Command: the primary editing area — grows with the viewport, drag-resizable -->
-    <div id="sched-command-section" style="flex:1 1 auto;display:flex;flex-direction:column;padding:10px 16px;min-height:clamp(220px, 44dvh, 540px);overflow:hidden;">
-      <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:6px;flex-shrink:0;gap:8px;">
+    <!-- Command: fills remaining vertical space -->
+    <div style="flex:1;display:flex;flex-direction:column;padding:10px 16px;min-height:0;overflow:hidden;">
+      <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:6px;flex-shrink:0;">
         <label class="field-label" id="sched-command-label" style="margin-bottom:0;">Command</label>
-        <div style="display:flex;align-items:center;gap:8px;">
-          <span id="sched-command-count" style="font-size:0.66rem;color:var(--dim);"></span>
-          <button type="button" class="sched-expand-btn" id="sched-expand-btn" onclick="toggleSchedCmdFullscreen()" title="Expand editor (fills the modal)">&#x2922;</button>
-          <div class="notes-mode-tabs" id="sched-command-tabs" style="margin:0;">
-            <button class="notes-mode-tab active" id="sched-cmd-tab-edit" onclick="schedCmdSwitchMode('edit')">Edit</button>
-            <button class="notes-mode-tab" id="sched-cmd-tab-preview" onclick="schedCmdSwitchMode('preview')">Preview</button>
-          </div>
+        <div class="notes-mode-tabs" id="sched-command-tabs" style="margin:0;">
+          <button class="notes-mode-tab active" id="sched-cmd-tab-edit" onclick="schedCmdSwitchMode('edit')">Edit</button>
+          <button class="notes-mode-tab" id="sched-cmd-tab-preview" onclick="schedCmdSwitchMode('preview')">Preview</button>
         </div>
       </div>
       <div id="sched-command-editor-wrap" style="flex:1;display:flex;min-height:0;">
-        <textarea id="sched-command" placeholder="e.g. /status, npm run build, or a full multi-paragraph prompt…" autocomplete="off" spellcheck="false"
-          oninput="_schedCmdCount()"
-          style="flex:1;resize:vertical;box-sizing:border-box;font-size:0.86rem;line-height:1.6;padding:10px 12px;background:var(--bg);border:1px solid var(--border);border-radius:6px;color:var(--text);font-family:ui-monospace,SFMono-Regular,Menlo,monospace;min-height:0;width:100%;tab-size:2;"></textarea>
+        <textarea id="sched-command" placeholder="e.g. /status or npm run build" autocomplete="off"
+          style="flex:1;resize:none;box-sizing:border-box;font-size:0.88rem;line-height:1.65;padding:10px 12px;background:var(--card);border:1px solid var(--border);border-radius:6px;color:var(--text);font-family:inherit;min-height:0;width:100%;"></textarea>
       </div>
-      <div id="sched-command-preview" class="md-content" style="display:none;flex:1;padding:10px 12px;background:var(--bg);border:1px solid var(--border);border-radius:6px;overflow-y:auto;font-size:0.88rem;line-height:1.65;color:var(--text);min-height:0;"></div>
+      <div id="sched-command-preview" class="md-content" style="display:none;flex:1;padding:10px 12px;background:var(--card);border:1px solid var(--border);border-radius:6px;overflow-y:auto;font-size:0.88rem;line-height:1.65;color:var(--text);min-height:0;"></div>
     </div>
-    <!-- Footer: mode-specific schedule panels + buttons (scrollable) -->
-    <div class="sched-modal-footer" style="flex-shrink:1;min-height:0;border-top:1px solid var(--border);overflow-y:auto;max-height:300px;padding:12px 16px 14px;">
-      <!-- LOOP -->
-      <div id="sched-panel-loop" class="sched-panel" style="display:none;">
-        <label class="field-label">Repeat every</label>
-        <div class="sched-chip-row" id="sched-loop-chips">
-          <button type="button" class="sched-chip" data-every="15m" onclick="setLoopEvery('15m')">15m</button>
-          <button type="button" class="sched-chip" data-every="30m" onclick="setLoopEvery('30m')">30m</button>
-          <button type="button" class="sched-chip" data-every="1h" onclick="setLoopEvery('1h')">1h</button>
-          <button type="button" class="sched-chip" data-every="2h" onclick="setLoopEvery('2h')">2h</button>
-          <button type="button" class="sched-chip" data-every="4h" onclick="setLoopEvery('4h')">4h</button>
-          <input id="sched-loop-every" type="text" placeholder="custom (e.g. 45m)" autocomplete="off"
-            style="width:120px;font-size:0.72rem;padding:5px 8px;" oninput="markLoopChipActive(this.value)">
+    <!-- Footer: schedule + advanced + buttons (scrollable) -->
+    <div style="flex-shrink:0;border-top:1px solid var(--border);overflow-y:auto;max-height:260px;padding:10px 16px 14px;">
+      <div style="display:flex;gap:12px;margin-bottom:8px;">
+        <div style="flex:1;">
+          <label class="field-label">Schedule</label>
+          <select id="sched-type" class="board-detail-session-select" style="width:100%;margin-bottom:0;" onchange="updateSchedTypeUI()">
+            <option value="once">Once</option>
+            <option value="recurring">Recurring</option>
+          </select>
         </div>
-        <div class="field-group" style="margin-top:10px;">
-          <label class="field-label">Stop when output matches <span class="field-optional">(optional — ends the loop)</span></label>
-          <input id="sched-done-pattern" type="text" placeholder='e.g. "all complete", "under 50.?ms", "nothing to do"' autocomplete="off">
+        <div id="sched-once-fields" style="flex:1;">
+          <label class="field-label">Run at</label>
+          <input id="sched-run-at" type="datetime-local" class="board-detail-session-select" style="width:100%;margin-bottom:0;">
         </div>
-        <select id="sched-done-action" style="display:none;"><option value="disable"></option><option value="notify"></option></select>
-        <div class="sched-mode-help"><b>Loop</b> — sends the command to the session over and over on a fixed interval. Add a stop pattern to auto-disable when the work is done ("keep optimizing until under 50ms").</div>
       </div>
-      <!-- ROUTINE -->
-      <div id="sched-panel-routine" class="sched-panel" style="display:none;">
-        <label class="field-label">When</label>
-        <input id="sched-expr" type="text" placeholder='e.g. "daily at 9am", "every weekday at 9am", "0 9 * * 1-5"' autocomplete="off">
-        <div class="sched-chip-row" id="sched-routine-chips">
-          <button type="button" class="sched-chip" onclick="setRoutineExpr('daily at 9am')">daily 9am</button>
-          <button type="button" class="sched-chip" onclick="setRoutineExpr('daily at 6pm')">daily 6pm</button>
-          <button type="button" class="sched-chip" onclick="setRoutineExpr('every weekday at 9am')">weekdays 9am</button>
-          <button type="button" class="sched-chip" onclick="setRoutineExpr('every morning')">mornings</button>
-          <button type="button" class="sched-chip" onclick="setRoutineExpr('weekly on monday at 09:00')">weekly Mon</button>
-          <button type="button" class="sched-chip" onclick="setRoutineExpr('0 9,17 * * 1-5')">2&times;/weekday</button>
+      <div id="sched-rec-fields" style="display:none;">
+      <div class="field-group">
+        <label class="field-label">Schedule expression <span class="field-optional">(optional — overrides dropdowns below)</span></label>
+        <input id="sched-expr" type="text" placeholder='e.g. "every 30m", "daily at 09:00", "0 9 * * 1-5"' autocomplete="off">
+        <div style="font-size:0.65rem;color:var(--dim);margin-top:3px;display:flex;gap:6px;flex-wrap:wrap;">
+          <a href="#" onclick="event.preventDefault();document.getElementById('sched-expr').value='every 30m'" style="color:var(--accent);">every 30m</a>
+          <a href="#" onclick="event.preventDefault();document.getElementById('sched-expr').value='every 1h'" style="color:var(--accent);">every 1h</a>
+          <a href="#" onclick="event.preventDefault();document.getElementById('sched-expr').value='every morning'" style="color:var(--accent);">every morning</a>
+          <a href="#" onclick="event.preventDefault();document.getElementById('sched-expr').value='every evening'" style="color:var(--accent);">every evening</a>
+          <a href="#" onclick="event.preventDefault();document.getElementById('sched-expr').value='daily at 6pm'" style="color:var(--accent);">daily at 6pm</a>
+          <a href="#" onclick="event.preventDefault();document.getElementById('sched-expr').value='every weekday at 9am'" style="color:var(--accent);">every weekday at 9am</a>
+          <a href="#" onclick="event.preventDefault();document.getElementById('sched-expr').value='weekly on monday at 08:00'" style="color:var(--accent);">weekly on monday</a>
+          <a href="#" onclick="event.preventDefault();document.getElementById('sched-expr').value='monthly on 1 at 9am'" style="color:var(--accent);">monthly on 1st</a>
+          <a href="#" onclick="event.preventDefault();document.getElementById('sched-expr').value='0 9 * * 1-5'" style="color:var(--accent);">cron: weekdays 9am</a>
         </div>
-        <div class="sched-mode-help"><b>Routine</b> — runs on a fixed daily or weekly schedule. Accepts natural language ("daily at 9am") or cron.</div>
       </div>
-      <!-- TRIGGER -->
-      <div id="sched-panel-trigger" class="sched-panel" style="display:none;">
-        <label class="field-label">Wake the session when&hellip;</label>
-        <div style="display:flex;flex-direction:column;gap:6px;margin-top:3px;">
-          <label style="display:flex;align-items:center;gap:7px;cursor:pointer;font-size:0.82rem;min-height:32px;">
-            <input type="checkbox" id="sched-trigger-idle" style="width:auto;accent-color:var(--accent);">
-            &#x1F4A4; a session goes idle <span style="color:var(--dim);font-size:0.7rem;">(a worker finished a turn)</span>
+      <div class="field-group">
+        <label class="field-label">Repeat</label>
+        <select id="sched-recurrence" class="board-detail-session-select" style="width:100%;" onchange="updateSchedRecUI()">
+          <option value="hourly">Hourly</option>
+          <option value="daily" selected>Daily</option>
+          <option value="weekly">Weekly</option>
+          <option value="monthly">Monthly</option>
+        </select>
+      </div>
+      <div class="field-group" id="sched-time-field">
+        <label class="field-label">Time</label>
+        <input id="sched-time" type="time" class="board-detail-session-select" style="width:100%;" value="09:00">
+      </div>
+      <div class="field-group" id="sched-weekday-field" style="display:none;">
+        <label class="field-label">Day of week</label>
+        <select id="sched-weekday" class="board-detail-session-select" style="width:100%;">
+          <option value="0">Monday</option><option value="1">Tuesday</option>
+          <option value="2">Wednesday</option><option value="3">Thursday</option>
+          <option value="4">Friday</option><option value="5">Saturday</option><option value="6">Sunday</option>
+        </select>
+      </div>
+      <div class="field-group" id="sched-monthday-field" style="display:none;">
+        <label class="field-label">Day of month</label>
+        <input id="sched-monthday" type="number" min="1" max="28" value="1" class="board-detail-session-select" style="width:100%;">
+      </div>
+      </div><!-- /sched-rec-fields -->
+      <div class="field-group" style="margin-top:4px;">
+        <label class="field-label">Event triggers <span class="field-optional">(runs in addition to the schedule above)</span></label>
+        <div style="display:flex;flex-direction:column;gap:4px;margin-top:2px;">
+          <label style="display:flex;align-items:center;gap:6px;cursor:pointer;font-size:0.8rem;">
+            <input type="checkbox" id="sched-trigger-idle" style="width:auto;accent-color:var(--accent);" onchange="updateSchedTriggerUI()">
+            A managed session goes idle <span style="color:var(--dim);font-size:0.7rem;">(a worker finished a turn)</span>
           </label>
-          <label style="display:flex;align-items:center;gap:7px;cursor:pointer;font-size:0.82rem;min-height:32px;">
-            <input type="checkbox" id="sched-trigger-board" style="width:auto;accent-color:var(--accent);">
-            &#x1F4CB; the board changes <span style="color:var(--dim);font-size:0.7rem;">(issue created/moved)</span>
+          <label style="display:flex;align-items:center;gap:6px;cursor:pointer;font-size:0.8rem;">
+            <input type="checkbox" id="sched-trigger-board" style="width:auto;accent-color:var(--accent);" onchange="updateSchedTriggerUI()">
+            The board changes <span style="color:var(--dim);font-size:0.7rem;">(an issue is created/updated/moved)</span>
           </label>
         </div>
-        <div class="field-group" style="margin-top:8px;">
-          <label class="field-label">Only these sessions <span class="field-optional">(comma-separated; blank = any)</span></label>
+        <div id="sched-trigger-cooldown-field" style="display:none;margin-top:6px;">
+          <label class="field-label">Only these sessions <span class="field-optional">(comma-separated; blank = any session)</span></label>
           <input id="sched-trigger-sessions" type="text" placeholder="e.g. backend, mvs-infra, ts-gke" autocomplete="off" style="width:100%;box-sizing:border-box;">
+          <label class="field-label" style="margin-top:6px;">Trigger cooldown <span class="field-optional">(min seconds between event-fired runs)</span></label>
+          <input id="sched-trigger-cooldown" type="number" min="10" max="3600" value="120" style="width:100px;">
         </div>
-        <div style="display:flex;gap:12px;">
-          <div style="flex:1;">
-            <label class="field-label">Cooldown <span class="field-optional">(sec)</span></label>
-            <input id="sched-trigger-cooldown" type="number" min="10" max="3600" value="120" style="width:100%;box-sizing:border-box;">
-          </div>
-          <div style="flex:2;">
-            <label class="field-label">Also on a timer <span class="field-optional">(optional heartbeat)</span></label>
-            <input id="sched-trigger-expr" type="text" placeholder='e.g. "every 1h"' autocomplete="off" style="width:100%;box-sizing:border-box;">
-          </div>
+      </div>
+      <div class="field-group">
+        <label style="display:flex;align-items:center;gap:6px;cursor:pointer;font-size:0.8rem;font-weight:500;">
+          <input type="checkbox" id="sched-watch" style="width:auto;accent-color:var(--accent);" onchange="updateSchedWatchUI()">
+          Watch response
+        </label>
+      </div>
+      <div id="sched-watch-fields" style="display:none;">
+        <div class="field-group">
+          <label class="field-label">Done pattern <span class="field-optional">(text or regex to match in response)</span></label>
+          <input id="sched-done-pattern" type="text" placeholder='e.g. "no more tasks", "all.*complete", "nothing to do"' autocomplete="off">
         </div>
-        <div class="sched-mode-help"><b>Trigger</b> — closed-loop orchestration. The session wakes in response to events instead of (or in addition to) a clock. Cooldown caps how often event-fired runs happen.</div>
+        <div class="field-group">
+          <label class="field-label">When matched</label>
+          <select id="sched-done-action" class="board-detail-session-select" style="width:100%;">
+            <option value="disable">Stop schedule (disable)</option>
+            <option value="notify">Notify only (keep running)</option>
+          </select>
+        </div>
+        <div class="field-group">
+          <label class="field-label">Watch timeout <span class="field-optional">(seconds to wait for response)</span></label>
+          <input id="sched-watch-timeout" type="number" min="10" max="600" value="120" style="width:100px;">
+        </div>
       </div>
-      <!-- ONCE -->
-      <div id="sched-panel-once" class="sched-panel" style="display:none;">
-        <label class="field-label">Run at</label>
-        <input id="sched-run-at" type="datetime-local" class="board-detail-session-select" style="width:100%;margin-bottom:0;">
-        <div class="sched-mode-help"><b>Once</b> — runs a single time, then disables itself.</div>
-      </div>
-      <!-- hidden carriers -->
-      <input type="checkbox" id="sched-watch" style="display:none;">
-      <input type="number" id="sched-watch-timeout" value="120" style="display:none;">
-      <div style="display:flex;gap:8px;justify-content:flex-end;margin-top:14px;">
+      <div style="display:flex;gap:8px;justify-content:flex-end;margin-top:10px;">
         <button class="btn" onclick="closeSchedModal()">Cancel</button>
         <button class="btn btn-primary" onclick="saveSchedModal()" id="sched-save-btn">Save</button>
       </div>
@@ -16953,10 +17148,6 @@ setTimeout(function(){var f=document.getElementById('js-fallback');if(f&&f.style
         <input id="be-due-time" type="time" style="width:110px;" title="Time (optional — leave blank for all-day)">
       </div>
     </div>
-    <div class="field-group">
-      <label class="field-label">Gate override <span class="field-optional">(optional)</span></label>
-      <textarea id="be-gate" rows="3" placeholder="One criterion per line. Leave blank to use the status's default gate." style="resize:vertical;"></textarea>
-    </div>
     <div class="board-edit-actions">
       <button class="be-cancel" onclick="closeBoardEdit()">Cancel</button>
       <button class="be-save" onclick="saveBoardEdit()">Save</button>
@@ -16995,12 +17186,6 @@ setTimeout(function(){var f=document.getElementById('js-fallback');if(f&&f.style
             onkeydown="_beTagKeydown(event,'bd')">
         </div>
         <div id="bd-tag-suggestions" class="be-tag-suggestions"></div>
-      </div>
-    </div>
-    <div class="board-detail-row" style="align-items:flex-start;">
-      <span style="font-size:0.78rem;color:var(--dim);padding-top:7px;">Gate:</span>
-      <div style="flex:1;">
-        <textarea id="bd-gate" class="board-detail-desc-input" style="min-height:56px;resize:vertical;" placeholder="Gate override — one criterion per line. Leave blank to use the status's default gate."></textarea>
       </div>
     </div>
     <div class="board-detail-tabs">
@@ -17128,9 +17313,9 @@ setTimeout(function(){var f=document.getElementById('js-fallback');if(f&&f.style
 
 <!-- Peek overlay -->
 <div id="peek-overlay" class="overlay">
-  <div class="overlay-header" style="flex-direction:column;gap:4px;padding-bottom:6px;">
-    <div style="display:flex;align-items:center;gap:8px;min-width:0;">
-      <h2 id="peek-title" style="margin:0;font-size:0.92rem;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">peek</h2>
+  <div class="overlay-header" style="flex-direction:column;gap:6px;padding-bottom:10px;">
+    <div style="display:flex;align-items:center;gap:10px;min-width:0;">
+      <h2 id="peek-title" style="margin:0;font-size:1.05rem;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">peek</h2>
       <span id="peek-session-status"></span>
       <span id="peek-model-badge" style="font-size:0.75rem;padding:2px 8px;border-radius:9999px;background:rgba(255,255,255,0.06);color:var(--dim);border:1px solid var(--border);white-space:nowrap;"></span>
     </div>
@@ -17149,8 +17334,9 @@ setTimeout(function(){var f=document.getElementById('js-fallback');if(f&&f.style
         <button class="search-clear" onclick="event.stopPropagation();clearPeekSearch()">&#x2715;</button>
       </div>
       <button class="btn peek-split-btn" id="peek-split-toggle" onclick="togglePeekSplit()" title="Split: file browser">&#x1F4C2;</button>
+      <button class="btn" id="peek-commitguard-btn" onclick="togglePeekCommitGuard()" title="Commit guard: nudge this session to commit on idle" style="font-size:0.7rem;padding:3px 8px;opacity:0.5;">&#x1F6E1;</button>
       <button class="btn" onclick="togglePeekFocus()" id="peek-focus-btn" title="Focus mode — hide controls">&#x25B4;</button>
-      <button class="btn" id="peek-close-btn" onclick="closePeek()">Close</button>
+      <button class="btn" onclick="closePeek()">Close</button>
     </div>
   </div>
   <!-- Focus mode minimal bar (visible only in focus mode) -->
@@ -17163,11 +17349,10 @@ setTimeout(function(){var f=document.getElementById('js-fallback');if(f&&f.style
   <div class="peek-tabs">
     <button class="peek-tab active" id="peek-tab-terminal" onclick="setPeekTab('terminal')">Terminal</button>
     <button class="peek-tab" id="peek-tab-steering" onclick="setPeekTab('steering')">Steering<span class="peek-tab-count" id="peek-tab-steering-count"></span></button>
-    <button class="peek-tab" id="peek-tab-schedules" onclick="setPeekTab('schedules')">Schedules<span class="peek-tab-count" id="peek-tab-schedules-count"></span></button>
-    <button class="peek-tab" id="peek-tab-issues" onclick="setPeekTab('issues')">Board<span class="peek-tab-count" id="peek-tab-issues-count"></span></button>
-    <button class="peek-tab" id="peek-tab-transcript" onclick="setPeekTab('transcript')" title="Clean conversation transcript (from Claude Code's JSONL — gap-free, never torn)">Transcript</button>
+    <button class="peek-tab" id="peek-tab-issues" onclick="setPeekTab('issues')">Issues<span class="peek-tab-count" id="peek-tab-issues-count"></span></button>
     <button class="peek-tab" id="peek-tab-git" onclick="setPeekTab('git')">Worktree</button>
     <button class="peek-tab" id="peek-tab-commits" onclick="setPeekTab('commits')">Commits</button>
+    <button class="peek-tab" id="peek-tab-schedules" onclick="setPeekTab('schedules')">Schedules<span class="peek-tab-count" id="peek-tab-schedules-count"></span></button>
     <button class="peek-tab" id="peek-tab-notes" onclick="setPeekTab('notes')">Notes<span class="peek-tab-count" id="peek-tab-notes-count"></span></button>
   </div>
   <!-- Working directory bar -->
@@ -17194,7 +17379,7 @@ setTimeout(function(){var f=document.getElementById('js-fallback');if(f&&f.style
       <div id="peek-body" class="overlay-body" style="position:absolute;inset:0;"></div>
       <button class="peek-copy-btn" id="peek-copy-btn" onclick="copyPeekContent()" title="Copy all">&#x2398; Copy</button>
     </div>
-    <div id="peek-status" class="overlay-status" onclick="_peekGeoDebug()" title="Tap for layout debug"></div>
+    <div id="peek-status" class="overlay-status"></div>
     <div class="peek-cmd-bar">
       <button class="peek-cmd-toggle" id="peek-cmd-toggle" onclick="togglePeekCmd()">&#x25BC; Send command</button>
       <div class="peek-cmd-row open" id="peek-cmd-row" style="flex-wrap:wrap;">
@@ -17205,8 +17390,8 @@ setTimeout(function(){var f=document.getElementById('js-fallback');if(f&&f.style
         <!-- Input row -->
         <div class="ac-wrap" style="flex:1;min-width:0;position:relative;">
           <textarea class="send-input" id="peek-cmd-input" rows="1" placeholder="Type a message or drop a file..."
-            autocomplete="off" autocorrect="on" autocapitalize="sentences" spellcheck="true"
-            enterkeyhint="enter" style="width:100%;"
+            autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false"
+            enterkeyhint="send" style="width:100%;"
             oninput="autoGrow(this);slashAcUpdate();cmdHistoryReset()" onkeydown="slashAcKeydown(event)"
             onbeforeinput="slashAcBeforeInput(event)"
             onpaste="handlePeekPaste(event)"></textarea>
@@ -17215,15 +17400,9 @@ setTimeout(function(){var f=document.getElementById('js-fallback');if(f&&f.style
         </div>
         <input type="file" id="peek-file-input" multiple
           style="position:absolute;width:0;height:0;opacity:0;overflow:hidden;pointer-events:none;" onchange="handlePeekFileInput(event)">
-        <div class="peek-more-wrap">
-          <button class="peek-attach-btn" id="peek-more-btn" title="Attach / history" onclick="_togglePeekMore(event)">&#x22EE;</button>
-          <div class="peek-more-menu" id="peek-more-menu">
-            <button type="button" onclick="_peekMoreClose();document.getElementById('peek-file-input').click()">&#128206; Attach file</button>
-            <button type="button" onclick="_peekMoreClose();openCmdHistoryModal()">&#x1F551; Message history</button>
-            <button type="button" onclick="_peekMoreClose();_openSavedMessages()">&#128190; Saved messages</button>
-          </div>
-        </div>
-        <div class="send-split"><button class="btn primary send-split-main" onpointerdown="event.preventDefault();_tapTraceEv('pointerdown')" onpointerup="_tapTraceEv('pointerup');_btnFire(event, sendPeekCmd)" onpointercancel="_tapTraceEv('pointercancel')" ontouchstart="_btnTouchStart(event)" ontouchend="_btnTouchEnd(event, sendPeekCmd)" onclick="_tapTraceEv('click');_btnFire(event, sendPeekCmd)">Send</button><button class="btn primary send-split-arrow" onpointerdown="event.preventDefault()" onpointerup="_btnFire(event, () => _toggleSendMode(event))" ontouchstart="_btnTouchStart(event)" ontouchend="_btnTouchEnd(event, () => _toggleSendMode(event))" onclick="_btnFire(event, () => _toggleSendMode(event))" title="Switch send mode">&#x25BC;</button></div>
+        <button class="peek-attach-btn" title="Attach file" onclick="document.getElementById('peek-file-input').click()">&#128206;</button>
+        <button class="peek-attach-btn" id="peek-hist-btn" onclick="openCmdHistoryModal()" title="Message history">&#x1F551;</button>
+        <div class="send-split"><button class="btn primary send-split-main" onmousedown="event.preventDefault()" onclick="sendPeekCmd()">Send</button><button class="btn primary send-split-arrow" onmousedown="event.preventDefault()" onclick="_toggleSendMode(event)" title="Switch send mode">&#x25BC;</button></div>
       </div>
       <!-- Drag-over hint (shown by CSS when drag-over class is on peek-overlay) -->
       <div class="peek-drag-hint" style="display:none;">&#128206; Drop to attach</div>
@@ -17249,13 +17428,6 @@ setTimeout(function(){var f=document.getElementById('js-fallback');if(f&&f.style
     <div id="psf-body" class="peek-split-files-body"></div>
   </div>
   </div><!-- /peek-split-wrap -->
-  <!-- Transcript panel (clean JSONL conversation history) -->
-  <div id="peek-transcript-panel" class="peek-tasks-panel" style="padding:0;gap:0;">
-    <div style="position:relative;flex:1;min-height:0;">
-      <div id="peek-transcript-body" class="overlay-body" style="position:absolute;inset:0;padding:12px 16px;"></div>
-    </div>
-    <div id="peek-transcript-status" class="overlay-status"></div>
-  </div>
   <!-- Steering queue panel -->
   <div id="peek-steering-panel" class="peek-tasks-panel">
     <div style="flex-shrink:0;border:1px solid var(--border);border-radius:8px;padding:10px;margin-bottom:8px;background:rgba(255,255,255,0.02);">
@@ -17283,7 +17455,6 @@ setTimeout(function(){var f=document.getElementById('js-fallback');if(f&&f.style
         <button id="piv-list" class="bv-btn" onclick="setPeekIssuesView('list')" title="List view">&#x2630;</button>
         <button id="piv-kanban" class="bv-btn" onclick="setPeekIssuesView('kanban')" title="Board view">&#x25A4;</button>
       </div>
-      <button id="piv-scope" class="btn" style="font-size:0.72rem;padding:4px 9px;" onclick="togglePeekIssuesAll()" title="Toggle between this session's issues and all sessions'">This session</button>
       <span id="peek-issues-count" style="flex:1;font-size:0.82rem;color:var(--dim);align-self:center;"></span>
       <button class="btn primary" style="font-size:0.8rem;padding:5px 12px;" onclick="openBoardAdd('backlog')">+ New issue</button>
     </div>
@@ -17427,6 +17598,34 @@ setTimeout(function(){var f=document.getElementById('js-fallback');if(f&&f.style
 </div>
 
 <!-- Edit modal -->
+<div id="icon-picker-overlay" class="edit-overlay" onclick="if(event.target===this)closeIconPicker()">
+  <div class="edit-box" style="max-width:320px;">
+    <h3 style="margin:0 0 12px;font-size:1rem;">Set session icon</h3>
+    <div id="icon-grid" style="display:grid;grid-template-columns:repeat(8,1fr);gap:6px;margin-bottom:12px;"></div>
+    <div style="display:flex;gap:8px;align-items:center;">
+      <input id="icon-custom-input" type="text" placeholder="or type/paste any emoji…"
+        style="flex:1;padding:7px 10px;background:var(--input-bg);border:1px solid var(--border);border-radius:6px;color:var(--fg);font-size:1.1rem;"
+        oninput="iconCustomPreview(this.value)">
+      <button class="btn" onclick="saveIcon('')" style="white-space:nowrap;color:var(--dim);">✕ Clear</button>
+    </div>
+    <div class="edit-actions" style="margin-top:10px;">
+      <button class="btn" onclick="closeIconPicker()">Cancel</button>
+      <button class="btn primary" onclick="saveIconCustom()">Save</button>
+    </div>
+  </div>
+</div>
+
+<div id="color-picker-overlay" class="edit-overlay" onclick="if(event.target===this)closeColorPicker()">
+  <div class="edit-box" style="max-width:260px;">
+    <h3 style="margin:0 0 12px;font-size:1rem;">Set session color</h3>
+    <div id="color-grid" style="display:grid;grid-template-columns:repeat(6,1fr);gap:10px;margin-bottom:14px;"></div>
+    <div class="edit-actions" style="margin-top:0;">
+      <button class="btn" onclick="saveColor('')" style="color:var(--dim);">✕ Clear</button>
+      <button class="btn" onclick="closeColorPicker()">Cancel</button>
+    </div>
+  </div>
+</div>
+
 <div id="edit-overlay" class="edit-overlay" onclick="if(event.target===this)closeEdit()">
   <div class="edit-box">
     <h3 id="edit-title">Edit</h3>
@@ -17437,7 +17636,7 @@ setTimeout(function(){var f=document.getElementById('js-fallback');if(f&&f.style
         onkeydown="editAcKeydown(event)">
       <div id="edit-ac-list" class="ac-list"></div>
     </div>
-    <select id="edit-select" style="display:none;" onchange="_editSelectChanged()">
+    <select id="edit-select" style="display:none;" onchange="submitEdit()">
       <option value="" id="model-default-opt">Default</option>
       <option value="opus">opus</option>
       <option value="sonnet">sonnet</option>
@@ -17449,22 +17648,11 @@ setTimeout(function(){var f=document.getElementById('js-fallback');if(f&&f.style
       <option value="claude-opus-4-7[1m]">claude-opus-4-7 [1M]</option>
       <option value="claude-opus-4-6">claude-opus-4-6</option>
       <option value="claude-opus-4-6[1m]">claude-opus-4-6 [1M]</option>
+      <option value="claude-sonnet-5">claude-sonnet-5</option>
       <option value="claude-sonnet-4-6">claude-sonnet-4-6</option>
       <option value="claude-sonnet-4-6[1m]">claude-sonnet-4-6 [1M]</option>
       <option value="claude-haiku-4-5-20251001">claude-haiku-4-5-20251001</option>
     </select>
-    <div id="edit-effort-wrap" style="display:none;margin-top:12px;">
-      <label class="field-label" style="display:block;margin-bottom:5px;font-size:0.78rem;color:var(--dim);">Reasoning effort</label>
-      <select id="edit-effort-select">
-        <option value="">Default</option>
-        <option value="low">low</option>
-        <option value="medium">medium</option>
-        <option value="high">high</option>
-        <option value="xhigh">xhigh</option>
-        <option value="max">max</option>
-      </select>
-      <div style="font-size:0.72rem;color:var(--dim);margin-top:5px;line-height:1.4;">Higher effort = more thinking, slower &amp; pricier. Changing this restarts the session.</div>
-    </div>
     <div class="edit-actions">
       <button class="btn" onclick="closeEdit()">Cancel</button>
       <button class="btn primary" onclick="submitEdit()">Save</button>
@@ -17493,7 +17681,7 @@ setTimeout(function(){var f=document.getElementById('js-fallback');if(f&&f.style
       <h3 id="about-brand-name" style="margin:0 0 4px;">amux</h3>
       <div id="about-brand-tagline" style="color:var(--dim);font-size:0.8rem;">Claude Code Multiplexer</div>
       <div style="color:var(--dim);font-size:0.7rem;font-family:monospace;margin-top:2px;"><script>document.write(location.host)</script></div>
-      <div id="about-version" style="margin:8px 0 4px;font-size:0.95rem;font-weight:600;cursor:pointer;" onclick="forceUpdate()" title="Tap to force update">&#x21BB;</div>
+      <div style="margin:8px 0 4px;font-size:0.95rem;font-weight:600;cursor:pointer;" onclick="forceUpdate()" title="Tap to force update">v0.6.0 &#x21BB;</div>
       <div id="update-status" style="color:var(--dim);font-size:0.75rem;min-height:1.2em;"></div>
       <button id="pull-btn" class="btn" onclick="pullFromRemote(this)" style="margin-top:6px;font-size:0.72rem;padding:4px 12px;">&#x2B07; Pull from remote</button>
       <div id="pull-status" style="color:var(--dim);font-size:0.7rem;font-family:monospace;margin-top:4px;min-height:1.2em;white-space:pre-wrap;max-height:60px;overflow-y:auto;"></div>
@@ -17597,15 +17785,9 @@ setTimeout(function(){var f=document.getElementById('js-fallback');if(f&&f.style
       <h2>&#x1F551; Message history</h2>
       <button class="btn" onclick="closeCmdHistoryModal()">&#x2715;</button>
     </div>
-    <div style="display:flex;gap:8px;margin-bottom:10px;">
-      <input type="search" id="cmd-history-search" placeholder="Search past messages..."
-        oninput="_renderCmdHistoryList()"
-        style="flex:1;min-width:0;box-sizing:border-box;padding:8px 12px;background:var(--bg);border:1px solid var(--border);border-radius:6px;color:var(--text);font-size:0.9rem;outline:none;">
-      <select id="cmd-history-session-filter" onchange="_renderCmdHistoryList()" title="Filter by session"
-        style="flex-shrink:0;max-width:200px;box-sizing:border-box;padding:8px 10px;background:var(--bg);border:1px solid var(--border);border-radius:6px;color:var(--text);font-size:0.85rem;outline:none;cursor:pointer;">
-        <option value="">All sessions</option>
-      </select>
-    </div>
+    <input type="search" id="cmd-history-search" placeholder="Search past messages..."
+      oninput="_renderCmdHistoryList(this.value)"
+      style="width:100%;box-sizing:border-box;padding:8px 12px;background:var(--bg);border:1px solid var(--border);border-radius:6px;color:var(--text);font-size:0.9rem;outline:none;margin-bottom:10px;">
     <div id="cmd-history-list" style="flex:1;overflow-y:auto;display:flex;flex-direction:column;gap:6px;"></div>
   </div>
 </div>
@@ -17871,18 +18053,7 @@ const ZOOM_STEPS = [50, 60, 70, 75, 80, 85, 90, 95, 100, 110, 120, 130, 150, 175
 let _zoomLevel = parseInt(localStorage.getItem('amux_zoom')) || 100;
 if (!ZOOM_STEPS.includes(_zoomLevel)) _zoomLevel = 100;
 function _applyZoom() {
-  // CSS zoom on the root breaks position:fixed geometry in WebKit — a zoomed
-  // page renders the peek overlay short of the physical screen bottom (dead
-  // strip under the command bar). So on touch devices scale the root
-  // font-size instead: the UI is rem-based, so text tracks the zoom level,
-  // and font-size never disturbs fixed/safe-area geometry.
-  if (matchMedia('(pointer: coarse)').matches) {
-    document.documentElement.style.zoom = '';
-    document.documentElement.style.fontSize = _zoomLevel === 100 ? '' : (16 * _zoomLevel / 100) + 'px';
-  } else {
-    document.documentElement.style.fontSize = '';
-    document.documentElement.style.zoom = (_zoomLevel / 100);
-  }
+  document.documentElement.style.zoom = (_zoomLevel / 100);
   localStorage.setItem('amux_zoom', _zoomLevel);
   const el = document.getElementById('zoom-level-display');
   if (el) el.textContent = _zoomLevel + '%';
@@ -17947,7 +18118,7 @@ async function _initIdentity() {
       if (d.is_cloud) {
         // Blocking modal for cloud users — must set key before using the app
         const m = document.getElementById('apikey-setup-modal');
-        if (m) m.style.display = 'flex';
+        if (m) { m.style.display = 'flex'; m.style.removeProperty('display'); m.style.display = 'flex'; }
         setTimeout(() => document.getElementById('apikey-setup-input')?.focus(), 100);
       } else {
         const banner = document.getElementById('no-apikey-banner');
@@ -18047,9 +18218,7 @@ async function apikeySetupSave() {
   const err = document.getElementById('apikey-setup-err');
   const btn = document.getElementById('apikey-setup-btn');
   const key = (inp?.value || '').trim();
-  const _PLACEHOLDER_KEYS = new Set(['changeme','change-me','change_me','your-api-key','your_api_key','your-key','yourkey','your_key_here','your-key-here','your-api-key-here','placeholder','dummy','example','sample','test','test-key','testkey','replace-me','replace_me','xxx','xxxx','sk-ant-xxx','sk-ant-your-key','sk-ant-example','sk-ant-placeholder']);
-  const _isPlaceholder = _PLACEHOLDER_KEYS.has(key.replace(/^["']|["']$/g, '').toLowerCase());
-  if (key.length < 10 || _isPlaceholder) { if (err) err.textContent = _isPlaceholder ? 'That looks like a placeholder. Enter your real API key.' : 'Key is too short'; return; }
+  if (!key.startsWith('sk-ant-')) { if (err) err.textContent = 'Key must start with sk-ant-'; return; }
   if (err) err.textContent = '';
   if (btn) btn.textContent = 'Saving…';
   try {
@@ -18060,12 +18229,9 @@ async function apikeySetupSave() {
     if (!r.ok) throw new Error('save failed');
     const m = document.getElementById('apikey-setup-modal');
     if (m) m.style.display = 'none';
-    const banner = document.getElementById('no-apikey-banner');
-    if (banner) banner.style.display = 'none';
-    showToast('API key saved — sessions are ready to use.');
   } catch(e) {
     if (err) err.textContent = 'Failed to save — try again';
-    if (btn) btn.textContent = 'Save API key';
+    if (btn) btn.textContent = 'Save & continue';
   }
 }
 
@@ -18400,14 +18566,14 @@ function openBulkActions() {
     html += `<button class="btn primary" style="width:100%;" onclick="bulkSendContinue(false)">Send "continue" to ${transient.length} session${transient.length>1?'s':''}</button>`;
     html += `</div>`;
   }
-  if (capped.length) {
+  if (weekly.length) {
     html += `<div style="padding:12px 14px;border:1px solid var(--border);border-radius:10px;margin-bottom:10px;">`;
-    html += `<div style="font-weight:600;font-size:0.9rem;margin-bottom:8px;">&#x1F4C5; Usage limit reached</div>`;
-    html += `<div style="font-size:0.8rem;color:var(--dim);margin-bottom:12px;">${capped.length} session${capped.length>1?'s':''} hit a usage cap (weekly or 5-hour session). amux auto-resumes each at the reset time shown — no action needed.</div>`;
+    html += `<div style="font-weight:600;font-size:0.9rem;margin-bottom:8px;">&#x1F4C5; Weekly limit reached</div>`;
+    html += `<div style="font-size:0.8rem;color:var(--dim);margin-bottom:12px;">${weekly.length} session${weekly.length>1?'s':''} hit the weekly cap. amux auto-resumes each at its reset time — no action needed.</div>`;
     html += `<div style="display:flex;flex-direction:column;gap:4px;margin-bottom:14px;max-height:180px;overflow-y:auto;">`;
-    capped.forEach(s => { html += _rlRow(s, '#f0a020'); });
+    weekly.forEach(s => { html += _rlRow(s, '#f0a020'); });
     html += `</div>`;
-    html += `<button class="btn" style="width:100%;" onclick="bulkSendContinue(true)">Send "continue" anyway to ${capped.length} session${capped.length>1?'s':''}</button>`;
+    html += `<button class="btn" style="width:100%;" onclick="bulkSendContinue(true)">Send "continue" anyway to ${weekly.length} session${weekly.length>1?'s':''}</button>`;
     html += `</div>`;
   }
   if (creditLimited.length) {
@@ -18448,11 +18614,10 @@ async function bulkSwitchModel(model) {
 function closeBulkActions() {
   document.getElementById('bulk-actions-overlay').classList.remove('open');
 }
-async function bulkSendContinue(cappedOnly) {
+async function bulkSendContinue(weeklyOnly) {
   const now = Date.now() / 1000;
-  const isCapped = s => s.rate_limit_banner || s.rate_limit_weekly;
   const matched = sessions.filter(s => s.rate_limited_until && s.rate_limited_until > now
-    && (cappedOnly ? isCapped(s) : !isCapped(s)));
+    && (weeklyOnly ? s.rate_limit_weekly : !s.rate_limit_weekly));
   if (!matched.length) { closeBulkActions(); return; }
   closeBulkActions();
   let sent = 0;
@@ -18812,7 +18977,6 @@ let lastSessionsJSON = '';
 // ── In-app notification system ──
 const _prevSessionState = {};  // name → {status, running}
 let _notifsNative = localStorage.getItem('amux_notifs') === '1';
-let _notifBanners = localStorage.getItem('amux_notif_banners') !== '0';  // in-app pop-ups, default on
 let _notesDirty = false;  // set by SSE invalidate when not on notes tab
 let _notifItems = JSON.parse(localStorage.getItem('amux_notif_items') || '[]').slice(0, 100);
 let _notifUnread = _notifItems.filter(n => !n.read).length;
@@ -18832,7 +18996,6 @@ function _notifUpdateBadge() {
 }
 
 function _notifShowBanner(icon, title, body, session) {
-  if (!_notifBanners) return;
   const container = document.getElementById('notif-banners');
   if (!container) return;
   const el = document.createElement('div');
@@ -18857,154 +19020,19 @@ function _notifPush(icon, title, body, session) {
   _notifFireNative(title, body, session);
 }
 
-async function _notifFireNative(title, body, session) {
+function _notifFireNative(title, body, session) {
   if (!_notifsNative) return;
-  if (typeof Notification === 'undefined' || Notification.permission !== 'granted') return;
-  const opts = {
-    body, icon: '/icon-192.png', badge: '/icon-192.png',
-    tag: 'amux-' + (session || Date.now()), renotify: true, silent: false,
-    requireInteraction: true,           // stays on screen until dismissed (desktop)
-    data: { session: session || '', url: '/' },
-  };
-  // Prefer the service worker — REQUIRED on iOS (new Notification() is unsupported
-  // there) and gives persistent, lock-screen notifications on installed PWAs.
   try {
-    if ('serviceWorker' in navigator) {
-      const reg = await navigator.serviceWorker.ready;
-      await reg.showNotification(title, opts);
-      return;
-    }
-  } catch(e) {}
-  // Desktop fallback for browsers without an active SW registration.
-  try {
-    const n = new Notification(title, opts);
+    if (typeof Notification === 'undefined' || Notification.permission !== 'granted') return;
+    const n = new Notification(title, { body, icon: '/icon.png', tag: 'amux-' + (session || Date.now()), renotify: true, silent: false });
     n.onclick = () => { window.focus(); if (session) openPeek(session); n.close(); };
   } catch(e) {}
-}
-
-function _urlB64ToUint8Array(base64String) {
-  const padding = '='.repeat((4 - base64String.length % 4) % 4);
-  const base64 = (base64String + padding).replace(/-/g, '+').replace(/_/g, '/');
-  const raw = atob(base64);
-  const arr = new Uint8Array(raw.length);
-  for (let i = 0; i < raw.length; i++) arr[i] = raw.charCodeAt(i);
-  return arr;
-}
-
-// serviceWorker.ready can hang forever on iOS if the SW never registers
-// (commonly an untrusted TLS cert). Race it against a timeout so callers fail
-// fast with a clear reason instead of spinning.
-function _swReady(ms) {
-  return Promise.race([
-    navigator.serviceWorker.ready,
-    new Promise((_, rej) => setTimeout(() => rej(new Error('service worker did not become ready in ' + (ms/1000) + 's')), ms)),
-  ]);
-}
-
-// Register this device for background Web Push (server can reach it with the
-// app/tab closed). Returns {ok} or {ok:false, reason}.
-async function _pushSubscribe() {
-  if (!('serviceWorker' in navigator) || !('PushManager' in window)) return { ok: false, reason: 'push unsupported' };
-  try {
-    const reg = await _swReady(8000);
-    let sub = await reg.pushManager.getSubscription();
-    if (!sub) {
-      const r = await fetch(API + '/api/push/public-key');
-      const { key } = await r.json();
-      if (!key) return { ok: false, reason: 'no server key' };
-      sub = await reg.pushManager.subscribe({ userVisibleOnly: true, applicationServerKey: _urlB64ToUint8Array(key) });
-    }
-    const j = sub.toJSON();
-    await apiCall(API + '/api/push/subscribe', {
-      method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ endpoint: j.endpoint, keys: j.keys }),
-    });
-    return { ok: true, endpoint: sub.endpoint };
-  } catch (e) {
-    return { ok: false, reason: e.message };
-  }
-}
-
-async function _pushUnsubscribe() {
-  try {
-    const reg = await navigator.serviceWorker.ready;
-    const sub = await reg.pushManager.getSubscription();
-    if (sub) {
-      await apiCall(API + '/api/push/unsubscribe', {
-        method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ endpoint: sub.endpoint }),
-      });
-      await sub.unsubscribe();
-    }
-  } catch (e) {}
-}
-
-// Step-by-step on-device diagnostic. Uses alert() so the full report is
-// readable on a phone (toasts truncate). Leads with the iOS Home-Screen fix,
-// which is the usual cause of "this browser has no Notification API".
-async function _notifSendTest() {
-  const isIOS = /iPad|iPhone|iPod/.test(navigator.userAgent);
-  const standalone = window.navigator.standalone || (window.matchMedia && matchMedia('(display-mode: standalone)').matches);
-  const steps = [];
-  const report = (extra) => alert('amux push test\n\n' + steps.join('\n') + (extra ? '\n\n' + extra : ''));
-
-  // 1. Notification API present? On iOS it only exists in an installed PWA.
-  if (typeof Notification === 'undefined' || !('serviceWorker' in navigator) || !('PushManager' in window)) {
-    if (isIOS && !standalone) {
-      return report('✗ You are in Safari. iOS only allows notifications for an installed app:\n'
-        + '1. Tap the Share button\n2. "Add to Home Screen"\n3. Open amux from that new icon\n4. Then tap Test again.');
-    }
-    return report('✗ This browser has no Web Push support'
-      + (isIOS ? ' (needs iOS/iPadOS 16.4+, opened from the Home Screen).' : '.'));
-  }
-  steps.push('✓ ' + (standalone ? 'installed PWA' : 'notifications supported'));
-
-  // 2. Permission
-  let perm = Notification.permission;
-  if (perm === 'default') { try { perm = await Notification.requestPermission(); } catch(e) {} }
-  if (perm !== 'granted') {
-    return report('✗ Permission: ' + perm + '. Allow notifications when prompted'
-      + (isIOS ? ', or enable amux under Settings → Notifications.' : ', or in site settings.'));
-  }
-  steps.push('✓ permission granted');
-
-  // 3. Service worker ready (hangs/fails if the TLS cert is not trusted)
-  let reg;
-  try { reg = await _swReady(8000); steps.push('✓ service worker active'); }
-  catch(e) {
-    return report('✗ ' + e.message + '\n→ The amux TLS certificate is probably not trusted on this device. '
-      + 'Install it from ' + location.origin + '/ca and enable Full Trust under '
-      + 'Settings → General → About → Certificate Trust Settings, then retry.');
-  }
-
-  // 4. Subscribe for background push
-  const sub = await _pushSubscribe();
-  if (!sub.ok) { return report('✗ Push subscription failed: ' + (sub.reason || 'unknown')); }
-  steps.push('✓ subscribed (' + (sub.endpoint ? new URL(sub.endpoint).host : 'ok') + ')');
-  if (!_notifsNative) { _notifsNative = true; localStorage.setItem('amux_notifs', '1'); _notifUpdateNativeBtn(); }
-
-  // 5. Trigger a REAL server push and report the push service's response
-  try {
-    const r = await fetch(API + '/api/push/test', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' });
-    const j = await r.json();
-    const res = (j.results || [])[0] || {};
-    if (j.ok) {
-      steps.push('✓ push service accepted (HTTP ' + res.status + ')');
-      return report('A notification was sent. It should appear shortly — even with amux closed. '
-        + 'If you see nothing, check Settings → Notifications → amux (Allow, Lock Screen, Banners).');
-    }
-    return report('✗ Push service rejected it: HTTP ' + (res.status || '?')
-      + (res.detail ? '\n' + res.detail : '') + '\n(VAPID subject can be set via AMUX_VAPID_SUBJECT.)');
-  } catch (e) {
-    return report('✗ Server push request failed: ' + e.message);
-  }
 }
 
 async function _notifToggleNative() {
   if (_notifsNative) {
     _notifsNative = false;
     localStorage.setItem('amux_notifs', '0');
-    _pushUnsubscribe();   // stop background pushes too
     showToast('Native notifications disabled');
   } else {
     try {
@@ -19018,9 +19046,7 @@ async function _notifToggleNative() {
     } catch(e) {}
     _notifsNative = true;
     localStorage.setItem('amux_notifs', '1');
-    // Register for background push so alerts reach this device with the app closed.
-    const sub = await _pushSubscribe();
-    showToast(sub.ok ? 'Notifications on (incl. background push)' : 'Native notifications enabled');
+    showToast('Native notifications enabled');
   }
   _notifUpdateNativeBtn();
 }
@@ -19028,23 +19054,6 @@ async function _notifToggleNative() {
 function _notifUpdateNativeBtn() {
   const btn = document.getElementById('notif-native-btn');
   if (btn) btn.style.opacity = _notifsNative ? '1' : '0.4';
-}
-
-function _notifToggleBanners() {
-  _notifBanners = !_notifBanners;
-  localStorage.setItem('amux_notif_banners', _notifBanners ? '1' : '0');
-  if (!_notifBanners) {
-    // Clear any banners already on screen so the toggle takes effect immediately
-    const c = document.getElementById('notif-banners');
-    if (c) c.innerHTML = '';
-  }
-  _notifUpdateBannerBtn();
-  showToast(_notifBanners ? 'In-app banners on' : 'In-app banners off');
-}
-
-function _notifUpdateBannerBtn() {
-  const btn = document.getElementById('notif-banner-btn');
-  if (btn) btn.style.opacity = _notifBanners ? '1' : '0.4';
 }
 
 function toggleNotifPanel() {
@@ -19055,7 +19064,6 @@ function toggleNotifPanel() {
   if (_notifPanelOpen) {
     _notifRenderPanel();
     _notifUpdateNativeBtn();
-    _notifUpdateBannerBtn();
     _notifItems.forEach(n => n.read = true);
     _notifSave();
     setTimeout(() => _notifUpdateBadge(), 300);
@@ -19119,7 +19127,6 @@ const _ALERT_LABELS = {
   thinking_reset: (a) => ({ icon: '\U0001f504', title: 'Thinking reset', body: a.session }),
   auto_continue:  (a) => ({ icon: '▶️', title: 'Agent continued', body: a.session }),
   steering_delivered: (a) => ({ icon: '\U0001f4e8', title: 'Steering delivered', body: a.session }),
-  task_pickup:      (a) => ({ icon: '\U0001f4cb', title: 'Task assigned', body: a.session + (a.message ? ' — ' + a.message : '') }),
 };
 
 function _fireAmuxAlert(a) {
@@ -19171,7 +19178,7 @@ async function fetchSessions() {
       try { localStorage.setItem('amux_sessions_cache', j); }
       catch (e2) { try { localStorage.removeItem('amux_sessions_cache'); } catch (e3) {} }
       render();
-      if (!window._peekEmbed) _fetchGitBranches(sessions);
+      _fetchGitBranches(sessions);
     }
   } catch(e) {
     console.error('fetch sessions:', e);
@@ -19182,6 +19189,29 @@ async function fetchSessions() {
   }
 }
 
+// ── Display-status hysteresis ("sticky working") ─────────────────────────
+// The raw server status flips active↔idle the instant a spinner frame is
+// missed between tool calls, so sessions whack-a-mole between the Working and
+// Idle groups. We hold a session in "working" for a grace window after it was
+// last seen active, so brief gaps (thinking, between tool calls) don't bounce
+// it. The raw s.status is left untouched — the server-side watchdog,
+// auto-continue, and idle-event logic still read the real status.
+const _stickyActiveAt = {};            // session name -> last time seen active (ms)
+const STICKY_ACTIVE_MS = 60000;        // keep showing "working" up to 60s past last spinner
+function displayStatus(s) {
+  if (!s || !s.running) return 'stopped';
+  if (s.status === 'active') { _stickyActiveAt[s.name] = Date.now(); return 'active'; }
+  if (s.status === 'waiting') { delete _stickyActiveAt[s.name]; return 'waiting'; }  // needs-input is immediate, never sticky over it
+  const t = _stickyActiveAt[s.name];              // s.status is idle / '' here
+  if (t && (Date.now() - t) < STICKY_ACTIVE_MS) return 'active';
+  if (t) delete _stickyActiveAt[s.name];          // window expired — let it settle to idle
+  return 'idle';
+}
+// True while at least one session is being held in sticky-working past its raw idle.
+function _hasStickyPending() {
+  return sessions.some(s => s.running && s.status !== 'active' && _stickyActiveAt[s.name]);
+}
+
 // ═══════ RENDERING ═══════
 function updatePeekStatus() {
   const el = document.getElementById('peek-session-status');
@@ -19189,9 +19219,10 @@ function updatePeekStatus() {
   const s = sessions.find(s => s.name === peekSession);
   if (!s) { el.innerHTML = ''; return; }
   let badge = '';
-  if (s.status === 'active')  badge = '<span class="status-badge active">working</span>';
-  else if (s.status === 'waiting') badge = '<span class="status-badge waiting">needs input</span>';
-  else if (s.status === 'idle')    badge = '<span class="status-badge idle">idle</span>';
+  const ds = displayStatus(s);
+  if (ds === 'active')  badge = '<span class="status-badge active">working</span>';
+  else if (ds === 'waiting') badge = '<span class="status-badge waiting">needs input</span>';
+  else if (ds === 'idle')    badge = '<span class="status-badge idle">idle</span>';
   else if (!s.running)             badge = '<span class="status-badge" style="background:rgba(255,255,255,0.06);color:var(--dim);border:1px solid var(--border);">stopped</span>';
   if (s.rate_limited_until) {
     const _lbl = s.rate_limit_weekly ? 'Weekly limit until' : 'Rate-limited until';
@@ -19205,11 +19236,10 @@ function updatePeekStatus() {
       ? 'Type a message (session is working)...'
       : 'Type a message or drop a file...';
   }
-  // Model badge (+ reasoning effort, Claude only)
+  // Model badge
   const mb = document.getElementById('peek-model-badge');
   if (mb) {
-    const _eff = sessionProvider(s) === 'claude' ? flagValue((s && s.flags) || '', '--effort') : '';
-    mb.textContent = sessionConfiguredModel(s) + (_eff ? ' · ' + _eff : '');
+    mb.textContent = sessionConfiguredModel(s);
   }
 }
 
@@ -19272,20 +19302,6 @@ function stripProviderYoloFlags(flags) {
     .trim();
 }
 
-// Restore focus to an element after the card list is rebuilt — but ONLY if it
-// actually lost focus. Card inputs get destroyed by the innerHTML swap and need
-// re-focusing; the search box lives outside #cards and never loses focus, so
-// re-focusing it makes iOS Safari yank the scroll back to it on every poll
-// (the "search results scroll back" bug). Skipping the no-op focus avoids that.
-function _restoreCardFocus(focusedId, savedInputs) {
-  if (!focusedId) return;
-  const inp = document.getElementById(focusedId);
-  if (!inp || document.activeElement === inp) return;
-  inp.focus({ preventScroll: true });
-  const d = savedInputs && savedInputs[focusedId];
-  if (d && inp.tagName === 'TEXTAREA') { inp.selectionStart = d.start; inp.selectionEnd = d.end; }
-}
-
 function render() {
   // Skip render if a menu or edit overlay is open to prevent DOM clobbering
   if (openMenu || editState || document.getElementById('edit-overlay').classList.contains('active')) return;
@@ -19323,7 +19339,7 @@ function render() {
         (!online ? '<br><span style="color:var(--yellow)">You\'re offline — sessions created now will sync when connected.</span>' : '') + '</div>';
     }
     _renderArchivedSection();
-    _restoreCardFocus(focusedId);
+    if (focusedId) { const f = document.getElementById(focusedId); if (f) f.focus({ preventScroll: true }); }
     return;
   }
 
@@ -19358,7 +19374,7 @@ function render() {
   if ((q || activeTag) && !filtered.length) {
     el.innerHTML = '<div class="empty">No matching sessions.</div>';
     _renderArchivedSection();
-    _restoreCardFocus(focusedId);
+    if (focusedId) { const f = document.getElementById(focusedId); if (f) f.focus({ preventScroll: true }); }
     return;
   }
   // Save input values + cursor positions before re-rendering
@@ -19373,27 +19389,24 @@ function render() {
     const isYolo = flags.includes('--dangerously-skip-permissions') || flags.includes('--dangerously-bypass-approvals-and-sandbox') || flags.includes('--yolo') || !!s.auto_continue;
     const provider = sessionProvider(s);
     const model = sessionConfiguredModel(s);
-    const effort = provider === 'claude' ? flagValue(flags, '--effort') : '';
     const pLabel = providerLabel(provider);
-    const schedCount = schedules.filter(sc => sc.session === s.name && sc.enabled).length;
     return `
-    <div class="card ${isExp ? 'expanded' : ''}" data-session="${esc(s.name)}" onclick="event.stopPropagation();toggle('${s.name}')">
+    <div class="card ${isExp ? 'expanded' : ''}" data-session="${esc(s.name)}" onclick="event.stopPropagation();toggle('${s.name}')" ${s.color ? `style="border-color:${s.color}"` : ''}>
       <div class="card-header" onclick="headerTap('${s.name}', event)" onmousedown="tileMouseDown(event,'${s.name}')">
         <div class="card-header-top">
           <div class="card-drag-handle" title="Drag to reorder"><svg width="10" height="16" viewBox="0 0 10 16" fill="currentColor"><circle cx="3" cy="3" r="1.3"/><circle cx="7" cy="3" r="1.3"/><circle cx="3" cy="8" r="1.3"/><circle cx="7" cy="8" r="1.3"/><circle cx="3" cy="13" r="1.3"/><circle cx="7" cy="13" r="1.3"/></svg></div>
-          <div class="card-name">${s.pinned ? '<span class="pin-icon">&#x1F4CC;</span> ' : ''}${esc(s.name)}</div>
+          <div class="card-name">${s.pinned ? '<span class="pin-icon">&#x1F4CC;</span> ' : ''}${s.icon ? '<span class="session-icon">' + s.icon + '</span> ' : ''}${esc(s.name)}</div>
           <button class="card-menu-btn" onclick="event.stopPropagation();toggleMenu('${s.name}')" title="Options">&#x22EF;</button>
           <div class="card-menu" id="menu-${s.name}">
-          <div class="card-menu-item" onclick="event.stopPropagation();editField('${s.name}','task','${esc(s.task_name||"")}')"><span class="mi">&#x270F;</span> Task label${s.task_name ? '' : ' (none)'}</div>
-          <div class="card-menu-sep"></div>
           <div class="card-menu-item" onclick="event.stopPropagation();closeAllMenus();openPeek('${s.name}')"><span class="mi">&#x1F4BB;</span> Peek terminal</div>
           ${s.dir ? `<div class="card-menu-item" onclick="event.stopPropagation();closeAllMenus();openExplore('${s.dir.replace(/'/g,"\\'")}','${s.name.replace(/'/g,"\\'")}')"><span class="mi">&#x1F4C1;</span> Browse files</div>` : ''}
           <div class="card-menu-item" onclick="event.stopPropagation();closeAllMenus();showSessionInfo('${s.name}')"><span class="mi">&#x2139;</span> Info</div>
           <div class="card-menu-item" onclick="event.stopPropagation();togglePin('${s.name}')"><span class="mi">${s.pinned?'&#x1F4CC;':'&#x1F4CC;'}</span> ${s.pinned ? 'Unpin' : 'Pin to top'}</div>
+          <div class="card-menu-item" onclick="event.stopPropagation();openIconPicker('${s.name}')"><span class="mi">&#x1F3A8;</span> Set icon</div>
+          <div class="card-menu-item" onclick="event.stopPropagation();openColorPicker('${s.name}')"><span class="mi" style="${s.color?'color:'+s.color:''}">&#x25A0;</span> Set color</div>
           <div class="card-menu-item" onclick="event.stopPropagation();editField('${s.name}','name','${esc(s.name)}')"><span class="mi">&#x270E;</span> Rename</div>
           <div class="card-menu-item" onclick="event.stopPropagation();editField('${s.name}','provider','${esc(provider)}')"><span class="mi">&#x21C4;</span> Provider: ${pLabel}</div>
           <div class="card-menu-item" onclick="event.stopPropagation();editField('${s.name}','model','${esc(model||"")}','${esc(provider)}')"><span class="mi">&#x2699;</span> Model${model ? ': '+esc(model) : ''}</div>
-          ${provider === 'claude' ? `<div class="card-menu-item" onclick="event.stopPropagation();editField('${s.name}','effort','${esc(effort||"")}','${esc(provider)}')"><span class="mi">&#x1F9E0;</span> Effort${effort ? ': '+esc(effort) : ' (default)'}</div>` : ''}
           <div class="card-menu-item" onclick="event.stopPropagation();toggleYolo('${s.name}')"><span class="mi">${isYolo?'&#x2611;':'&#x2610;'}</span> YOLO mode</div>
           <div class="card-menu-item" onclick="event.stopPropagation();editField('${s.name}','desc','${esc(s.desc||"")}')"><span class="mi">&#x1F4DD;</span> Description</div>
           <div class="card-menu-item" onclick="event.stopPropagation();editField('${s.name}','tags','${esc(s.tags.join(", "))}')"><span class="mi">&#x1F3F7;</span> Tags</div>
@@ -19427,8 +19440,7 @@ function render() {
       ${s.creator ? `<div class="card-dir" style="font-size:0.72rem;">${esc(s.creator)}</div>` : ''}
       ${s.dir ? _renderBranchBadge(s.name, s.branch) : ''}
       ${isExp && s.desc ? `<div class="card-desc">${esc(s.desc)}</div>` : ''}
-      ${!isExp && s.task_name ? `<div class="card-preview" style="font-weight:600;color:var(--text);">${esc(s.task_name)}</div>` : ''}
-      ${!isExp && schedCount ? `<div class="card-sched-count" onclick="event.stopPropagation();switchView('scheduler')">&#x23F2; ${schedCount} scheduler${schedCount>1?'s':''}</div>` : ''}
+      ${!isExp && s.task_name ? `<div class="card-preview">${esc(s.task_name)}</div>` : ''}
       ${isExp && s.preview ? `<div class="card-preview">${esc(s.preview)}</div>` : ''}
       ${logSearchMode && _logMatches[s.name] ? (() => {
         const hits = _logMatches[s.name];
@@ -19438,17 +19450,16 @@ function render() {
         ).join('') + (hits.length > 2 ? `<div class="card-log-hit" style="color:var(--dim);font-style:italic;" onclick="event.stopPropagation();openPeek('${s.name}',{query:'${sq}'})">+${hits.length - 2} more matches</div>` : '');
       })() : ''}
       ${(isYolo || model || s.tags.length || provider) ? `<div class="badges">
-        ${provider && provider !== 'claude' ? `<span class="badge provider ${provider}" onclick="event.stopPropagation();editField('${s.name}','provider','${esc(provider)}')" title="Change provider">${pLabel}</span>` : ''}
+        <span class="badge provider ${provider}" onclick="event.stopPropagation();editField('${s.name}','provider','${esc(provider)}')" title="Change provider">${pLabel}</span>
         ${isYolo ? '<span class="badge yolo">YOLO</span>' : ''}
         ${model ? `<span class="badge model" onclick="event.stopPropagation();editField('${s.name}','model','${esc(model)}','${esc(provider)}')" title="Change model">${esc(model)}</span>` : ''}
-        ${effort ? `<span class="badge effort" onclick="event.stopPropagation();editField('${s.name}','model','${esc(model)}','${esc(provider)}')" title="Reasoning effort — click to change">${esc(effort)}</span>` : ''}
         ${s.tags.map(t => `<span class="tag" data-tag="${esc(t)}" onclick="event.stopPropagation();toggleTagFilter('${esc(t)}')">${esc(t)}</span>`).join('')}
       </div>` : ''}
       ${!s.running ? `<div style="padding:6px 0 2px;" onclick="event.stopPropagation()">
         <button class="btn primary" style="width:100%;" onclick="doStart('${s.name}')">&#x25B6; Start</button>
       </div>` : ''}
       <div class="panel" onclick="event.stopPropagation()">
-        ${isExp && s.task_name ? `<div class="card-task-name" onclick="event.stopPropagation();editField('${s.name}','task','${esc(s.task_name)}')" title="Click to edit task label" style="cursor:pointer;"><span class="tn-label">Task:</span>${esc(s.task_name)}</div>` : ''}
+        ${isExp && s.task_name ? `<div class="card-task-name"><span class="tn-label">Task:</span>${esc(s.task_name)}</div>` : ''}
         ${isExp && s.running ? `<div class="card-timing">
           ${s.session_created ? `<div class="timing-item"><span class="timing-label">Session</span><span class="timing-value">${fmtDuration(Math.floor(Date.now()/1000) - s.session_created)}</span></div>` : ''}
           ${s.task_time ? `<div class="timing-item"><span class="timing-label">Task</span><span class="timing-value accent">${esc(s.task_time)}</span></div>` : ''}
@@ -19465,22 +19476,10 @@ function render() {
             oninput="autoGrow(this);cardSlashAcUpdate('${s.name}');cmdHistoryReset()"
             onkeydown="cardSlashAcKeydown('${s.name}',event)"
             onbeforeinput="cardSlashAcBeforeInput('${s.name}',event)"></textarea>
-          <button class="btn primary" onpointerdown="event.preventDefault()" onpointerup="_btnFire(event, () => sendFromInput('${s.name}'))" ontouchstart="_btnTouchStart(event)" ontouchend="_btnTouchEnd(event, () => sendFromInput('${s.name}'))" onclick="_btnFire(event, () => sendFromInput('${s.name}'))">Send</button>
+          <button class="btn primary" onpointerdown="event.preventDefault()" onclick="sendFromInput('${s.name}')">Send</button>
         </div>` : ''}
       </div>
     </div>`;
-  }
-
-  // Freeze mode: flat list locked to captured order — bypasses status grouping and activity re-sort
-  if (_frozen && cardOrder.length) {
-    const frozenList = _sortByCardOrder(filtered);
-    el.innerHTML = draftCards + frozenList.map(_renderSessionCard).join('');
-    for (const [id, d] of Object.entries(savedInputs)) { const inp = document.getElementById(id); if (inp) { inp.value = d.value; autoGrow(inp); } }
-    _restoreCardFocus(focusedId, savedInputs);
-    _renderArchivedSection();
-    requestAnimationFrame(initSortable);
-    requestAnimationFrame(() => { document.querySelectorAll('.chips[id^="card-chips-"]').forEach(el => { const name = el.id.replace('card-chips-', ''); if (name) renderChips(el, name, false); }); });
-    return;
   }
 
   // Grid mode: flat list sorted by activity or alpha, no grouping (desktop only)
@@ -19493,7 +19492,7 @@ function render() {
     }
     el.innerHTML = draftCards + sortedFiltered.map(_renderSessionCard).join('');
     for (const [id, d] of Object.entries(savedInputs)) { const inp = document.getElementById(id); if (inp) { inp.value = d.value; autoGrow(inp); } }
-    _restoreCardFocus(focusedId, savedInputs);
+    if (focusedId) { const inp = document.getElementById(focusedId); if (inp) { inp.focus({ preventScroll: true }); const d = savedInputs[focusedId]; if (d && inp.tagName === 'TEXTAREA') { inp.selectionStart = d.start; inp.selectionEnd = d.end; } } }
     _renderArchivedSection();
     requestAnimationFrame(initSortable);
     requestAnimationFrame(() => {
@@ -19515,10 +19514,11 @@ function render() {
     ];
     const buckets = { active: [], waiting: [], idle: [], stopped: [] };
     filtered.forEach(s => {
-      if (!s.running)              buckets.stopped.push(s);
-      else if (s.status === 'active')  buckets.active.push(s);
-      else if (s.status === 'waiting') buckets.waiting.push(s);
-      else                             buckets.idle.push(s);
+      const ds = displayStatus(s);   // sticky-working: avoids active↔idle group whack-a-mole
+      if (!s.running)            buckets.stopped.push(s);
+      else if (ds === 'active')  buckets.active.push(s);
+      else if (ds === 'waiting') buckets.waiting.push(s);
+      else                       buckets.idle.push(s);
     });
     // Sort within each bucket: alpha (pinned → name) or pinned → last activity
     for (const key of Object.keys(buckets)) {
@@ -19573,7 +19573,14 @@ function render() {
     const inp = document.getElementById(id);
     if (inp) { inp.value = d.value; autoGrow(inp); }
   }
-  _restoreCardFocus(focusedId, savedInputs);
+  if (focusedId) {
+    const inp = document.getElementById(focusedId);
+    if (inp) {
+      inp.focus({ preventScroll: true });
+      const d = savedInputs[focusedId];
+      if (d && inp.tagName === 'TEXTAREA') { inp.selectionStart = d.start; inp.selectionEnd = d.end; }
+    }
+  }
 
   _renderArchivedSection();
 
@@ -19591,11 +19598,6 @@ function esc(s) {
   const d = document.createElement('div');
   d.textContent = s;
   return d.innerHTML;
-}
-function _cssRect(el) {
-  const r = el.getBoundingClientRect();
-  const z = parseFloat(getComputedStyle(document.documentElement).zoom) || 1;
-  return { top: r.top / z, right: r.right / z, bottom: r.bottom / z, left: r.left / z, width: r.width / z, height: r.height / z };
 }
 
 function timeAgo(epoch) {
@@ -19710,8 +19712,8 @@ function showBranchPopover(name, e) {
   }
   // Append to body to escape card's overflow:hidden
   document.body.appendChild(pop);
-  const rect = _cssRect(e.target);
-  const vw = document.documentElement.clientWidth || window.innerWidth;
+  const rect = e.target.getBoundingClientRect();
+  const vw = window.innerWidth;
   let left = rect.left;
   if (left + 240 > vw - 8) left = vw - 248;
   pop.style.top = (rect.bottom + 6) + 'px';
@@ -19753,21 +19755,9 @@ function toggle(name) {
   }
 }
 
-function expandActive() {
-  sessions.forEach(s => { if (s.running && s.status !== 'idle') expanded.add(s.name); });
-  render();
-  sessions.filter(s => s.running && s.status !== 'idle').forEach(s => fetchStats(s.name));
-  _updateResetBtn();
-}
 function collapseAll() {
   expanded.clear();
   render();
-  _updateResetBtn();
-}
-// Single toggle: expand active sessions, or collapse all if anything is expanded
-function toggleExpand() {
-  if (expanded.size > 0) collapseAll();
-  else expandActive();
 }
 // Double-tap header to peek
 let _lastHeaderTap = { name: null, time: 0 };
@@ -19805,56 +19795,39 @@ function toggleMenu(name) {
   closeAllMenus();
   const el = document.getElementById('menu-' + name);
   if (!el) return;
-  // The trigger button is the previousElementSibling of the menu in the card DOM
+  // Position fixed menu relative to the ellipsis button
   const btn = el.previousElementSibling;
-  if (!btn) { el.classList.add('open'); openMenu = name; return; }
-  const r = _cssRect(btn);
-  const vw = document.documentElement.clientWidth || window.innerWidth;
-  const z = parseFloat(getComputedStyle(document.documentElement).zoom) || 1;
-  const vh = window.innerHeight / z;
-  // Portal to body — escapes overflow:hidden on .card (iOS Safari clips fixed children)
-  if (el.parentElement !== document.body) {
-    el._menuOrigParent = el.parentElement;
-    el._menuOrigNext = el.nextSibling;
-    document.body.appendChild(el);
+  if (btn) {
+    const r = btn.getBoundingClientRect();
+    const vw = document.documentElement.clientWidth || window.innerWidth;
+    const vh = window.innerHeight;
+    let left = r.right - 200;
+    if (left < 8) left = 8;
+    if (left + 200 > vw) left = vw - 208;
+    // Check if menu would overflow bottom of viewport — if so, open upward
+    el.style.maxHeight = '';
+    const spaceBelow = vh - r.bottom - 8;
+    const spaceAbove = r.top - 8;
+    if (spaceBelow < 260 && spaceAbove > spaceBelow) {
+      // Open upward
+      el.style.bottom = (vh - r.top + 4) + 'px';
+      el.style.top = 'auto';
+      el.style.maxHeight = Math.min(500, spaceAbove) + 'px';
+    } else {
+      el.style.top = (r.bottom + 4) + 'px';
+      el.style.bottom = 'auto';
+      el.style.maxHeight = Math.min(500, spaceBelow) + 'px';
+    }
+    el.style.left = left + 'px';
+    el.style.right = 'auto';
   }
-  // Make the menu displayable but invisible so we can read its real rendered width.
-  // offsetWidth is 0 while display:none, which made wide menus clip past the right edge.
-  el.style.visibility = 'hidden';
   el.classList.add('open');
-  const menuW = Math.max(el.offsetWidth || 200, 200);
-  let left = r.right - menuW;
-  if (left < 8) left = 8;
-  if (left + menuW > vw - 8) left = vw - menuW - 8;
-  el.style.maxHeight = '';
-  const spaceBelow = vh - r.bottom - 8;
-  const spaceAbove = r.top - 8;
-  if (spaceBelow < 260 && spaceAbove > spaceBelow) {
-    el.style.bottom = (vh - r.top + 4) + 'px';
-    el.style.top = 'auto';
-    el.style.maxHeight = Math.min(500, spaceAbove) + 'px';
-  } else {
-    el.style.top = (r.bottom + 4) + 'px';
-    el.style.bottom = 'auto';
-    el.style.maxHeight = Math.min(500, spaceBelow) + 'px';
-  }
-  el.style.left = left + 'px';
-  el.style.right = 'auto';
-  el.style.visibility = '';
   openMenu = name;
 }
 function closeAllMenus() {
   if (openMenu) {
     const el = document.getElementById('menu-' + openMenu);
-    if (el) {
-      el.classList.remove('open');
-      // Restore from body portal back to original card location
-      if (el._menuOrigParent) {
-        try { el._menuOrigParent.insertBefore(el, el._menuOrigNext || null); } catch(e) {}
-        el._menuOrigParent = null;
-        el._menuOrigNext = null;
-      }
-    }
+    if (el) el.classList.remove('open');
   }
   openMenu = null;
   const pm = document.getElementById('peek-menu');
@@ -19886,7 +19859,6 @@ const ALL_TABS = [
   { id: 'terminal',      label: 'Terminal' },
   { id: 'journal',       label: 'Journal' },
   { id: 'habits',        label: 'Habits' },
-  { id: 'skills',        label: 'Skills' },
 ];
 
 let hiddenTabs = (function() {
@@ -19895,7 +19867,7 @@ let hiddenTabs = (function() {
     if (s !== null) return new Set(JSON.parse(s));
   } catch(e) {}
   // Default visible tabs: sessions, files, scheduler, board, workspace, notes, browser
-  return new Set(['logs','metrics','crm','torrents','terminal','skills']);
+  return new Set(['logs','metrics','crm','torrents','terminal']);
 })();
 
 let tabOrder = (function() {
@@ -20057,112 +20029,6 @@ async function shareLayoutPreset(name) {
   showToast('Layout link copied to clipboard');
 }
 
-// ── Peek-embed mode ──
-// When this page is loaded inside a Workspace tile (?peekEmbed=<session>), strip
-// the app chrome and auto-open the full peek view for that session. Each tile is
-// a real, isolated peek instance (its own iframe/JS context) — full parity with
-// no singleton-state collisions.
-let _peekEmbedOpened = false;
-(function() {
-  const name = new URLSearchParams(location.search).get('peekEmbed');
-  if (!name) return;
-  window._peekEmbed = name;
-  const apply = () => document.body && document.body.classList.add('peek-embed');
-  if (document.body) apply(); else document.addEventListener('DOMContentLoaded', apply);
-})();
-function _maybeAutoOpenEmbedPeek() {
-  if (!window._peekEmbed || _peekEmbedOpened) return;
-  if (!sessions || !sessions.some(s => s.name === window._peekEmbed)) return;
-  _peekEmbedOpened = true;
-  openPeek(window._peekEmbed);
-  const ov = document.getElementById('peek-overlay');
-  if (ov) ov.classList.remove('peek-focus');  // tiles always show the full tab strip
-  // fit the terminal once content lands, then keep it fitted
-  setTimeout(_embedFitZoom, 700);
-  setTimeout(_embedFitZoom, 2500);
-  setInterval(_embedFitZoom, 5000);
-  window.addEventListener('resize', () => setTimeout(_embedFitZoom, 150));
-}
-// Workspace tiles: zoom ONLY the terminal body so the session's full capture
-// width (canonical ~220 cols) fits the tile without wrapping — a scaled-down
-// but correctly-shaped screen instead of mangled wrapped lines. Controls stay
-// full-size. No-ops outside embed mode.
-function _embedFitZoom() {
-  if (!window._peekEmbed) return;
-  const body = document.getElementById('peek-body');
-  if (!body || !body.offsetParent) return;
-  // widest source line (textContent keeps source newlines, unaffected by wrap)
-  let cols = 0;
-  for (const l of (body.textContent || '').split('\n')) if (l.length > cols) cols = l.length;
-  cols = cols > 10 ? Math.min(240, Math.max(80, cols)) : 220;
-  body.style.zoom = '1';
-  const probe = document.createElement('span');
-  probe.style.cssText = 'position:absolute;visibility:hidden;white-space:pre;';
-  probe.textContent = '0'.repeat(50);
-  body.appendChild(probe);
-  const chW = probe.getBoundingClientRect().width / 50;
-  probe.remove();
-  const avail = body.clientWidth - 20;
-  let z = Math.max(0.35, Math.min(1, avail / (cols * chW)));
-  z = Math.round(z * 100) / 100;
-  if (Math.abs((body._embedZ || 1) - z) < 0.03) z = body._embedZ || 1;
-  body._embedZ = z;
-  body.style.zoom = z;
-}
-// Fallback retry until session data arrives (SSE/fetch hooks call this too).
-(function _embedPeekRetry() {
-  if (!window._peekEmbed) return;
-  _maybeAutoOpenEmbedPeek();
-  if (!_peekEmbedOpened) setTimeout(_embedPeekRetry, 300);
-})();
-
-// ── General view-embed mode (?embed=<view>) ──
-// Loads the app inside a dock/grid panel showing a single view (board, files,
-// terminal, notes, logs, …) — or peek:<session> as a shorthand for a peek tile.
-// Each panel is an isolated iframe, so singleton views never collide.
-// sessions→session-view etc.; mirror switchView's id/name mapping.
-const _EMBED_VIEW_EL = {
-  sessions:'session-view', board:'board-view', calendar:'calendar-view',
-  scheduler:'scheduler-view', files:'files-view', logs:'logs-view',
-  notes:'notes-view', crm:'crm-view', map:'map-view', metrics:'metrics-view',
-  torrents:'torrents-view', terminal:'terminal-view', browser:'browser-view',
-  graph:'graph-view', journal:'journal-view', habits:'habits-view', skills:'skills-view'
-};
-let _embedViewApplied = false;
-(function() {
-  const raw = new URLSearchParams(location.search).get('embed');
-  if (!raw) return;
-  // peek:<session> shorthand routes through the peek-embed path
-  if (raw.indexOf('peek:') === 0) {
-    const nm = raw.slice(5);
-    if (nm) {
-      window._peekEmbed = nm;
-      const ap = () => document.body && document.body.classList.add('peek-embed');
-      if (document.body) ap(); else document.addEventListener('DOMContentLoaded', ap);
-      const kick = () => { _maybeAutoOpenEmbedPeek(); if (!_peekEmbedOpened) setTimeout(kick, 300); };
-      kick();
-    }
-    return;
-  }
-  window._embedView = _EMBED_VIEW_EL[raw] ? raw : '';
-  if (!window._embedView) return;
-  const apply = () => document.body && document.body.classList.add('embed');
-  if (document.body) apply(); else document.addEventListener('DOMContentLoaded', apply);
-})();
-function _applyEmbedView() {
-  if (!window._embedView || _embedViewApplied) return;
-  _embedViewApplied = true;
-  try { switchView(window._embedView); } catch(e) {}
-  const id = _EMBED_VIEW_EL[window._embedView];
-  const el = id && document.getElementById(id);
-  if (el) el.classList.add('embed-filled');
-}
-(function _embedViewRetry() {
-  if (!window._embedView) return;
-  if (document.getElementById(_EMBED_VIEW_EL[window._embedView] || '')) _applyEmbedView();
-  if (!_embedViewApplied) setTimeout(_embedViewRetry, 200);
-})();
-
 // Apply layout from URL parameter on load
 (function() {
   const params = new URLSearchParams(location.search);
@@ -20197,17 +20063,9 @@ function _renderArchivedSection() {
     s.name.toLowerCase().includes(q) ||
     (s.dir || '').toLowerCase().includes(q) ||
     (s.desc || '').toLowerCase().includes(q) ||
-    (s.task_name || '').toLowerCase().includes(q) ||
-    (s.preview || '').toLowerCase().includes(q) ||
-    (s.branch || '').toLowerCase().includes(q) ||
-    (s.active_model || '').toLowerCase().includes(q) ||
-    (s.provider || '').toLowerCase().includes(q) ||
-    (s.creator || '').toLowerCase().includes(q) ||
     (s.tags || []).some(t => t.toLowerCase().includes(q))
   ) : allArchived;
-  // Only expand when the user has explicitly toggled it open — never auto-expand
-  // on search. The footer still shows "N of M archived" so matches are discoverable.
-  const showExpanded = archivedExpanded;
+  const showExpanded = archivedExpanded || (q && archived.length > 0);
   const label = q && archived.length !== allArchived.length
     ? `${archived.length} of ${allArchived.length} archived`
     : `${allArchived.length} archived`;
@@ -20217,36 +20075,15 @@ function _renderArchivedSection() {
     html += '<div class="archived-body">';
     (q ? archived : allArchived).forEach(s => {
       const ago = s.last_activity ? timeAgo(s.last_activity) : '';
-      const created = s.session_created ? new Date(s.session_created * 1000).toLocaleDateString([], {month:'short', day:'numeric', year:'2-digit'}) : '';
-      const dir = s.dir ? s.dir.replace(/^\/Users\/[^/]+/, '~') : '';
-      const provider = s.provider && s.provider !== 'claude' ? s.provider : '';
-      const model = s.active_model || '';
-      const tokens = !s.tokens ? '' :
-        s.tokens >= 1e6 ? (s.tokens/1e6).toFixed(1) + 'M' :
-        s.tokens >= 1000 ? (s.tokens/1000).toFixed(s.tokens >= 10000 ? 0 : 1) + 'k' : String(s.tokens);
-      const body = esc(s.task_name || s.preview || s.desc || '');
-      const meta = [];
-      if (dir) meta.push(`<code title="${esc(s.dir)}">${esc(dir)}</code>`);
-      if (s.branch) meta.push(`&#x2387; ${esc(s.branch)}`);
-      if (s.worktree) meta.push(`worktree`);
-      if (ago) meta.push(`active ${ago}`);
-      if (created) meta.push(`created ${created}`);
-      if (tokens) meta.push(`${tokens} tok`);
-      if (s.creator) meta.push(`by ${esc(s.creator)}`);
-      (s.tags || []).forEach(t => meta.push(`<span class="archived-card-tag">#${esc(t)}</span>`));
+      const preview = esc(s.preview || s.desc || '');
       html += `<div class="archived-card" data-session="${esc(s.name)}">
-        <div class="archived-card-top">
-          <span class="archived-card-name" onclick="openPeek('${esc(s.name)}')">${esc(s.name)}</span>
-          ${model ? `<span class="archived-card-chip model">${esc(model)}</span>` : ''}
-          ${provider ? `<span class="archived-card-chip provider-${esc(provider)}">${esc(provider)}</span>` : ''}
-          <span class="archived-card-spacer"></span>
-          <div class="archived-card-actions">
-            <button class="archived-wake-btn" onclick="wakeSession('${esc(s.name)}')">Wake</button>
-            <button class="archived-del-btn" onclick="deleteSession('${esc(s.name)}')">&#x2715;</button>
-          </div>
+        <div class="archived-card-name">${esc(s.name)}</div>
+        ${ago ? `<div class="archived-card-meta">${ago}</div>` : ''}
+        ${preview ? `<div class="archived-card-preview">${preview}</div>` : ''}
+        <div class="archived-card-actions">
+          <button class="archived-wake-btn" onclick="wakeSession('${esc(s.name)}')">Wake</button>
+          <button class="archived-del-btn" onclick="deleteSession('${esc(s.name)}')">&#x2715;</button>
         </div>
-        ${meta.length ? `<div class="archived-card-meta">${meta.join('<span style="opacity:0.4;">&middot;</span>')}</div>` : ''}
-        ${body ? `<div class="archived-card-preview">${body}</div>` : ''}
       </div>`;
     });
     html += '</div>';
@@ -20281,7 +20118,7 @@ function toggleActiveDropdown() {
   // Position below the button
   const btn = document.getElementById('active-btn');
   if (btn) {
-    const rect = _cssRect(btn);
+    const rect = btn.getBoundingClientRect();
     dd.style.top = (rect.bottom + 6) + 'px';
   }
   dd.classList.add('open');
@@ -20358,14 +20195,12 @@ if (window._AMUX_DEFAULT_MODEL) {
 let editState = null;  // {session, field, current}
 function editField(session, field, current, provider) {
   closeAllMenus();
-  const titles = { name: 'Rename session', provider: 'Change provider', model: 'Change model', effort: 'Reasoning effort', dir: 'Change directory', desc: 'Set description', tags: 'Edit tags', task: 'Edit task label', duplicate: 'Duplicate session', clone: 'Clone & continue' };
-  const placeholders = { name: 'Session name', model: 'e.g. opus, sonnet, haiku', dir: window._cloudEmail ? '/root' : '/path/to/project', desc: 'Brief description...', tags: 'e.g. work, frontend, urgent', task: 'e.g. Fix login bug (blank to auto-generate)', duplicate: 'New session name', clone: 'New session name' };
+  const titles = { name: 'Rename session', provider: 'Change provider', model: 'Change model', dir: 'Change directory', desc: 'Set description', tags: 'Edit tags', duplicate: 'Duplicate session', clone: 'Clone & continue' };
+  const placeholders = { name: 'Session name', model: 'e.g. opus, sonnet, haiku', dir: window._cloudEmail ? '/root' : '/path/to/project', desc: 'Brief description...', tags: 'e.g. work, frontend, urgent', duplicate: 'New session name', clone: 'New session name' };
   document.getElementById('edit-title').textContent = titles[field] || 'Edit';
   const inp = document.getElementById('edit-input');
   const sel = document.getElementById('edit-select');
   const inpWrap = document.getElementById('edit-input-wrap');
-  const _effW = document.getElementById('edit-effort-wrap');
-  if (_effW) _effW.style.display = 'none';  // only the Claude model branch re-shows it
   if (field === 'provider') {
     const providers = [
       {v:'claude',l:'Claude Code'},
@@ -20408,28 +20243,6 @@ function editField(session, field, current, provider) {
       sel.appendChild(opt);
       sel.value = current;
     }
-    // Reasoning effort — Claude only. Pre-fill from the session's current --effort flag.
-    const effortWrap = document.getElementById('edit-effort-wrap');
-    if (effortWrap) {
-      if (provider === 'claude' || !provider) {
-        const s = sessions.find(x => x.name === session);
-        const effortSel = document.getElementById('edit-effort-select');
-        if (effortSel) effortSel.value = s ? flagValue(s.flags || '', '--effort') : '';
-        effortWrap.style.display = '';
-      } else {
-        effortWrap.style.display = 'none';
-      }
-    }
-  } else if (field === 'effort') {
-    const efforts = [
-      {v:'',l:'Default'},{v:'low',l:'low'},{v:'medium',l:'medium'},
-      {v:'high',l:'high'},{v:'xhigh',l:'xhigh'},{v:'max',l:'max'}
-    ];
-    sel.innerHTML = '';
-    efforts.forEach(e => { const o = document.createElement('option'); o.value = e.v; o.textContent = e.l; sel.appendChild(o); });
-    inpWrap.style.display = 'none';
-    sel.style.display = 'block';
-    sel.value = current || '';
   } else {
     inpWrap.style.display = '';
     sel.style.display = 'none';
@@ -20438,38 +20251,23 @@ function editField(session, field, current, provider) {
   }
   document.getElementById('edit-overlay').classList.add('active');
   editState = { session, field };
-  if (field !== 'model' && field !== 'provider' && field !== 'effort') setTimeout(() => { inp.focus({ preventScroll: true }); inp.select(); }, 100);
+  if (field !== 'model' && field !== 'provider') setTimeout(() => { inp.focus({ preventScroll: true }); inp.select(); }, 100);
 }
 function closeEdit() {
   document.getElementById('edit-overlay').classList.remove('active');
   document.getElementById('edit-ac-list').classList.remove('open');
   document.getElementById('edit-input-wrap').style.display = '';
   document.getElementById('edit-select').style.display = 'none';
-  const _effW = document.getElementById('edit-effort-wrap');
-  if (_effW) _effW.style.display = 'none';
   tagAcItems = []; tagAcSelected = -1;
   editState = null;
 }
-// edit-select auto-submits for quick single-select fields (provider), but the
-// model field pairs with the reasoning-effort dial, so it waits for Save.
-function _editSelectChanged() {
-  if (editState && editState.field === 'model') return;
-  submitEdit();
-}
 async function submitEdit() {
   if (!editState) return;
-  const val = (editState.field === 'model' || editState.field === 'provider' || editState.field === 'effort')
+  const val = (editState.field === 'model' || editState.field === 'provider')
     ? document.getElementById('edit-select').value.trim()
     : document.getElementById('edit-input').value.trim();
-  if (!val && editState.field !== 'desc' && editState.field !== 'tags' && editState.field !== 'model' && editState.field !== 'task' && editState.field !== 'effort') return;
+  if (!val && editState.field !== 'desc' && editState.field !== 'tags' && editState.field !== 'model') return;
   const { session, field } = editState;
-  // Capture the reasoning-effort dial before closeEdit() tears the dialog down.
-  let _effortVal = null;
-  if (field === 'model') {
-    const _eff = document.getElementById('edit-effort-select');
-    const _effW = document.getElementById('edit-effort-wrap');
-    if (_eff && _effW && _effW.style.display !== 'none') _effortVal = _eff.value;
-  }
   closeEdit();
   if (field === 'duplicate') {
     await apiCall(API + '/api/sessions/' + session + '/duplicate', {
@@ -20487,21 +20285,14 @@ async function submitEdit() {
       body: JSON.stringify({ rename: val })
     });
   } else if (field === 'model') {
-    const payload = { model: val };
-    if (_effortVal !== null) payload.effort = _effortVal;  // Claude only
     await apiCall(API + '/api/sessions/' + session + '/config', {
       method: 'PATCH', headers: {'Content-Type':'application/json'},
-      body: JSON.stringify(payload)
+      body: JSON.stringify({ model: val })
     });
   } else if (field === 'provider') {
     await apiCall(API + '/api/sessions/' + session + '/config', {
       method: 'PATCH', headers: {'Content-Type':'application/json'},
       body: JSON.stringify({ provider: val })
-    });
-  } else if (field === 'effort') {
-    await apiCall(API + '/api/sessions/' + session + '/config', {
-      method: 'PATCH', headers: {'Content-Type':'application/json'},
-      body: JSON.stringify({ effort: val })
     });
   } else if (field === 'dir') {
     await apiCall(API + '/api/sessions/' + session + '/config', {
@@ -20512,11 +20303,6 @@ async function submitEdit() {
     await apiCall(API + '/api/sessions/' + session + '/config', {
       method: 'PATCH', headers: {'Content-Type':'application/json'},
       body: JSON.stringify({ desc: val })
-    });
-  } else if (field === 'task') {
-    await apiCall(API + '/api/sessions/' + session + '/config', {
-      method: 'PATCH', headers: {'Content-Type':'application/json'},
-      body: JSON.stringify({ task_summary: val })
     });
   } else if (field === 'tags') {
     await apiCall(API + '/api/sessions/' + session + '/config', {
@@ -21015,10 +20801,7 @@ function setPeekTab(tab) {
   if (tab !== 'notes' && _peekNotesSaveTimer) {
     clearTimeout(_peekNotesSaveTimer); _peekNotesSaveTimer = null; _peekNotesSave();
   }
-  // Stop transcript auto-refresh when leaving the tab
-  if (tab !== 'transcript' && _transcriptTimer) { clearInterval(_transcriptTimer); _transcriptTimer = null; }
   document.getElementById('peek-tab-terminal').classList.toggle('active', tab === 'terminal');
-  document.getElementById('peek-tab-transcript').classList.toggle('active', tab === 'transcript');
   document.getElementById('peek-tab-steering').classList.toggle('active', tab === 'steering');
   document.getElementById('peek-tab-issues').classList.toggle('active', tab === 'issues');
   document.getElementById('peek-tab-git').classList.toggle('active', tab === 'git');
@@ -21027,12 +20810,6 @@ function setPeekTab(tab) {
   document.getElementById('peek-tab-notes').classList.toggle('active', tab === 'notes');
   document.getElementById('peek-terminal-panel').style.display = tab === 'terminal' ? '' : 'none';
   document.getElementById('peek-split-wrap').style.display = tab === 'terminal' ? '' : 'none';
-  const transcript = document.getElementById('peek-transcript-panel');
-  if (tab === 'transcript') {
-    transcript.classList.add('active');
-    loadPeekTranscript(true);
-    _transcriptTimer = setInterval(() => loadPeekTranscript(false), 3000);
-  } else { transcript.classList.remove('active'); }
   const steering = document.getElementById('peek-steering-panel');
   if (tab === 'steering') { steering.classList.add('active'); _steeringRender(); loadPeekInstructions(); }
   else { steering.classList.remove('active'); }
@@ -21614,7 +21391,6 @@ function peekGitOpenPR() {
 
 // ── Peek Issues (board issues for this session) ──────────────────────────────
 let _peekIssuesView = localStorage.getItem('amux_peek_issues_view') || 'list';
-let _peekIssuesAllSessions = localStorage.getItem('amux_peek_issues_all') === '1';
 let _peekIssuesSortables = [];
 
 function setPeekIssuesView(mode) {
@@ -21623,31 +21399,16 @@ function setPeekIssuesView(mode) {
   renderPeekIssues();
 }
 
-function togglePeekIssuesAll() {
-  _peekIssuesAllSessions = !_peekIssuesAllSessions;
-  localStorage.setItem('amux_peek_issues_all', _peekIssuesAllSessions ? '1' : '0');
-  renderPeekIssues();
-}
-
 function renderPeekIssues() {
   // Don't rebuild mid-drag — a board SSE refresh would destroy the active Sortable.
   if (document.body.classList.contains('board-dragging')) return;
   const list = document.getElementById('peek-issues-list');
   const count = document.getElementById('peek-issues-count');
-  const allScope = _peekIssuesAllSessions;
-  const items = (boardItems || []).filter(i => !i.deleted && (allScope || i.session === peekSession));
-  count.textContent = items.length ? items.length + ' issue' + (items.length === 1 ? '' : 's') + (allScope ? ' · all sessions' : '') : '';
-  // Scope toggle label/active state
-  const scopeBtn = document.getElementById('piv-scope');
-  if (scopeBtn) {
-    scopeBtn.textContent = allScope ? 'All sessions' : 'This session';
-    scopeBtn.classList.toggle('primary', allScope);
-  }
-  // Tab badge always reflects THIS session's count, regardless of view scope.
-  const _sessCount = (boardItems || []).filter(i => !i.deleted && i.session === peekSession).length;
+  const items = (boardItems || []).filter(i => i.session === peekSession && !i.deleted);
+  count.textContent = items.length ? items.length + ' issue' + (items.length === 1 ? '' : 's') : '';
   const tabCount = document.getElementById('peek-tab-issues-count');
   if (tabCount) {
-    if (_sessCount > 0) { tabCount.textContent = _sessCount; tabCount.classList.add('has-count'); }
+    if (items.length > 0) { tabCount.textContent = items.length; tabCount.classList.add('has-count'); }
     else { tabCount.textContent = ''; tabCount.classList.remove('has-count'); }
   }
   // Sync toggle active state
@@ -21660,8 +21421,7 @@ function renderPeekIssues() {
   list.classList.toggle('peek-issues-kanban', _peekIssuesView === 'kanban');
 
   if (!items.length) {
-    list.innerHTML = '<div style="color:var(--dim);font-size:0.85rem;padding:12px 4px;">' +
-      (allScope ? 'No issues on the board yet.' : 'No issues for this session yet.') + '</div>';
+    list.innerHTML = '<div style="color:var(--dim);font-size:0.85rem;padding:12px 4px;">No issues for this session yet.</div>';
     return;
   }
 
@@ -21674,13 +21434,9 @@ function renderPeekIssues() {
     const sty = statusStyle(item.status || 'todo');
     const badge = '<span class="status-badge" style="background:' + sty.bg + ';color:' + sty.color + ';border:1px solid ' + sty.border + ';font-size:0.7rem;padding:1px 6px;border-radius:10px;">' + esc(item.status || 'todo') + '</span>';
     const due = item.due ? '<span class="peek-issue-due">' + esc(item.due) + '</span>' : '';
-    // In all-sessions scope, tag each row with its owning session for awareness.
-    const owner = (allScope && item.session && item.session !== peekSession)
-      ? '<span class="peek-issue-owner" style="font-size:0.68rem;color:var(--accent);background:rgba(88,166,255,0.12);border-radius:8px;padding:1px 6px;margin-right:4px;">' + esc(item.session) + '</span>'
-      : '';
     return '<div class="peek-issue-item" onclick="openBoardDetail(\'' + esc(item.id) + '\')">' +
       '<span class="peek-issue-key">' + esc(item.id) + '</span>' +
-      '<span class="peek-issue-title">' + owner + esc(item.title) + '</span>' +
+      '<span class="peek-issue-title">' + esc(item.title) + '</span>' +
       '<span class="peek-issue-meta">' + badge + due + '</span>' +
       '</div>';
   }).join('');
@@ -21770,16 +21526,7 @@ function _renderPeekIssuesKanban(items, list) {
         else if (nextPos != null) newPos = nextPos - 1024;
         else newPos = Date.now() / 1000;
         const item = boardItems.find(i => i.id === id);
-        if (item && item.status !== newStatus) {
-          // Gate: confirm the status change; on cancel, revert the visual move.
-          _gateConfirm(item, newStatus).then(ok => {
-            if (!ok) { renderPeekIssues(); return; }
-            moveBoardItem(id, newStatus, newPos, ok);
-            renderPeekIssues();
-          });
-          return;
-        }
-        if (item && item.pos !== newPos) moveBoardItem(id, newStatus, newPos);
+        if (item && (item.status !== newStatus || item.pos !== newPos)) moveBoardItem(id, newStatus, newPos);
         renderPeekIssues();
       }
     }));
@@ -21894,12 +21641,22 @@ async function _peekEditSchedule(id) {
   await fetchSchedules();
   openSchedModal(id);
 }
-async function _peekNewSchedule() {
-  // Open the full modal preset to this session, so the rich mode picker is available.
-  await fetchSchedules();
-  openSchedModal();
-  const sel = document.getElementById('sched-session');
-  if (sel && peekSession) sel.value = peekSession;
+function _peekNewSchedule() {
+  const title = prompt('Schedule title:');
+  if (!title) return;
+  const command = prompt('Command to send to session:');
+  if (!command) return;
+  const expr = prompt('Cron expression (e.g. "0 9 * * 1" for Mon 9am), or leave blank for one-time:');
+  const body = {
+    title, session: peekSession, command, kind: 'tmux',
+    sched_type: expr ? 'recurring' : 'once',
+  };
+  if (expr) body.schedule_expr = expr;
+  else body.run_at = new Date().toISOString().slice(0, 16);
+  apiCall(API + '/api/schedules', {
+    method: 'POST', headers: {'Content-Type':'application/json'},
+    body: JSON.stringify(body)
+  }).then(() => _peekLoadSchedules());
 }
 
 // ── Peek notes ──
@@ -22304,7 +22061,7 @@ async function saveGlobalMemory() {
   }
 }
 
-const APP_VER = '0.9.61';   // bump together with the sw.js CACHE version
+const APP_VER = '0.8.9';   // bump together with the sw.js CACHE version
 let _peekScrollLockY = 0;
 function openPeek(name, opts) {
   _stopPeekPoll();
@@ -22353,11 +22110,6 @@ function openPeek(name, opts) {
   document.getElementById('peek-cmd-toggle').innerHTML = '&#x25BC; Send command';
   if (draft) setTimeout(() => document.getElementById('peek-cmd-input').focus({ preventScroll: true }), 50);
   document.getElementById('peek-title').textContent = name;
-  const _peekSess = sessions.find(s => s.name === name);
-  const _peekTask = _peekSess && _peekSess.task_name;
-  const peekTaskRow = document.getElementById('peek-task-row');
-  peekTaskRow.style.display = _peekTask ? 'flex' : 'none';
-  if (_peekTask) document.getElementById('peek-task-label').textContent = _peekTask;
   updatePeekStatus();
   document.getElementById('peek-body').innerHTML = '<span style="color:var(--dim)">Loading...</span>';
   // Reset tab badges; will be repopulated by _peekUpdateTabCounts
@@ -22370,22 +22122,11 @@ function openPeek(name, opts) {
   updateConnectionStatus();
   const peekOv = document.getElementById('peek-overlay');
   peekOv.classList.add('active');
-  // Freeze the page behind the overlay: otherwise iOS scrolls the session list
-  // to reveal the focused input, sliding content around under the fixed overlay
-  // and feeding bogus offsets into the viewport math.
-  if (!document.body.classList.contains('peek-embed') && document.body.style.position !== 'fixed') {
-    _peekScrollLockY = window.scrollY || 0;
-    document.body.style.position = 'fixed';
-    document.body.style.top = (-_peekScrollLockY) + 'px';
-    document.body.style.width = '100%';
-  }
   // Restore focus mode preference
   const focusPref = localStorage.getItem('peekFocus') === '1';
   peekOv.classList.toggle('peek-focus', focusPref);
-  document.getElementById('peek-focus-title').textContent = _peekTask ? name + ' — ' + _peekTask : name;
+  document.getElementById('peek-focus-title').textContent = name;
   _syncPeekOverlayToVisualViewport();
-  _vvKick();   // keyboard may already be up or mid-animation when peek opens
-  setTimeout(_peekGeoBeacon, 1500);   // mobile geometry self-report (once per load)
   // Load cached peek instantly while fetching fresh data
   _idb.get('peek_' + name).then(cached => {
     if (peekSession !== name) return;  // session changed before cache resolved
@@ -22395,7 +22136,7 @@ function openPeek(name, opts) {
       const ago = Math.floor((Date.now() - cached.time) / 60000);
       document.getElementById('peek-status').textContent = 'Cached ' + (ago < 1 ? 'just now' : ago + 'm ago');
       const body = document.getElementById('peek-body');
-      body.scrollTop = body.scrollHeight;
+      _peekScrollToBottom(body);
     }
   });
   refreshPeek();
@@ -22591,38 +22332,28 @@ async function _psfViewFile(filePath) {
   }
 }
 
-// Keep the peek input visible above the on-screen keyboard WITHOUT ever
-// shrinking the overlay box. Earlier versions resized the overlay to the
-// visual viewport (top/height) — but iOS PWA reports flaky vv numbers mid
-// keyboard-animation, so the overlay came out shorter than the space above
-// the keyboard and the session list bled through underneath it.
-//
-// New approach: the overlay always stays full-screen (position:fixed, inset:0,
-// solid background), and we only pad its BOTTOM by the keyboard height so the
-// flex column lifts the command bar to just above the keyboard. Because the
-// overlay never shrinks, nothing can ever show through behind it, even if the
-// keyboard-height estimate is off by a few px.
+// Keep peek overlay fitted to the visual viewport so it stays visible
+// when the user pinches to zoom or the on-screen keyboard appears.
+// Only apply inline sizing when visual viewport differs from layout viewport
+// (pinch zoom or virtual keyboard). Desktop browser zoom (Cmd+/-) keeps them
+// equal and is handled by CSS position:fixed + inset:0.
 function _syncPeekOverlayToVisualViewport() {
   const ov = document.getElementById('peek-overlay');
   if (!window.visualViewport || !ov) return;
   const vv = window.visualViewport;
-  // Pinch/auto zoom shrinks vv.height in CSS px (height/scale); don't treat that
-  // as a keyboard. Zoom-out fires another resize and we recompute then.
-  const scaled = vv.scale > 1.02;
-  // Keyboard height = how much shorter the visual viewport is than the layout
-  // viewport (the keyboard does NOT change window.innerHeight on iOS Safari).
-  let kb = scaled ? 0 : Math.max(0, Math.round(window.innerHeight - vv.height - vv.offsetTop));
-  // Standalone-PWA quirk: vv.height sits ~50-90px short of innerHeight even
-  // with the keyboard DOWN (home indicator / safe areas live outside the
-  // visual viewport), which left a permanent dead strip under the cmd bar.
-  // A real keyboard is never under ~260px — ignore small deltas.
-  if (kb < 100) kb = 0;
-  const sig = 'kb' + kb;
-  if (ov._vvSig === sig) return;
-  ov._vvSig = sig;
-  // setProperty important: the mobile stylesheet pins padding-bottom:0!important.
-  ov.style.setProperty('padding-bottom', kb + 'px', 'important');
-  ov.classList.toggle('vv-compact', kb > window.innerHeight * 0.15);
+  const constrained = vv.height < window.innerHeight * 0.95 || vv.offsetTop > 5;
+  if (constrained) {
+    ov.style.top = vv.offsetTop + 'px';
+    ov.style.height = vv.height + 'px';
+    ov.style.bottom = 'auto';
+    ov.style.paddingBottom = '0px';
+  } else {
+    ov.style.top = '';
+    ov.style.height = '';
+    ov.style.bottom = '0';
+    ov.style.paddingBottom = '';
+  }
+  ov.classList.toggle('vv-compact', constrained && vv.height < window.innerHeight * 0.7);
 }
 // Tap the "Updated … · vX.Y.Z" status line to dump exact bottom-edge geometry
 // from the running device — for diagnosing layout gaps that only reproduce on
@@ -22687,153 +22418,24 @@ function _peekGeoBeacon() {
   if (_geoBeaconSent || window.innerWidth > 700) return;
   _geoBeaconSent = true;
   try {
-    const ov = document.getElementById('peek-overlay');
-    const bar = document.querySelector('.peek-cmd-bar');
-    const row = document.querySelector('.peek-cmd-row');
-    const hdr = ov.querySelector('.overlay-header');
-    const title = document.getElementById('peek-session-status');
-    const vv = window.visualViewport || {};
-    const o = ov.getBoundingClientRect(), b = bar.getBoundingClientRect();
-    const r = row ? row.getBoundingClientRect() : { bottom: 0 };
-    const hdrTop = hdr ? Math.round(hdr.getBoundingClientRect().top) : -1;
-    const titleTop = title ? Math.round(title.getBoundingClientRect().top) : -1;
-    const probe = document.createElement('div');
-    probe.style.cssText = 'position:fixed;bottom:0;height:env(safe-area-inset-bottom,0px);width:1px;visibility:hidden;';
-    document.body.appendChild(probe);
-    const sabH = Math.round(probe.getBoundingClientRect().height);
-    const sabBottom = Math.round(probe.getBoundingClientRect().bottom);
-    probe.remove();
-    fetch(API + '/api/client-debug', {
-      method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        kind: 'peek-geo', ver: APP_VER, zoom: (typeof _zoomLevel !== 'undefined' ? _zoomLevel : '?'),
-        win: window.innerWidth + 'x' + window.innerHeight,
-        vvH: Math.round(vv.height || 0), vvTop: Math.round(vv.offsetTop || 0), vvScale: vv.scale || 1,
-        sab: sabH, fixedBottomAt: sabBottom,
-        ovTop: Math.round(o.top), ovBottom: Math.round(o.bottom),
-        ovPadT: getComputedStyle(ov).paddingTop, ovPadB: getComputedStyle(ov).paddingBottom,
-        hdrTop, titleTop,
-        bodyPadT: getComputedStyle(document.body).paddingTop,
-        noTopInset: document.body.classList.contains('no-top-inset') ? 1 : 0,
-        barBottom: Math.round(b.bottom), barPadB: getComputedStyle(bar).paddingBottom,
-        rowBottom: Math.round(r.bottom),
-        standalone: navigator.standalone ? 1 : 0, dpr: window.devicePixelRatio,
-      }),
-    }).catch(() => {});
-  } catch (e) {}
-}
-// ── Geo ruler: on-device visual diagnostic ────────────────────────────────
-// FOUR taps anywhere in the top 120px toggle a full-screen measurement overlay,
-// so ONE screenshot from the real device shows exactly how the viewport maps to
-// the physical screen: where `fixed top:0` (blue) and `fixed bottom:0` (orange)
-// actually land vs the status-bar clock and the home indicator, plus the env()
-// safe-area bands (red=top, green=bottom) and a 50px labelled grid. This removes
-// the screenshot-guessing that made the top/bottom inset flip-flop.
-function _measureEnv(side) {
-  const p = document.createElement('div');
-  p.style.cssText = 'position:fixed;' + side + ':0;height:env(safe-area-inset-' + side + ',0px);width:1px;visibility:hidden;';
-  document.body.appendChild(p);
-  const h = Math.round(p.getBoundingClientRect().height);
-  p.remove();
-  return h;
-}
-function _geoRuler() {
-  let el = document.getElementById('geo-ruler');
-  if (el) { el.remove(); return; }
-  el = document.createElement('div');
-  el.id = 'geo-ruler';
-  el.style.cssText = 'position:fixed;inset:0;z-index:2147483647;pointer-events:none;font:12px/1.35 ui-monospace,monospace;';
-  const envTop = _measureEnv('top'), envBot = _measureEnv('bottom');
-  const vv = window.visualViewport || {};
-  let h = '';
-  h += '<div style="position:fixed;top:0;left:0;right:0;height:' + envTop + 'px;background:rgba(248,81,73,0.30);border-bottom:2px solid #f85149;"></div>';
-  h += '<div style="position:fixed;bottom:0;left:0;right:0;height:' + envBot + 'px;background:rgba(63,185,80,0.30);border-top:2px solid #3fb950;"></div>';
-  h += '<div style="position:fixed;top:0;left:0;right:0;height:3px;background:#58a6ff;"></div>';
-  h += '<div style="position:fixed;bottom:0;left:0;right:0;height:3px;background:#d29922;"></div>';
-  for (let y = 0; y <= window.innerHeight; y += 50) {
-    h += '<div style="position:fixed;top:' + y + 'px;left:0;right:0;height:1px;background:rgba(255,255,255,0.22);"></div>';
-    h += '<div style="position:fixed;top:' + y + 'px;left:2px;color:#fff;background:rgba(0,0,0,0.65);padding:0 3px;">' + y + '</div>';
-  }
-  h += '<div style="position:fixed;top:50%;left:50%;transform:translate(-50%,-50%);background:rgba(0,0,0,0.88);color:#fff;padding:12px 14px;border-radius:8px;border:1px solid #fff;text-align:left;">'
-     + 'screen ' + screen.width + 'x' + screen.height + '<br>'
-     + 'inner ' + window.innerWidth + 'x' + window.innerHeight + '<br>'
-     + 'vv.offsetTop ' + Math.round(vv.offsetTop || 0) + ' &nbsp; vv.h ' + Math.round(vv.height || 0) + '<br>'
-     + 'env(top) ' + envTop + ' &nbsp; env(bottom) ' + envBot + '<br>'
-     + 'standalone ' + navigator.standalone + ' &nbsp; dpr ' + window.devicePixelRatio + '<br>'
-     + '<span style="color:#58a6ff">blue=fixed top:0</span> &nbsp; <span style="color:#d29922">orange=fixed bottom:0</span><br>'
-     + '<span style="color:#f85149">red=env-top</span> &nbsp; <span style="color:#3fb950">green=env-bottom</span>'
-     + '</div>';
-  el.innerHTML = h;
-  document.body.appendChild(el);
-}
-(function() {
-  let taps = [];
-  document.addEventListener('touchend', function(e) {
-    const t = e.changedTouches && e.changedTouches[0];
-    if (!t || t.clientY > 120) return;   // only the top strip
-    const now = performance.now();
-    taps = taps.filter(function(x) { return now - x < 1400; });
-    taps.push(now);
-    if (taps.length >= 4) { taps = []; _geoRuler(); }
-  }, { passive: true });
-})();
-let _peekGeoHold = 0;   // while set, refreshPeek leaves the status line alone
-function _peekGeoDebug() {
-  _peekGeoHold = performance.now() + 12000;
-  try {
-    const ov = document.getElementById('peek-overlay');
-    const bar = document.querySelector('.peek-cmd-bar');
-    const row = document.querySelector('.peek-cmd-row');
-    const vv = window.visualViewport || {};
-    const o = ov.getBoundingClientRect(), b = bar.getBoundingClientRect();
-    const r = row ? row.getBoundingClientRect() : { bottom: 0 };
-    const probe = document.createElement('div');
-    probe.style.cssText = 'position:fixed;bottom:0;height:env(safe-area-inset-bottom,0px);width:1px;visibility:hidden;';
-    document.body.appendChild(probe);
-    const sab = Math.round(probe.getBoundingClientRect().height);
-    probe.remove();
-    const s = 'geo v' + APP_VER +
-      ' win=' + window.innerWidth + 'x' + window.innerHeight +
-      ' vv=' + Math.round(vv.height || 0) + '+' + Math.round(vv.offsetTop || 0) +
-      ' sab=' + sab +
-      ' ovB=' + Math.round(o.bottom) + ' ovPadB=' + getComputedStyle(ov).paddingBottom +
-      ' barB=' + Math.round(b.bottom) + ' barPadB=' + getComputedStyle(bar).paddingBottom +
-      ' rowB=' + Math.round(r.bottom) +
-      ' standalone=' + (navigator.standalone ? 1 : 0);
-    document.getElementById('peek-status').textContent = s;
-    console.log(s);
-  } catch (e) { document.getElementById('peek-status').textContent = 'geo err: ' + e.message; }
-}
-// iOS reports stale visualViewport values while the keyboard animates, and a
-// single resize/scroll event can land mid-animation — freezing the overlay at
-// a half-animated height (squished terminal, page visible underneath, buttons
-// shifting out from under a tap). Never trust one event: every trigger opens a
-// short per-frame tracking window that follows the geometry through the whole
-// animation and past its settle point.
-let _vvRaf = 0, _vvUntil = 0;
-function _vvKick(ms) {
   if (!window.visualViewport) return;
-  const until = performance.now() + (ms || 1200);
-  if (until > _vvUntil) _vvUntil = until;
-  if (!_vvRaf) _vvRaf = requestAnimationFrame(_vvTick);
-}
-function _vvTick() {
-  _vvRaf = 0;
-  const ov = document.getElementById('peek-overlay');
-  if (!ov || !ov.classList.contains('active')) return;   // stops when peek closes
-  _syncPeekOverlayToVisualViewport();
-  if (performance.now() < _vvUntil) _vvRaf = requestAnimationFrame(_vvTick);
-}
-// Mark Safari-in-a-tab on iPhone (not the installed PWA) so CSS can keep
-// bottom controls clear of Safari's tap-stealing toolbar zone.
-(function() {
-  try {
-    if (/iPhone|iPod/.test(navigator.userAgent) && !navigator.standalone) {
-      const apply = () => document.body && document.body.classList.add('safari-tab');
-      if (document.body) apply(); else document.addEventListener('DOMContentLoaded', apply);
+  window.visualViewport.addEventListener('resize', () => {
+    if (document.getElementById('peek-overlay')?.classList.contains('active')) {
+      _syncPeekOverlayToVisualViewport();
     }
+  });
+  window.visualViewport.addEventListener('scroll', () => {
+    if (document.getElementById('peek-overlay')?.classList.contains('active')) {
+      _syncPeekOverlayToVisualViewport();
+    }
+  });
+  // iOS keyboard: re-sync after animation settles so input stays visible
+  document.getElementById('peek-cmd-input')?.addEventListener('focus', () => {
+    setTimeout(_syncPeekOverlayToVisualViewport, 100);
+    setTimeout(_syncPeekOverlayToVisualViewport, 400);
+  });
   } catch (e) {}
-})();
+}
 // Standalone top inset — FINAL (2026-07-05 device ruler + oscillation beacons):
 // DO NOT gate layout on innerHeight. In the iOS 26 home-screen webview innerHeight
 // OSCILLATES 762<->812 every ~2s and is COUPLED to our own layout: any JS inset that
@@ -23176,9 +22778,20 @@ function wrapBoxBlocks(html) {
 
 let peekSelecting = false;
 let _peekScrollLocked = false;
+// (B) Set true immediately before any PROGRAMMATIC peek scroll so the scroll
+// handler can ignore it and not mis-latch the lock (mobile reflow/momentum
+// otherwise trips _isScrolledToBottom=false on our own auto-scroll-to-bottom).
+let _peekProgrammaticScroll = false;
+function _peekScrollToBottom(body) {
+  if (!body) return;
+  _peekProgrammaticScroll = true;
+  body.scrollTop = body.scrollHeight;
+}
 
+// (D) 80px is more forgiving than 40 for touch momentum / rubber-band scroll,
+// so normal mobile scrolling reliably re-enables live updates.
 function _isScrolledToBottom(el, threshold) {
-  return el.scrollHeight - el.scrollTop - el.clientHeight < (threshold || 40);
+  return el.scrollHeight - el.scrollTop - el.clientHeight < (threshold || 80);
 }
 
 function _showScrollLockBadge(scrollEl, onClickResume) {
@@ -23256,12 +22869,9 @@ async function refreshPeek() {
     _peekEtag = r.headers.get('ETag') || _peekEtag;
     const data = await r.json();
     const output = data.output || '(no output)';
-    // Skip re-render when output is identical — saves ansiToHtml work on every poll tick.
-    // This also applies with an active search: the highlights are already in the DOM,
-    // so re-running applyPeekSearch would needlessly scroll the view back to the current
-    // match every tick (the "force-scroll back to result" bug on idle sessions).
-    if (output === _lastPeekRaw && lastPeekHTML) {
-      if (performance.now() > _peekGeoHold) statusEl.textContent = 'Updated ' + new Date().toLocaleTimeString() + ' · v' + APP_VER;
+    // Skip re-render when output is identical — saves ansiToHtml work on every poll tick
+    if (output === _lastPeekRaw && lastPeekHTML && !peekSearchQuery.trim()) {
+      statusEl.textContent = 'Updated ' + new Date().toLocaleTimeString() + ' · v' + APP_VER;
       return;
     }
     _lastPeekRaw = output;
@@ -23286,7 +22896,7 @@ async function refreshPeek() {
       applyPeekSearch(false);
     }
     if (!_peekScrollLocked && atBottom && !hasSearch) {
-      body.scrollTop = body.scrollHeight;
+      _peekScrollToBottom(body);
       _hideScrollLockBadge(body);
     } else if (_peekScrollLocked) {
       _showScrollLockBadge(body, () => {
@@ -23296,7 +22906,7 @@ async function refreshPeek() {
         _hideScrollLockBadge(body);
       });
     }
-    if (performance.now() > _peekGeoHold) statusEl.textContent = (data.saved ? 'Saved log' : 'Updated') + ' ' + new Date().toLocaleTimeString() + ' · v' + APP_VER;
+    statusEl.textContent = (data.saved ? 'Saved log' : 'Updated') + ' ' + new Date().toLocaleTimeString() + ' · v' + APP_VER;
     // Cache peek output for offline browsing
     _idb.set('peek_' + peekSession, { output, time: Date.now() });
   } catch(e) {
@@ -23366,9 +22976,7 @@ let peekCmdOpen = true;
 function togglePeekFocus() {
   const ov = document.getElementById('peek-overlay');
   const on = ov.classList.toggle('peek-focus');
-  const _fs = sessions.find(s => s.name === peekSession);
-  const _ft = _fs && _fs.task_name;
-  document.getElementById('peek-focus-title').textContent = _ft ? (peekSession + ' — ' + _ft) : (peekSession || '');
+  document.getElementById('peek-focus-title').textContent = peekSession || '';
   localStorage.setItem('peekFocus', on ? '1' : '');
 }
 
@@ -23379,7 +22987,7 @@ function togglePeekMenu() {
   const wasOpen = m.classList.contains('open');
   closeAllMenus();
   if (wasOpen) return;
-  const r = _cssRect(btn);
+  const r = btn.getBoundingClientRect();
   const vw = document.documentElement.clientWidth || window.innerWidth;
   let left = r.right - 200;
   if (left < 8) left = 8;
@@ -23665,7 +23273,7 @@ function handlePeekPaste(e) {
   });
 })();
 
-let _sendMode = localStorage.getItem('amux_send_mode') || 'queue'; // 'queue' or 'send'
+let _sendMode = localStorage.getItem('amux_send_mode') || 'send'; // 'send' or 'queue'
 function _toggleSendMode(e) {
   e?.stopPropagation();
   _sendMode = _sendMode === 'send' ? 'queue' : 'send';
@@ -23704,11 +23312,21 @@ async function sendPeekCmd() {
     await steerSession(peekSession, text);
     return;
   }
-  // 'send' mode + active session sends immediately. The old confirmation dialog
-  // here required a second Enter (or click) to confirm — that was the real
-  // "press enter twice" bug. The safe default is 'queue' mode (handled just
-  // above), which reliably delivers at the next turn boundary; use the send-mode
-  // toggle to switch between queue and send.
+  // Send mode with active session: show dialog
+  if (_sendMode === 'send' && sess && sess.status === 'active' && files.length === 0 && !text.startsWith('/')) {
+    const choice = await _showSteerPrompt(text);
+    if (choice === 'queue') {
+      cmdHistoryAdd(text, {type:'steering'});
+      inp.value = '';
+      inp.style.height = 'auto';
+      delete _peekDrafts[peekSession];
+      await steerSession(peekSession, text);
+      return;
+    } else if (choice === 'cancel') {
+      return;
+    }
+    // choice === 'send' — fall through to normal send
+  }
   cmdHistoryAdd(text);
 
   // Build message: inline @path references (no newlines — tmux treats \n as Enter,
@@ -24141,6 +23759,7 @@ const _ACTION_CHIPS = [
     { id: 'esc', label: 'Esc', action: 'keys', value: 'Escape', desc: 'Escape' },
     { id: 'space', label: 'Space', action: 'keys', value: 'Space', desc: 'Space key' },
     { id: 'tab', label: 'Tab', action: 'keys', value: 'Tab', desc: 'Tab key' },
+    { id: 'shifttab', label: 'Shift+Tab', action: 'keys', value: 'BTab', desc: 'Shift+Tab (accept suggestion)' },
     { id: 'yes', label: 'Yes', action: 'send', value: 'yes', desc: 'Send "yes"' },
     { id: 'no', label: 'No', action: 'send', value: 'no', desc: 'Send "no"' },
     { id: 'log', label: '\uD83D\uDCC4 Log', action: 'special', value: 'downloadLog', desc: 'Download terminal log' },
@@ -24950,79 +24569,25 @@ function slashAcPick(i) {
 // so it still inserts a newline.
 let _lastKeyShiftEnter = false;
 function _sendBeforeInput(e, send) {
-  // Enter inserts a newline now (standard textarea) — never send from a line break.
-  // Kept as a no-op so the existing onbeforeinput bindings don't error.
-}
-// Send-button firing: onpointerdown preventDefault keeps the input focused
-// (no keyboard collapse mid-tap) — but on real iOS Safari, canceling
-// pointerdown ALSO suppresses the click event (WebKit divergence from Chrome),
-// so onclick alone never fires on the tap ("press send twice"). Fire on
-// pointerup (never suppressed) and keep click as the fallback for non-pointer
-// environments, deduped per-button so one tap can't double-fire.
-function _btnDbg(obj) {
-  if (window.innerWidth > 700) return;
-  try {
-    fetch(API + '/api/client-debug', { method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(Object.assign({ ver: APP_VER }, obj)) }).catch(() => {});
-  } catch (e) {}
-}
-function _btnFire(e, fn) {
-  const t = e.currentTarget;
-  const now = performance.now();
-  if (t._fireTs && now - t._fireTs < 350) { _tapTraceEv('DEDUP'); return; }   // click echo of the same tap
-  t._fireTs = now;
-  _tapTraceEv('FIRE');
-  // Mobile diagnostic: no dead-tap beacon means events DO reach the button, so
-  // "two presses" is the send no-oping. Capture pre/post input length AND any
-  // sync throw or async rejection so the device pins down the exact cause.
-  const inp = document.getElementById('peek-cmd-input');
-  const before = inp ? inp.value.trim().length : -1;
-  const mode = (typeof _sendMode !== 'undefined' ? _sendMode : '?');
-  const sess = (typeof peekSession !== 'undefined' ? peekSession : null);
-  const seq = _tapTrace.slice(-7).map(x => x.e).join(',');
-  let syncErr = '';
-  try {
-    const r = fn();
-    if (r && typeof r.then === 'function') {
-      r.then(() => _btnDbg({ kind: 'send-fire', phase: 'resolved', before, after: inp ? inp.value.trim().length : -1, mode, session: sess, seq }))
-       .catch(er => _btnDbg({ kind: 'send-fire', phase: 'async-throw', err: String(er).slice(0, 200), before, mode, session: sess, seq }));
-    }
-  } catch (er) { syncErr = String(er).slice(0, 200); }
-  _btnDbg({ kind: 'send-fire', phase: syncErr ? 'sync-throw' : 'called', err: syncErr,
-    before, after: inp ? inp.value.trim().length : -1, mode, session: sess, seq });
-}
-// iOS cancels the synthesized click (and pointer events) when a tap races a
-// scroll or a re-render — and the peek re-renders every 1.2s while a session
-// streams. Such taps produce no pointer/click at all ("press send twice").
-// Touch events are the primitive and ALWAYS fire: treat a stationary touch
-// ending on the button as the tap. _btnFire's dedup absorbs the pointerup/
-// click duplicates when they do arrive.
-let _btnTouchX = 0, _btnTouchY = 0;
-function _btnTouchStart(e) {
-  const t = e.touches && e.touches[0];
-  if (t) { _btnTouchX = t.clientX; _btnTouchY = t.clientY; }
-  _tapTraceEv('touchstart');
-}
-function _btnTouchEnd(e, fn) {
-  _tapTraceEv('touchend');
-  const t = e.changedTouches && e.changedTouches[0];
-  if (!t) return;
-  if (Math.abs(t.clientX - _btnTouchX) > 24 || Math.abs(t.clientY - _btnTouchY) > 24) return;   // swipe, not a tap (loosened for thumbs)
-  e.preventDefault();   // we own the tap; suppress the synthetic mouse/click
-  _btnFire(e, fn);
+  if (e.inputType !== 'insertLineBreak') return;
+  if (_lastKeyShiftEnter) return;   // Shift+Enter = newline
+  e.preventDefault();
+  send();
 }
 function slashAcBeforeInput(e) { _sendBeforeInput(e, sendPeekCmd); }
 function cardSlashAcBeforeInput(name, e) { _sendBeforeInput(e, () => sendFromInput(name)); }
 
 function slashAcKeydown(e) {
   _lastKeyShiftEnter = (e.key === 'Enter' && e.shiftKey);
-  if (e.isComposing || e.keyCode === 229) return; // let IME composition finish
+  if (e.isComposing || e.keyCode === 229) return; // ignore IME composition Enter
   const inp = document.getElementById('peek-cmd-input');
   const el = document.getElementById('slash-ac-list');
   if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) { e.preventDefault(); sendPeekCmd(); return; }
   if (!el.classList.contains('open')) {
-    // Enter inserts a newline (standard textarea) — do NOT send. Send is the Send
-    // button or Cmd/Ctrl+Enter (handled just above). Arrows still browse history.
+    // Enter always sends (the mobile keyboard key is labeled "send" via enterkeyhint);
+    // Shift+Enter inserts a newline. The old touch-device carve-out made the send key
+    // insert newlines on phones, which read as "Enter does nothing / send twice".
+    if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); sendPeekCmd(); return; }
     if (e.key === 'ArrowUp' && inp.selectionStart === 0) { e.preventDefault(); cmdHistoryUp(inp); return; }
     if (e.key === 'ArrowDown' && _cmdHistoryIdx !== -1) { e.preventDefault(); cmdHistoryDown(inp); return; }
     return;
@@ -25128,44 +24693,21 @@ function openCmdHistoryModal() {
   m.classList.add('active');
   const s = document.getElementById('cmd-history-search');
   if (s) { s.value = ''; setTimeout(() => s.focus(), 50); }
-  _populateCmdHistorySessions();
-  _renderCmdHistoryList();
-  // History is server-side, but this page only pulled it once at load — a
-  // long-lived tab/PWA would miss everything sent from other devices since.
-  // Re-pull on every open so phone and desktop always see the same history.
-  _loadCmdHistoryFromServer().then(() => {
-    _populateCmdHistorySessions();
-    _renderCmdHistoryList();
-  });
-}
-function _populateCmdHistorySessions() {
-  const sel = document.getElementById('cmd-history-session-filter');
-  if (!sel) return;
-  const prev = sel.value;
-  const names = [...new Set(_cmdHistory.map(e => typeof e === 'string' ? '' : (e.session || '')).filter(Boolean))]
-    .sort((a, b) => a.localeCompare(b));
-  sel.innerHTML = '<option value="">All sessions</option>' + names.map(n => {
-    const safe = n.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
-    return '<option value="' + safe + '">' + safe + '</option>';
-  }).join('');
-  sel.value = names.includes(prev) ? prev : '';
+  _renderCmdHistoryList('');
 }
 function closeCmdHistoryModal() {
   const m = document.getElementById('cmd-history-modal');
   if (m) m.classList.remove('active');
 }
-function _renderCmdHistoryList() {
+function _renderCmdHistoryList(filter) {
   const list = document.getElementById('cmd-history-list');
   if (!list) return;
-  const q = (document.getElementById('cmd-history-search')?.value || '').trim().toLowerCase();
-  const sessFilter = document.getElementById('cmd-history-session-filter')?.value || '';
+  const q = (filter || '').trim().toLowerCase();
   const items = _cmdHistory.slice().reverse();
-  let filtered = items;
-  if (sessFilter) filtered = filtered.filter(e => (typeof e === 'string' ? '' : (e.session || '')) === sessFilter);
-  if (q) filtered = filtered.filter(e => { const t = typeof e === 'string' ? e : e.text; return t.toLowerCase().includes(q); });
+  const filtered = q ? items.filter(e => { const t = typeof e === 'string' ? e : e.text; return t.toLowerCase().includes(q); }) : items;
   if (!filtered.length) {
     list.innerHTML = '<div style="color:var(--dim);font-size:0.85rem;padding:20px;text-align:center;">'
-      + (q || sessFilter ? 'No matches.' : 'No history yet.') + '</div>';
+      + (q ? 'No matches.' : 'No history yet.') + '</div>';
     return;
   }
   list.innerHTML = filtered.map(e => {
@@ -25304,8 +24846,8 @@ function cardSlashAcKeydown(name, e) {
   const el = document.getElementById('card-ac-' + name);
   if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) { e.preventDefault(); sendFromInput(name); return; }
   if (!el || !el.classList.contains('open')) {
-    // Enter inserts a newline (standard textarea) — do NOT send. Send is the Send
-    // button or Cmd/Ctrl+Enter (handled just above). Arrows still browse history.
+    // Enter always sends (keyboard key is labeled "send"); Shift+Enter = newline.
+    if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); sendFromInput(name); return; }
     if (e.key === 'ArrowUp' && inp && inp.selectionStart === 0) { e.preventDefault(); cmdHistoryUp(inp); return; }
     if (e.key === 'ArrowDown' && _cmdHistoryIdx !== -1) { e.preventDefault(); if (inp) cmdHistoryDown(inp); return; }
     return;
@@ -27517,8 +27059,16 @@ function peekCheckSelection() {
 document.getElementById('peek-body').addEventListener('mousedown', () => { peekSelecting = true; clearTimeout(peekSelectTimer); });
 document.getElementById('peek-body').addEventListener('touchstart', () => { peekSelecting = true; clearTimeout(peekSelectTimer); }, {passive: true});
 document.getElementById('peek-body').addEventListener('scroll', function() {
+  // (B) Ignore our own programmatic scroll-to-bottom — only USER gestures latch.
+  if (_peekProgrammaticScroll) { _peekProgrammaticScroll = false; return; }
   if (_isScrolledToBottom(this)) {
-    _peekScrollLocked = false;
+    // (C) On returning to the bottom, flush any content buffered while locked
+    // so the conversation updates immediately instead of on the next poll tick.
+    if (_peekScrollLocked) {
+      _peekScrollLocked = false;
+      applyPeekSearch(peekSearchQuery.trim().length > 0);
+      _peekScrollToBottom(this);
+    }
     _hideScrollLockBadge(this);
   } else {
     _peekScrollLocked = true;
@@ -27817,10 +27367,6 @@ document.addEventListener('keydown', (e) => {
     }
     return;
   }
-  if (document.getElementById('sched-overlay').classList.contains('active')) {
-    if (e.key === 'Escape') { e.preventDefault(); closeSchedModal(); return; }
-    return;
-  }
   if (document.getElementById('board-detail-overlay').classList.contains('active')) {
     if (e.key === 'Escape') { e.preventDefault(); closeBoardDetail(); return; }
     if ((e.metaKey || e.ctrlKey) && e.key === 's') { e.preventDefault(); boardDetailSave(); return; }
@@ -27848,10 +27394,9 @@ document.addEventListener('keydown', (e) => {
 });
 
 // ═══════ LAYOUT MODES (list / grid) ═══════
-let layoutMode = localStorage.getItem('amux_layout') || 'grid';
+let layoutMode = localStorage.getItem('amux_layout') || 'group';
 let sortMode = localStorage.getItem('amux_sort_mode') || 'natural';
 let cardOrder = JSON.parse(localStorage.getItem('amux_card_order') || '[]');
-let _frozen = localStorage.getItem('amux_frozen') === '1';
 let _sortable = null;
 let _tileJustDragged = false; // keep for toggle() guard
 
@@ -27873,65 +27418,26 @@ function _alphaSortSessions(a, b) {
   return (a.name || '').localeCompare(b.name || '');
 }
 
-// Sort by frozen cardOrder; sessions not in the list go to the end in natural order
-function _sortByCardOrder(arr) {
-  const idx = Object.fromEntries(cardOrder.map((n, i) => [n, i]));
-  return [...arr].sort((a, b) => {
-    const ia = idx[a.name] ?? Infinity;
-    const ib = idx[b.name] ?? Infinity;
-    if (ia !== ib) return ia - ib;
-    return _naturalSortSessions(a, b);
-  });
-}
-
-function toggleFreeze() {
-  if (_frozen) {
-    _frozen = false;
-    localStorage.removeItem('amux_frozen');
-    cardOrder = [];
-    localStorage.removeItem('amux_card_order');
-  } else {
-    // Compute order using the SAME logic as render() — works even for collapsed groups
-    const visible = sessions.filter(s => !s.archived);
-    let ordered;
-    if (layoutMode === 'group') {
-      const buckets = {active: [], waiting: [], idle: [], stopped: []};
-      visible.forEach(s => {
-        if (!s.running) buckets.stopped.push(s);
-        else if (s.status === 'active') buckets.active.push(s);
-        else if (s.status === 'waiting') buckets.waiting.push(s);
-        else buckets.idle.push(s);
-      });
-      const sortFn = sortMode === 'alpha' ? _alphaSortSessions : (a, b) => {
-        if (a.pinned !== b.pinned) return a.pinned ? -1 : 1;
-        return (b.last_activity || 0) - (a.last_activity || 0);
-      };
-      for (const k of Object.keys(buckets)) buckets[k].sort(sortFn);
-      ordered = [...buckets.active, ...buckets.waiting, ...buckets.idle, ...buckets.stopped];
-    } else if (sortMode === 'alpha') {
-      ordered = [...visible].sort(_alphaSortSessions);
-    } else {
-      ordered = [...visible].sort(_naturalSortSessions);
-    }
-    cardOrder = ordered.map(s => s.name);
-    localStorage.setItem('amux_card_order', JSON.stringify(cardOrder));
-    _frozen = true;
-    localStorage.setItem('amux_frozen', '1');
-  }
+function resetCardOrder() {
+  cardOrder = [];
+  localStorage.removeItem('amux_card_order');
   _updateResetBtn();
   render();
 }
 
 function _updateResetBtn() {
-  const eb = document.getElementById('tile-expand-btn');
-  if (eb) eb.classList.toggle('active', expanded.size > 0);
-  const fb = document.getElementById('tile-freeze-btn');
-  if (fb) fb.classList.toggle('active', _frozen);
+  const btn = document.getElementById('tile-reset-btn');
+  if (btn) btn.style.display = cardOrder.length > 0 ? '' : 'none';
+  const cb = document.getElementById('tile-collapse-btn');
+  if (cb) cb.style.display = expanded.size > 0 ? '' : 'none';
 }
 
 function setLayoutMode(mode) {
   layoutMode = mode;
   localStorage.setItem('amux_layout', mode);
+  document.getElementById('tile-list-btn').classList.toggle('active', mode === 'list');
+  document.getElementById('tile-group-btn').classList.toggle('active', mode === 'group');
+  document.getElementById('tile-grid-btn').classList.toggle('active', mode === 'grid');
   const cards = document.querySelector('.cards');
   if (cards) cards.classList.toggle('grid-mode', mode === 'grid');
   if (mode === 'group') destroySortable();
@@ -27999,18 +27505,19 @@ function tileMouseDown(e, name) {} // no-op — kept so card HTML doesn't break
 // Initialize layout on load
 document.addEventListener('DOMContentLoaded', function() {
   const cards = document.querySelector('.cards');
-  // Default to grid on desktop, list on mobile
   if (layoutMode === 'grid' && window.innerWidth >= 900) {
     if (cards) cards.classList.add('grid-mode');
+    document.getElementById('tile-grid-btn').classList.add('active');
     setTimeout(initSortable, 200);
+  } else if (layoutMode === 'group') {
+    document.getElementById('tile-group-btn').classList.add('active');
   } else {
-    if (layoutMode === 'group' || (layoutMode === 'grid' && window.innerWidth < 900)) layoutMode = 'list';
+    layoutMode = 'list';
+    document.getElementById('tile-list-btn').classList.add('active');
     setTimeout(initSortable, 200);
   }
   const sortBtn = document.getElementById('tile-sort-btn');
   if (sortBtn) sortBtn.classList.toggle('active', sortMode === 'alpha');
-  const freezeBtn = document.getElementById('tile-freeze-btn');
-  if (freezeBtn) freezeBtn.classList.toggle('active', _frozen);
 });
 
 // ═══════ REPORTS ═══════
@@ -28280,7 +27787,6 @@ let _boardSortables = [];
 let _boardColSortable = null;
 let boardTimer = null;
 let schedules = [];
-let schedSearchQuery = '';
 let _schedEditId = null;
 let boardEditId = null;
 let boardEditStatus = 'todo';
@@ -28431,12 +27937,14 @@ function _chromeUpdateOffsets() {
     const ctb = document.getElementById('chrome-tabs-bar');
     const hr = document.querySelector('.header-row');
     if (ctb) {
-      // Phones hide the tab strip entirely (CSS) — its height must not leak
-      // into layout offsets (it pushed the peek 54px down on mobile).
-      const h = (_chromeCollapsed || window.innerWidth <= 700) ? 0 : ctb.offsetHeight;
+      const h = _chromeCollapsed ? 0 : ctb.offsetHeight;
       document.documentElement.style.setProperty('--chrome-tab-h', h + 'px');
+      // Body padding-top is handled by CSS: max(16px, --chrome-tab-h, safe-area-inset-top)
+      if (hr) {
+        const bodyPadTop = parseInt(getComputedStyle(document.body).paddingTop) || 0;
+        document.documentElement.style.setProperty('--sticky-nav-top', (bodyPadTop + hr.offsetHeight) + 'px');
+      }
     }
-    // --sticky-nav-top no longer used (tab-bar-outer is position:relative)
   });
 }
 
@@ -28479,9 +27987,9 @@ function _chromeSave() {
 function switchView(view) {
   if (document.getElementById('grid-view').classList.contains('active')) exitGridMode();
   activeView = view;
-  const _svIds = ['session','board','calendar','scheduler','files','logs','notes','crm','map','metrics','torrents','terminal','browser','graph','journal','habits','skills'];
-  const _svNames = ['sessions','board','calendar','scheduler','files','logs','notes','crm','map','metrics','torrents','terminal','browser','graph','journal','habits','skills'];
-  const _svDisplay = ['','','flex','','flex','flex','flex','flex','flex','flex','flex','flex','','flex','flex','flex','flex'];
+  const _svIds = ['session','board','threads','calendar','scheduler','files','logs','notes','crm','map','metrics','torrents','terminal','browser','graph','journal','habits','repos'];
+  const _svNames = ['sessions','board','threads','calendar','scheduler','files','logs','notes','crm','map','metrics','torrents','terminal','browser','graph','journal','habits','repos'];
+  const _svDisplay = ['','','flex','flex','','flex','flex','flex','flex','flex','flex','flex','flex','','flex','flex','flex','flex'];
   for (let i = 0; i < _svIds.length; i++) {
     const ve = document.getElementById(_svIds[i] + '-view');
     if (ve) ve.style.display = view === _svNames[i] ? (_svDisplay[i] || '') : 'none';
@@ -28495,10 +28003,10 @@ function switchView(view) {
   if (view === 'crm') { _crmDirty = false; _crmLoad(); _crmApplySidebarState(); } // always refresh on tab switch
   if (view === 'map') { _mapLoad(); _mapInit(); }
   if (view === 'metrics') { _metricsLoad(); _metricsApplySidebarState(); } // always refresh on tab switch
-  if (view === 'browser') _bwInit(); else if (typeof _bwStopLive === 'function') _bwStopLive();
+  if (view === 'browser') _bwInit();
   if (view === 'journal') _journalInit();
   if (view === 'habits') _habitsLoad();
-  if (view === 'skills') _skillsTabLoad();
+  if (view === 'repos') _reposLoad();
   if (view === 'files') loadFiles(_filesPath);
   else {
     try { if (location.hash.startsWith('#path=')) history.replaceState({}, '', location.pathname); } catch(e) {}
@@ -28517,12 +28025,603 @@ function switchView(view) {
     fetchBoard();
     // Only poll if SSE is not active (SSE pushes board updates)
     if (_sseFallback && !boardTimer) boardTimer = setInterval(fetchBoard, 5000);
+  } else if (view === 'threads') {
+    _threadsLoad();
+    // SSE pushes threads updates; only poll when the stream is dead.
+    if (_sseFallback && !_threadsTimer) _threadsTimer = setInterval(_threadsLoad, 5000);
   } else if (view === 'scheduler') {
     Promise.all([fetchSchedules(), fetchSchedulerRuns()]).then(() => renderScheduler());
   } else {
     if (boardTimer) { clearInterval(boardTimer); boardTimer = null; }
   }
+  if (view !== 'threads' && _threadsTimer) { clearInterval(_threadsTimer); _threadsTimer = null; }
 }
+
+
+// ── Threads tab (successor to Inbox) ────────────────────────────────────────
+// Conversations with agents, modeled as (thread, [messages]). Every message
+// has a Reply button that targets that specific message via parent_id. The
+// renderer is flat for now — parent_id is preserved on the server so we can
+// add indented reply chains later without a data migration.
+let _threadsTimer = null;
+let _threadsCache = [];
+let _threadsLastSig = '';
+// Icons — inline SVG (matches Notes-toolbar style, no external assets).
+const _TICON_REPLY = '<svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="9 17 4 12 9 7"/><path d="M20 18v-2a4 4 0 0 0-4-4H4"/></svg>';
+const _TICON_CHECK = '<svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>';
+// Bookmark flag — filled when flagged, outline when not.
+const _TICON_FLAG_OFF = '<svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M19 21l-7-5-7 5V5a2 2 0 0 1 2-2h10a2 2 0 0 1 2 2z"/></svg>';
+const _TICON_FLAG_ON  = '<svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="#f0c02a" stroke="#f0c02a" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M19 21l-7-5-7 5V5a2 2 0 0 1 2-2h10a2 2 0 0 1 2 2z"/></svg>';
+const _TICON_TRASH = '<svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/><path d="M10 11v6M14 11v6"/><path d="M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg>';
+// Small icon button — subtle, ~24px hit target, hover tint.
+const _TICON_BTN_STYLE = 'background:transparent;border:1px solid var(--border);color:var(--muted);padding:3px 6px;border-radius:4px;cursor:pointer;display:inline-flex;align-items:center;line-height:1;';
+let _tExpanded = new Set(JSON.parse(localStorage.getItem('amux.tExpanded') || '[]'));
+function _tExpandedSave() {
+  try { localStorage.setItem('amux.tExpanded', JSON.stringify([..._tExpanded])); } catch(e) {}
+}
+// Per-message collapse state. Default: unread-to-Jeremy expand, everything
+// else collapses. Explicit-expand ids live in _tMsgExpanded; explicit-collapse
+// ids live with a '!' prefix so the same set carries both overrides. Toggle
+// flips from whatever's showing now, so first click on a collapsed message
+// always expands it.
+let _tMsgExpanded = new Set();
+function _tMsgToggle(mid, wasExpanded) {
+  _tMsgExpanded.delete(mid);
+  _tMsgExpanded.delete('!' + mid);
+  if (wasExpanded) _tMsgExpanded.add('!' + mid);
+  else _tMsgExpanded.add(mid);
+  _threadsRender();
+}
+function _tToggle(tid) {
+  if (_tExpanded.has(tid)) _tExpanded.delete(tid); else _tExpanded.add(tid);
+  _tExpandedSave();
+  _threadsRender();
+}
+// HTML escape + friendly time formatter (used to live on _qEsc/_qFmtTime in
+// the deleted Inbox module — reimplemented here so Threads is self-contained).
+function _tEsc(s) { return String(s || '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
+// Some agents post message bodies with LITERAL '\n' char sequences (backslash
+// + n) instead of real newlines — happens when a body is double-encoded via
+// nested JSON or built by a script that escapes newlines twice. `white-space:
+// pre-wrap` in CSS can't recover from that; we have to turn the two chars
+// into a real \n before rendering. Same story for \t and \r. Leaves a real
+// escaped-backslash-followed-by-n (\\n) alone.
+function _tNormalizeBody(s) {
+  return String(s || '')
+    .replace(/(^|[^\\])\\n/g, '$1\n')
+    .replace(/(^|[^\\])\\t/g, '$1\t')
+    .replace(/(^|[^\\])\\r/g, '$1\r')
+    .replace(/\\\\/g, '\\');
+}
+function _tFmtTime(ts) {
+  if (!ts) return '';
+  const d = new Date(ts * 1000);
+  const now = new Date();
+  const sameDay = d.toDateString() === now.toDateString();
+  if (sameDay) return d.toLocaleTimeString(undefined, {hour:'numeric', minute:'2-digit'});
+  return d.toLocaleDateString();
+}
+// Signature — cheap change detector; re-render only when content changes.
+function _threadsSig(list) {
+  return list.map(t => t.id + ':' + t.starred + ':' + t.updated + ':' + t.messages.length +
+    ':' + t.messages.map(m => m.id + ',' + m.status + ',' + m.read + ',' + (m.flagged || 0) + ',' + (m.body || '').length + ',' + m.updated).join('|')
+  ).join('~');
+}
+// Thread state — computed from newest complete message and any working ones.
+//   working    → any message is still being written (green pill)
+//   needs-you  → newest complete message is TO Jeremy AND unread (red)
+//   with-agent → newest complete message is TO an agent (blue)
+//   settled    → nothing pending on either side (grey)
+function _tThreadState(t) {
+  if (t.messages.some(m => m.status === 'working')) return 'working';
+  const complete = t.messages.filter(m => m.status === 'complete');
+  if (!complete.length) return 'settled';
+  const newest = complete.reduce((a,b) => (a.updated > b.updated ? a : b));
+  if (!newest.to_session && !newest.read) return 'needs-you';
+  if (newest.to_session) return 'with-agent';
+  return 'settled';
+}
+function _tStateTint(state) {
+  if (state === 'needs-you')  return {pill:'#e11', bg:'rgba(238,17,17,0.06)', border:'rgba(238,17,17,0.35)', label:'NEEDS YOU'};
+  if (state === 'working')    return {pill:'#4a4', bg:'rgba(74,170,74,0.06)', border:'rgba(74,170,74,0.35)', label:'WORKING'};
+  if (state === 'with-agent') return {pill:'#468', bg:'rgba(70,120,180,0.06)', border:'rgba(70,120,180,0.35)', label:'WITH AGENT'};
+  return {pill:'#666', bg:'transparent', border:'var(--border)', label:'SETTLED'};
+}
+function _tMsgStateBadge(m) {
+  // Badge is from Jeremy's perspective:
+  //   working    → sender still writing (green)
+  //   discarded  → dropped (grey)
+  //   unread     → complete message TO Jeremy that he hasn't opened (red)
+  //   read       → complete message TO Jeremy that he already opened (steel)
+  //   sent       → complete message Jeremy sent to an agent (blue)
+  //   delivered  → complete message between two agents (rare) (grey)
+  if (m.status === 'working')   return {text: 'writing',   color: '#4a4'};
+  if (m.status === 'discarded') return {text: 'discarded', color: '#666'};
+  if (!m.to_session) {
+    // to Jeremy
+    return m.read ? {text: 'read', color: '#456'} : {text: 'unread', color: '#e11'};
+  }
+  if (!m.from_session) return {text: 'sent', color: '#468'};   // from Jeremy → agent
+  return {text: 'delivered', color: '#666'};                    // agent → agent
+}
+function _tMsgDir(m) {
+  // Human-readable "who → who" for a message header.
+  const from = m.from_session || 'Jeremy';
+  const to   = m.to_session   || 'Jeremy';
+  const forJeremy = (!m.to_session && !!m.from_session);
+  return {label: `${from} → ${to}`, forJeremy};
+}
+async function _threadsLoad() {
+  try {
+    const r = await fetch(API + '/api/threads');
+    const list = await r.json();
+    if (!Array.isArray(list)) return;
+    _threadsCache = list;
+    _updateThreadsBadge(list);
+    const sig = _threadsSig(list);
+    if (sig === _threadsLastSig) return;
+    _threadsLastSig = sig;
+    _threadsRender();
+  } catch(e) {}
+}
+function _updateThreadsBadge(list) {
+  // Badge count = THREADS with at least one unread-to-Jeremy complete message,
+  // matching the Inbox convention (count of threads, not messages). Prevents
+  // a chain with 5 follow-ups from inflating the number.
+  let needsYou = 0;
+  for (const t of list) {
+    const anyUnread = t.messages.some(m =>
+      !m.to_session && !m.read && m.status === 'complete');
+    if (anyUnread) needsYou++;
+  }
+  const b = document.getElementById('tab-threads-count');
+  if (!b) return;
+  b.textContent = String(needsYou);
+  b.style.display = needsYou > 0 ? 'inline-block' : 'none';
+}
+function _threadsRender() {
+  const root = document.getElementById('threads-list');
+  if (!root) return;
+  // Preserve reply drafts across re-renders.
+  const drafts = {};
+  root.querySelectorAll('textarea[id^="t-reply-"]').forEach(el => { drafts[el.id] = el.value; });
+  const focused = document.activeElement;
+  const focusedId = focused && focused.id && focused.id.startsWith('t-reply-') ? focused.id : null;
+
+  const list = _threadsCache;
+  if (!list.length) {
+    root.innerHTML = '<div style="padding:24px;text-align:center;color:var(--muted);font-size:0.9rem;">No threads yet. Click <b>+ New thread</b> to start one, or wait for an agent to open one.</div>';
+    return;
+  }
+  let html = _tRenderFlagSection(list);
+  for (const t of list) html += _tRenderThread(t);
+  root.innerHTML = html;
+  // Restore drafts + focus
+  for (const [id, val] of Object.entries(drafts)) {
+    const el = document.getElementById(id);
+    if (el) el.value = val;
+  }
+  if (focusedId) { const el = document.getElementById(focusedId); if (el && el.focus) el.focus(); }
+}
+// Cross-thread "Flagged" summary section at the top of the list. Shows one
+// row per flagged message across every thread, so bookmarks stay findable
+// even as the thread they live in gets buried.
+let _tFlagSectionCollapsed = localStorage.getItem('amux.tFlagCollapsed') === '1';
+function _tFlagSectionToggle() {
+  _tFlagSectionCollapsed = !_tFlagSectionCollapsed;
+  try { localStorage.setItem('amux.tFlagCollapsed', _tFlagSectionCollapsed ? '1' : '0'); } catch(e) {}
+  _threadsRender();
+}
+function _tRenderFlagSection(list) {
+  // Collect every flagged message with its thread context.
+  const flagged = [];
+  for (const t of list) {
+    for (const m of t.messages) {
+      if (m.flagged) flagged.push({t, m});
+    }
+  }
+  if (!flagged.length) return '';
+  // Newest first — most recent bookmark is probably the most relevant.
+  flagged.sort((a, b) => (b.m.updated || 0) - (a.m.updated || 0));
+  const chev = _tFlagSectionCollapsed ? '▸' : '▾';
+  let html = `<div style="border:1px solid #f0c02a;background:rgba(240,192,42,0.05);border-radius:8px;margin:6px 0 14px 0;">
+    <div style="display:flex;align-items:center;gap:10px;padding:10px 12px;cursor:pointer;" onclick="_tFlagSectionToggle()">
+      <span style="width:12px;color:var(--muted);font-size:0.9rem;">${chev}</span>
+      <span style="color:#f0c02a;font-size:1rem;">${_TICON_FLAG_ON.replace('width="14" height="14"','width="16" height="16"')}</span>
+      <span style="font-weight:600;font-size:0.9rem;color:var(--fg);">Flagged</span>
+      <span style="background:#f0c02a;color:#111;padding:1px 8px;border-radius:10px;font-size:0.7rem;font-weight:700;">${flagged.length}</span>
+      <span style="flex:1;"></span>
+    </div>`;
+  if (!_tFlagSectionCollapsed) {
+    html += '<div style="border-top:1px solid rgba(240,192,42,0.25);padding:6px 10px 10px;">';
+    for (const {t, m} of flagged) {
+      const midEsc = _tEsc(m.id);
+      const tidEsc = _tEsc(t.id);
+      const dir = _tMsgDir(m);
+      const preview = _tNormalizeBody(m.body).replace(/\s+/g, ' ').slice(0, 140);
+      html += `<div style="padding:8px 10px;margin:4px 0;border:1px solid var(--border);border-radius:6px;background:var(--card-bg,transparent);cursor:pointer;" onclick="_tJumpToFlagged('${tidEsc}','${midEsc}')">
+        <div style="display:flex;align-items:baseline;gap:8px;font-size:0.72rem;color:var(--muted);flex-wrap:wrap;">
+          <span style="font-weight:600;color:var(--fg);">${midEsc}</span>
+          <span>${_tEsc(dir.label)}</span>
+          <span style="color:var(--muted);">in ${tidEsc} · ${_tEsc(t.title)}</span>
+          <span style="flex:1;"></span>
+          <span>${_tFmtTime(m.updated || m.created)}</span>
+          <button style="${_TICON_BTN_STYLE}" onclick="event.stopPropagation();_tFlagToggle('${midEsc}', false)" title="Remove flag">${_TICON_FLAG_ON}</button>
+        </div>
+        <div style="margin-top:6px;font-size:0.85rem;color:var(--fg);opacity:0.9;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${_tEsc(preview)}</div>
+      </div>`;
+    }
+    html += '</div>';
+  }
+  html += '</div>';
+  return html;
+}
+function _tJumpToFlagged(tid, mid) {
+  _tExpanded.add(tid);
+  _tExpandedSave();
+  _tMsgExpanded.delete('!' + mid);
+  _tMsgExpanded.add(mid);
+  _threadsRender();
+  // Scroll to the message once the render lands.
+  setTimeout(() => {
+    // Find the message card by its M-id text in the visible DOM.
+    const rows = document.querySelectorAll('#threads-list [style*="border-radius:6px"]');
+    for (const el of rows) {
+      if (el.textContent && el.textContent.trim().startsWith(mid)) {
+        el.scrollIntoView({behavior:'smooth', block:'center'});
+        el.style.transition = 'background 0.4s';
+        const old = el.style.background;
+        el.style.background = 'rgba(240,192,42,0.25)';
+        setTimeout(() => { el.style.background = old; }, 900);
+        break;
+      }
+    }
+  }, 60);
+}
+function _tRenderThread(t) {
+  const state = _tThreadState(t);
+  const tint = _tStateTint(state);
+  const expanded = _tExpanded.has(t.id);
+  const star = t.starred ? '★' : '☆';
+  const starColor = t.starred ? '#f0c02a' : 'var(--muted)';
+  const chev = expanded ? '▾' : '▸';
+  const anyBlocking = t.messages.some(m => m.blocking === 1 && m.status !== 'discarded');
+  const newestUpdated = t.messages.reduce((mx, m) => Math.max(mx, m.updated || 0), t.updated || 0);
+  const tidEsc = _tEsc(t.id);
+  // Thread cards get a chunkier border-left (4px accent bar) to visually
+  // separate them from the message cards inside; the rest of the border stays
+  // thin. Thread header is heavier (larger title, more padding) so the
+  // thread/message hierarchy reads at a glance.
+  const rowStyle = `border:1px solid ${tint.border};border-left:4px solid ${tint.pill};background:${tint.bg};border-radius:8px;margin:10px 0;`;
+  let html = `<div class="t-thread" style="${rowStyle}">
+    <div style="display:flex;align-items:center;gap:10px;padding:12px 14px;cursor:pointer;" onclick="_tToggle('${tidEsc}')">
+      <span style="font-size:1.15rem;color:${starColor};cursor:pointer;user-select:none;" title="${t.starred ? 'Unstar' : 'Star (keep at top)'}" onclick="event.stopPropagation();_tStarToggle('${tidEsc}', ${t.starred ? 'false' : 'true'})">${star}</span>
+      <span style="width:12px;color:var(--muted);font-size:0.9rem;">${chev}</span>
+      <span style="background:${tint.pill};color:#fff;padding:2px 8px;border-radius:4px;font-size:0.65rem;font-weight:700;text-transform:uppercase;letter-spacing:0.04em;white-space:nowrap;">${tint.label}</span>
+      ${anyBlocking ? '<span style="background:#e11;color:#fff;padding:2px 8px;border-radius:4px;font-size:0.65rem;font-weight:700;">BLOCKING</span>' : ''}
+      <span style="font-weight:700;font-size:0.9rem;color:var(--fg);white-space:nowrap;letter-spacing:0.02em;">${tidEsc}</span>
+      <span class="t-row-title" style="flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:1rem;font-weight:600;color:var(--fg);">${_tEsc(t.title)}</span>
+      <button style="${_TICON_BTN_STYLE}opacity:0.55;" onclick="event.stopPropagation();_tRenameThread('${tidEsc}')" title="Rename thread">✎</button>
+      <span style="font-size:0.7rem;color:var(--muted);white-space:nowrap;">${t.messages.length} msg${t.messages.length===1?'':'s'}</span>
+      <span class="t-row-time" style="font-size:0.7rem;color:var(--muted);white-space:nowrap;">${_tFmtTime(newestUpdated)}</span>
+    </div>`;
+  if (expanded) html += _tRenderMessages(t);
+  html += '</div>';
+  return html;
+}
+// Per-thread "show all older messages" toggle — long threads default to just
+// the 5 newest settled messages so switching threads doesn't require a huge
+// scroll. Flagged / unread / still-working messages are ALWAYS visible
+// regardless of age — those are the ones Jeremy actually wants to see.
+let _tShowAllMsgs = new Set();
+function _tToggleShowAll(tid) {
+  if (_tShowAllMsgs.has(tid)) _tShowAllMsgs.delete(tid);
+  else _tShowAllMsgs.add(tid);
+  _threadsRender();
+}
+function _tMsgAlwaysShow(m) {
+  return m.status === 'working'
+      || !!m.flagged
+      || (m.status === 'complete' && !m.to_session && !m.read);  // unread to Jeremy
+}
+function _tRenderMessages(t) {
+  const tidEsc = _tEsc(t.id);
+  // Slightly darker inset background inside the expanded panel so the message
+  // cards visually sit ON a distinct surface — makes the thread-vs-message
+  // hierarchy read instantly instead of merging into a wall of cards.
+  let html = `<div style="border-top:1px solid var(--border);padding:12px 14px;background:rgba(0,0,0,0.18);">`;
+  // Newest at top so the message you probably want to act on is first.
+  const msgs = t.messages.slice().sort((a,b) => (b.position - a.position) || (b.created - a.created));
+  const showAll = _tShowAllMsgs.has(t.id);
+  const READ_MAX = 5;
+  const collapsibleTotal = msgs.filter(m => !_tMsgAlwaysShow(m)).length;
+  let readShown = 0;
+  for (const m of msgs) {
+    if (_tMsgAlwaysShow(m)) {
+      html += _tRenderMsg(t, m);
+    } else if (showAll || readShown < READ_MAX) {
+      html += _tRenderMsg(t, m);
+      readShown++;
+    }
+  }
+  // Truncation control: "Show N older" collapsed; "Collapse older" expanded.
+  const hidden = collapsibleTotal - readShown;
+  if (hidden > 0) {
+    html += `<div style="text-align:center;padding:6px 8px 4px;font-size:0.8rem;">
+      <a href="javascript:void(0)" onclick="_tToggleShowAll('${tidEsc}')" style="color:var(--accent, #6aa);text-decoration:none;border-bottom:1px dashed currentColor;">Show ${hidden} older message${hidden===1?'':'s'}</a>
+    </div>`;
+  } else if (showAll && collapsibleTotal > READ_MAX) {
+    html += `<div style="text-align:center;padding:6px 8px 4px;font-size:0.8rem;">
+      <a href="javascript:void(0)" onclick="_tToggleShowAll('${tidEsc}')" style="color:var(--muted);text-decoration:none;">Collapse older messages</a>
+    </div>`;
+  }
+  // Discard-thread button lives at the very bottom, right-aligned, so it
+  // doesn't eat a whole row above the messages just to hold one icon.
+  html += `<div style="display:flex;justify-content:flex-end;margin-top:4px;">
+      <button style="${_TICON_BTN_STYLE}opacity:0.55;" onclick="_tDiscardThread('${tidEsc}')" title="Discard thread">${_TICON_TRASH}</button>
+    </div>`;
+  html += '</div>';
+  return html;
+}
+function _tRenderMsg(t, m) {
+  const dir = _tMsgDir(m);
+  const st = _tMsgStateBadge(m);
+  const forJeremy = dir.forJeremy;
+  const canMarkRead = m.status === 'complete' && !m.to_session && !m.read;
+  const midEsc = _tEsc(m.id);
+  const tidEsc = _tEsc(t.id);
+  // Default: expand only unread-to-Jeremy complete messages, still-writing
+  // messages, and flagged messages (they're actionable — Jeremy wants them
+  // visible when he opens the thread). Everything else collapses.
+  const isUnreadToMe = (m.status === 'complete' && !m.to_session && !m.read);
+  const isWorking = (m.status === 'working');
+  const expandByDefault = isUnreadToMe || isWorking || !!m.flagged;
+  const expanded = _tMsgExpanded.has(m.id) ? true
+                  : _tMsgExpanded.has('!' + m.id) ? false
+                  : expandByDefault;
+  const chev = expanded ? '▾' : '▸';
+  const flagged = !!m.flagged;
+  // Direction-colored left accent so a glance tells you who sent what without
+  // reading the "Jeremy → agent" text:
+  //   flagged            → gold (overrides everything)
+  //   working            → green (still writing)
+  //   unread to Jeremy   → red (needs attention)
+  //   from Jeremy (sent) → steel blue (your outbound)
+  //   read from agent    → muted
+  let accent = 'var(--border)';
+  if (flagged)                             accent = '#f0c02a';
+  else if (m.status === 'working')          accent = '#4a4';
+  else if (!m.to_session && !m.read && m.status === 'complete') accent = '#e11';
+  else if (!m.from_session && m.to_session) accent = '#468';
+  else if (m.status === 'complete')         accent = '#556';
+  const cardBg = flagged ? 'rgba(240,192,42,0.08)' : 'var(--card-bg, rgba(255,255,255,0.02))';
+  let html = `<div style="margin:0 0 8px 0;border:1px solid var(--border);border-left:3px solid ${accent};background:${cardBg};border-radius:4px;">
+    <div style="display:flex;align-items:center;gap:8px;padding:6px 10px;cursor:pointer;font-size:0.75rem;color:var(--muted);flex-wrap:wrap;" onclick="_tMsgToggle('${midEsc}', ${expanded})">
+      <span style="width:12px;color:var(--muted);">${chev}</span>
+      <button style="${_TICON_BTN_STYLE}" onclick="event.stopPropagation();_tFlagToggle('${midEsc}', ${flagged ? 'false' : 'true'})" title="${flagged ? 'Unflag' : 'Flag this message'}">${flagged ? _TICON_FLAG_ON : _TICON_FLAG_OFF}</button>
+      <button style="${_TICON_BTN_STYLE}" onclick="event.stopPropagation();_tReplyTo('${tidEsc}','${midEsc}')" title="Reply to this message">${_TICON_REPLY}</button>
+      ${canMarkRead ? `<button style="${_TICON_BTN_STYLE}" onclick="event.stopPropagation();_tMarkRead('${midEsc}')" title="Mark read">${_TICON_CHECK}</button>` : ''}
+      <span style="background:${st.color};color:#fff;padding:1px 6px;border-radius:3px;font-weight:600;text-transform:uppercase;letter-spacing:0.03em;">${st.text}</span>
+      <span style="font-weight:600;color:var(--fg);">${midEsc}</span>
+      <span>${_tEsc(dir.label)}</span>
+      <span style="flex:1;min-width:0;"></span>
+      <span>${_tFmtTime(m.updated || m.created)}</span>
+    </div>`;
+  if (!expanded) { html += '</div>'; return html; }
+  html += `<div style="padding:0 12px 10px 12px;">`;
+  // linkifyOutput auto-detects absolute paths and URLs — a path like
+  // /home/jwesley/.amux/uploads/abc-doc.pdf becomes a click-to-preview link,
+  // same behavior as session peek output. It escapes non-match text internally.
+  if (m.body) html += `<div style="white-space:pre-wrap;font-size:0.88rem;color:var(--fg);opacity:0.92;margin:4px 0 8px 0;">${linkifyOutput(_tNormalizeBody(m.body))}</div>`;
+  html += '</div></div>';
+  return html;
+}
+async function _tStarToggle(tid, starred) {
+  await fetch(API + '/api/threads/' + encodeURIComponent(tid), {
+    method: 'PATCH', headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({starred: !!starred}),
+  });
+  _threadsLoad();
+}
+async function _tDiscardThread(tid) {
+  if (!confirm('Discard thread ' + tid + '?')) return;
+  await fetch(API + '/api/threads/' + encodeURIComponent(tid), {method: 'DELETE'});
+  _threadsLoad();
+}
+async function _tRenameThread(tid) {
+  // Look up the current title so the prompt starts pre-filled — Jeremy is
+  // usually tweaking a title, not composing one from scratch.
+  const cur = (_threadsCache.find(t => t.id === tid) || {}).title || '';
+  const next = prompt('Rename thread ' + tid + ':', cur);
+  if (next === null) return;               // cancel
+  const trimmed = next.trim();
+  if (!trimmed || trimmed === cur) return; // empty or unchanged
+  const r = await fetch(API + '/api/threads/' + encodeURIComponent(tid), {
+    method: 'PATCH', headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({title: trimmed}),
+  });
+  if (!r.ok) { alert('Rename failed'); return; }
+  _threadsLoad();
+}
+async function _tMarkRead(mid) {
+  await fetch(API + '/api/messages/' + encodeURIComponent(mid), {
+    method: 'PATCH', headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({read: true}),
+  });
+  _threadsLoad();
+}
+async function _tFlagToggle(mid, flagged) {
+  await fetch(API + '/api/messages/' + encodeURIComponent(mid), {
+    method: 'PATCH', headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({flagged: !!flagged}),
+  });
+  _threadsLoad();
+}
+// ── New-thread / Reply modal ──
+let _tNewCtx = null;   // {mode:'new'} or {mode:'reply', tid, parentMid}
+// Attachment state — pending uploads for the currently-open modal. Mirrors
+// peekFiles but scoped to the threads modal so composing here and in the
+// session send-command row don't stomp each other.
+let _threadsFiles = []; // [{name, path, url, isImage, previewUrl}]
+function _threadsRenderAttach() {
+  const bar = document.getElementById('t-new-attach-bar');
+  if (!bar) return;
+  bar.classList.toggle('has-files', _threadsFiles.length > 0);
+  bar.innerHTML = _threadsFiles.map((f, i) => {
+    const isUploading = !f.path;
+    let thumb = '';
+    if (f.isImage && f.previewUrl) thumb = `<img src="${f.previewUrl}" alt="">`;
+    else thumb = `<span class="chip-icon">${_fileIcon(f.name)}</span>`;
+    return `<div class="peek-attach-chip${isUploading ? ' uploading' : ''}">
+      ${thumb}
+      <span class="chip-name">${esc(f.name)}</span>
+      ${isUploading ? '<span style="color:var(--dim);font-size:0.7rem;">↑</span>' : `<span class="chip-remove" onclick="_threadsRemoveFile(${i})">×</span>`}
+    </div>`;
+  }).join('');
+}
+function _threadsRemoveFile(idx) {
+  const f = _threadsFiles[idx];
+  if (f && f.previewUrl) URL.revokeObjectURL(f.previewUrl);
+  _threadsFiles.splice(idx, 1);
+  _threadsRenderAttach();
+}
+function _threadsClearFiles() {
+  _threadsFiles.forEach(f => { if (f && f.previewUrl) URL.revokeObjectURL(f.previewUrl); });
+  _threadsFiles = [];
+  _threadsRenderAttach();
+}
+async function _threadsUploadAndAttach(file) {
+  if (file.size > 20 * 1024 * 1024) { showToast('File too large (max 20 MB)'); return; }
+  const isImage = file.type.startsWith('image/');
+  const previewUrl = isImage ? URL.createObjectURL(file) : null;
+  const placeholder = { name: file.name, path: null, url: null, isImage, previewUrl };
+  const idx = _threadsFiles.length;
+  _threadsFiles.push(placeholder);
+  _threadsRenderAttach();
+  try {
+    const buf = await file.arrayBuffer();
+    const bytes = new Uint8Array(buf);
+    let binary = '';
+    for (let i = 0; i < bytes.length; i += 8192) {
+      binary += String.fromCharCode.apply(null, bytes.subarray(i, i + 8192));
+    }
+    const b64 = btoa(binary);
+    const r = await fetch(API + '/api/upload', {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({ name: file.name, data: b64 })
+    });
+    const d = await r.json();
+    if (!r.ok || d.error) { showToast('Upload failed: ' + (d.error || r.status)); _threadsFiles.splice(idx, 1); }
+    else { _threadsFiles[idx] = { name: file.name, path: d.path, url: d.url, isImage, previewUrl }; }
+  } catch(e) {
+    showToast('Upload failed: ' + e.message); _threadsFiles.splice(idx, 1);
+  }
+  _threadsRenderAttach();
+}
+function _threadsHandleFileInput(e) {
+  for (const f of e.target.files) _threadsUploadAndAttach(f);
+  e.target.value = '';
+}
+function _threadsHandlePaste(e) {
+  const items = e.clipboardData && e.clipboardData.items;
+  if (!items) return;
+  for (const item of items) {
+    if (item.kind === 'file') {
+      e.preventDefault();
+      _threadsUploadAndAttach(item.getAsFile());
+      return;
+    }
+  }
+}
+async function _threadsOpenNew() {
+  _tNewCtx = {mode: 'new'};
+  document.getElementById('t-new-header').textContent = 'New thread';
+  document.getElementById('t-new-target-row').style.display = '';
+  document.getElementById('t-new-title-row').style.display = '';
+  document.getElementById('t-new-body-label').textContent = 'Body (message content)';
+  document.getElementById('t-new-title').value = '';
+  document.getElementById('t-new-body').value = '';
+  document.getElementById('t-new-blocking').checked = false;
+  _threadsClearFiles();
+  await _tLoadTargets();
+  document.getElementById('t-new-modal').style.display = 'flex';
+  setTimeout(() => document.getElementById('t-new-title').focus(), 50);
+}
+function _tReplyTo(tid, parentMid) {
+  const t = _threadsCache.find(x => x.id === tid);
+  if (!t) return;
+  _tNewCtx = {mode: 'reply', tid, parentMid};
+  document.getElementById('t-new-header').textContent = `Reply to ${parentMid} in ${tid}`;
+  document.getElementById('t-new-target-row').style.display = 'none';
+  document.getElementById('t-new-title-row').style.display = 'none';
+  document.getElementById('t-new-body-label').textContent = 'Reply';
+  document.getElementById('t-new-title').value = '';
+  document.getElementById('t-new-body').value = '';
+  document.getElementById('t-new-blocking').checked = false;
+  _threadsClearFiles();
+  document.getElementById('t-new-modal').style.display = 'flex';
+  setTimeout(() => document.getElementById('t-new-body').focus(), 50);
+}
+async function _tLoadTargets() {
+  const sel = document.getElementById('t-new-target');
+  sel.innerHTML = '<option value="">(loading...)</option>';
+  try {
+    const r = await fetch(API + '/api/sessions');
+    const sessions = await r.json();
+    const optionsHtml = sessions
+      .filter(s => !s.archived && (s.status === 'active' || s.status === 'idle') && s.name !== 'amux-helper')
+      .sort((a,b) => a.name.localeCompare(b.name))
+      .map(s => `<option value="${_tEsc(s.name)}">${_tEsc(s.name)}${s.desc ? ' — ' + _tEsc(s.desc.slice(0,50)) : ''}</option>`)
+      .join('');
+    sel.innerHTML = optionsHtml || '<option value="">(no online sessions)</option>';
+  } catch(e) { sel.innerHTML = '<option value="">(failed to load)</option>'; }
+}
+function _threadsCloseNew() {
+  document.getElementById('t-new-modal').style.display = 'none';
+  _tNewCtx = null;
+  _threadsClearFiles();
+}
+async function _threadsSubmitNew() {
+  const text = document.getElementById('t-new-body').value.trim();
+  // Wait for any in-flight uploads before sending — otherwise we'd omit the
+  // path (still null) and the recipient wouldn't see the attachment.
+  if (_threadsFiles.some(f => !f.path)) { alert('Wait for attachments to finish uploading.'); return; }
+  const attachPaths = _threadsFiles.filter(f => f.path).map(f => f.path);
+  if (!text && attachPaths.length === 0) { alert('Body or attachment required.'); return; }
+  // Append attachment paths on their own lines so linkifyOutput picks them up
+  // as clickable file-preview links on the recipient's side.
+  const body = attachPaths.length
+    ? (text ? text + '\n\n' : '') + attachPaths.join('\n')
+    : text;
+  const blocking = document.getElementById('t-new-blocking').checked;
+  if (_tNewCtx && _tNewCtx.mode === 'reply') {
+    const {tid, parentMid} = _tNewCtx;
+    const r = await fetch(API + '/api/threads/' + encodeURIComponent(tid) + '/messages', {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({body, parent_id: parentMid, blocking}),
+    });
+    if (r.ok) { _threadsCloseNew(); _tExpanded.add(tid); _tExpandedSave(); _threadsLoad(); }
+    else { const t = await r.text(); alert('Reply failed: ' + r.status + ' — ' + t); }
+    return;
+  }
+  const target = document.getElementById('t-new-target').value;
+  const title = document.getElementById('t-new-title').value.trim();
+  if (!target) { alert('Pick a target session.'); return; }
+  if (!title) { alert('Title required.'); return; }
+  const r = await fetch(API + '/api/threads', {
+    method: 'POST', headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({title, body, to_session: target, blocking}),
+  });
+  if (r.ok) { _threadsCloseNew(); _threadsLoad(); }
+  else { const t = await r.text(); alert('Send failed: ' + r.status + ' — ' + t); }
+}
+// Fire an initial load so the tab badge shows unread count on page start.
+_threadsLoad();
+// Also refresh when the app comes back from background — iOS PWA pauses JS
+// timers, so returning to the tab needs a manual kick.
+document.addEventListener('visibilitychange', () => {
+  if (document.visibilityState === 'visible') _threadsLoad();
+});
 
 // ── Habits tab ───────────────────────────────────────────────────────────────
 let _habits = [];
@@ -28643,6 +28742,144 @@ async function _habitsDelete(idx) {
   _habits.splice(idx, 1);
   _habitsRender();
   await _habitsSave();
+}
+
+// ── Icon picker ──────────────────────────────────────────────────────────────
+const _ICON_EMOJIS = [
+  '🤖','🧠','💻','⚡','🔬','🔭','🧪','⚗️',
+  '🛠️','🔧','⚙️','🏗️','🔨','🪛','🔩','📦',
+  '📊','📈','🔍','🎯','💡','📝','📋','🗂️',
+  '🛡️','🔐','🌐','📡','🚀','🌊','🏛️','🦾',
+  '🌿','👁️','🦅','🐉','🌙','⭐','🎨','🔥',
+];
+let _iconPickerSession = null;
+
+function openIconPicker(session) {
+  closeAllMenus();
+  _iconPickerSession = session;
+  const grid = document.getElementById('icon-grid');
+  grid.innerHTML = _ICON_EMOJIS.map(e =>
+    `<button onclick="saveIcon('${e}')" title="${e}"
+       style="font-size:1.4rem;background:var(--card);border:1px solid transparent;border-radius:6px;
+              padding:4px;cursor:pointer;line-height:1;transition:border-color 0.1s;"
+       onmouseenter="this.style.borderColor='var(--accent)'"
+       onmouseleave="this.style.borderColor='transparent'">${e}</button>`
+  ).join('');
+  document.getElementById('icon-custom-input').value = '';
+  document.getElementById('icon-picker-overlay').classList.add('active');
+}
+
+function closeIconPicker() {
+  document.getElementById('icon-picker-overlay').classList.remove('active');
+  _iconPickerSession = null;
+}
+
+function iconCustomPreview(val) { /* live preview hook — currently no-op */ }
+
+async function saveIcon(emoji) {
+  if (!_iconPickerSession) return;
+  const session = _iconPickerSession;
+  closeIconPicker();
+  await apiCall(API + '/api/sessions/' + session + '/config', {
+    method: 'PATCH', headers: {'Content-Type':'application/json'},
+    body: JSON.stringify({ icon: emoji })
+  });
+  await fetchSessions();
+}
+
+async function saveIconCustom() {
+  const val = document.getElementById('icon-custom-input').value.trim();
+  await saveIcon(val);
+}
+
+// ── Color picker ─────────────────────────────────────────────────────────────
+const _CARD_COLORS = [
+  '#ef4444','#f97316','#eab308','#22c55e',
+  '#14b8a6','#3b82f6','#8b5cf6','#ec4899',
+  '#f43f5e','#84cc16','#06b6d4','#a78bfa',
+];
+let _colorPickerSession = null;
+
+function openColorPicker(session) {
+  closeAllMenus();
+  _colorPickerSession = session;
+  const grid = document.getElementById('color-grid');
+  grid.innerHTML = _CARD_COLORS.map(c =>
+    `<button onclick="saveColor('${c}')" title="${c}"
+       style="width:100%;aspect-ratio:1/1;background:${c};border:2px solid transparent;border-radius:50%;cursor:pointer;transition:transform 0.1s,border-color 0.1s;"
+       onmouseenter="this.style.transform='scale(1.2)';this.style.borderColor='white'"
+       onmouseleave="this.style.transform='';this.style.borderColor='transparent'"></button>`
+  ).join('');
+  document.getElementById('color-picker-overlay').classList.add('active');
+}
+
+function closeColorPicker() {
+  document.getElementById('color-picker-overlay').classList.remove('active');
+  _colorPickerSession = null;
+}
+
+async function saveColor(color) {
+  if (!_colorPickerSession) return;
+  const session = _colorPickerSession;
+  closeColorPicker();
+  await apiCall(API + '/api/sessions/' + session + '/config', {
+    method: 'PATCH', headers: {'Content-Type':'application/json'},
+    body: JSON.stringify({ color: color })
+  });
+  await fetchSessions();
+}
+
+// ── Repos tab ────────────────────────────────────────────────────────────────
+let _reposData = [];
+
+async function _reposLoad() {
+  try {
+    const r = await fetch('/api/repos');
+    const data = await r.json();
+    _reposData = data || [];
+    _reposRender();
+    const el = document.getElementById('repos-updated');
+    if (el) el.textContent = 'Updated ' + new Date().toLocaleTimeString();
+  } catch(e) {
+    const c = document.getElementById('repos-container');
+    if (c) c.innerHTML = '<div style="color:var(--dim);padding:24px;text-align:center;">Failed to load repos</div>';
+  }
+}
+
+function _reposRender() {
+  const c = document.getElementById('repos-container');
+  if (!c) return;
+  if (!_reposData.length) {
+    c.innerHTML = '<div style="color:var(--dim);font-size:0.85rem;padding:24px;text-align:center;">No repositories found under /mnt/gitdata/</div>';
+    return;
+  }
+  const rows = _reposData.map(r => {
+    const hasDirty    = r.dirty > 0;
+    const hasUnpushed = r.unpushed > 0;
+    let badge = '';
+    if (hasUnpushed) badge = '<span style="background:rgba(248,81,73,0.18);color:#f85149;border-radius:4px;padding:2px 7px;font-size:0.72rem;font-weight:600;">&#x2191;' + r.unpushed + ' unpushed</span>';
+    else if (hasDirty) badge = '<span style="background:rgba(210,153,34,0.18);color:#d2993e;border-radius:4px;padding:2px 7px;font-size:0.72rem;font-weight:600;">&#x25CF; dirty</span>';
+    else badge = '<span style="background:rgba(63,185,80,0.18);color:#3fb950;border-radius:4px;padding:2px 7px;font-size:0.72rem;font-weight:600;">&#x2713; clean</span>';
+
+    const dirty = hasDirty ? '<span style="color:var(--dim);font-size:0.75rem;">' + r.dirty + ' file' + (r.dirty !== 1 ? 's' : '') + ' changed</span>' : '';
+    const sha   = r.sha ? '<code style="font-size:0.72rem;background:var(--card);border-radius:3px;padding:1px 5px;color:var(--dim);">' + r.sha + '</code>' : '';
+    const when  = r.last_commit_when ? '<span style="color:var(--dim);font-size:0.75rem;">' + r.last_commit_when + '</span>' : '';
+    const msg   = r.last_commit ? '<span style="font-size:0.8rem;color:var(--fg);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:320px;" title="' + r.last_commit.replace(/"/g,'&quot;') + '">' + r.last_commit.substring(0, 72) + (r.last_commit.length > 72 ? '…' : '') + '</span>' : '';
+
+    return `<div style="background:var(--card);border:1px solid var(--border);border-radius:8px;padding:10px 14px;display:flex;flex-direction:column;gap:5px;">
+      <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;">
+        <span style="font-weight:600;font-size:0.9rem;">${r.name}</span>
+        <span style="color:var(--dim);font-size:0.75rem;">&#x2387; ${r.branch}</span>
+        ${badge}
+        ${dirty}
+      </div>
+      <div style="display:flex;align-items:center;gap:6px;flex-wrap:wrap;">
+        ${sha}${msg}${when ? '<span style="color:var(--dim);font-size:0.75rem;">·</span>' + when : ''}
+      </div>
+      <div style="color:var(--dim);font-size:0.7rem;user-select:all;">${r.path}</div>
+    </div>`;
+  }).join('');
+  c.innerHTML = rows;
 }
 
 // ── Map tab ───────────────────────────────────────────────────────────────────
@@ -29650,61 +29887,44 @@ function renderScheduler(opts) {
 
   if (!scope.length) {
     listEl.innerHTML = `<div style="text-align:center;padding:40px 0;color:var(--dim);">
-      <div style="font-size:2rem;margin-bottom:10px;">&#x23F0;</div>
+      <div style="font-size:2rem;margin-bottom:10px;">⏰</div>
       <div style="font-weight:600;font-size:0.9rem;margin-bottom:6px;color:var(--text);">No schedules yet</div>
       <div style="font-size:0.82rem;">Create a schedule to run commands in sessions on a recurring timer.</div>
     </div>`;
   } else {
     const renderCard = (s) => {
+      const nextRun = s.next_run ? s.next_run.replace('T', ' ') : '—';
+      const lastRun = s.last_run ? s.last_run.replace('T', ' ') : 'never';
       const recLabel = s.schedule_expr || (s.sched_type === 'once' ? 'once' : (s.recurrence || 'recurring'));
-      const runs = runMap[s.id] || [];
-      const dots = runs.map(r => {
-        const cls = r.status === 'ok' ? 'ok' : r.status === 'done' ? 'done' : 'err';
-        const title = esc(r.status + ' · ' + new Date(r.ran_at * 1000).toLocaleTimeString());
-        return `<span class="sched-run-dot ${cls}" title="${title}"></span>`;
-      }).join('');
-      const sessStatus = sessMap[s.session] || 'idle';
-      const sessLink = s.session
-        ? `<span class="sched-sess-dot ${sessStatus}" title="${s.session}: ${sessStatus}"></span><span style="color:var(--accent);cursor:pointer;" onclick="switchView('sessions');openPeek('${esc(s.session)}')">${esc(s.session)}</span>`
-        : `<span style="color:var(--dim);">(shell)</span>`;
-      const nextRel = s.next_run ? `▶ <strong style="color:var(--text);" title="${s.next_run}">${relTime(s.next_run)}</strong>` : '';
-      const lastRel = s.last_run ? `<span style="color:var(--dim);" title="${s.last_run}">&#x2713; ${relTime(s.last_run)}</span>` : `<span style="color:var(--dim);">never</span>`;
-      const trigLabel = s.trigger_on ? `&nbsp;&middot;&nbsp;<span style="color:var(--accent);font-size:0.65rem;">&#x26A1; ${esc((s.trigger_on||'').split(',').map(t=>t==='session_idle'?'idle':t==='board'?'board':t).join('+')).trim()}</span>` : '';
-      const watchLabel = s.watch ? `&nbsp;&middot;&nbsp;<span style="color:var(--dim);font-size:0.65rem;">&#x1F441; watch</span>` : '';
-      const doneLabel = s.done_pattern ? `&nbsp;&middot;&nbsp;<span style="color:var(--dim);font-size:0.65rem;">stop: <code style="font-size:0.6rem;">${esc(s.done_pattern.length > 20 ? s.done_pattern.slice(0,20)+'…' : s.done_pattern)}</code></span>` : '';
-      return `<div class="card sched-item" style="padding:9px 12px;">
-        <div style="display:flex;align-items:flex-start;gap:8px;">
-          <label class="sched-toggle-label" title="${s.enabled ? 'Disable' : 'Enable'}">
+      const dimmed = !s.enabled ? 'opacity:0.5;' : '';
+      return `<div class="card" style="padding:10px 12px;${dimmed}">
+        <div style="display:flex;align-items:flex-start;gap:10px;">
+          <label style="display:flex;align-items:center;cursor:pointer;flex-shrink:0;margin-top:1px;">
             <input type="checkbox" ${s.enabled ? 'checked' : ''}
               onchange="toggleSchedEnabled('${esc(s.id)}', this.checked)"
               style="width:auto;accent-color:var(--accent);">
           </label>
           <div style="flex:1;min-width:0;">
-            <div style="display:flex;align-items:center;gap:6px;flex-wrap:wrap;margin-bottom:4px;">
-              <code class="sched-id-badge" title="Schedule id — click to copy" onclick="event.stopPropagation();_copySchedId('${esc(s.id)}')">${esc(s.id)}</code>
-              <span style="font-weight:600;font-size:0.84rem;cursor:pointer;" onclick="toggleSchedExpand('${esc(s.id)}')">${esc(s.title)}</span>
-              <code class="sched-cadence-pill">${esc(recLabel)}</code>
-              ${trigLabel}${watchLabel}${doneLabel}
+            <div style="font-weight:600;font-size:0.85rem;">${esc(s.title)} <span style="font-weight:400;font-size:0.68rem;color:var(--dim);user-select:all;">${esc(s.id)}</span></div>
+            <div style="font-size:0.72rem;color:var(--dim);margin-top:2px;">
+              <span style="color:var(--accent);">${esc(s.session)}</span>
+              &nbsp;·&nbsp;<code style="font-size:0.7rem;background:var(--card);border:1px solid var(--border);border-radius:3px;padding:0 3px;">${esc(s.command.length > 60 ? s.command.slice(0,60) + '…' : s.command)}</code>
             </div>
-            <div style="font-size:0.72rem;display:flex;align-items:center;gap:8px;flex-wrap:wrap;color:var(--dim);">
-              <span style="display:flex;align-items:center;gap:3px;">${sessLink}</span>
-              ${nextRel ? `<span>${nextRel}</span>` : ''}
-              ${lastRel}
-              <span title="Total runs">&#xD7;${s.run_count || 0}</span>
-              ${dots ? `<span style="display:flex;align-items:center;gap:2px;" title="Recent runs (newest first)">${dots}</span>` : ''}
+            <div style="font-size:0.7rem;color:var(--dim);margin-top:5px;display:flex;gap:10px;flex-wrap:wrap;">
+              <span>🔁 ${esc(recLabel)}</span>
+              <span>▶ next: <strong style="color:var(--text);">${esc(nextRun)}</strong></span>
+              <span>✓ last: ${esc(lastRun)}</span>
+              <span>runs: <strong>${s.run_count || 0}</strong></span>
+              ${s.watch ? `<span style="color:var(--accent);">👁 watching</span>` : ''}
+              ${s.done_pattern ? `<span style="color:var(--dim);">stop: <code style="font-size:0.65rem;">${esc(s.done_pattern)}</code></span>` : ''}
+              ${s.trigger_on ? `<span style="color:var(--accent);" title="Event-triggered (cooldown ${s.trigger_cooldown||120}s)">⚡ ${esc((s.trigger_on||'').split(',').map(t=>t==='session_idle'?'on idle':t==='board'?'on board':t).join(' + '))}</span>` : ''}
             </div>
-            <div class="sched-cmd-expand" id="sched-cmd-${esc(s.id)}" style="display:none;">
-              <pre>${esc(s.command)}</pre>
-            </div>
-            <div class="sched-actions">
-              <button class="btn sched-action-btn" id="sched-view-btn-${esc(s.id)}"
-                onclick="toggleSchedExpand('${esc(s.id)}')">View</button>
-              <button class="btn sched-action-btn"
+            <div style="display:flex;gap:6px;margin-top:8px;flex-wrap:wrap;">
+              <button class="btn" style="font-size:0.72rem;padding:4px 12px;"
                 onclick="runScheduleNow('${esc(s.id)}')">Run Now</button>
-              ${s.sched_type !== 'once' && s.next_run ? `<button class="btn sched-action-btn" title="Skip the next occurrence" onclick="skipSchedule('${esc(s.id)}')">&#x23ED; Skip</button>` : ''}
-              <button class="btn sched-action-btn"
+              <button class="btn" style="font-size:0.72rem;padding:4px 12px;"
                 onclick="openSchedModal('${esc(s.id)}')">Edit</button>
-              <button class="btn sched-action-btn" style="color:var(--red);"
+              <button class="btn" style="font-size:0.72rem;padding:4px 12px;color:var(--red);"
                 onclick="deleteSchedule('${esc(s.id)}')">Delete</button>
             </div>
           </div>
@@ -29834,19 +30054,6 @@ async function runScheduleNow(id) {
     renderScheduler();
     _peekRefreshSchedIfActive();
   }
-}
-async function skipSchedule(id) {
-  try {
-    const r = await fetch(API + '/api/schedules/' + id + '/skip', {
-      method: 'POST', headers: {'Content-Type':'application/json'}, body: '{}'
-    });
-    const d = await r.json().catch(() => ({}));
-    if (!r.ok || d.error) { if (typeof showToast === 'function') showToast(d.error || 'Could not skip'); return; }
-    await fetchSchedules();
-    renderScheduler();
-    _peekRefreshSchedIfActive();
-    if (typeof showToast === 'function' && d.next_run) showToast('Skipped → next ' + relTime(d.next_run));
-  } catch(e) { if (typeof showToast === 'function') showToast('Skip failed'); }
 }
 
 async function toggleSchedEnabled(id, enabled) {
@@ -30080,11 +30287,8 @@ function boardColDrop(e, col) {
   e.preventDefault();
   e.currentTarget.classList.remove('drag-over');
   if (_boardDragId) {
-    const dragId = _boardDragId;
-    const item = boardItems.find(i => i.id === dragId);
-    if (item && item.status !== col) {
-      _gateConfirm(item, col).then(ok => { if (ok) moveBoardItem(dragId, col, undefined, ok); else renderBoard(); });
-    }
+    const item = boardItems.find(i => i.id === _boardDragId);
+    if (item && item.status !== col) moveBoardItem(_boardDragId, col);
     _boardDragId = null;
   }
 }
@@ -30298,8 +30502,6 @@ function renderBoard() {
     html += '</span>';
     html += '<span style="display:flex;align-items:center;gap:6px;">';
     html += '<span class="col-count" data-col="' + st + '">' + stCol.length + '</span>';
-    const _hasGate = Array.isArray(stObj.gate) && stObj.gate.length;
-    html += '<button class="col-gate-btn' + (_hasGate ? ' has-gate' : '') + '" onclick="event.stopPropagation();editStatusGate(\'' + st + '\')" title="Edit gate checklist for this column">&#9745;&#xFE0E; Gate</button>';
     if (!isBuiltIn) {
       html += '<button class="col-del-btn" onclick="event.stopPropagation();deleteBoardStatus(\'' + st + '\')" title="Delete column">&#x2715;</button>';
     }
@@ -30410,20 +30612,9 @@ function renderBoard() {
           const item = boardItems.find(i => i.id === id);
           const statusChanged = item && item.status !== newStatus;
           const posChanged = !item || item.pos !== newPos;
-          const _flush = () => { if (_boardRenderPending) { _boardRenderPending = false; renderBoard(); } };
-          if (statusChanged) {
-            // Gate: confirm before committing a status change; on cancel, revert the
-            // visual move by re-rendering from the (unchanged) boardItems.
-            _gateConfirm(item || {}, newStatus).then(ok => {
-              if (!ok) { renderBoard(); return; }
-              moveBoardItem(id, newStatus, newPos, ok);
-              _flush();
-            });
-            return;
-          }
-          if (posChanged) moveBoardItem(id, newStatus, newPos);
+          if (statusChanged || posChanged) moveBoardItem(id, newStatus, newPos);
           // Flush any renderBoard() calls that were deferred during the drag
-          _flush();
+          if (_boardRenderPending) { _boardRenderPending = false; renderBoard(); }
         }
       }));
     });
@@ -30494,51 +30685,25 @@ function _populateSessionSelect(selectId, current) {
 }
 
 // ── Schedule modal ────────────────────────────────────────────────────────────
-let _schedMode = 'loop';
-function setSchedMode(mode) {
-  _schedMode = mode;
-  ['loop','routine','trigger','once'].forEach(m => {
-    const panel = document.getElementById('sched-panel-' + m);
-    if (panel) panel.style.display = m === mode ? '' : 'none';
-  });
-  document.querySelectorAll('.sched-mode-btn').forEach(b =>
-    b.classList.toggle('active', b.dataset.mode === mode));
-  // default the once datetime if entering once with empty value
-  if (mode === 'once') {
-    const ra = document.getElementById('sched-run-at');
-    if (ra && !ra.value) ra.value = new Date(Date.now() + 3600000).toISOString().slice(0,16);
-  }
+function updateSchedTypeUI() {
+  const t = document.getElementById('sched-type').value;
+  document.getElementById('sched-once-fields').style.display = t === 'once' ? '' : 'none';
+  document.getElementById('sched-rec-fields').style.display = t === 'recurring' ? '' : 'none';
 }
-function setLoopEvery(v) {
-  document.getElementById('sched-loop-every').value = v;
-  markLoopChipActive(v);
+function updateSchedRecUI() {
+  const rec = document.getElementById('sched-recurrence').value;
+  document.getElementById('sched-weekday-field').style.display = rec === 'weekly' ? '' : 'none';
+  document.getElementById('sched-monthday-field').style.display = rec === 'monthly' ? '' : 'none';
+  document.getElementById('sched-time-field').style.display = rec === 'hourly' ? 'none' : '';
 }
-function markLoopChipActive(v) {
-  document.querySelectorAll('#sched-loop-chips .sched-chip').forEach(c =>
-    c.classList.toggle('active', c.dataset.every === v));
+function updateSchedWatchUI() {
+  document.getElementById('sched-watch-fields').style.display =
+    document.getElementById('sched-watch').checked ? '' : 'none';
 }
-function setRoutineExpr(v) {
-  document.getElementById('sched-expr').value = v;
-  markRoutineChip(v);
-}
-function markRoutineChip(v) {
-  document.querySelectorAll('#sched-routine-chips .sched-chip').forEach(c =>
-    c.classList.toggle('active', (c.getAttribute('onclick') || '').includes("'" + v + "'")));
-}
-function _schedCmdCount() {
-  const ta = document.getElementById('sched-command');
-  const el = document.getElementById('sched-command-count');
-  if (!ta || !el) return;
-  const n = ta.value.length;
-  el.textContent = n ? (n >= 1000 ? (n/1000).toFixed(1) + 'k' : n) + ' chars' : '';
-}
-function toggleSchedCmdFullscreen() {
-  const box = document.querySelector('#sched-overlay .board-edit-box');
-  if (!box) return;
-  const on = box.classList.toggle('sched-cmd-max');
-  const btn = document.getElementById('sched-expand-btn');
-  if (btn) { btn.innerHTML = on ? '&#x2921;' : '&#x2922;'; btn.title = on ? 'Shrink editor' : 'Expand editor (fills the modal)'; }
-  setTimeout(() => document.getElementById('sched-command').focus(), 30);
+function updateSchedTriggerUI() {
+  const any = document.getElementById('sched-trigger-idle').checked ||
+              document.getElementById('sched-trigger-board').checked;
+  document.getElementById('sched-trigger-cooldown-field').style.display = any ? '' : 'none';
 }
 function schedCmdSwitchMode(mode) {
   const ta = document.getElementById('sched-command');
@@ -30559,19 +30724,14 @@ function schedCmdSwitchMode(mode) {
   }
 }
 function updateSchedKindUI() {
-  const shell = document.getElementById('sched-kind-shell').checked;
-  document.getElementById('sched-kind').value = shell ? 'shell' : 'tmux';
-  document.getElementById('sched-session-group').style.display = shell ? 'none' : '';
-  document.getElementById('sched-command-label').textContent = shell ? 'Shell command' : 'Command';
-  document.getElementById('sched-command').placeholder = shell
+  const kind = document.getElementById('sched-kind').value;
+  document.getElementById('sched-session-group').style.display = kind === 'shell' ? 'none' : '';
+  document.getElementById('sched-command-label').textContent = kind === 'shell' ? 'Shell command' : 'Command';
+  document.getElementById('sched-command').placeholder = kind === 'shell'
     ? 'e.g. /bin/bash /path/to/script.sh' : 'e.g. /status or npm run build';
-}
-// Determine which mode an existing schedule maps to
-function schedModeOf(s) {
-  if (s.trigger_on) return 'trigger';
-  if (s.sched_type === 'once' && !s.schedule_expr) return 'once';
-  if (isLoopCadence(s)) return 'loop';
-  return 'routine';
+  // Watch mode only works in tmux mode
+  const watchSection = document.getElementById('sched-watch');
+  if (watchSection && kind === 'shell') { watchSection.checked = false; updateSchedWatchUI(); }
 }
 function openSchedModal(editId) {
   _schedEditId = editId || null;
@@ -30579,69 +30739,51 @@ function openSchedModal(editId) {
   // Populate session list
   const sel = document.getElementById('sched-session');
   sel.innerHTML = (sessions || []).map(s => `<option value="${esc(s.name)}">${esc(s.name)}</option>`).join('');
-  // Reset all fields to defaults
-  const setVal = (id, v) => { const el = document.getElementById(id); if (el) el.value = v; };
-  const setChk = (id, v) => { const el = document.getElementById(id); if (el) el.checked = v; };
-  setVal('sched-title', '');
-  setChk('sched-kind-shell', false);
-  setVal('sched-command', '');
-  setVal('sched-loop-every', '30m');
-  setVal('sched-expr', '');
-  setVal('sched-trigger-expr', '');
-  setVal('sched-run-at', new Date(Date.now() + 3600000).toISOString().slice(0,16));
-  setChk('sched-watch', false);
-  setVal('sched-done-pattern', '');
-  setVal('sched-done-action', 'disable');
-  setVal('sched-watch-timeout', 120);
-  setChk('sched-trigger-idle', false);
-  setChk('sched-trigger-board', false);
-  setVal('sched-trigger-cooldown', 120);
-  setVal('sched-trigger-sessions', '');
-
-  let mode = 'loop';
   if (editId) {
     const s = schedules.find(x => x.id === editId);
     if (s) {
-      setVal('sched-title', s.title);
-      setChk('sched-kind-shell', (s.kind || 'tmux') === 'shell');
+      document.getElementById('sched-title').value = s.title;
+      document.getElementById('sched-kind').value = s.kind || 'tmux';
       sel.value = s.session;
-      setVal('sched-command', s.command);
-      setVal('sched-run-at', s.run_at && s.run_at.includes('T') ? s.run_at : '');
-      setVal('sched-done-pattern', s.done_pattern || '');
-      setVal('sched-done-action', s.done_action || 'disable');
-      setChk('sched-watch', !!s.watch);
-      setVal('sched-watch-timeout', s.watch_timeout || 120);
+      document.getElementById('sched-command').value = s.command;
+      document.getElementById('sched-type').value = s.sched_type;
+      document.getElementById('sched-run-at').value = s.run_at || '';
+      document.getElementById('sched-expr').value = s.schedule_expr || '';
+      if (s.recurrence) document.getElementById('sched-recurrence').value = s.recurrence;
+      document.getElementById('sched-watch').checked = !!s.watch;
+      document.getElementById('sched-done-pattern').value = s.done_pattern || '';
+      document.getElementById('sched-done-action').value = s.done_action || 'disable';
+      document.getElementById('sched-watch-timeout').value = s.watch_timeout || 120;
       const trig = (s.trigger_on || '').split(',').map(x => x.trim());
-      setChk('sched-trigger-idle', trig.includes('session_idle'));
-      setChk('sched-trigger-board', trig.includes('board'));
-      setVal('sched-trigger-cooldown', s.trigger_cooldown || 120);
-      setVal('sched-trigger-sessions', s.trigger_sessions || '');
-      mode = schedModeOf(s);
-      const expr = s.schedule_expr || '';
-      if (mode === 'loop') {
-        const m = expr.match(/every\s+(\d+\s*[mh])/i);
-        setVal('sched-loop-every', m ? m[1].replace(/\s+/g,'') : (expr === 'hourly' ? '1h' : '30m'));
-      } else if (mode === 'routine') {
-        setVal('sched-expr', expr);
-      } else if (mode === 'trigger') {
-        setVal('sched-trigger-expr', expr);
-      }
+      document.getElementById('sched-trigger-idle').checked = trig.includes('session_idle');
+      document.getElementById('sched-trigger-board').checked = trig.includes('board');
+      document.getElementById('sched-trigger-cooldown').value = s.trigger_cooldown || 120;
+      document.getElementById('sched-trigger-sessions').value = s.trigger_sessions || '';
     }
     document.getElementById('sched-save-btn').textContent = 'Update';
   } else {
+    document.getElementById('sched-title').value = '';
+    document.getElementById('sched-kind').value = 'tmux';
+    document.getElementById('sched-command').value = '';
+    document.getElementById('sched-expr').value = '';
+    document.getElementById('sched-type').value = 'once';
+    document.getElementById('sched-run-at').value = new Date(Date.now() + 3600000).toISOString().slice(0,16);
+    document.getElementById('sched-watch').checked = false;
+    document.getElementById('sched-done-pattern').value = '';
+    document.getElementById('sched-done-action').value = 'disable';
+    document.getElementById('sched-watch-timeout').value = 120;
+    document.getElementById('sched-trigger-idle').checked = false;
+    document.getElementById('sched-trigger-board').checked = false;
+    document.getElementById('sched-trigger-cooldown').value = 120;
+    document.getElementById('sched-trigger-sessions').value = '';
     document.getElementById('sched-save-btn').textContent = 'Save';
   }
+  updateSchedTypeUI();
+  updateSchedRecUI();
+  updateSchedWatchUI();
+  updateSchedTriggerUI();
   updateSchedKindUI();
-  setSchedMode(mode);
-  setLoopEvery(document.getElementById('sched-loop-every').value);
-  markRoutineChip(document.getElementById('sched-expr').value);
   schedCmdSwitchMode('edit');
-  // reset editor expand state + char count
-  const _box = overlay.querySelector('.board-edit-box');
-  if (_box) _box.classList.remove('sched-cmd-max');
-  const _eb = document.getElementById('sched-expand-btn');
-  if (_eb) { _eb.innerHTML = '&#x2922;'; _eb.title = 'Expand editor (fills the modal)'; }
-  _schedCmdCount();
   overlay.style.display = 'flex';
   requestAnimationFrame(() => {
     overlay.classList.add('active');
@@ -30658,44 +30800,39 @@ function closeSchedModal() {
 }
 async function saveSchedModal() {
   const title = document.getElementById('sched-title').value.trim();
-  const shell = document.getElementById('sched-kind-shell').checked;
-  const kind = shell ? 'shell' : 'tmux';
-  const session = shell ? '' : document.getElementById('sched-session').value;
+  const kind = document.getElementById('sched-kind').value;
+  const session = kind === 'shell' ? '' : document.getElementById('sched-session').value;
   const command = document.getElementById('sched-command').value.trim();
-  if (!title || !command) { showToast && showToast('Title and command are required'); return; }
-  if (!shell && !session) { showToast && showToast('Pick a session'); return; }
-
-  const v = (id) => (document.getElementById(id).value || '').trim();
-  const mode = _schedMode;
-  let stype = 'recurring', run_at = '', schedExpr = '';
-  let watch = 0, donePattern = '', doneAction = 'disable';
-  const trig = [];
-  let triggerCooldown = 120, triggerSessions = '';
-
-  if (mode === 'loop') {
-    let every = v('sched-loop-every') || '30m';
-    if (!/^\d+\s*[mh]$/i.test(every)) { showToast && showToast('Interval looks off — try "30m" or "1h"'); return; }
-    schedExpr = 'every ' + every.replace(/\s+/g,'');
-    donePattern = v('sched-done-pattern');
-    if (donePattern) { watch = 1; doneAction = 'disable'; }
-  } else if (mode === 'routine') {
-    schedExpr = v('sched-expr');
-    if (!schedExpr) { showToast && showToast('Enter a schedule (e.g. "daily at 9am")'); return; }
-  } else if (mode === 'trigger') {
-    if (document.getElementById('sched-trigger-idle').checked) trig.push('session_idle');
-    if (document.getElementById('sched-trigger-board').checked) trig.push('board');
-    schedExpr = v('sched-trigger-expr');  // optional heartbeat
-    if (!trig.length && !schedExpr) { showToast && showToast('Pick a trigger event or add a heartbeat timer'); return; }
-    triggerCooldown = parseInt(v('sched-trigger-cooldown')) || 120;
-    triggerSessions = v('sched-trigger-sessions').split(',').map(x => x.trim()).filter(Boolean).join(',');
-  } else { // once
-    stype = 'once';
-    run_at = v('sched-run-at');
-    if (!run_at) { showToast && showToast('Pick a date & time'); return; }
+  const stype = document.getElementById('sched-type').value;
+  if (!title || !command) return;
+  if (kind === 'tmux' && !session) return;
+  let run_at, recurrence;
+  if (stype === 'once') {
+    run_at = document.getElementById('sched-run-at').value;
+  } else {
+    recurrence = document.getElementById('sched-recurrence').value;
+    const time = document.getElementById('sched-time').value || '09:00';
+    if (recurrence === 'weekly') {
+      const wd = document.getElementById('sched-weekday').value;
+      run_at = wd + ':' + time;
+    } else if (recurrence === 'monthly') {
+      const md = document.getElementById('sched-monthday').value || '1';
+      run_at = md + ':' + time;
+    } else {
+      run_at = time;
+    }
   }
-
-  const watchTimeout = parseInt(v('sched-watch-timeout')) || 120;
-  const payload = { title, session, kind, command, sched_type: stype, recurrence: null, run_at,
+  const schedExpr = document.getElementById('sched-expr').value.trim();
+  const watch = document.getElementById('sched-watch').checked ? 1 : 0;
+  const donePattern = document.getElementById('sched-done-pattern').value.trim();
+  const doneAction = document.getElementById('sched-done-action').value;
+  const watchTimeout = parseInt(document.getElementById('sched-watch-timeout').value) || 120;
+  const trig = [];
+  if (document.getElementById('sched-trigger-idle').checked) trig.push('session_idle');
+  if (document.getElementById('sched-trigger-board').checked) trig.push('board');
+  const triggerCooldown = parseInt(document.getElementById('sched-trigger-cooldown').value) || 120;
+  const triggerSessions = document.getElementById('sched-trigger-sessions').value.split(',').map(x => x.trim()).filter(Boolean).join(',');
+  const payload = { title, session, kind, command, sched_type: stype, recurrence: recurrence || null, run_at,
                     schedule_expr: schedExpr || null,
                     watch, done_pattern: donePattern || null, done_action: doneAction, watch_timeout: watchTimeout,
                     trigger_on: trig.join(','), trigger_cooldown: triggerCooldown, trigger_sessions: triggerSessions };
@@ -30731,8 +30868,6 @@ function openBoardAdd(statusOrDate, prefillDate) {
   boardEditStatus = status;
   document.getElementById('be-title').value = '';
   document.getElementById('be-desc').value = '';
-  const beGateEl = document.getElementById('be-gate');
-  if (beGateEl) beGateEl.value = '';
   const dueEl = document.getElementById('be-due');
   if (dueEl) dueEl.value = dueDate;
   const dueTimeEl2 = document.getElementById('be-due-time');
@@ -30765,17 +30900,8 @@ async function saveBoardEdit() {
   const due = dueEl ? dueEl.value : '';
   const dueTimeEl = document.getElementById('be-due-time');
   const dueTime = dueTimeEl ? dueTimeEl.value : '';
-  const gateEl = document.getElementById('be-gate');
-  const gate = gateEl ? gateEl.value.split('\n').map(s => s.trim()).filter(Boolean) : [];
-  // Gate: if creating directly into a status different from the one the modal opened
-  // at, and that status has an effective gate, confirm before saving.
-  if (status !== boardEditStatus) {
-    const ok = await _gateConfirm({ gate }, status);
-    if (!ok) return;  // abort — leave the modal open
-  }
   closeBoardEdit();
-  const ownerType = session ? 'agent' : 'human';
-  await addBoardItem(title, desc, status, session, tags, due, ownerType, dueTime, gate);
+  await addBoardItem(title, desc, status, session, tags, due, undefined, dueTime);
   if (_peekTab === 'issues') renderPeekIssues();
 }
 
@@ -30804,8 +30930,6 @@ function openBoardDetail(id) {
   if (dueEl) dueEl.value = draft ? (draft.due || '') : (item.due || '');
   const dueTimeEl = document.getElementById('bd-due-time');
   if (dueTimeEl) dueTimeEl.value = draft ? (draft.due_time || '') : (item.due_time || '');
-  const gateEl = document.getElementById('bd-gate');
-  if (gateEl) gateEl.value = (Array.isArray(item.gate) ? item.gate : []).join('\n');
   boardDetailTab('edit');
   _tagState['bd'] = [...(item.tags || [])];
   _beTagRenderChips('bd');
@@ -30923,24 +31047,11 @@ async function boardDetailSave() {
   const desc = document.getElementById('bd-desc').value.trim();
   const sel = document.getElementById('bd-session');
   const session = sel ? sel.value : undefined;
-  const gateEl = document.getElementById('bd-gate');
-  const gate = gateEl ? gateEl.value.split('\n').map(s => s.trim()).filter(Boolean) : [];
-  const _cur = boardItems.find(i => i.id === boardDetailId);
-  // Gate: if the status changed to a different status with an effective gate
-  // (using the possibly-just-edited override), confirm before saving.
-  let _gateAck = null;
-  if (_cur && boardDetailStatus !== (_cur.status || 'todo')) {
-    const ok = await _gateConfirm({ ..._cur, gate }, boardDetailStatus);
-    if (!ok) { const el = document.getElementById('bd-save-status'); if (el) el.textContent = ''; return; }
-    _gateAck = ok;
-  }
   document.getElementById('bd-save-status').textContent = 'Saving...';
   const dueInput = document.getElementById('bd-due');
   const dueTimeInput = document.getElementById('bd-due-time');
-  const changes = { title, desc, status: boardDetailStatus, due: dueInput ? dueInput.value : '', due_time: dueTimeInput ? dueTimeInput.value : '', tags: [..._tagState['bd']], gate };
+  const changes = { title, desc, status: boardDetailStatus, due: dueInput ? dueInput.value : '', due_time: dueTimeInput ? dueTimeInput.value : '', tags: [..._tagState['bd']] };
   if (session !== undefined) changes.session = session;
-  // The server enforces status gates: forward acknowledgement from _gateConfirm.
-  if (_gateAck) { changes.gate_ack = true; if (Array.isArray(_gateAck)) changes.gate_checked = _gateAck; }
   await updateBoardItem(boardDetailId, changes);
   delete _boardDrafts[boardDetailId];
   document.getElementById('bd-save-status').textContent = 'Saved';
@@ -30971,18 +31082,17 @@ function saveBoardCache() {
   localStorage.setItem('amux_board_cache', lastBoardJSON);
 }
 
-async function addBoardItem(title, desc, status, session, tags, due, ownerType, dueTime, gate) {
-  ownerType = ownerType || (session ? 'agent' : 'human');
-  gate = gate || [];
+async function addBoardItem(title, desc, status, session, tags, due, ownerType, dueTime) {
+  ownerType = ownerType || 'human';
   const tempId = Math.random().toString(16).slice(2, 8);
   const now = Math.floor(Date.now() / 1000);
-  const tempItem = { id: tempId, title, desc, status, session: session || '', tags: tags || [], due: due || '', due_time: dueTime || '', gate: gate, creator: _getDeviceName(), owner_type: ownerType, created: now, updated: now, _pending: true };
+  const tempItem = { id: tempId, title, desc, status, session: session || '', tags: tags || [], due: due || '', due_time: dueTime || '', creator: _getDeviceName(), owner_type: ownerType, created: now, updated: now, _pending: true };
   boardItems.push(tempItem);
   saveBoardCache();
   renderBoard();
   const r = await apiCall(API + '/api/board', {
     method: 'POST', headers: {'Content-Type': 'application/json'},
-    body: JSON.stringify({ title, desc, status, session: session || '', tags: tags || [], due: due || '', due_time: dueTime || '', gate: gate, creator: _getDeviceName(), owner_type: ownerType })
+    body: JSON.stringify({ title, desc, status, session: session || '', tags: tags || [], due: due || '', due_time: dueTime || '', creator: _getDeviceName(), owner_type: ownerType })
   });
   if (r) {
     const item = await r.json();
@@ -31054,12 +31164,7 @@ function _gateConfirm(item, targetStatusId) {
     chks.forEach(c => c.addEventListener('change', upd)); upd();
     const done = v => { bg.remove(); resolve(v); };
     box.querySelector('#_gate-cancel').onclick = () => done(false);
-    // Resolve with the list of acknowledged criteria (empty→true) so callers can
-    // forward gate_ack / gate_checked to the server, which now enforces the gate.
-    box.querySelector('#_gate-ok').onclick = () => {
-      const checked = [...chks].filter(c => c.checked).map(c => gate[+c.dataset.i]).filter(x => x != null);
-      done(checked.length ? checked : true);
-    };
+    box.querySelector('#_gate-ok').onclick = () => done(true);
     bg.onclick = e => { if (e.target === bg) done(false); };
   });
 }
@@ -31145,7 +31250,7 @@ function editSessionGate(session, statusId) {
   box.querySelector('#_sgate-edit-save').onclick = () => persist(ta.value.split('\n').map(x => x.trim()).filter(Boolean));
 }
 
-function moveBoardItem(id, newStatus, newPos, gateAck) {
+function moveBoardItem(id, newStatus, newPos) {
   // Optimistic: update in-memory + cache immediately; Sortable already moved the DOM
   const idx = boardItems.findIndex(i => i.id === id);
   if (idx >= 0) {
@@ -31157,8 +31262,6 @@ function moveBoardItem(id, newStatus, newPos, gateAck) {
   // Sync to backend silently — no renderBoard() so the drag stays smooth
   const body = { status: newStatus };
   if (typeof newPos === 'number' && isFinite(newPos)) body.pos = newPos;
-  // The server enforces status gates: forward acknowledgement from _gateConfirm.
-  if (gateAck) { body.gate_ack = true; if (Array.isArray(gateAck)) body.gate_checked = gateAck; }
   apiCall(API + '/api/board/' + id, {
     method: 'PATCH', headers: {'Content-Type': 'application/json'},
     body: JSON.stringify(body)
@@ -31252,8 +31355,21 @@ let _fcInstance = null;
 
 function _fcGetEvents() {
   const events = [];
-  // Board issues are intentionally excluded — the calendar reflects schedules
-  // (when things actually run), not every board due date (too noisy).
+  (boardItems || []).forEach(item => {
+    if (!item.due || item.deleted) return;
+    const sty = statusStyle(item.status || 'todo');
+    const ev = {
+      id: item.id,
+      title: item.title,
+      start: item.due_time ? item.due + 'T' + item.due_time : item.due,
+      allDay: !item.due_time,
+      backgroundColor: sty.bg,
+      borderColor: sty.color,
+      textColor: sty.color,
+      extendedProps: { _type: 'board', status: item.status || 'todo', desc: item.desc || '' },
+    };
+    events.push(ev);
+  });
   (schedules || []).forEach(s => {
     if (s.deleted || !s.enabled || !s.next_run) return;
     events.push({
@@ -31317,10 +31433,18 @@ function _fcInit() {
     stickyHeaderDates: true,
     eventClick: function(info) {
       const props = info.event.extendedProps;
-      if (props._type === 'schedule') openSchedModal(props.schedId);
+      if (props._type === 'schedule') {
+        openSchedModal(props.schedId);
+      } else {
+        openBoardDetail(info.event.id);
+      }
     },
-    dateClick: function() { openSchedModal(); },   // calendar is schedules now → new schedule
-    select: function() { openSchedModal(); },
+    dateClick: function(info) {
+      openBoardAdd(info.dateStr);
+    },
+    select: function(info) {
+      openBoardAdd(info.startStr.slice(0, 10));
+    },
     viewDidMount: function(info) {
       localStorage.setItem('amux_cal_view', info.view.type);
     },
@@ -31348,89 +31472,39 @@ function renderCalendar() {
   }
 }
 
-async function _tunnelStatus() {
-  try { const r = await fetch(API + '/api/tunnel/status'); return await r.json(); }
-  catch(e) { return { error: String(e) }; }
-}
-function _tunnelCopy(btn, url) {
-  navigator.clipboard.writeText(url).then(() => {
-    const t = btn.textContent; btn.textContent = 'Copied!'; setTimeout(() => btn.textContent = t, 1200);
-  }).catch(() => {});
-}
-async function _tunnelStartUI(box) {
-  const btn = box.querySelector('#tun-toggle'); if (btn) { btn.disabled = true; btn.textContent = 'Starting…'; }
-  try { await fetch(API + '/api/tunnel/start', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' }); } catch(e) {}
-  for (let i = 0; i < 14; i++) { const s = await _tunnelStatus(); if (s.url || s.error) break; await new Promise(r => setTimeout(r, 500)); }
-  _renderIcalBody(box);
-}
-async function _tunnelStopUI(box) {
-  const btn = box.querySelector('#tun-toggle'); if (btn) { btn.disabled = true; btn.textContent = 'Stopping…'; }
-  try { await fetch(API + '/api/tunnel/stop', { method: 'POST' }); } catch(e) {}
-  _renderIcalBody(box);
-}
-async function _renderIcalBody(box) {
-  const esc_url = s => String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;');
+function showIcalInfo() {
   const s3Url = window._AMUX_S3_ICAL_URL || '';
   const origin = window.location.origin;
   const localUrl = origin + '/api/calendar.ics';
   const isLocal = origin.includes('localhost') || origin.includes('127.0.0.1');
-  const tun = await _tunnelStatus();
-  const tunUrl = (tun && tun.running && tun.url) ? (tun.url.replace(/\/$/, '') + '/api/calendar.ics') : '';
-  const subUrl = tunUrl || s3Url || localUrl;
+  const subUrl = s3Url || localUrl;
   const googleUrl = 'https://calendar.google.com/calendar/r/settings/addbyurl?url=' + encodeURIComponent(subUrl);
-  const appleUrl = /^https?:/.test(subUrl) ? ('webcal://' + subUrl.replace(/^https?:\/\//, '')) : subUrl;
-
-  let html = '<div style="font-size:0.9rem;line-height:1.6;">';
-  html += '<p style="margin:0 0 0.9rem;font-weight:600;font-size:1rem;">Subscribe to amux calendar</p>';
-
-  // ── Public tunnel (amux cloud) ──
-  html += '<div style="border:1px solid var(--border);border-radius:8px;padding:0.7rem 0.8rem;margin-bottom:0.9rem;background:var(--card,rgba(255,255,255,0.02));">';
-  if (tun && tun.running && tun.url) {
-    html += '<div style="display:flex;align-items:center;gap:6px;margin-bottom:0.45rem;"><span style="width:8px;height:8px;border-radius:50%;background:#3fb950;flex-shrink:0;"></span><strong style="font-size:0.85rem;">Public tunnel active</strong><span style="color:var(--dim);font-size:0.72rem;margin-left:auto;">' + (tun.requests || 0) + ' reqs</span></div>';
-    html += '<code style="display:block;background:var(--bg);padding:0.45rem 0.6rem;border-radius:6px;font-size:0.73rem;word-break:break-all;margin-bottom:0.5rem;">' + esc_url(tunUrl) + '</code>';
-    html += '<div style="display:flex;gap:0.4rem;">';
-    html += '<button class="btn" style="font-size:0.76rem;" onclick="_tunnelCopy(this,\'' + tunUrl.replace(/'/g, "\\'") + '\')">Copy URL</button>';
-    html += '<button id="tun-toggle" class="btn" style="font-size:0.76rem;" onclick="_tunnelStopUI(this.closest(\'[data-ical-box]\'))">Stop tunnel</button>';
-    html += '</div>';
-  } else if (tun && tun.configured) {
-    html += '<div style="margin-bottom:0.35rem;"><strong style="font-size:0.85rem;">Public tunnel</strong> <span style="color:var(--dim);font-size:0.78rem;">— off</span></div>';
-    html += '<p style="color:var(--muted);font-size:0.76rem;margin:0 0 0.5rem;">Expose this calendar at a public cloud URL you can subscribe to from anywhere.</p>';
-    if (tun.error) html += '<p style="color:var(--red);font-size:0.72rem;margin:0 0 0.4rem;word-break:break-word;">' + esc_url(tun.error) + '</p>';
-    html += '<button id="tun-toggle" class="btn" style="font-size:0.78rem;" onclick="_tunnelStartUI(this.closest(\'[data-ical-box]\'))">Start public tunnel</button>';
+  const appleUrl = s3Url ? ('webcal://' + s3Url.replace(/^https?:\/\//, '')) : ('webcal://' + window.location.host + '/api/calendar.ics');
+  function esc_url(s) { return s.replace(/&/g,'&amp;').replace(/</g,'&lt;'); }
+  let html = '<div style="font-size:0.9rem;line-height:1.7;">';
+  html += '<p style="margin-bottom:0.8rem;font-weight:600;">Subscribe to amux calendar</p>';
+  if (s3Url) {
+    html += '<p style="margin-bottom:0.6rem;font-size:0.82rem;">Subscription URL (public S3):</p>';
+    html += '<code style="display:block;background:var(--card-bg);padding:0.5rem 0.8rem;border-radius:6px;font-size:0.78rem;margin-bottom:1rem;word-break:break-all;">' + esc_url(s3Url) + '</code>';
+  } else if (isLocal) {
+    html += '<p style="margin-bottom:0.8rem;color:var(--muted);font-size:0.82rem;">Set <code>AMUX_S3_BUCKET</code> for a publicly reachable subscription URL.</p>';
   } else {
-    html += '<div style="margin-bottom:0.3rem;"><strong style="font-size:0.85rem;">Public tunnel</strong> <span style="color:var(--dim);font-size:0.78rem;">— amux cloud</span></div>';
-    html += '<p style="color:var(--muted);font-size:0.76rem;margin:0;">Sign in to amux cloud and set <code>AMUX_TUNNEL_TOKEN</code> to expose this calendar publicly — subscribe from Google/Apple anywhere, no port forwarding.</p>';
+    html += '<code style="display:block;background:var(--card-bg);padding:0.5rem 0.8rem;border-radius:6px;font-size:0.78rem;margin-bottom:1rem;word-break:break-all;">' + esc_url(localUrl) + '</code>';
   }
-  html += '</div>';
-
-  // ── Subscription URL + actions ──
-  const label = tunUrl ? 'public tunnel' : (s3Url ? 'public S3' : (isLocal ? '' : 'server'));
-  if (label) html += '<p style="margin:0 0 0.4rem;font-size:0.8rem;color:var(--muted);">Subscription URL (' + label + '):</p>';
-  if (tunUrl || s3Url || !isLocal) {
-    html += '<code style="display:block;background:var(--card,rgba(255,255,255,0.02));padding:0.5rem 0.7rem;border-radius:6px;font-size:0.75rem;word-break:break-all;margin-bottom:0.9rem;">' + esc_url(subUrl) + '</code>';
-  } else {
-    html += '<p style="margin:0 0 0.9rem;color:var(--muted);font-size:0.8rem;">Local only — start the tunnel above (or set <code>AMUX_S3_BUCKET</code>) for a publicly reachable URL.</p>';
-  }
-  html += '<div style="display:flex;gap:0.5rem;flex-wrap:wrap;">';
+  html += '<div style="display:flex;gap:0.5rem;flex-wrap:wrap;margin-bottom:0.8rem;">';
   html += '<a href="' + googleUrl + '" target="_blank" class="btn" style="font-size:0.8rem;">Add to Google Calendar</a>';
   html += '<a href="' + appleUrl + '" class="btn" style="font-size:0.8rem;">Add to Apple Calendar</a>';
   html += '<a href="/api/calendar.ics" download="amux.ics" class="btn" style="font-size:0.8rem;">Download .ics</a>';
   html += '</div></div>';
-
-  box.innerHTML = html + '<button onclick="this.closest(\'[data-ical-modal]\').remove()" class="btn" style="margin-top:0.9rem;font-size:0.8rem;">Close</button>';
-}
-function showIcalInfo() {
   const modal = document.createElement('div');
   modal.style.cssText = 'position:fixed;inset:0;z-index:2000;display:flex;align-items:center;justify-content:center;background:rgba(0,0,0,0.55);';
   const box = document.createElement('div');
-  box.setAttribute('data-ical-box', '1');
-  box.style.cssText = 'background:var(--bg);border:1px solid var(--border);border-radius:12px;padding:1.4rem;max-width:440px;width:90%;box-shadow:0 8px 32px rgba(0,0,0,0.4);max-height:85vh;overflow:auto;';
-  box.innerHTML = '<p style="color:var(--dim);font-size:0.85rem;margin:0;">Loading…</p>';
+  box.style.cssText = 'background:var(--bg);border:1px solid var(--border);border-radius:12px;padding:1.4rem;max-width:420px;width:90%;box-shadow:0 8px 32px rgba(0,0,0,0.4);';
+  box.innerHTML = html + '<button onclick="this.closest(\'[data-ical-modal]\').remove()" class="btn" style="margin-top:0.4rem;font-size:0.8rem;">Close</button>';
   modal.setAttribute('data-ical-modal', '1');
   modal.appendChild(box);
   modal.addEventListener('click', e => { if (e.target === modal) modal.remove(); });
   document.body.appendChild(modal);
-  _renderIcalBody(box);
 }
 
 // ═══════ GRID MODE ═══════
@@ -31449,9 +31523,9 @@ function enterGridMode() {
   const ref = tabBar || document.querySelector('.header-row');
   if (ref) {
     const rect = ref.getBoundingClientRect();
-    // Flush under the tab bar — adding the ref's marginBottom here left a
-    // visible strip of page background above the workspace toolbar.
-    view.style.top = rect.bottom + 'px';
+    // Add computed marginBottom to close the gap between tab bar and grid
+    const marginBottom = parseFloat(getComputedStyle(ref).marginBottom) || 0;
+    view.style.top = (rect.bottom + marginBottom) + 'px';
   }
   view.classList.add('active');
   _torrentStopTimer();
@@ -31472,7 +31546,6 @@ function enterGridMode() {
       resizable: { handles: 'e,se,s,sw,w,n,ne,nw' },
     }, '#gridstack');
     _grid.on('change', _gridSaveLayout);
-    _grid.on('resizestop', () => setTimeout(_wsTermRefitAll, 50));
     _gridRestoreLayout();
   } else {
     // Resume paused update timers for existing panes
@@ -31482,8 +31555,6 @@ function enterGridMode() {
         _updateGridPane(name);
       }
     });
-    // Refit terminal panes after workspace becomes visible
-    setTimeout(_wsTermRefitAll, 100);
   }
 }
 
@@ -31539,36 +31610,9 @@ function _renderGridChips() {
   }).join('');
 }
 
-function wsExpandActive() {
-  (sessions || []).filter(s => s.running && s.status !== 'idle').forEach(s => addGridPane(s.name));
-}
 function toggleGridPane(name) {
   if (_gridPanes[name]) removeGridPane(name);
   else addGridPane(name);
-}
-
-// Snap a workspace pane to a fraction of the 12-column grid:
-// 4 = ⅓, 6 = ½, 8 = ⅔, 12 = full width. Works for any pane type via the
-// enclosing .grid-stack-item, so the same control fits session/term/note panes.
-function wsSetFraction(btn, cols, ev) {
-  if (ev) ev.stopPropagation();
-  if (!_grid || !btn.closest) return;
-  const item = btn.closest('.grid-stack-item');
-  if (!item) return;
-  _grid.update(item, { w: cols });
-  const grp = btn.parentElement;
-  if (grp) grp.querySelectorAll('.gp-size-btn').forEach(b => b.classList.toggle('active', b === btn));
-  setTimeout(() => { if (typeof _wsTermRefitAll === 'function') _wsTermRefitAll(); }, 60);
-  _gridSaveLayout();
-}
-
-function _gpSizeButtons() {
-  return '<div class="gp-size">' +
-    '<button class="gp-size-btn" title="Third width" onclick="wsSetFraction(this,4,event)">&#x2153;</button>' +
-    '<button class="gp-size-btn" title="Half width" onclick="wsSetFraction(this,6,event)">&#xBD;</button>' +
-    '<button class="gp-size-btn" title="Two-thirds width" onclick="wsSetFraction(this,8,event)">&#x2154;</button>' +
-    '<button class="gp-size-btn" title="Full width" onclick="wsSetFraction(this,12,event)">&#x26F6;</button>' +
-  '</div>';
 }
 
 function addGridPane(name, x, y, w, h) {
@@ -31579,13 +31623,38 @@ function addGridPane(name, x, y, w, h) {
     '<div class="gp-header">' +
       '<span class="gp-dot" id="' + sid + '-dot"></span>' +
       '<span class="gp-title">' + esc(name) + '</span>' +
-      _gpSizeButtons() +
       '<button class="gp-peek-btn" onclick="openPeek(\'' + safeName + '\');event.stopPropagation();" title="Open in peek">&#x2197;</button>' +
       '<button class="gp-close" onclick="removeGridPane(\'' + safeName + '\')">&#x2715;</button>' +
     '</div>' +
-    '<iframe class="gp-peek-frame" id="' + sid + '-frame" src="?peekEmbed=' + encodeURIComponent(name) + '" title="' + esc(name) + ' peek"></iframe>';
-  const widget = _grid.addWidget({ id: name, x, y, w: w || 6, h: h || 8, content });
-  _gridPanes[name] = { widget, timer: setInterval(() => _updateGridPane(name), 3000) };
+    '<div class="gp-body overlay-body" id="' + sid + '-body" onclick="_lastActivePane=\'' + safeName + '\'">Loading\u2026</div>' +
+    '<div class="gp-send">' +
+      '<div class="chips" id="' + sid + '-chips"></div>' +
+      '<div class="send-row">' +
+        '<textarea class="send-input" id="' + sid + '-input" rows="1" placeholder="Send\u2026"' +
+          ' oninput="autoGrow(this);cmdHistoryReset()"' +
+          ' onfocus="_lastActivePane=\'' + safeName + '\'"' +
+          ' onkeydown="gpSendKeydown(\'' + safeName + '\',event)"></textarea>' +
+        '<button class="btn primary" onclick="sendGridCmd(\'' + safeName + '\')">Send</button>' +
+      '</div>' +
+    '</div>';
+  const widget = _grid.addWidget({ id: name, x, y, w: w || 6, h: h || 7, content });
+  _gridPanes[name] = { widget, timer: setInterval(() => _updateGridPane(name), 2000) };
+  // Attach URL click handler (same as peek body — ensures links open in new tab in PWA mode)
+  const gpBody = document.getElementById(sid + '-body');
+  if (gpBody) {
+    gpBody.addEventListener('click', _peekOpenLink);
+    gpBody.addEventListener('touchend', _peekOpenLink, {passive: false});
+    gpBody.addEventListener('scroll', function() {
+      if (_isScrolledToBottom(this)) {
+        this._scrollLocked = false;
+        _hideScrollLockBadge(this);
+      } else {
+        this._scrollLocked = true;
+      }
+    }, {passive: true});
+  }
+  const gpChips = document.getElementById(sid + '-chips');
+  if (gpChips) renderChips(gpChips, name, false);
   _updateGridPane(name);
   _renderGridChips();
   _gridSaveLayout();
@@ -31601,16 +31670,32 @@ function removeGridPane(name) {
   _gridSaveLayout();
 }
 
-// Session panes render their content inside an isolated peek iframe, so this
-// only refreshes the header status dot from in-memory session data (no fetch).
-function _updateGridPane(name) {
+async function _updateGridPane(name) {
   const sid = _gpSafeId(name);
-  const dot   = document.getElementById(sid + '-dot');
-  const frame = document.getElementById(sid + '-frame');
-  if (!dot && !frame) { removeGridPane(name); return; }  // pane was removed
-  if (dot) {
-    const s = (sessions || []).find(s => s.name === name);
-    dot.className = 'gp-dot' + (!s || !s.running ? '' : s.status === 'active' ? ' working' : s.status === 'waiting' ? ' waiting' : ' idle');
+  const body = document.getElementById(sid + '-body');
+  const dot  = document.getElementById(sid + '-dot');
+  if (!body) { removeGridPane(name); return; }
+  try {
+    const data = await fetch(API + '/api/sessions/' + encodeURIComponent(name) + '/peek?lines=500').then(r => r.json());
+    const atBottom = _isScrolledToBottom(body);
+    const locked = body._scrollLocked;
+    body.innerHTML = highlightPrompts(ansiToHtml(data.output || ''));
+    if (!locked && atBottom) {
+      body.scrollTop = body.scrollHeight;
+      _hideScrollLockBadge(body);
+    } else if (locked) {
+      _showScrollLockBadge(body, () => {
+        body._scrollLocked = false;
+        body.scrollTop = body.scrollHeight;
+        _hideScrollLockBadge(body);
+      });
+    }
+    if (dot) {
+      const s = (sessions || []).find(s => s.name === name);
+      dot.className = 'gp-dot' + (!s || !s.running ? '' : s.status === 'active' ? ' working' : s.status === 'waiting' ? ' waiting' : ' idle');
+    }
+  } catch(e) {
+    if (body) { body.textContent = '(error loading output)'; }
   }
 }
 
@@ -31627,8 +31712,6 @@ function _gridRestoreLayout() {
       const notePath = _notePathFromId(item.id);
       if (notePath) {
         wsAddNotePane(notePath, item.x, item.y, item.w, item.h);
-      } else if (item.id.startsWith('ws-term:')) {
-        wsAddTermPane(item.x, item.y, item.w, item.h, item.id);
       } else if ((sessions || []).find(s => s.name === item.id)) {
         addGridPane(item.id, item.x, item.y, item.w, item.h);
       }
@@ -31708,7 +31791,6 @@ function wsClearWorkspace() {
     const path = _notePathFromId(nid);
     if (path) wsRemoveNotePane(path);
   });
-  Object.keys(_wsTerm).slice().forEach(pid => wsRemoveTermPane(pid));
 }
 
 function wsLoadProfile(name) {
@@ -31724,8 +31806,6 @@ function wsLoadProfile(name) {
     const notePath = _notePathFromId(item.id);
     if (notePath) {
       wsAddNotePane(notePath, item.x, item.y, item.w, item.h);
-    } else if (item.id.startsWith('ws-term:')) {
-      wsAddTermPane(item.x, item.y, item.w, item.h, item.id);
     } else if ((sessions || []).find(s => s.name === item.id)) {
       addGridPane(item.id, item.x, item.y, item.w, item.h);
     }
@@ -31928,7 +32008,6 @@ function wsAddNotePane(path, x, y, w, h) {
     '<div class="gp-header" style="background:var(--card);">' +
       '<span style="font-size:0.75rem;margin-right:4px;">&#x1F4DD;</span>' +
       '<span class="gp-title" id="' + sid + '-title">' + esc(title) + '</span>' +
-      _gpSizeButtons() +
       '<button class="gp-peek-btn" onclick="wsOpenNoteInTab(\'' + safePath + '\');event.stopPropagation();" title="Open in Notes tab">&#x2197;</button>' +
       '<button class="gp-close" onclick="wsRemoveNotePane(\'' + safePath + '\')">&#x2715;</button>' +
     '</div>' +
@@ -32029,210 +32108,6 @@ function wsOpenNoteInTab(path) {
   switchView('notes');
   setTimeout(() => _notesOpen(path), 200);
 }
-
-// ── Workspace Terminal Panes ───────────────────────────────────────────────────
-let _wsTerm = {}; // pid → {widget, term, fit, poll, ptyId}
-let _wsTermSeq = parseInt(localStorage.getItem('amux_ws_term_seq') || '0');
-
-function _wsNextTermId() {
-  const id = 'ws-term:' + _wsTermSeq++;
-  localStorage.setItem('amux_ws_term_seq', String(_wsTermSeq));
-  return id;
-}
-
-function _wsTermRefitAll() {
-  Object.values(_wsTerm).forEach(p => { if (p.fit) { try { p.fit.fit(); } catch(e) {} } });
-}
-
-// Persist ptyId so reconnect after sleep/reload finds the existing PTY
-function _wsTermSavePtyId(pid, ptyId) {
-  try {
-    const map = JSON.parse(localStorage.getItem('amux_ws_term_pty') || '{}');
-    if (ptyId) map[pid] = ptyId; else delete map[pid];
-    localStorage.setItem('amux_ws_term_pty', JSON.stringify(map));
-  } catch(e) {}
-}
-function _wsTermGetSavedPtyId(pid) {
-  try { return JSON.parse(localStorage.getItem('amux_ws_term_pty') || '{}')[pid] || null; }
-  catch(e) { return null; }
-}
-
-function wsAddTermPane(x, y, w, h, pid) {
-  if (!_grid) return;
-  pid = pid || _wsNextTermId();
-  if (_wsTerm[pid]) return;
-  const sid = _gpSafeId(pid);
-  const safeId = pid.replace(/\\/g, '\\\\').replace(/'/g, "\\'");
-  const content =
-    '<div class="gp-header">' +
-      '<span style="font-size:0.76rem;margin-right:2px;opacity:0.55;font-family:monospace;">&gt;_</span>' +
-      '<span class="gp-title" id="' + sid + '-title">shell</span>' +
-      _gpSizeButtons() +
-      '<button class="gp-peek-btn" onclick="wsTermSendTmux(\'' + safeId + '\')" title="Attach / create a tmux session">tmux</button>' +
-      '<button class="gp-close" onclick="wsRemoveTermPane(\'' + safeId + '\')">&#x2715;</button>' +
-    '</div>' +
-    '<div class="gp-term-body" id="' + sid + '-body" style="position:relative;"></div>';
-  const widget = _grid.addWidget({ id: pid, x, y, w: w || 6, h: h || 8, content });
-  _wsTerm[pid] = { widget, term: null, fit: null, poll: null, ptyId: null };
-  setTimeout(() => _initWsTermPane(pid), 150);
-  _gridSaveLayout();
-}
-
-function _wsTermSetupHandlers(pid) {
-  const p = _wsTerm[pid];
-  if (!p || !p.term || !p.ptyId) return;
-  p.term.onData(d => {
-    if (!p.ptyId) return;
-    fetch(API + '/api/terminal/' + p.ptyId + '/input', {
-      method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ data: btoa(unescape(encodeURIComponent(d))) }),
-    }).catch(() => {});
-  });
-  p.term.onResize(({ cols, rows }) => {
-    if (!p.ptyId) return;
-    fetch(API + '/api/terminal/' + p.ptyId + '/resize', {
-      method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ cols, rows }),
-    }).catch(() => {});
-  });
-}
-
-async function _initWsTermPane(pid) {
-  const p = _wsTerm[pid];
-  if (!p) return;
-  const sid = _gpSafeId(pid);
-  const container = document.getElementById(sid + '-body');
-  if (!container) return;
-
-  const term = new Terminal({
-    cursorBlink: true,
-    cursorStyle: 'block',
-    fontSize: 13,
-    fontFamily: "'JetBrains Mono', 'Menlo', 'Monaco', 'Courier New', monospace",
-    theme: {
-      background: '#0d1117', foreground: '#c9d1d9',
-      cursor: '#58a6ff', cursorAccent: '#0d1117',
-      selectionBackground: 'rgba(56,139,253,0.3)',
-      black: '#484f58',   red: '#ff7b72',    green: '#3fb950',  yellow: '#d29922',
-      blue: '#58a6ff',    magenta: '#bc8cff', cyan: '#39d353',   white: '#b1bac4',
-      brightBlack: '#6e7681', brightRed: '#ffa198', brightGreen: '#56d364', brightYellow: '#e3b341',
-      brightBlue: '#79c0ff',  brightMagenta: '#d2a8ff', brightCyan: '#56d364', brightWhite: '#f0f6fc',
-    },
-    scrollback: 5000,
-    allowProposedApi: true,
-    macOptionIsMeta: true,
-    macOptionClickForcesSelection: true,
-  });
-
-  const fit = new FitAddon.FitAddon();
-  term.loadAddon(fit);
-  term.loadAddon(new WebLinksAddon.WebLinksAddon());
-  term.open(container);
-  fit.fit();
-  p.term = term; p.fit = fit;
-  // Second fit after paint to correct dimensions in flex layout
-  requestAnimationFrame(() => { try { fit.fit(); } catch(e) {} });
-
-  // Try to reconnect to an existing PTY (survives laptop sleep / page reload)
-  const savedPtyId = _wsTermGetSavedPtyId(pid);
-  if (savedPtyId) {
-    try {
-      const r = await fetch(API + '/api/terminal/' + savedPtyId + '/output');
-      const d = await r.json();
-      if (d.alive) {
-        p.ptyId = savedPtyId;
-        if (d.data) {
-          const bytes = Uint8Array.from(atob(d.data), c => c.charCodeAt(0));
-          term.write(bytes);
-        }
-        _wsTermSetupHandlers(pid);
-        _wsTermStartPoll(pid);
-        term.focus();
-        return;
-      }
-    } catch(e) {}
-    // Saved PTY is gone — clear it and fall through to create a new one
-    _wsTermSavePtyId(pid, null);
-  }
-
-  const dims = fit.proposeDimensions();
-  const cols = dims ? dims.cols : 100;
-  const rows = dims ? dims.rows : 30;
-
-  try {
-    const r = await fetch(API + '/api/terminal/create', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ cols, rows }),
-    });
-    const data = await r.json();
-    if (data.error) { term.writeln('\r\n\x1b[31mError: ' + data.error + '\x1b[0m'); return; }
-    p.ptyId = data.id;
-    _wsTermSavePtyId(pid, data.id);
-  } catch(e) {
-    term.writeln('\r\n\x1b[31mFailed to start shell: ' + e.message + '\x1b[0m');
-    return;
-  }
-
-  _wsTermSetupHandlers(pid);
-  _wsTermStartPoll(pid);
-  term.focus();
-}
-
-function _wsTermStartPoll(pid) {
-  const p = _wsTerm[pid];
-  if (!p || p.poll || !p.ptyId) return;
-  p.poll = true;
-  async function tick() {
-    if (!p.poll || !p.ptyId) return;
-    try {
-      const r = await fetch(API + '/api/terminal/' + p.ptyId + '/output?wait=25');
-      const d = await r.json();
-      if (d.data) {
-        const bytes = Uint8Array.from(atob(d.data), c => c.charCodeAt(0));
-        p.term.write(bytes);
-      }
-      if (!d.alive) {
-        p.term.writeln('\r\n\x1b[33m[Process exited]\x1b[0m');
-        p.poll = null; p.ptyId = null;
-        _wsTermSavePtyId(pid, null);
-        return;
-      }
-    } catch(e) {
-      if (p.poll) p.poll = setTimeout(tick, 500);  // transient — back off
-      return;
-    }
-    if (p.poll) p.poll = setTimeout(tick, 0);  // re-poll immediately (long-poll)
-  }
-  p.poll = setTimeout(tick, 0);
-}
-
-function wsTermSendTmux(pid) {
-  const p = _wsTerm[pid];
-  if (!p || !p.ptyId) return;
-  const cmd = '\x03tmux new-session -A -s workspace\r';
-  fetch(API + '/api/terminal/' + p.ptyId + '/input', {
-    method: 'POST', headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ data: btoa(unescape(encodeURIComponent(cmd))) }),
-  }).catch(() => {});
-  if (p.term) p.term.focus();
-}
-
-function wsRemoveTermPane(pid) {
-  const p = _wsTerm[pid];
-  if (!p || !_grid) return;
-  if (p.poll) { clearTimeout(p.poll); p.poll = null; }
-  if (p.ptyId) { fetch(API + '/api/terminal/' + p.ptyId, { method: 'DELETE' }).catch(() => {}); p.ptyId = null; }
-  if (p.term) { try { p.term.dispose(); } catch(e) {} p.term = null; }
-  _wsTermSavePtyId(pid, null);
-  try { _grid.removeWidget(p.widget); } catch(e) {}
-  delete _wsTerm[pid];
-  _gridSaveLayout();
-}
-
-window.addEventListener('resize', () => {
-  if (document.getElementById('grid-view')?.classList.contains('active')) _wsTermRefitAll();
-});
 
 function gpDoKeys(name, keys) { doKeys(name, keys); }
 
@@ -32376,7 +32251,7 @@ const _idb = (() => {
 _idb.getAll('statuses').then(items => {
   if (items && items.length) {
     items.sort((a, b) => (a._pos || 0) - (b._pos || 0));
-    boardStatuses = items.map(s => ({ id: s.id, label: s.label, gate: Array.isArray(s.gate) ? s.gate : [] }));
+    boardStatuses = items.map(s => ({ id: s.id, label: s.label }));
     lastStatusesJSON = JSON.stringify(boardStatuses);
     if (activeView === 'board') renderBoard();
   }
@@ -32436,8 +32311,31 @@ async function _runDeltaSync() {
   }
 }
 // Run delta sync shortly after startup (after queue replay window)
-if (!window._peekEmbed) setTimeout(_runDeltaSync, 2500);
+setTimeout(_runDeltaSync, 2500);
 _applyTabVisibility();
+(function() {
+  // The tab bar sticks below the header row. Its `top` must equal where the
+  // sticky header ends: safe-area-inset-top + header height. Using only
+  // header.offsetHeight (as before) hid the tab bar behind the header on iOS
+  // because it ignored the notch. Body padding-top already resolves to
+  // env(safe-area-inset-top) at rest, so use that.
+  function _syncTabTop() {
+    const h = document.querySelector('.header-row');
+    const t = document.querySelector('.tab-bar-outer');
+    if (!h || !t) return;
+    const bodyPadTop = parseInt(getComputedStyle(document.body).paddingTop) || 0;
+    const top = bodyPadTop + h.offsetHeight;
+    t.style.top = top + 'px';
+    document.documentElement.style.setProperty('--sticky-nav-top', top + 'px');
+  }
+  _syncTabTop();
+  window.addEventListener('resize', _syncTabTop);
+  window.addEventListener('load', _syncTabTop);
+  // Re-run after fonts/images settle — header height can change once web
+  // fonts load, and sticky offsets need to match the final layout.
+  setTimeout(_syncTabTop, 300);
+  setTimeout(_syncTabTop, 1500);
+})();
 
 // ═══════ SSE — real-time push updates ═══════
 let _sse = null;
@@ -32519,6 +32417,9 @@ function connectSSE() {
             else _crmDirty = true;
           } else if (key === 'journal') {
             if (activeView === 'journal') _journalLoad();
+          } else if (key === 'threads') {
+            // Always refresh — even off-tab, so the tab badge count stays live.
+            _threadsLoad();
           }
         }
       } else if (msg.type === 'ping') {
@@ -32589,6 +32490,14 @@ function _onClientResume(reason) {
   if (_lastDataTime && Date.now() - _lastDataTime > _SSE_REFRESH_MS) {
     _resyncEverything();
   }
+  // (A) The peek conversation can sit behind a latched scroll-lock after the OS
+  // backgrounds the app — which is why a reboot/force-refresh was the only fix.
+  // On resume, release the lock and re-render so foregrounding refreshes it.
+  if (peekSession) {
+    _peekScrollLocked = false;
+    _hideScrollLockBadge(document.getElementById('peek-body'));
+    refreshPeek();
+  }
   // If the SSE connection looks dead (zombie after iOS background), bounce it.
   if (!_sseFallback && (_sseLooksStale() || !_sse)) {
     _forceSseReconnect(reason);
@@ -32601,20 +32510,16 @@ window.addEventListener('online',    () => _onClientResume('online'));
 // Periodic stale-watchdog — only fires when visible, so it's cheap on phones.
 setInterval(() => {
   if (document.hidden) return;
+  // Expire "sticky working" deterministically: SSE only re-renders on payload
+  // change, so a quiet session could otherwise linger in Working past its
+  // window. Re-render while any sticky hold is pending so it settles to Idle.
+  if (_hasStickyPending()) render();
   if (_sseFallback) return;
-  if (window._peekEmbed) return;
   if (_sseLooksStale()) _forceSseReconnect('watchdog stale ' + Math.round((Date.now() - _lastDataTime)/1000) + 's');
 }, 5000);
 
-if (window._peekEmbed) {
-  // Peek-embed iframes only need one fetchSessions to detect the session, then the
-  // peek timer handles everything.  Skip SSE/board/git/sync to avoid 5x request
-  // amplification when multiple workspace tiles are open.
-  fetchSessions();
-} else {
-  connectSSE();
-  fetchSchedules().then(() => render());
-}
+// Start SSE (falls back to polling on failure)
+connectSSE();
 _notifUpdateBadge();
 loadBranding();
 // JS initialized — hide the no-JS fallback overlay
@@ -32622,9 +32527,7 @@ loadBranding();
 
 // Initialize chrome tabs
 _chromeRender();
-_chromeUpdateOffsets();
 window.addEventListener('resize', _chromeUpdateOffsets);
-window.addEventListener('orientationchange', () => setTimeout(_chromeUpdateOffsets, 100));
 
 // Register service worker for offline asset caching
 if ('serviceWorker' in navigator) {
@@ -32656,38 +32559,9 @@ if ('serviceWorker' in navigator) {
     });
   // Auto-reload when a new SW takes control (ensures fresh HTML after update)
   navigator.serviceWorker.addEventListener('controllerchange', () => {
-    // Rescue in-progress peek input from the reload
-    try {
-      const inp = document.getElementById('peek-cmd-input');
-      if (typeof peekSession !== 'undefined' && peekSession && inp && inp.value.trim()) {
-        const st = JSON.parse(sessionStorage.getItem('peekState') || '{}');
-        st.session = st.session || peekSession;
-        st.draft = inp.value;
-        sessionStorage.setItem('peekState', JSON.stringify(st));
-      }
-    } catch (e) {}
     location.reload();
   });
   }).catch(() => {});
-
-  // A PWA kept in the foreground never re-checks the SW, so it can run stale
-  // code for days. Nudge an update check on every foreground/network return
-  // (throttled); skipWaiting + controllerchange above finish the swap.
-  let _swLastCheck = 0;
-  const _swCheckUpdate = () => {
-    const now = Date.now();
-    if (now - _swLastCheck < 60000) return;
-    _swLastCheck = now;
-    navigator.serviceWorker.getRegistration().then(reg => {
-      if (!reg) return;
-      reg.update().then(() => {
-        if (reg.waiting) reg.waiting.postMessage({ type: 'SKIP_WAITING' });
-      }).catch(() => {});
-    }).catch(() => {});
-  };
-  document.addEventListener('visibilitychange', () => { if (!document.hidden) _swCheckUpdate(); });
-  window.addEventListener('pageshow', _swCheckUpdate);
-  window.addEventListener('online', _swCheckUpdate);
 }
 
 // Dual-write drafts and queue to both localStorage and IndexedDB
@@ -32788,161 +32662,6 @@ async function pingServer() {
   renderDebugInfo();
 }
 
-let _skillsData = { db: [], file: [], builtin: [] };
-
-async function _skillsTabLoad() {
-  const container = document.getElementById('skills-tab-sections');
-  const countEl = document.getElementById('skills-count');
-  const searchEl = document.getElementById('skills-search');
-  if (!container) return;
-  container.innerHTML = '<div style="color:var(--dim);font-size:0.85rem;padding:20px 0;">Loading...</div>';
-  if (searchEl) searchEl.value = '';
-  try {
-    const [cmds, dbSkills] = await Promise.all([
-      fetch(API + '/api/slash-commands').then(r => r.json()),
-      fetch(API + '/api/skills').then(r => r.json()),
-    ]);
-    const dbNames = new Set(dbSkills.map(s => '/' + s.name));
-    _skillsData.db = dbSkills;
-    _skillsData.file = cmds.filter(c => c.cmd && !dbNames.has(c.cmd) && !_isBuiltinCmd(c.cmd));
-    _skillsData.builtin = cmds.filter(c => _isBuiltinCmd(c.cmd));
-    _skillsRender('', countEl, container);
-  } catch(e) {
-    container.innerHTML = '<div style="color:var(--red);font-size:0.85rem;padding:20px 0;">Failed to load skills</div>';
-  }
-}
-
-function _skillsFilter(q) {
-  const container = document.getElementById('skills-tab-sections');
-  const countEl = document.getElementById('skills-count');
-  _skillsRender(q.toLowerCase(), countEl, container);
-}
-
-function _skillsRender(q, countEl, container) {
-  const match = item => {
-    if (!q) return true;
-    const name = (item.name || item.cmd || '').toLowerCase();
-    const desc = (item.description || item.desc || '').toLowerCase();
-    const hint = (item.hint || '').toLowerCase();
-    return name.includes(q) || desc.includes(q) || hint.includes(q);
-  };
-  const db = _skillsData.db.filter(match);
-  const file = _skillsData.file.filter(match);
-  const builtin = _skillsData.builtin.filter(match);
-  const total = db.length + file.length;
-  if (countEl) countEl.textContent = total + ' skill' + (total === 1 ? '' : 's');
-
-  const section = (title, items, renderFn) => items.length === 0 ? '' :
-    '<div style="margin-bottom:20px;">' +
-      '<div style="font-size:0.7rem;font-weight:700;color:var(--dim);text-transform:uppercase;letter-spacing:0.06em;margin-bottom:8px;">' + title + '</div>' +
-      '<div style="display:flex;flex-direction:column;gap:6px;">' + items.map(renderFn).join('') + '</div>' +
-    '</div>';
-
-  const card = (cmd, desc, hint, editable, fetchKey) => {
-    const id = 'sc-' + cmd.replace(/[^a-z0-9]/gi,'_');
-    const safeCmd = cmd.replace(/'/g,"\\'");
-    const usage = hint ? cmd + ' ' + hint : cmd;
-    return '<div class="skill-card" id="' + id + '">' +
-      '<div style="display:flex;align-items:center;justify-content:space-between;gap:8px;">' +
-        '<span class="skill-card-name" style="cursor:pointer;" onclick="_skillToggle(\'' + id + '\',\'' + esc(fetchKey || '') + '\')">' + esc(cmd) + '</span>' +
-        '<div style="display:flex;gap:4px;flex-shrink:0;">' +
-          (editable ? '<button class="btn" style="font-size:0.65rem;padding:2px 8px;" onclick="event.stopPropagation();editSkill(\'' + esc(cmd.replace(/^\//,'')) + '\')">Edit</button>' : '') +
-          '<button class="btn" style="font-size:0.65rem;padding:2px 8px;" onclick="event.stopPropagation();navigator.clipboard.writeText(\'' + esc(usage) + '\');showToast(\'Copied!\')">Copy</button>' +
-          '<button class="btn" style="font-size:0.65rem;padding:2px 6px;" onclick="_skillToggle(\'' + id + '\',\'' + esc(fetchKey || '') + '\')" title="Expand">▾</button>' +
-        '</div>' +
-      '</div>' +
-      (desc ? '<div class="skill-card-desc">' + esc(desc) + '</div>' : '') +
-      (hint ? '<div class="skill-card-hint" style="font-family:monospace;font-size:0.75rem;color:var(--dim);">' + esc(cmd + ' ' + hint) + '</div>' : '') +
-      '<div class="skill-expand" id="' + id + '-body" style="display:none;margin-top:8px;"></div>' +
-    '</div>';
-  };
-
-  const html =
-    section('Custom skills', db, s => card('/' + s.name, s.description, s.hint, true, 'db:' + s.name)) +
-    section('Project commands (.claude/commands)', file, c => card(c.cmd, c.desc, c.hint || '', false, 'file:' + c.cmd.replace(/^\//,''))) +
-    section('Built-in', builtin, c => card(c.cmd, c.desc, '', false, ''));
-
-  container.innerHTML = html || '<div style="color:var(--dim);font-size:0.85rem;padding:20px 0;">No skills match "' + esc(q) + '"</div>';
-}
-
-const _skillContentCache = {};
-async function _skillToggle(cardId, fetchKey) {
-  const body = document.getElementById(cardId + '-body');
-  const btn = document.querySelector('#' + cardId + ' .btn[title="Expand"]');
-  if (!body) return;
-  if (body.style.display !== 'none') {
-    body.style.display = 'none';
-    if (btn) btn.textContent = '▾';
-    return;
-  }
-  body.style.display = 'block';
-  if (btn) btn.textContent = '▴';
-  if (_skillContentCache[fetchKey]) { body.innerHTML = _skillContentCache[fetchKey]; return; }
-  if (!fetchKey) { body.innerHTML = '<span style="color:var(--dim);font-size:0.8rem;">No details available for built-in commands.</span>'; return; }
-  body.innerHTML = '<span style="color:var(--dim);font-size:0.8rem;">Loading...</span>';
-  try {
-    const [type, name] = fetchKey.split(':', 2);
-    const url = type === 'db' ? API + '/api/skills/' + encodeURIComponent(name) : API + '/api/slash-commands/' + encodeURIComponent(name);
-    const data = await fetch(url).then(r => r.json());
-    const content = data.content || '';
-    const html = _skillRenderContent(content);
-    _skillContentCache[fetchKey] = html;
-    body.innerHTML = html;
-  } catch(e) {
-    body.innerHTML = '<span style="color:var(--red);font-size:0.8rem;">Failed to load</span>';
-  }
-}
-
-function _skillRenderContent(raw) {
-  // Strip frontmatter
-  let body = raw;
-  if (body.startsWith('---')) {
-    const end = body.indexOf('---', 3);
-    if (end > 0) body = body.slice(end + 3).replace(/^\n/, '');
-  }
-  // Extract code blocks as copy-pasteable examples
-  const parts = [];
-  let last = 0;
-  const codeRe = /```(\w*)\n([\s\S]*?)```/g;
-  let m;
-  while ((m = codeRe.exec(body)) !== null) {
-    if (m.index > last) parts.push({type:'text', val: body.slice(last, m.index)});
-    parts.push({type:'code', lang: m[1], val: m[2].trim()});
-    last = m.index + m[0].length;
-  }
-  if (last < body.length) parts.push({type:'text', val: body.slice(last)});
-
-  let html = '<div style="font-size:0.8rem;color:var(--text);border-top:1px solid var(--border);padding-top:8px;">';
-  for (const p of parts) {
-    if (p.type === 'text') {
-      // Render basic markdown: headings, bold, bullets
-      let t = p.val
-        .replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;')
-        .replace(/^#{1,3} (.+)$/gm, '<div style="font-weight:700;margin:8px 0 4px;color:var(--text);">$1</div>')
-        .replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>')
-        .replace(/`([^`]+)`/g, '<code style="background:var(--border);padding:1px 4px;border-radius:3px;font-size:0.78rem;">$1</code>')
-        .replace(/^[-*] (.+)$/gm, '<div style="padding-left:12px;">• $1</div>')
-        .replace(/\n{2,}/g, '<div style="margin:4px 0;"></div>')
-        .replace(/\n/g, ' ');
-      html += '<div>' + t + '</div>';
-    } else {
-      const safeVal = p.val.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
-      const rawVal = p.val.replace(/'/g, "\\'").replace(/\n/g,'\\n');
-      html += '<div style="position:relative;margin:6px 0;">' +
-        '<pre style="background:var(--bg);border:1px solid var(--border);border-radius:6px;padding:8px 36px 8px 10px;font-size:0.75rem;overflow-x:auto;white-space:pre-wrap;word-break:break-all;margin:0;">' + safeVal + '</pre>' +
-        '<button onclick="navigator.clipboard.writeText(\'' + rawVal + '\');showToast(\'Copied!\')" style="position:absolute;top:4px;right:4px;background:var(--border);border:none;border-radius:4px;padding:2px 6px;font-size:0.65rem;cursor:pointer;color:var(--text);">Copy</button>' +
-      '</div>';
-    }
-  }
-  html += '</div>';
-  return html;
-}
-
-function _isBuiltinCmd(cmd) {
-  const builtins = new Set(['/help','/clear','/compact','/status','/model','/vim','/config','/doctor','/cost','/bug','/review','/pr-comments','/init','/login','/logout','/release-notes','/approved-tools','/memory','/mcp','/settings','/terminal']);
-  return builtins.has(cmd);
-}
-
 async function openSkills() {
   const modal = document.getElementById('skills-modal');
   const list = document.getElementById('skills-list');
@@ -33031,11 +32750,6 @@ async function deleteSkill() {
 }
 
 function openAbout() {
-  // Live version — the modal markup renders before APP_VER is defined, so fill it here
-  try {
-    const v = document.getElementById('about-version');
-    if (v) v.innerHTML = 'v' + APP_VER + ' &#x21BB;';
-  } catch (e) {}
   document.getElementById('about-overlay').classList.add('active');
   document.getElementById('add-server-form').style.display = 'none';
   renderServerList();
@@ -33415,38 +33129,7 @@ function toggleSettings() {
     // Populate the notes-folder row
     _notesLoadSource();
     loadCommitGuard();
-    loadTaskGuard();
-    loadAlertConfig();
   }
-}
-async function loadAlertConfig() {
-  try {
-    const r = await fetch(API + '/api/alert/config'); const d = await r.json();
-    const p = document.getElementById('alert-push-cb'); if (p) p.checked = !!d.push;
-    const s = document.getElementById('alert-sms-cb'); if (s) s.checked = !!d.sms;
-    const ph = document.getElementById('alert-phone'); if (ph && document.activeElement !== ph) ph.value = d.phone || '';
-    const pv = document.getElementById('alert-sms-provider'); if (pv) pv.textContent = d.sms_provider ? '(' + d.sms_provider + ')' : '';
-  } catch(e) {}
-}
-async function saveAlertConfig() {
-  const body = {
-    push: !!document.getElementById('alert-push-cb')?.checked,
-    sms: !!document.getElementById('alert-sms-cb')?.checked,
-    phone: document.getElementById('alert-phone')?.value || '',
-  };
-  try { await fetch(API + '/api/alert/config', { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) }); } catch(e) {}
-}
-async function sendTestAlert(btn) {
-  const st = document.getElementById('alert-test-status'); if (st) st.textContent = 'Sending…';
-  if (btn) btn.disabled = true;
-  try {
-    const r = await fetch(API + '/api/alert/owner', { method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ message: 'Test urgent alert from Settings', session: 'amux', reason: 'settings test' }) });
-    const d = await r.json();
-    if (st) st.textContent = d.deduped ? 'Deduped (sent in the last 60s)'
-      : (d.channels ? ('Sent → ' + Object.entries(d.channels).map(([k, v]) => k + ': ' + v).join('; ')) : 'Sent');
-  } catch(e) { if (st) st.textContent = 'Error: ' + e.message; }
-  if (btn) btn.disabled = false;
 }
 
 function closeSettings() {
@@ -33675,29 +33358,56 @@ async function saveCommitGuard(enabled) {
   } catch(e) { if (st) st.textContent = 'Error: ' + e.message; }
 }
 
-// ── Board awareness (task guard) ──────────────────────────────────────────────
-const _taskGuardStatusOn = 'On — idle sessions are nudged to log tasks; new sessions get an all-board briefing';
-async function loadTaskGuard() {
+// ── Pushover ───────────────────────────────────────────────────────────────────
+async function loadPushoverKeys() {
   try {
-    const r = await fetch('/api/settings/task-guard');
-    const d = await r.json();
-    const t = document.getElementById('settings-taskguard-toggle');
-    const st = document.getElementById('settings-taskguard-status');
-    if (t) t.checked = !!d.enabled;
-    if (st) st.textContent = d.enabled ? _taskGuardStatusOn : 'Off';
+    const r = await fetch('/api/settings/env');
+    const data = await r.json();
+    const tInp = document.getElementById('settings-pushover-token');
+    const uInp = document.getElementById('settings-pushover-user');
+    const st = document.getElementById('settings-pushover-status');
+    if (tInp) tInp.placeholder = data.AMUX_PUSHOVER_TOKEN || 'a…';
+    if (uInp) uInp.placeholder = data.AMUX_PUSHOVER_USER || 'u…';
+    if (st) st.textContent = (data.AMUX_PUSHOVER_TOKEN && data.AMUX_PUSHOVER_USER) ? 'Keys saved ✓' : 'No keys set';
   } catch(e) {}
 }
-async function saveTaskGuard(enabled) {
-  const st = document.getElementById('settings-taskguard-status');
+
+async function savePushoverKeys() {
+  const tInp = document.getElementById('settings-pushover-token');
+  const uInp = document.getElementById('settings-pushover-user');
+  const st = document.getElementById('settings-pushover-status');
+  const token = tInp ? tInp.value.trim() : '';
+  const user  = uInp ? uInp.value.trim() : '';
+  if (!token && !user) return;
+  st && (st.textContent = 'Saving…');
+  const body = {};
+  if (token) body.AMUX_PUSHOVER_TOKEN = token;
+  if (user)  body.AMUX_PUSHOVER_USER  = user;
   try {
-    const r = await fetch('/api/settings/task-guard', {
-      method: 'PATCH', headers: {'Content-Type':'application/json'},
-      body: JSON.stringify({enabled})
-    });
+    const r = await fetch('/api/settings/env', {method:'PATCH', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify(body)});
     if (r.ok) {
-      if (st) st.textContent = enabled ? _taskGuardStatusOn : 'Off';
-      showToast('Board awareness ' + (enabled ? 'enabled' : 'disabled'));
-    } else if (st) { st.textContent = 'Save failed'; }
+      if (tInp) tInp.value = '';
+      if (uInp) uInp.value = '';
+      if (st) st.textContent = 'Saved ✓';
+      await loadPushoverKeys();
+    } else {
+      if (st) st.textContent = 'Save failed';
+    }
+  } catch(e) { if (st) st.textContent = 'Error: ' + e.message; }
+}
+
+async function sendPushoverTest() {
+  const st = document.getElementById('settings-pushover-status');
+  st && (st.textContent = 'Sending…');
+  try {
+    const r = await fetch('/api/pushover/test', {method:'POST'});
+    if (r.ok) {
+      if (st) st.textContent = 'Test sent ✓';
+    } else {
+      const d = await r.json().catch(()=>({}));
+      if (st) st.textContent = d.error || 'Send failed';
+    }
   } catch(e) { if (st) st.textContent = 'Error: ' + e.message; }
 }
 
@@ -33876,6 +33586,7 @@ toggleSettings = function() {
     loadTeamSection();
     loadApiKeys();
     loadBillingSection();
+    loadPushoverKeys();
   }
 };
 
@@ -33892,17 +33603,6 @@ toggleSettings = function() {
 // Deep-link: #path=/some/path (or ?path= for backwards compat)
 // Hash-based routing works in PWA mode — SW never strips fragments, no iOS query-param loss
 async function _handleDeeplink(hash) {
-  // #peek=<session> — open a session's peek directly (shareable links; also
-  // lets headless/simulator test rigs land in a peek without tap automation).
-  if (hash && hash.startsWith('#peek=')) {
-    const target = decodeURIComponent(hash.slice(6));
-    const tryOpen = (attempt) => {
-      if (typeof sessions !== 'undefined' && sessions.some(s => s.name === target)) { openPeek(target); return; }
-      if (attempt < 20) setTimeout(() => tryOpen(attempt + 1), 400);
-    };
-    tryOpen(0);
-    return;
-  }
   let dpath = null;
   if (hash && hash.startsWith('#path=')) {
     dpath = decodeURIComponent(hash.slice(6));
@@ -33932,7 +33632,6 @@ _handleDeeplink(location.hash);
 try {
   const _ps = JSON.parse(sessionStorage.getItem('peekState') || 'null');
   if (_ps && _ps.session) {
-    if (_ps.draft) _peekDrafts[_ps.session] = _ps.draft;   // rescued from pre-update reload
     setTimeout(() => {
       openPeek(_ps.session);
       if (_ps.split && window.innerWidth > 600) {
@@ -34354,11 +34053,9 @@ async function pullFromRemote(btn) {
     _wtShow();
   };
 
-  // Auto-launch on first visit after short delay — but not when arriving on a
-  // deeplink (#peek=…): the visitor came for a specific session, not a tour.
+  // Auto-launch on first visit after short delay
   setTimeout(function() {
     try { if (localStorage.getItem(WT_KEY)) return; } catch(e) {}
-    if (location.hash && location.hash.indexOf('=') !== -1) return;
     _wtShow();
   }, 1500);
 
@@ -35197,7 +34894,7 @@ async function _termConnect() {
     _term.dispose();
     _term = null;
   }
-  if (_termPoll) { clearTimeout(_termPoll); _termPoll = null; }
+  if (_termPoll) { clearInterval(_termPoll); _termPoll = null; }
   if (_termId) {
     fetch(API + '/api/terminal/' + _termId, { method: 'DELETE' }).catch(() => {});
     _termId = null;
@@ -35284,13 +34981,11 @@ async function _termConnect() {
     }).catch(() => {});
   });
 
-  // Stream output via long-poll: each request blocks server-side until output
-  // is available (up to 25s), then we re-request immediately — near-real-time
-  // with no fixed polling lag. Only back off on transient errors.
-  async function _termTick() {
-    if (!_termPoll || !_termId) return;
+  // Poll for output
+  _termPoll = setInterval(async () => {
+    if (!_termId) return;
     try {
-      const r = await fetch(API + '/api/terminal/' + _termId + '/output?wait=25');
+      const r = await fetch(API + '/api/terminal/' + _termId + '/output');
       const d = await r.json();
       if (d.data) {
         const bytes = Uint8Array.from(atob(d.data), c => c.charCodeAt(0));
@@ -35299,24 +34994,19 @@ async function _termConnect() {
       if (!d.alive) {
         _term.writeln('\r\n\x1b[33m[Process exited]\x1b[0m');
         document.getElementById('term-status').textContent = 'Disconnected';
+        clearInterval(_termPoll);
         _termPoll = null;
         document.getElementById('term-connect-btn').style.display = '';
         document.getElementById('term-disconnect-btn').style.display = 'none';
-        return;
       }
-    } catch (e) {
-      if (_termPoll) _termPoll = setTimeout(_termTick, 500);  // transient — back off
-      return;
-    }
-    if (_termPoll) _termPoll = setTimeout(_termTick, 0);  // re-poll immediately
-  }
-  _termPoll = setTimeout(_termTick, 0);
+    } catch (e) {}
+  }, 50);
 
   _term.focus();
 }
 
 function _termDisconnect() {
-  if (_termPoll) { clearTimeout(_termPoll); _termPoll = null; }
+  if (_termPoll) { clearInterval(_termPoll); _termPoll = null; }
   if (_termId) {
     fetch(API + '/api/terminal/' + _termId, { method: 'DELETE' }).catch(() => {});
     _termId = null;
@@ -37821,50 +37511,32 @@ function _graphRestorePositions() {
 }
 
 // ── Browser ─────────────────────────────────────────────────────────────────
-// Thin harness over the browser-use CLI. Structured-first: a named profile
-// auto-loads by URL (persistent login), the page is driven by real actions
-// (click/type/keys/scroll), and `state` gives an index-addressable element list
-// for ref-based clicking. The Computer-Use agent is the vision fallback.
 let _bwInited = false;
 let _bwSession = 'amux';
-let _bwViewport = null;        // {w,h} of the page viewport, for click scaling
-let _bwCurrentUrl = '';        // last URL we navigated to (for the agent start_url)
-let _bwActiveProfile = '';     // profile the current session is running under
-let _bwLive = false;           // live auto-refresh on?
-let _bwLiveTimer = null;
-let _bwShotInFlight = false;   // debounce: skip a screenshot while one is running
-let _bwAgentCtl = null;        // AbortController for the running agent task
 
 async function _bwInit() {
-  if (!_bwInited) {
-    _bwInited = true;
-    await _bwLoadProfiles();
-  }
-}
-
-async function _bwLoadProfiles() {
+  if (_bwInited) return;
+  _bwInited = true;
+  // Load profiles
   try {
     const r = await fetch('/api/browser/profiles');
     const d = await r.json();
     const sel = document.getElementById('bw-profile');
-    if (!sel) return;
-    const cur = sel.value;
-    // Rebuild: Auto (empty) + registered profiles + real Chrome profiles
-    sel.innerHTML = '<option value="">Auto profile</option>';
     (d.profiles || []).forEach(p => {
       const o = document.createElement('option');
-      o.value = p.name;
-      const doms = (p.domains || []).join(', ');
-      o.textContent = '🔓 ' + p.name + (doms ? ' — ' + doms : '');
-      if (doms) o.title = doms;
+      o.value = p; o.textContent = p;
       sel.appendChild(o);
     });
-    (d.chrome_profiles || []).forEach(p => {
-      const o = document.createElement('option');
-      o.value = p; o.textContent = '🌐 ' + p;
-      sel.appendChild(o);
-    });
-    if (cur) sel.value = cur;
+    // Also add Playwright auth profiles
+    const pw = await fetch('/api/browser/pw-profiles').catch(() => null);
+    if (pw && pw.ok) {
+      const pd = await pw.json();
+      (pd.profiles || []).forEach(p => {
+        const o = document.createElement('option');
+        o.value = 'pw:' + p; o.textContent = '🔐 ' + p;
+        sel.appendChild(o);
+      });
+    }
   } catch(e) {}
 }
 
@@ -37873,317 +37545,97 @@ function _bwStatus(msg) {
   if (el) el.textContent = msg;
 }
 
-function _bwShowProfile(profile, auto) {
-  _bwActiveProfile = profile || '';
-  const el = document.getElementById('bw-loggedin');
-  if (!el) return;
-  if (!profile) { el.style.display = 'none'; return; }
-  el.style.display = '';
-  el.textContent = (auto ? '🔒 auto: ' : '🔓 ') + profile;
-  el.style.background = 'var(--surface)';
-  el.style.border = '1px solid var(--border)';
-  el.style.color = 'var(--fg)';
-  el.title = auto ? 'Profile auto-selected by URL' : 'Profile: ' + profile;
-}
-
 async function _bwGo() {
-  let url = document.getElementById('bw-url').value.trim();
+  const url = document.getElementById('bw-url').value.trim();
   if (!url) return;
-  if (!/^[a-zA-Z][a-zA-Z0-9+.-]*:\/\//.test(url) && !url.startsWith('about:')) url = 'https://' + url;
   const profile = document.getElementById('bw-profile').value;
-  _bwStatus('Loading…');
+  _bwStatus('Loading...');
   try {
     const body = { url, session: _bwSession };
-    if (profile) body.profile = profile;   // empty = auto-select by URL
+    if (profile && !profile.startsWith('pw:')) body.profile = profile;
+    else if (profile && profile.startsWith('pw:')) body.profile = profile.slice(3);
     const r = await fetch('/api/browser/start', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify(body) });
     const d = await r.json();
     if (d.error) { _bwStatus('Error: ' + d.error); return; }
-    _bwCurrentUrl = (d.data && d.data.url) || url;
-    _bwShowProfile(d.profile, d.auto_profile);
-    _bwStatus('Navigated' + (d.profile_fallback ? ' (no profile — Chrome busy)' : ''));
-    _bwViewport = null;
-    await _bwFetchViewport();
-    // Auto-refresh a couple times, then flip live view on so the page stays current
-    setTimeout(() => _bwScreenshot(2), 1500);
-    if (!_bwLive) _bwSetLive(true);
+    _bwStatus('Navigated');
+    // Auto-screenshot after a delay
+    setTimeout(() => _bwScreenshot(2), 2000);
   } catch(e) { _bwStatus('Error: ' + e.message); }
 }
 
-async function _bwFetchViewport() {
-  try {
-    const r = await fetch('/api/browser/action', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({ action: 'eval', script: '({w:window.innerWidth,h:window.innerHeight})', session: _bwSession }) });
-    const d = await r.json();
-    const res = (d.data || {}).result;
-    if (res && res.w && res.h) _bwViewport = { w: res.w, h: res.h };
-  } catch(e) {}
-}
-
-async function _bwScreenshot(retries, silent) {
+async function _bwScreenshot(retries) {
   retries = retries || 0;
-  if (_bwShotInFlight) return;   // debounce — don't stack requests
-  _bwShotInFlight = true;
-  if (!silent) _bwStatus('Taking screenshot…');
+  _bwStatus('Taking screenshot...');
   try {
     const r = await fetch('/api/browser/screenshot?session=' + _bwSession + '&t=' + Date.now());
     const d = await r.json();
     if (d.path) {
+      // Load via file raw API
       const img = document.getElementById('bw-img');
       img.src = _authUrl('/api/file/raw?path=' + encodeURIComponent(d.path) + '&t=' + Date.now());
       img.style.display = '';
       document.getElementById('bw-placeholder').style.display = 'none';
-      if (!silent) _bwStatus('Updated ' + new Date().toLocaleTimeString());
+      _bwStatus('Screenshot taken');
     } else if (retries > 0) {
-      _bwShotInFlight = false;
-      setTimeout(() => _bwScreenshot(retries - 1, silent), 1500);
-      return;
-    } else if (!silent) {
+      _bwStatus('Retrying screenshot...');
+      setTimeout(() => _bwScreenshot(retries - 1), 2000);
+    } else {
       _bwStatus(d.error || 'Screenshot failed');
     }
   } catch(e) {
     if (retries > 0) {
-      _bwShotInFlight = false;
-      setTimeout(() => _bwScreenshot(retries - 1, silent), 1500);
-      return;
-    } else if (!silent) { _bwStatus('Error: ' + e.message); }
-  } finally {
-    _bwShotInFlight = false;
+      _bwStatus('Retrying screenshot...');
+      setTimeout(() => _bwScreenshot(retries - 1), 2000);
+    } else {
+      _bwStatus('Error: ' + e.message);
+    }
   }
-}
-
-// ── Live auto-refresh (deliverable #4) ──
-function _bwSetLive(on) {
-  _bwLive = on;
-  const btn = document.getElementById('bw-live-btn');
-  if (btn) {
-    btn.classList.toggle('active', on);
-    btn.innerHTML = on ? '&#10074;&#10074; Live' : '&#9658; Live';
-  }
-  if (on) _bwLiveTick();
-  else if (_bwLiveTimer) { clearTimeout(_bwLiveTimer); _bwLiveTimer = null; }
-}
-function _bwToggleLive() { _bwSetLive(!_bwLive); }
-function _bwStopLive() { if (_bwLive) _bwSetLive(false); }
-async function _bwLiveTick() {
-  if (!_bwLive) return;
-  // Only refresh when the Browser tab is actually visible
-  if (activeView === 'browser' && !document.hidden && !_bwShotInFlight) {
-    await _bwScreenshot(0, true);
-  }
-  if (_bwLive) _bwLiveTimer = setTimeout(_bwLiveTick, 900);
 }
 
 async function _bwClick(event) {
   const img = document.getElementById('bw-img');
   const rect = img.getBoundingClientRect();
-  // Scale display coords → page viewport coords. Prefer the real innerWidth/
-  // innerHeight; fall back to the screenshot's natural size (correct at dpr=1).
-  let vw, vh;
-  if (_bwViewport && _bwViewport.w && _bwViewport.h) { vw = _bwViewport.w; vh = _bwViewport.h; }
-  else { vw = img.naturalWidth || rect.width; vh = img.naturalHeight || rect.height; }
-  const x = Math.round((event.clientX - rect.left) * (vw / rect.width));
-  const y = Math.round((event.clientY - rect.top) * (vh / rect.height));
-  try { document.getElementById('bw-viewport').focus({ preventScroll: true }); } catch(e) {}
-  _bwStatus('Click ' + x + ',' + y + '…');
+  // Scale click coords to actual viewport (1280x800 default)
+  const scaleX = 1280 / rect.width;
+  const scaleY = 800 / rect.height;
+  const x = Math.round((event.clientX - rect.left) * scaleX);
+  const y = Math.round((event.clientY - rect.top) * scaleY);
+  _bwStatus('Clicking ' + x + ',' + y + '...');
   try {
     await fetch('/api/browser/action', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({ action: 'click', x, y, session: _bwSession }) });
-    setTimeout(() => _bwScreenshot(1), 800);
+    setTimeout(() => _bwScreenshot(1), 1000);
   } catch(e) { _bwStatus('Error: ' + e.message); }
-}
-
-// ── Real interaction: type / keys / scroll (deliverable #2) ──
-async function _bwAction(payload, note) {
-  try {
-    payload.session = _bwSession;
-    if (note) _bwStatus(note);
-    await fetch('/api/browser/action', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify(payload) });
-    setTimeout(() => _bwScreenshot(1), 500);
-  } catch(e) { _bwStatus('Error: ' + e.message); }
-}
-async function _bwType(fromInput) {
-  const inp = document.getElementById('bw-type');
-  const text = inp.value;
-  if (!text) return;
-  await _bwAction({ action: 'type', text }, 'Typing…');
-  if (fromInput) inp.value = '';
-}
-function _bwKey(key) { _bwAction({ action: 'key', key }, 'Key ' + key + '…'); }
-function _bwScroll(dir) { _bwAction({ action: 'scroll', dy: dir * 600 }, dir > 0 ? 'Scroll down…' : 'Scroll up…'); }
-
-// Keyboard passthrough from the focused viewport — printable chars → type,
-// named keys (Enter/Tab/Arrows/…) → key. Lets you drive the page directly.
-const _BW_NAMED_KEYS = new Set(['Enter','Tab','Backspace','Delete','Escape','ArrowUp','ArrowDown','ArrowLeft','ArrowRight','Home','End','PageUp','PageDown']);
-function _bwViewportKey(event) {
-  if (event.metaKey || event.ctrlKey || event.altKey) return;  // leave shortcuts alone
-  if (_BW_NAMED_KEYS.has(event.key)) {
-    event.preventDefault();
-    _bwKey(event.key);
-  } else if (event.key.length === 1) {
-    event.preventDefault();
-    _bwAction({ action: 'type', text: event.key }, null);
-  }
 }
 
 async function _bwBack() {
-  _bwStatus('Going back…');
+  _bwStatus('Going back...');
   try {
     await fetch('/api/browser/action', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({ action: 'back', session: _bwSession }) });
-    setTimeout(() => _bwScreenshot(1), 800);
+    setTimeout(() => _bwScreenshot(1), 1000);
   } catch(e) { _bwStatus('Error: ' + e.message); }
 }
 
-// ── Structured perception: element list + ref-based click (deliverables #3/#5) ──
-async function _bwToggleElements() {
-  const panel = document.getElementById('bw-elements-panel');
-  const btn = document.getElementById('bw-el-btn');
-  const open = panel.style.display === 'none';
-  panel.style.display = open ? '' : 'none';
-  if (btn) btn.classList.toggle('active', open);
-  if (open) await _bwLoadElements();
-}
-async function _bwLoadElements() {
-  const list = document.getElementById('bw-elements-list');
-  list.innerHTML = '<div style="padding:8px;color:var(--dim);font-size:0.74rem;">Loading…</div>';
-  try {
-    const r = await fetch('/api/browser/state?session=' + _bwSession);
-    const d = await r.json();
-    if (d.viewport) _bwViewport = d.viewport;
-    const els = d.elements || [];
-    document.getElementById('bw-el-count').textContent = els.length + ' elements';
-    if (!els.length) { list.innerHTML = '<div style="padding:8px;color:var(--dim);font-size:0.74rem;">No elements</div>'; return; }
-    list.innerHTML = els.map(e =>
-      '<div class="bw-el" onclick="_bwClickIndex(' + e.index + ')">' +
-      '<span class="idx">' + e.index + '</span>' +
-      '<span class="tag">&lt;' + esc(e.tag) + '&gt;</span>' +
-      '<span style="flex:1;overflow:hidden;text-overflow:ellipsis;">' + esc(e.label || '') + '</span></div>'
-    ).join('');
-  } catch(e) {
-    list.innerHTML = '<div style="padding:8px;color:var(--dim);font-size:0.74rem;">Error: ' + esc(e.message) + '</div>';
-  }
-}
-async function _bwClickIndex(index) {
-  _bwStatus('Click element [' + index + ']…');
-  try {
-    await fetch('/api/browser/action', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({ action: 'click', index, session: _bwSession }) });
-    setTimeout(() => { _bwScreenshot(1); _bwLoadElements(); }, 800);
-  } catch(e) { _bwStatus('Error: ' + e.message); }
-}
-
-// ── Inspect panel: console / network / errors (full browser troubleshooting) ──
-let _bwInspData = { console: [], network: [], errors: [] };
-let _bwInspActiveTab = 'console';
-async function _bwToggleInspect() {
-  const panel = document.getElementById('bw-inspect-panel');
-  const btn = document.getElementById('bw-inspect-btn');
-  const open = panel.style.display === 'none' || !panel.style.display;
-  panel.style.display = open ? 'flex' : 'none';
-  if (btn) btn.classList.toggle('active', open);
-  if (open) await _bwLoadInspect();
-}
-function _bwInspTab(t) {
-  _bwInspActiveTab = t;
-  document.querySelectorAll('#browser-view .bw-itab').forEach(b => b.classList.toggle('active', b.dataset.itab === t));
-  _bwRenderInspect();
-}
-async function _bwLoadInspect() {
-  const list = document.getElementById('bw-inspect-list');
-  if (list && !list.children.length) list.innerHTML = '<div class="il-empty">Loading…</div>';
-  try {
-    const r = await fetch('/api/browser/inspect?session=' + _bwSession + '&limit=300');
-    const d = await r.json();
-    if (d.error) { list.innerHTML = '<div class="il-empty">' + esc(d.error) + '</div>'; return; }
-    _bwInspData = { console: d.console || [], network: d.network || [], errors: d.errors || [] };
-    const c = d.counts || {};
-    document.getElementById('bw-ic-console').textContent = c.console ? '(' + c.console + ')' : '';
-    document.getElementById('bw-ic-network').textContent = c.network ? '(' + c.network + ')' : '';
-    document.getElementById('bw-ic-errors').textContent = c.errors ? '(' + c.errors + ')' : '';
-    _bwRenderInspect();
-  } catch(e) {
-    list.innerHTML = '<div class="il-empty">Error: ' + esc(e.message) + '</div>';
-  }
-}
-function _bwRenderInspect() {
-  const list = document.getElementById('bw-inspect-list');
-  const rows = _bwInspData[_bwInspActiveTab] || [];
-  if (!rows.length) { list.innerHTML = '<div class="il-empty">No ' + _bwInspActiveTab + ' entries. Interact with the page, then refresh.</div>'; return; }
-  let html = '';
-  if (_bwInspActiveTab === 'console') {
-    html = rows.map(e => '<div class="il ' + esc(e.level) + '"><span class="lv ' + esc(e.level) + '">' + esc(e.level) + '</span><span>' + esc(e.text || '') + '</span></div>').join('');
-  } else if (_bwInspActiveTab === 'network') {
-    html = rows.map(n => {
-      const ok = n.ok && n.status >= 200 && n.status < 400;
-      return '<div class="il"><span class="st ' + (ok ? 'ok' : 'bad') + '">' + esc(String(n.status || '—')) + '</span>' +
-             '<span class="mth">' + esc(n.method || '') + '</span>' +
-             '<span style="flex:1;overflow:hidden;text-overflow:ellipsis;">' + esc(n.url || '') + '</span>' +
-             '<span class="ms">' + (n.ms != null ? n.ms + 'ms' : '') + '</span></div>';
-    }).join('');
-  } else {
-    html = rows.map(e => '<div class="il error"><span class="lv error">err</span><span>' + esc(e.text || '') + (e.stack ? '\n' + esc(e.stack) : '') + '</span></div>').join('');
-  }
-  list.innerHTML = html;
-}
-async function _bwClearInspect() {
-  try { await fetch('/api/browser/inspect/clear', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({ session: _bwSession }) }); } catch(e) {}
-  _bwInspData = { console: [], network: [], errors: [] };
-  ['console','network','errors'].forEach(k => { const el = document.getElementById('bw-ic-' + k); if (el) el.textContent = ''; });
-  _bwRenderInspect();
-}
-
-// ── Save profile: register current site to a profile (deliverable #1 UI) ──
 async function _bwSaveProfile() {
-  const suggested = _bwActiveProfile || '';
-  const name = prompt('Register the current site to which profile?\n(Logging in under this profile persists automatically.)', suggested);
-  if (name === null) return;
-  _bwStatus('Saving profile…');
+  const name = prompt('Profile name to save current session as:');
+  if (!name) return;
+  _bwStatus('Saving profile...');
   try {
-    const r = await fetch('/api/browser/save-profile', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({ name: name.trim(), session: _bwSession }) });
+    const r = await fetch('/api/browser/save-profile', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({ name, session: _bwSession }) });
     const d = await r.json();
+    _bwStatus(d.success ? 'Profile saved: ' + name : (d.error || 'Save failed'));
     if (d.success) {
-      _bwStatus('Saved: ' + d.profile + (d.host ? ' → ' + d.host : ''));
-      _bwShowProfile(d.profile, false);
-      await _bwLoadProfiles();
-      document.getElementById('bw-profile').value = d.profile;
-    } else {
-      _bwStatus(d.error || 'Save failed');
+      // Add to dropdown if not there
+      const sel = document.getElementById('bw-profile');
+      const exists = Array.from(sel.options).some(o => o.value === 'pw:' + name);
+      if (!exists) {
+        const o = document.createElement('option');
+        o.value = 'pw:' + name; o.textContent = '🔐 ' + name;
+        sel.appendChild(o);
+        sel.value = 'pw:' + name;
+      }
     }
   } catch(e) { _bwStatus('Error: ' + e.message); }
 }
-
-// ── Autonomous agent (Computer-Use vision loop) — deliverable #5 ──
-async function _bwAgentRun() {
-  const inp = document.getElementById('bw-task');
-  const task = inp.value.trim();
-  if (!task) return;
-  const out = document.getElementById('bw-agent-result');
-  const stopBtn = document.getElementById('bw-agent-stop');
-  out.style.display = '';
-  out.textContent = '⏳ Agent working on: ' + task + '\n(this can take a while — vision loop)';
-  stopBtn.style.display = '';
-  _bwStatus('Agent running…');
-  _bwAgentCtl = new AbortController();
-  try {
-    const body = { task, session: _bwSession };
-    if (_bwCurrentUrl) body.start_url = _bwCurrentUrl;
-    const r = await fetch('/api/browser/agent', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify(body), signal: _bwAgentCtl.signal });
-    const d = await r.json();
-    if (d.error) { out.textContent = '⚠️ ' + d.error; }
-    else {
-      let txt = (d.result || '(no summary)') + '\n\n— ' + (d.iterations || 0) + ' steps, stop: ' + (d.stop_reason || '?');
-      if (d.log && d.log.length) {
-        txt += '\n\nActions:\n' + d.log.filter(l => l.type === 'tool_use').map(l => '· ' + l.name + ' ' + JSON.stringify(l.input || {})).join('\n');
-      }
-      out.textContent = txt;
-    }
-    _bwStatus('Agent done');
-    _bwScreenshot(1);
-  } catch(e) {
-    if (e.name === 'AbortError') { out.textContent = '⏹ Stopped (client). The server-side loop finishes its current step.'; _bwStatus('Agent stopped'); }
-    else { out.textContent = '⚠️ ' + e.message; _bwStatus('Agent error'); }
-  } finally {
-    stopBtn.style.display = 'none';
-    _bwAgentCtl = null;
-  }
-}
-function _bwAgentStop() { if (_bwAgentCtl) _bwAgentCtl.abort(); }
 
 // ── Journal ──────────────────────────────────────────────────────────────────
 let _jrnlEntries = [];
@@ -38457,12 +37909,9 @@ async function _jrnlDeleteMedia(mid) {
 function _jrnlViewMedia(url) {
   const overlay = document.createElement('div');
   overlay.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,0.9);z-index:10000;display:flex;align-items:center;justify-content:center;cursor:pointer;';
-  const close = () => { overlay.remove(); document.removeEventListener('keydown', onKey); };
-  const onKey = (e) => { if (e.key === 'Escape') { e.stopPropagation(); close(); } };
-  overlay.onclick = close;
+  overlay.onclick = () => overlay.remove();
   overlay.innerHTML = '<img src="' + url + '" style="max-width:90vw;max-height:90vh;border-radius:8px;">';
   document.body.appendChild(overlay);
-  document.addEventListener('keydown', onKey);
 }
 
 function _jrnlGetLocation() {
@@ -38687,7 +38136,6 @@ window.addEventListener('load', _pinnedNotesRefresh);
       <button class="ws-preset-btn" onclick="wsToggleNoteMenu()" title="Add a note pane">&#x1F4DD; Note</button>
       <div class="ws-note-menu" id="ws-note-menu"></div>
     </div>
-    <button class="ws-preset-btn" onclick="wsAddTermPane()" title="Add an interactive terminal pane">&gt;_ Term</button>
     <div class="ws-preset-dropdown" id="ws-preset-dropdown">
       <button class="ws-preset-btn" onclick="wsTogglePresetMenu()" title="Apply a layout preset">&#x25A6; Layout</button>
       <div class="ws-preset-menu" id="ws-preset-menu">
@@ -38700,7 +38148,6 @@ window.addEventListener('load', _pinnedNotesRefresh);
         <button onclick="wsApplyPreset('rows')"><span class="preset-icon">&#x2261;</span> Stacked Rows</button>
       </div>
     </div>
-    <button class="btn" onclick="wsExpandActive()" style="flex-shrink:0;font-size:0.75rem;padding:4px 10px;" title="Add all active/waiting sessions">&#x26A1; Active</button>
     <button class="btn" onclick="wsClearWorkspace()" style="flex-shrink:0;font-size:0.75rem;padding:4px 10px;color:var(--dim);" title="Remove all panes">Clear</button>
     <button class="btn" id="ws-fullscreen-btn" onclick="wsToggleFullscreen()" style="flex-shrink:0;font-size:0.75rem;padding:4px 10px;" title="Toggle fullscreen">&#x26F6;</button>
     <button class="btn" onclick="exitGridMode()" style="flex-shrink:0;font-size:0.75rem;padding:4px 10px;">&#x2715; Exit</button>
@@ -38773,7 +38220,7 @@ PWA_MANIFEST = json.dumps({
 
 # Robust service worker: cache-first with localStorage fallback for multi-day offline
 SERVICE_WORKER = r"""
-const CACHE = 'amux-v0.9.61';
+const CACHE = 'amux-v0.8.9';
 const SHELL_URLS = ['/', '/manifest.json', '/icon.svg', '/icon.png', '/icon-192.png', '/icon-512.png'];
 
 // Install: pre-cache entire app shell
@@ -38790,36 +38237,6 @@ self.addEventListener('activate', e => {
     caches.keys().then(keys =>
       Promise.all(keys.filter(k => k !== CACHE).map(k => caches.delete(k)))
     ).then(() => self.clients.claim())
-  );
-});
-
-// Web Push: a push message from the server arrives here even when the PWA is
-// fully closed. We MUST call showNotification (userVisibleOnly), or the browser
-// penalises the subscription.
-self.addEventListener('push', e => {
-  let d = {};
-  try { d = e.data ? e.data.json() : {}; } catch(_) { d = { title: 'amux', body: e.data ? e.data.text() : '' }; }
-  const title = d.title || 'amux';
-  e.waitUntil(self.registration.showNotification(title, {
-    body: d.body || '',
-    icon: '/icon-192.png',
-    badge: '/icon-192.png',
-    tag: d.tag || 'amux-push',
-    renotify: true,
-    requireInteraction: true,
-    data: { url: d.url || '/', session: d.session || '' },
-  }));
-});
-
-// Focus the app (or open it) when a notification is tapped — required for the
-// click to do anything on iOS, where notifications are shown via the SW.
-self.addEventListener('notificationclick', e => {
-  e.notification.close();
-  e.waitUntil(
-    clients.matchAll({ type: 'window', includeUncontrolled: true }).then(cl => {
-      for (const c of cl) { if ('focus' in c) return c.focus(); }
-      if (clients.openWindow) return clients.openWindow('/');
-    })
   );
 });
 
@@ -38952,7 +38369,11 @@ class ResilientHTTPSServer(ThreadingHTTPServer):
     """
     daemon_threads = True
     allow_reuse_address = True
-    allow_reuse_port = True
+    # allow_reuse_port must stay False: with SO_REUSEPORT a second server
+    # instance binds the same port silently and runs a duplicate scheduler
+    # (every schedule fired twice, 2026-05/06). A second instance must die
+    # at bind time with EADDRINUSE instead.
+    allow_reuse_port = False
     ssl_ctx = None  # Set after creation; None = plain HTTP
 
     def process_request_thread(self, request, client_address):
@@ -38967,7 +38388,7 @@ class ResilientHTTPSServer(ThreadingHTTPServer):
                 except OSError:
                     pass
                 return
-            request.settimeout(120)
+            request.settimeout(None)
         try:
             self.finish_request(request, client_address)
         except Exception:
@@ -39230,6 +38651,7 @@ class CCHandler(BaseHTTPRequestHandler):
         last_notes_version = _notes_version
         last_crm_version   = _crm_version
         last_journal_version = _journal_version
+        last_threads_version = _threads_version
 
         try:
             while True:
@@ -39305,6 +38727,9 @@ class CCHandler(BaseHTTPRequestHandler):
                 if _journal_version != last_journal_version:
                     last_journal_version = _journal_version
                     invalidated.append("journal")
+                if _threads_version != last_threads_version:
+                    last_threads_version = _threads_version
+                    invalidated.append("threads")
                 if invalidated:
                     self.wfile.write(f"data: {json.dumps({'type': 'invalidate', 'keys': invalidated})}\n\n".encode())
                     self.wfile.flush()
@@ -39353,15 +38778,10 @@ class CCHandler(BaseHTTPRequestHandler):
         t0 = time.monotonic()
         try:
             return self._route_inner(method, path, qs)
-        except (BrokenPipeError, ConnectionResetError, ssl.SSLError, OSError) as e:
-            slog(f"ERROR {method} {path} — {e}")
         except Exception as e:
             import traceback
             slog(f"ERROR {method} {path} — {e}\n{traceback.format_exc()}")
-            try:
-                return self._json({"error": str(e)}, 500)
-            except (BrokenPipeError, ConnectionResetError, ssl.SSLError, OSError):
-                pass
+            return self._json({"error": str(e)}, 500)
         finally:
             # Skip logging SSE (long-lived) connections
             if path != "/api/events":
@@ -39410,75 +38830,6 @@ class CCHandler(BaseHTTPRequestHandler):
         # ── Auth gate ──
         if not self._check_auth(method, path):
             return
-
-        # ── amux tunnel control (cloud reverse proxy for localhost) ──
-        if path == "/api/tunnel/status" and method == "GET":
-            return self._json({"running": _tunnel_client["running"], "url": _tunnel_client["url"],
-                               "error": _tunnel_client["error"], "requests": _tunnel_client["requests"],
-                               "target": _tunnel_client["target"], "configured": bool(_TUNNEL_TOKEN),
-                               "gateway": _TUNNEL_GATEWAY})
-        if path == "/api/tunnel/start" and method == "POST":
-            body = self._read_body()
-            return self._json(_tunnel_start(token=body.get("token"), target_port=body.get("port")))
-        if path == "/api/tunnel/stop" and method == "POST":
-            return self._json(_tunnel_stop())
-
-        # ── Urgent owner alert (use sparingly) + its config ──
-        if path == "/api/alert/owner" and method == "POST":
-            body = self._read_body()
-            return self._json(_send_urgent_alert(
-                body.get("message", ""), body.get("session", ""), body.get("reason", "")))
-        if path == "/api/alert/config":
-            if method == "GET":
-                return self._json({
-                    "phone": os.environ.get("AMUX_OWNER_PHONE", ""),
-                    "push": os.environ.get("AMUX_URGENT_PUSH", "1") != "0",
-                    "sms": os.environ.get("AMUX_URGENT_SMS", "1") != "0",
-                    "sms_provider": "twilio" if os.environ.get("TWILIO_ACCOUNT_SID") else "imessage",
-                })
-            if method == "PATCH":
-                body = self._read_body()
-                if "phone" in body:
-                    _env_set("AMUX_OWNER_PHONE", (body.get("phone") or "").strip())
-                if "push" in body:
-                    _env_set("AMUX_URGENT_PUSH", "1" if body.get("push") else "0")
-                if "sms" in body:
-                    _env_set("AMUX_URGENT_SMS", "1" if body.get("sms") else "0")
-                return self._json({"ok": True})
-
-        # ── Real-time Google Calendar push (schedules → GCal via amux OAuth) ──
-        if path == "/api/gcal/auth" and method == "GET":
-            url, err = _gcal_auth_url()
-            if not url:
-                return self._json({"error": err}, 500)
-            return self._json({"url": url})
-        if path == "/api/gcal/status" and method == "GET":
-            adc_ok = False
-            try:
-                _gcal_service().calendarList().list(maxResults=1).execute(); adc_ok = True
-            except Exception:
-                pass
-            return self._json({"enabled": bool(_GCAL_ID), "calendar_id": _GCAL_ID, "adc_ok": adc_ok, "tz": _GCAL_TZ})
-        if path == "/api/gcal/enable" and method == "POST":
-            body = self._read_body()
-            try:
-                service = _gcal_service()
-                service.calendarList().list(maxResults=1).execute()   # verify calendar scope
-            except Exception as e:
-                return self._json({"error": "calendar auth unavailable — run: gcloud auth application-default "
-                                   "login --scopes=openid,https://www.googleapis.com/auth/userinfo.email,"
-                                   "https://www.googleapis.com/auth/cloud-platform,https://www.googleapis.com/auth/drive,"
-                                   "https://www.googleapis.com/auth/calendar", "detail": str(e)[:150]}, 400)
-            cal_id = (body.get("calendar_id") or "").strip()
-            if not cal_id:
-                cal = service.calendars().insert(body={"summary": "amux Schedules", "timeZone": _GCAL_TZ}).execute()
-                cal_id = cal["id"]
-            _gcal_set_id(cal_id)
-            threading.Thread(target=_gcal_backfill, daemon=True).start()
-            return self._json({"ok": True, "calendar_id": cal_id, "backfill": "started"})
-        if path == "/api/gcal/disable" and method == "POST":
-            _gcal_set_id("")
-            return self._json({"ok": True})
 
         # GET /
         if method == "GET" and path == "/":
@@ -39665,10 +39016,8 @@ class CCHandler(BaseHTTPRequestHandler):
                     if log_out:
                         output = log_out
                 if not output:
-                    output = "(no output)"
-                resp = {"name": session_name, "output": output, "saved": bool(not tmux_lines or (tmux_lines < 30 and tmux_lines < lines // 4))}
-                _peek_cache[session_name] = (now, lines, resp)
-                return self._json(resp)
+                    output = load_session_log(session_name, tail_bytes=65_536) or "(no output)"
+                return self._json({"name": session_name, "output": output})
 
             if method == "GET" and action == "info":
                 env_file = CC_SESSIONS / f"{session_name}.env"
@@ -39977,6 +39326,425 @@ class CCHandler(BaseHTTPRequestHandler):
                     return self._json({"ok": True})
                 return self._error(400, "expected array")
 
+        # Threads + Messages API — the successor to /api/questions.
+        #
+        # Threads model conversations as (thread, [messages]) instead of the
+        # questions-with-embedded-answer shape. Every entry is its own message;
+        # `parent_id` on a message points at the specific message it replies to.
+        # A thread's overall state (needs-you / with-agent / closed) is derived
+        # by the client from the newest message's direction and read flag.
+        #
+        # Sender is `from_session` (or X-Amux-Session header); recipient is
+        # `to_session`. Exactly one side is empty — the empty side is Jeremy.
+        #
+        # POST /api/threads              — create a thread + first message
+        # GET  /api/threads              — list all live threads with embedded messages
+        # GET  /api/threads/T-N          — one thread with embedded messages
+        # PATCH /api/threads/T-N         — star, edit title, or discard
+        # POST /api/threads/T-N/messages — append a message (Reply)
+        # GET  /api/messages/M-N         — one message
+        # PATCH /api/messages/M-N        — mark read, update body (streaming), discard
+        #
+        # Phase 1 supports text messages only; choice/set support (AskUserQuestion
+        # style) is retained in the schema for a follow-on phase.
+        if (path == "/api/threads" or path.startswith("/api/threads/")
+                or path == "/api/messages" or path.startswith("/api/messages/")):
+            db = get_db()
+
+            def _bump_threads_version():
+                # Bumps the SSE watermark so connected clients get an
+                # invalidate('threads') event within ~2s of any write.
+                global _threads_version
+                _threads_version += 1
+
+            def _thread_to_dict(t_row, msgs=None):
+                d = dict(t_row)
+                if msgs is None:
+                    msgs = db.execute(
+                        "SELECT * FROM messages WHERE thread_id = ? "
+                        "ORDER BY position, created", (d["id"],)
+                    ).fetchall()
+                d["messages"] = [dict(m) for m in msgs]
+                return d
+
+            def _other_party(tid, sender):
+                # The 'other' participant in a thread — used to default to_session
+                # when an agent replies without specifying it. Derived from the
+                # root message: if sender is that root's from_session, other is
+                # its to_session; otherwise other is the root's from_session.
+                root = db.execute(
+                    "SELECT from_session, to_session FROM messages "
+                    "WHERE thread_id = ? ORDER BY position, created LIMIT 1",
+                    (tid,)
+                ).fetchone()
+                if not root:
+                    return ""
+                return root["to_session"] if sender == root["from_session"] else root["from_session"]
+
+            def _deliver(thread_row, msg_row):
+                # Route a newly-complete message to its recipient. Recipient == ''
+                # → Jeremy; pushover him. Recipient == agent → send_text if
+                # blocking (interrupts mid-task), else drop a board issue so the
+                # agent picks it up on next turn.
+                tid = thread_row["id"]
+                mid = msg_row["id"]
+                title = thread_row["title"]
+                mbody = msg_row["body"] or "(no body)"
+                blocking = msg_row["blocking"]
+                recipient = msg_row["to_session"]
+                sender = msg_row["from_session"] or "Jeremy"
+                if not recipient:
+                    _send_pushover(
+                        f"Thread reply from {sender}",
+                        f"{tid}: {title[:200]}",
+                        priority=1 if blocking else 0,
+                    )
+                    return
+                preamble = (
+                    f"Message from **{sender}** in thread **{tid}** — _{title}_\n\n"
+                    f"> {mbody}\n\n"
+                    f"Reply with the `amux` CLI:\n\n"
+                    f"    amux threads reply {mid} \"<your reply>\"\n\n"
+                    f"For a longer/streaming answer:\n\n"
+                    f"    MID=$(amux threads reply --partial {mid} \"working on it...\")\n"
+                    f"    # ...do the work...\n"
+                    f"    amux threads finalize $MID \"<final answer>\"\n"
+                )
+                if blocking:
+                    try:
+                        send_text(recipient,
+                                  f"[{tid}/{mid}] {sender}: {title}\n\n{mbody}\n\n"
+                                  f"Reply: amux threads reply {mid} \"...\"")
+                    except Exception as _e:
+                        slog(f"[threads] {mid}: send_text failed: {_e}")
+                else:
+                    board_id = _next_issue_id(_prefix_from_session(recipient))
+                    now_t = int(time.time())
+                    db.execute(
+                        "INSERT INTO issues (id, title, desc, status, session, creator, "
+                        "  created, updated, owner_type) "
+                        "VALUES (?, ?, ?, 'todo', ?, 'threads', ?, ?, 'agent')",
+                        (board_id, f"Thread {tid}: {title[:80]}", preamble,
+                         recipient, now_t, now_t),
+                    )
+                    db.commit()
+                    _board_changed()
+                    try:
+                        _notify_session_of_task(recipient, board_id,
+                                                f"Thread {tid}: {title[:80]}")
+                    except Exception:
+                        pass
+
+            def _check_thread_addressing(from_session, to_session, body):
+                # Threads are for Jeremy only. When an agent (from_session set)
+                # sends to Jeremy (to_session blank) and the body addresses
+                # another known session with '<name>:' — e.g. "Scorpio: ..." or
+                # "Addendum for Scorpio: ..." — the addressed agent never sees
+                # it. Reject and hint at board (handoff) or channels (chatter).
+                # Doc: /mnt/gitdata/amux/CLAUDE.md 'Threads are for Jeremy only'.
+                if not from_session or to_session or not body:
+                    return ""
+                names = []
+                for env in CC_SESSIONS.glob("*.env"):
+                    name = env.stem
+                    if not name or name == from_session:
+                        continue
+                    names.append(name)
+                if not names:
+                    return ""
+                # Longest first so 'iSchedule-Main' wins over 'iSchedule'.
+                names.sort(key=len, reverse=True)
+                pattern = r'\b(' + '|'.join(re.escape(n) for n in names) + r')\s*:'
+                m = re.search(pattern, body)
+                return m.group(1) if m else ""
+
+            def _addressing_error(addressed, from_session):
+                return {
+                    "error": "thread-addressing-guard",
+                    "addressed": addressed,
+                    "hint": (
+                        f"Thread body addresses {addressed} but threads only "
+                        f"notify Jeremy — {addressed} will never see this. "
+                        f"For a handoff, POST /api/board with "
+                        f'session="{addressed}". For back-and-forth chatter, '
+                        f"POST /api/channels/{from_session}/{addressed}/messages."
+                    ),
+                }
+
+            # ── GET /api/threads — list live threads with embedded messages ─
+            if method == "GET" and path == "/api/threads":
+                rows = db.execute(
+                    "SELECT * FROM threads WHERE discarded = 0 "
+                    "ORDER BY starred DESC, updated DESC"
+                ).fetchall()
+                all_msgs = db.execute(
+                    "SELECT m.* FROM messages m "
+                    "JOIN threads t ON t.id = m.thread_id "
+                    "WHERE t.discarded = 0 "
+                    "ORDER BY m.thread_id, m.position, m.created"
+                ).fetchall()
+                by_thread: dict = {}
+                for m in all_msgs:
+                    by_thread.setdefault(m["thread_id"], []).append(m)
+                return self._json([_thread_to_dict(r, by_thread.get(r["id"], []))
+                                   for r in rows])
+
+            # ── POST /api/threads — create thread + first message ───────────
+            if method == "POST" and path == "/api/threads":
+                bj = self._read_body()
+                title = (bj.get("title") or "").strip()
+                if not title:
+                    return self._json({"error": "title required"}, 400)
+                mbody = (bj.get("body") or "").strip()
+                from_session = (bj.get("from_session")
+                                or self.headers.get("X-Amux-Session")
+                                or "").strip()
+                to_session = (bj.get("to_session") or "").strip()
+                if not from_session and not to_session:
+                    return self._json({"error": "must specify either from_session (agent posting) or to_session (Jeremy posting)"}, 400)
+                if from_session and to_session:
+                    return self._json({"error": "exactly one of from_session/to_session must be empty (the empty side is Jeremy)"}, 400)
+                addressed = _check_thread_addressing(from_session, to_session, mbody)
+                if addressed:
+                    return self._json(_addressing_error(addressed, from_session), 400)
+                blocking = 1 if bj.get("blocking") else 0
+                now = int(time.time())
+                tid = _next_issue_id("T")
+                mid = _next_issue_id("M")
+                db.execute(
+                    "INSERT INTO threads (id, title, starred, created, updated) "
+                    "VALUES (?, ?, 0, ?, ?)",
+                    (tid, title, now, now),
+                )
+                db.execute(
+                    "INSERT INTO messages (id, thread_id, parent_id, from_session, "
+                    "  to_session, body, blocking, status, position, created, updated) "
+                    "VALUES (?, ?, '', ?, ?, ?, ?, 'complete', 0, ?, ?)",
+                    (mid, tid, from_session, to_session, mbody, blocking, now, now),
+                )
+                db.commit()
+                _bump_threads_version()
+                thread_row = db.execute("SELECT * FROM threads WHERE id = ?", (tid,)).fetchone()
+                msg_row = db.execute("SELECT * FROM messages WHERE id = ?", (mid,)).fetchone()
+                # no_deliver=true skips notification — used by Move-to-Threads
+                # migration to avoid re-pinging agents about long-answered
+                # conversations.
+                if not bj.get("no_deliver"):
+                    _deliver(thread_row, msg_row)
+                return self._json(_thread_to_dict(thread_row, [msg_row]), 201)
+
+            # ── /api/threads/T-N and its sub-routes ─────────────────────────
+            m_thread = re.match(r"^/api/threads/([A-Za-z0-9-]+)$", path)
+            if m_thread:
+                tid = m_thread.group(1)
+                thread_row = db.execute("SELECT * FROM threads WHERE id = ?", (tid,)).fetchone()
+                if not thread_row:
+                    return self._json({"error": "not found"}, 404)
+                if method == "GET":
+                    return self._json(_thread_to_dict(thread_row))
+                if method == "PATCH":
+                    bj = self._read_body()
+                    now = int(time.time())
+                    if "starred" in bj:
+                        db.execute("UPDATE threads SET starred = ?, updated = ? WHERE id = ?",
+                                   (1 if bj["starred"] else 0, now, tid))
+                    if "title" in bj:
+                        new_t = (bj["title"] or "").strip()
+                        if new_t:
+                            db.execute("UPDATE threads SET title = ?, updated = ? WHERE id = ?",
+                                       (new_t, now, tid))
+                    if bj.get("discarded"):
+                        db.execute("UPDATE threads SET discarded = 1, updated = ? WHERE id = ?",
+                                   (now, tid))
+                    db.commit()
+                    _bump_threads_version()
+                    thread_row = db.execute("SELECT * FROM threads WHERE id = ?", (tid,)).fetchone()
+                    return self._json(_thread_to_dict(thread_row))
+                if method == "DELETE":
+                    db.execute("UPDATE threads SET discarded = 1, updated = ? WHERE id = ?",
+                               (int(time.time()), tid))
+                    db.commit()
+                    _bump_threads_version()
+                    return self._json({"ok": True, "id": tid})
+                return self._json({"error": "method not allowed"}, 405)
+
+            # ── POST /api/threads/T-N/messages — append a Reply ─────────────
+            m_msgs = re.match(r"^/api/threads/([A-Za-z0-9-]+)/messages$", path)
+            if m_msgs and method == "POST":
+                tid = m_msgs.group(1)
+                thread_row = db.execute("SELECT * FROM threads WHERE id = ?", (tid,)).fetchone()
+                if not thread_row:
+                    return self._json({"error": "thread not found"}, 404)
+                bj = self._read_body()
+                mbody = (bj.get("body") or "").strip()
+                if not mbody:
+                    return self._json({"error": "body required"}, 400)
+                from_session = (bj.get("from_session")
+                                or self.headers.get("X-Amux-Session")
+                                or "").strip()
+                # Default to_session = the other participant in the thread.
+                to_session = bj.get("to_session")
+                if to_session is None:
+                    to_session = _other_party(tid, from_session)
+                to_session = (to_session or "").strip()
+                parent_id = (bj.get("parent_id") or "").strip()
+                if parent_id:
+                    p = db.execute(
+                        "SELECT thread_id FROM messages WHERE id = ?", (parent_id,)
+                    ).fetchone()
+                    if not p:
+                        return self._json({"error": f"parent_id {parent_id} not found"}, 404)
+                    if p["thread_id"] != tid:
+                        return self._json({"error": f"parent_id {parent_id} belongs to a different thread"}, 400)
+                blocking = 1 if bj.get("blocking") else 0
+                partial = bool(bj.get("partial"))
+                new_status = "working" if partial else "complete"
+                # Skip the check on partial (streaming) writes — enforced at
+                # finalize instead (PATCH body → complete). Prevents rejecting a
+                # message the agent is still editing.
+                if not partial:
+                    addressed = _check_thread_addressing(from_session, to_session, mbody)
+                    if addressed:
+                        return self._json(_addressing_error(addressed, from_session), 400)
+                now = int(time.time())
+                pos_row = db.execute(
+                    "SELECT COALESCE(MAX(position), -1) + 1 AS next_pos FROM messages "
+                    "WHERE thread_id = ?", (tid,)
+                ).fetchone()
+                pos = pos_row["next_pos"]
+                mid = _next_issue_id("M")
+                db.execute(
+                    "INSERT INTO messages (id, thread_id, parent_id, from_session, "
+                    "  to_session, body, blocking, status, position, created, updated) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    (mid, tid, parent_id, from_session, to_session, mbody,
+                     blocking, new_status, pos, now, now),
+                )
+                db.execute("UPDATE threads SET updated = ? WHERE id = ?", (now, tid))
+                db.commit()
+                _bump_threads_version()
+                msg_row = db.execute("SELECT * FROM messages WHERE id = ?", (mid,)).fetchone()
+                # Only 'complete' messages get delivered — 'working' means the
+                # sender is still writing; deliver on the flip in PATCH.
+                # no_deliver=true skips (used by Move-to-Threads migration).
+                if new_status == "complete" and not bj.get("no_deliver"):
+                    _deliver(thread_row, msg_row)
+                return self._json(dict(msg_row), 201)
+
+            # ── /api/messages/M-N ───────────────────────────────────────────
+            m_msg = re.match(r"^/api/messages/([A-Za-z0-9-]+)$", path)
+            if m_msg:
+                mid = m_msg.group(1)
+                msg_row = db.execute("SELECT * FROM messages WHERE id = ?", (mid,)).fetchone()
+                if not msg_row:
+                    return self._json({"error": "not found"}, 404)
+                if method == "GET":
+                    return self._json(dict(msg_row))
+                if method == "PATCH":
+                    bj = self._read_body()
+                    now = int(time.time())
+                    delivered = False
+                    if "read" in bj:
+                        db.execute("UPDATE messages SET read = ?, updated = ? WHERE id = ?",
+                                   (1 if bj["read"] else 0, now, mid))
+                    if "flagged" in bj:
+                        # Per-message bookmark for Jeremy. Doesn't touch `read`
+                        # or `status`; a message can be flagged in any state.
+                        db.execute("UPDATE messages SET flagged = ?, updated = ? WHERE id = ?",
+                                   (1 if bj["flagged"] else 0, now, mid))
+                    if "body" in bj:
+                        # Streaming update path. partial=true keeps status='working';
+                        # omitting partial (or false) flips to 'complete' and triggers
+                        # delivery to the recipient exactly once.
+                        new_body = bj["body"]
+                        partial = bool(bj.get("partial"))
+                        was_working = (msg_row["status"] == "working")
+                        new_status = "working" if partial else "complete"
+                        # Enforce thread-addressing guard on finalize. Uses the
+                        # message's stored from/to (agent-set on original POST)
+                        # against the NEW body, so an agent can't smuggle
+                        # inter-agent addressing in via a finalize.
+                        if not partial:
+                            addressed = _check_thread_addressing(
+                                msg_row["from_session"], msg_row["to_session"], new_body)
+                            if addressed:
+                                return self._json(
+                                    _addressing_error(addressed, msg_row["from_session"]), 400)
+                        db.execute(
+                            "UPDATE messages SET body = ?, status = ?, updated = ? "
+                            "WHERE id = ?", (new_body, new_status, now, mid),
+                        )
+                        db.execute("UPDATE threads SET updated = ? WHERE id = ?",
+                                   (now, msg_row["thread_id"]))
+                        if was_working and new_status == "complete":
+                            thread_row = db.execute(
+                                "SELECT * FROM threads WHERE id = ?",
+                                (msg_row["thread_id"],)
+                            ).fetchone()
+                            db.commit()
+                            fresh = db.execute(
+                                "SELECT * FROM messages WHERE id = ?", (mid,)
+                            ).fetchone()
+                            _deliver(thread_row, fresh)
+                            delivered = True
+                    if bj.get("discarded"):
+                        db.execute("UPDATE messages SET status = 'discarded', updated = ? "
+                                   "WHERE id = ?", (now, mid))
+                    if not delivered:
+                        db.commit()
+                    _bump_threads_version()
+                    msg_row = db.execute("SELECT * FROM messages WHERE id = ?", (mid,)).fetchone()
+                    return self._json(dict(msg_row))
+                if method == "DELETE":
+                    db.execute("UPDATE messages SET status = 'discarded', updated = ? "
+                               "WHERE id = ?", (int(time.time()), mid))
+                    db.commit()
+                    _bump_threads_version()
+                    return self._json({"ok": True, "id": mid})
+                return self._json({"error": "method not allowed"}, 405)
+
+            return self._json({"error": "method not allowed"}, 405)
+
+        # Workflows API (/api/workflows) — deterministic multi-step choreographies.
+        # See _run_workflow above + /mnt/gitdata/amux/workflows/*.py.
+        if path == "/api/workflows" or path.startswith("/api/workflows/"):
+            db = get_db()
+            if method == "GET" and path == "/api/workflows":
+                return self._json(_list_workflows())
+            m_run = re.match(r"^/api/workflows/([a-zA-Z0-9_]+)/run$", path)
+            if m_run and method == "POST":
+                wf_name = m_run.group(1)
+                bj = self._read_body()
+                inner_ctx = bj.get("ctx") if isinstance(bj, dict) else {}
+                if not isinstance(inner_ctx, dict):
+                    inner_ctx = {}
+                result = _run_workflow(wf_name, inner_ctx)
+                code = 200 if result.get("status") == "ok" else (
+                    404 if result.get("error", "").startswith("workflow ") else 500
+                )
+                return self._json(result, code)
+            m_runid = re.match(r"^/api/workflows/runs/([A-Za-z0-9_-]+)$", path)
+            if m_runid and method == "GET":
+                row = db.execute(
+                    "SELECT * FROM workflow_runs WHERE id = ?", (m_runid.group(1),)
+                ).fetchone()
+                if not row:
+                    return self._json({"error": "run not found"}, 404)
+                d = dict(row)
+                for k in ("ctx_in", "result", "events"):
+                    try: d[k] = json.loads(d[k])
+                    except Exception: pass
+                return self._json(d)
+            if method == "GET" and path == "/api/workflows/runs":
+                # Recent runs across all workflows — for a future UI list.
+                limit = int(qs.get("limit", ["50"])[0])
+                rows = db.execute(
+                    "SELECT id, name, status, started_at, finished_at "
+                    "FROM workflow_runs ORDER BY started_at DESC LIMIT ?", (limit,)
+                ).fetchall()
+                return self._json([dict(r) for r in rows])
+            return self._json({"error": "method not allowed"}, 405)
+
         # Notifications API (/api/notifications)
         if path == "/api/notifications":
             def _notif_load():
@@ -39997,6 +39765,10 @@ class CCHandler(BaseHTTPRequestHandler):
                 body.setdefault("level", "info")
                 items.insert(0, body)
                 _notif_save(items)
+                _send_pushover(
+                    body.get("title", "amux notification"),
+                    body.get("body", body.get("message", "")),
+                )
                 return self._json({"ok": True, "id": body["id"]})
 
         if path.startswith("/api/notifications/"):
@@ -40021,59 +39793,6 @@ class CCHandler(BaseHTTPRequestHandler):
                 items = [n for n in _notif_load() if n.get("id") != nid]
                 _notif_save(items)
                 return self._json({"ok": True})
-
-        # Web Push API (/api/push/*) — background notifications to phones
-        if path == "/api/push/public-key" and method == "GET":
-            try:
-                _, pub = _vapid_keys()
-                return self._json({"key": pub})
-            except Exception as e:
-                return self._json({"error": str(e)}, 500)
-
-        if path == "/api/push/subscribe" and method == "POST":
-            body = self._read_body()
-            endpoint = (body.get("endpoint") or "").strip()
-            keys = body.get("keys") or {}
-            p256dh = (keys.get("p256dh") or "").strip()
-            auth = (keys.get("auth") or "").strip()
-            if not (endpoint and p256dh and auth):
-                return self._json({"error": "endpoint, keys.p256dh and keys.auth required"}, 400)
-            db = get_db()
-            db.execute(
-                "INSERT INTO push_subscriptions (endpoint, p256dh, auth, ua, created) "
-                "VALUES (?,?,?,?,?) ON CONFLICT(endpoint) DO UPDATE SET p256dh=excluded.p256dh, auth=excluded.auth, ua=excluded.ua",
-                (endpoint, p256dh, auth, self.headers.get("User-Agent", "")[:300], int(time.time())))
-            db.commit()
-            globals()["_PUSH_SUBS_PRESENT"] = True
-            return self._json({"ok": True})
-
-        if path == "/api/push/unsubscribe" and method == "POST":
-            body = self._read_body()
-            endpoint = (body.get("endpoint") or "").strip()
-            db = get_db()
-            db.execute("DELETE FROM push_subscriptions WHERE endpoint=?", (endpoint,))
-            db.commit()
-            return self._json({"ok": True})
-
-        if path == "/api/push/test" and method == "POST":
-            db = get_db()
-            n = db.execute("SELECT COUNT(*) AS c FROM push_subscriptions").fetchone()["c"]
-            if not n:
-                return self._json({"error": "no subscriptions registered on this server", "sent_to": 0}, 400)
-            # Synchronous so the caller sees exactly how the push service responded.
-            results = _web_push_send_all(
-                "amux",
-                "test\nBackground push is working, even with the app closed.",
-                session="", tag="amux-push-test")
-            ok = any(200 <= (r["status"] or 0) < 300 for r in results)
-            return self._json({"ok": ok, "sent_to": n, "results": results})
-
-        if path == "/api/push/subscriptions" and method == "GET":
-            from urllib.parse import urlparse as _up
-            db = get_db()
-            rows = db.execute("SELECT endpoint, ua, created FROM push_subscriptions ORDER BY created DESC").fetchall()
-            subs = [{"host": _up(r["endpoint"]).netloc, "ua": (r["ua"] or "")[:120], "created": r["created"]} for r in rows]
-            return self._json({"count": len(subs), "subject": os.environ.get("AMUX_VAPID_SUBJECT", "mailto:amux@localhost"), "subscriptions": subs})
 
         # Map API (/api/map)
         if path == "/api/map":
@@ -40383,22 +40102,6 @@ class CCHandler(BaseHTTPRequestHandler):
             cmds = _get_slash_commands()
             return self._json(cmds)
 
-        # GET /api/slash-commands/<name> — get full content of a file-based command
-        if method == "GET" and path.startswith("/api/slash-commands/"):
-            import pathlib as _p
-            name = path.split("/api/slash-commands/", 1)[1].lstrip("/")
-            if not name or "/" in name:
-                return self._json({"error": "invalid"}, 400)
-            for d in [_p.Path.home() / ".claude" / "commands", _p.Path(".") / ".claude" / "commands"]:
-                f = d / (name + ".md")
-                if f.exists():
-                    try:
-                        content = f.read_text()
-                        return self._json({"name": name, "content": content, "source": "file"})
-                    except Exception:
-                        pass
-            return self._json({"error": "not found"}, 404)
-
         # GET /api/skills/<name> — get full skill content
         if method == "GET" and path.startswith("/api/skills/"):
             name = path.split("/api/skills/", 1)[1]
@@ -40437,14 +40140,53 @@ class CCHandler(BaseHTTPRequestHandler):
             _sync_skills_to_commands()
             return self._json({"ok": True, "name": name})
 
-        # DELETE /api/skills/<name> — delete a skill
+        # DELETE /api/skills/<name> — delete a skill (Jeremy-only)
         if method == "DELETE" and path.startswith("/api/skills/"):
             name = path.split("/api/skills/", 1)[1]
             if not name or "/" in name:
                 return self._json({"error": "invalid name"}, 400)
+            # Auth: agents cannot delete skills (they can list/get/set, not delete).
+            # An agent request carries X-Amux-Session; the dashboard carries the
+            # UI guard token. Direct human curl (no headers) is also allowed —
+            # matches how session-archive is gated. Env var override for trusted
+            # automation.
+            _from_agent = bool((self.headers.get("X-Amux-Session") or "").strip())
+            _from_dashboard = _session_destructive_allowed(self.headers)
+            _override = os.environ.get("AMUX_ALLOW_AGENT_SKILL_DELETE", "") in ("1", "true", "yes")
+            if _from_agent and not (_from_dashboard or _override):
+                _sender = self.headers.get("X-Amux-Session", "").strip()
+                slog(f"[guard] skill DELETE {name} rejected — agent {_sender!r} not allowed to delete skills")
+                return self._json({
+                    "error": "agents cannot delete skills",
+                    "hint": (
+                        "Skill deletion is reserved for Jeremy (dashboard or direct curl). "
+                        "If your agent believes a skill needs to be removed, post to Threads "
+                        "so Jeremy can review and delete it manually. Automation opt-in: set "
+                        "AMUX_ALLOW_AGENT_SKILL_DELETE=1 in ~/.amux/server.env."
+                    ),
+                }, 403)
             db = get_db()
             db.execute("DELETE FROM skills WHERE name=?", (name,))
             db.commit()
+            # Sweep every sync target so the slash command actually goes away
+            # for every agent — host + every org's shared home.
+            _sweep_paths = [
+                CC_HOME / "skills" / (name + ".md"),
+                Path.home() / ".claude" / "commands" / (name + ".md"),
+            ]
+            try:
+                for _spec in _list_org_specs():
+                    _sweep_paths.append(
+                        CC_ORGS / _spec["name"] / "home" / ".claude" / "commands" / (name + ".md")
+                    )
+            except Exception:
+                pass
+            for _p in _sweep_paths:
+                try:
+                    if _p.exists():
+                        _p.unlink()
+                except Exception:
+                    pass
             try:
                 f = CC_HOME / "skills" / (name + ".md")
                 if f.exists():
@@ -40476,23 +40218,6 @@ class CCHandler(BaseHTTPRequestHandler):
             return self._json({"ok": True, "key": key, "value": value})
 
         # ── Command history API (server-side) ──
-        # POST /api/client-debug — device-side layout/geometry self-reports so
-        # mobile-only rendering bugs can be diagnosed from real device numbers
-        # without asking the user to run anything. JSON lines, crude 1MB cap.
-        if method == "POST" and path == "/api/client-debug":
-            body = self._read_body()
-            try:
-                p = CC_LOGS / "client-debug.log"
-                if p.exists() and p.stat().st_size > 1_000_000:
-                    p.write_text("")
-                body["server_ts"] = int(time.time())
-                body["ip"] = self.client_address[0] if self.client_address else ""
-                with open(p, "a") as f:
-                    f.write(json.dumps(body)[:2000] + "\n")
-            except Exception:
-                pass
-            return self._json({"ok": True})
-
         if path == "/api/history" or path.startswith("/api/history/"):
             if method == "GET" and path == "/api/history":
                 limit = int(qs.get("limit", ["500"])[0])
@@ -40782,7 +40507,88 @@ class CCHandler(BaseHTTPRequestHandler):
             except Exception as e:
                 return self._json({"ok": False, "output": str(e)}, 500)
 
+        # POST /api/webhooks/sms/<session> — SMS Eagle inbound webhook
+        if method == "POST" and path.startswith("/api/webhooks/sms/"):
+            session_name = path[len("/api/webhooks/sms/"):]
+            if not session_name:
+                return self._json({"error": "missing session name"}, 400)
+            length = int(self.headers.get("Content-Length", 0))
+            raw = self.rfile.read(length) if length > 0 else b""
+            ct = self.headers.get("Content-Type", "")
+            slog(f"[sms-webhook] ct={ct!r} raw={raw!r}")
+            if "application/json" in ct:
+                try:
+                    payload = json.loads(raw)
+                except Exception:
+                    return self._json({"error": "invalid JSON"}, 400)
+                sender = payload.get("from", payload.get("sender", "unknown"))
+                message = (payload.get("message_text") or payload.get("text") or
+                           payload.get("body") or payload.get("msg") or "")
+            else:
+                fields = {k: v[0] for k, v in parse_qs(raw.decode("utf-8", errors="replace")).items()}
+                slog(f"[sms-webhook] fields={fields}")
+                sender = fields.get("from", fields.get("modem_no", "unknown"))
+                message = (fields.get("message_text") or fields.get("text") or
+                           fields.get("body") or fields.get("msg") or "")
+            if not message:
+                return self._json({"error": "no message body"}, 400)
+            text = f"SMS from {sender}: {message}"
+            ok, msg = send_text(session_name, text)
+            slog(f"[sms-webhook] session={session_name} from={sender} ok={ok}")
+            code = 200 if ok else (409 if msg == "not running" else 500)
+            return self._json({"ok": ok, "message": msg}, code)
+
+        # GET|POST /api/webhooks/smartertrack/<session> — SmarterTrack new-chat webhook
+        if method in ("GET", "POST") and path.startswith("/api/webhooks/smartertrack/"):
+            session_name = path[len("/api/webhooks/smartertrack/"):]
+            if not session_name:
+                return self._json({"error": "missing session name"}, 400)
+            if method == "GET":
+                return self._json({"ok": True})
+            length = int(self.headers.get("Content-Length", 0))
+            raw = self.rfile.read(length) if length > 0 else b""
+            ct = self.headers.get("Content-Type", "")
+            slog(f"[smartertrack-webhook] ct={ct!r} raw={raw!r}")
+            try:
+                if "application/json" in ct:
+                    payload = json.loads(raw) if raw else {}
+                else:
+                    fields = {k: v[0] for k, v in parse_qs(raw.decode("utf-8", errors="replace")).items()}
+                    payload = fields
+                slog(f"[smartertrack-webhook] payload={payload}")
+            except Exception as e:
+                return self._json({"error": f"parse error: {e}"}, 400)
+            customer = (payload.get("customerName") or payload.get("customer_name") or
+                        payload.get("name") or payload.get("displayName") or "unknown")
+            email = payload.get("email") or payload.get("customerEmail") or ""
+            chat_id = payload.get("chatId") or payload.get("chat_id") or payload.get("id") or ""
+            dept = payload.get("department") or payload.get("departmentName") or ""
+            initial_msg = (payload.get("message") or payload.get("initialMessage") or
+                           payload.get("body") or payload.get("text") or "")
+            parts = [f"New SmarterTrack chat from {customer}"]
+            if email:
+                parts.append(f"Email: {email}")
+            if dept:
+                parts.append(f"Department: {dept}")
+            if chat_id:
+                parts.append(f"Chat ID: {chat_id}")
+            if initial_msg:
+                parts.append(f"Message: {initial_msg}")
+            text = "\n".join(parts)
+            ok, msg = send_text(session_name, text)
+            slog(f"[smartertrack-webhook] session={session_name} customer={customer} ok={ok}")
+            code = 200 if ok else (409 if msg == "not running" else 500)
+            return self._json({"ok": ok, "message": msg}, code)
+
         # GET /api/metrics — system + per-session resource metrics
+        if method == "GET" and path == "/api/repos":
+            cached = _sse_cache["repos"]
+            if cached["json"] and time.time() - cached["time"] < 120:
+                return self._json(cached["data"])
+            # Cache cold or stale — kick a background refresh and return what we have
+            threading.Thread(target=_repos_scan, daemon=True).start()
+            return self._json(cached["data"] or [])
+
         if method == "GET" and path == "/api/metrics":
             return self._json(get_system_metrics())
 
@@ -41404,9 +41210,11 @@ class CCHandler(BaseHTTPRequestHandler):
 
             # GET /api/board — list non-deleted issues
             # ?done_limit=N  limits returned done/discarded items (default 100, 0=all)
+            # ?org=X  only items of one fleet (org='none' for unpartitioned items)
             if method == "GET" and path == "/api/board":
                 done_limit = int(qs.get("done_limit", ["100"])[0])
-                return self._json(_load_board(done_limit=done_limit))
+                org = qs.get("org", [None])[0]
+                return self._json(_load_board(done_limit=done_limit, org=org))
 
             # POST /api/board — create issue
             if method == "POST" and path == "/api/board":
@@ -41424,12 +41232,78 @@ class CCHandler(BaseHTTPRequestHandler):
                 creator = body.get("creator", "")
                 desc = body.get("desc", "").strip()
                 tags = [t for t in body.get("tags", []) if t]
+
+                # ── Escalation-mint gate (RD-89, 2026-06-24): every escalation
+                # POST gets a server-enforced 24h cooldown per target plus a
+                # target-status guard. The same logic was tried in the Dispatch
+                # prompt earlier but Haiku wasn't reliably applying it, so it
+                # moves here where it CAN'T be skipped. Trigger is SESSION-
+                # based (assignee is a *-Research session) so it works for any
+                # org — RTG-Research RR-*, Ember-Research ER-*, future orgs.
+                # Full spec lives in the rtg-follow-up-gate amux note.
+                if _is_research_session(session):
+                    # Extract the target id — prefer TITLE (short, deterministic;
+                    # convention is "ESCALATE <target>:" or "Re-take of <target>")
+                    # then fall back to desc. Prevents cross-references in desc
+                    # bodies from being mis-identified as the escalation target.
+                    m = re.search(r"\b((?:RA|RP|RAC|RAO|RM|RD|AW|AH|RR)-\d+)\b", title or "")
+                    if not m:
+                        m = re.search(r"\b((?:RA|RP|RAC|RAO|RM|RD|AW|AH|RR)-\d+)\b", desc or "")
+                    if m:
+                        target_id = m.group(1)
+                        # (b) Target-status guard
+                        if target_id != item_id:  # don't gate against self
+                            t_row = db.execute(
+                                "SELECT id, status, title, desc FROM issues "
+                                "WHERE id = ? AND deleted IS NULL",
+                                (target_id,)
+                            ).fetchone()
+                            if t_row:
+                                if t_row["status"] in ("verified", "done", "discarded"):
+                                    return self._json({
+                                        "error": "escalation-gate: target is settled",
+                                        "target": target_id,
+                                        "target_status": t_row["status"],
+                                    }, 409)
+                                t_text = ((t_row["title"] or "") + " " + (t_row["desc"] or "")).upper()
+                                if "VOID" in t_text:
+                                    return self._json({
+                                        "error": "escalation-gate: target marked VOID",
+                                        "target": target_id,
+                                    }, 409)
+                        # (c) 24h cooldown across non-discarded escalation items.
+                        # Match only on TITLE — desc bodies routinely mention
+                        # other target ids as cross-refs/coordination context
+                        # and would false-positive if we matched desc too.
+                        # RTG-Research caught this 2026-07-01 on RA-663: RR-476
+                        # (for RA-664) mentioned RA-663 in coordination context
+                        # and was mis-tagged as a prior escalation of RA-663.
+                        # Session-based (LIKE '%-Research') so it covers RR-*
+                        # (RTG) and ER-* (Ember) and any future org uniformly.
+                        cooldown_secs = 86400
+                        prior = db.execute(
+                            "SELECT id, created FROM issues "
+                            "WHERE session LIKE '%-Research' AND deleted IS NULL "
+                            "  AND status != 'discarded' "
+                            "  AND created > ? "
+                            "  AND title LIKE ? "
+                            "ORDER BY created DESC LIMIT 1",
+                            (now - cooldown_secs, f"%{target_id}%")
+                        ).fetchone()
+                        if prior:
+                            age_h = (now - int(prior["created"])) / 3600.0
+                            return self._json({
+                                "error": "escalation-gate: 24h cooldown",
+                                "target": target_id,
+                                "prior_rr": prior["id"],
+                                "prior_age_hours": round(age_h, 1),
+                            }, 409)
+                # ── end escalation-mint gate
                 owner_type = body.get("owner_type", "agent" if session else "human")
                 if owner_type not in ("human", "agent"):
                     owner_type = "human"
-                _g = body.get("gate")
-                _gate_items = [str(x).strip() for x in _g if str(x).strip()] if isinstance(_g, list) else []
-                gate_json = json.dumps(_gate_items) if _gate_items else None
+                # Org: explicit param wins; else derive from assignee, else creator session.
+                org = (body.get("org") or "").strip() or _session_org(session) or _session_org(creator)
                 # Place new card at top of its column: pos = (min existing pos) - 1
                 min_pos_row = db.execute(
                     "SELECT COALESCE(MIN(NULLIF(pos, 0)), 0) AS m FROM issues WHERE status = ? AND deleted IS NULL",
@@ -41437,9 +41311,9 @@ class CCHandler(BaseHTTPRequestHandler):
                 ).fetchone()
                 new_pos = (min_pos_row["m"] if min_pos_row else 0) - 1024.0
                 db.execute(
-                    """INSERT INTO issues (id, title, desc, status, session, creator, due, due_time, created, updated, owner_type, pos, gate)
+                    """INSERT INTO issues (id, title, desc, status, session, creator, due, due_time, created, updated, owner_type, pos, org)
                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-                    (item_id, title, desc, status, session or None, creator, due, due_time, now, now, owner_type, new_pos, gate_json),
+                    (item_id, title, desc, status, session or None, creator, due, due_time, now, now, owner_type, new_pos, org),
                 )
                 for tag in tags:
                     db.execute(
@@ -41447,8 +41321,22 @@ class CCHandler(BaseHTTPRequestHandler):
                         (item_id, tag),
                     )
                 db.commit()
+                # ── Routing-directive hook (Dispatch retirement, 2026-06-24).
+                # Fires ONLY on POST (not PATCH). If the new item's desc has
+                # a ROUTE_TO line, mint the worker child task and mark this
+                # item done before we read back the response. Triggered by
+                # desc content, not id prefix, so RTG RD-* and Ember ED-*
+                # (and any future org's routing prefix) all work without
+                # per-org configuration. Idempotent: skips if [server-routed
+                # already in desc.
+                routing_cascade = None
+                try:
+                    routing_cascade = _try_route_rd(item_id, title, desc, org, db)
+                except Exception as _re:
+                    slog(f"[route-rd] {item_id}: hook error: {_re}")
                 _board_changed()  # invalidate SSE cache
                 item = _item_by_id(item_id)
+                _push_ical_bg()
                 if due:
                     _gcal_sync_bg(item_id, title=title, due=due, due_time=due_time or "", desc=desc, status=status)
                 _req_tl.event = {"type": "board", "action": "created", "target": item_id,
@@ -41459,6 +41347,8 @@ class CCHandler(BaseHTTPRequestHandler):
                         and status in ("todo", "backlog")
                         and creator != session):
                     _notify_session_of_task(session, item_id, title)
+                if routing_cascade:
+                    item["_cascaded"] = routing_cascade
                 return self._json(item, 201)
 
             # POST /api/board/clear-done — soft-delete all done issues
@@ -41475,6 +41365,7 @@ class CCHandler(BaseHTTPRequestHandler):
                 remaining = db.execute(
                     "SELECT COUNT(*) FROM issues WHERE deleted IS NULL"
                 ).fetchone()[0]
+                _push_ical_bg()
                 for did in done_ids:
                     _gcal_sync_bg(did, deleted=True)
                 return self._json({"ok": True, "remaining": remaining})
@@ -41564,12 +41455,7 @@ class CCHandler(BaseHTTPRequestHandler):
                     label = body.get("label", "").strip()
                     if label:
                         db.execute("UPDATE statuses SET label = ? WHERE id = ?", (label, sid))
-                    if "gate" in body:
-                        g = body.get("gate")
-                        items = [str(x).strip() for x in g if str(x).strip()] if isinstance(g, list) else []
-                        db.execute("UPDATE statuses SET gate = ? WHERE id = ?", (json.dumps(items) if items else None, sid))
-                    db.commit()
-                    _board_changed()
+                        db.commit()
                     return self._json({"ok": True})
 
             # GET /api/board/tag-completion?tag=X — check if all tasks with a tag are done
@@ -41617,6 +41503,14 @@ class CCHandler(BaseHTTPRequestHandler):
                 db.commit()
                 if cur.rowcount == 0:
                     return self._json({"error": "claim failed — taken by another session"}, 409)
+                # First claim partitions an un-orged item to the claimer's fleet
+                claim_org = _session_org(session_name)
+                if claim_org:
+                    db.execute(
+                        "UPDATE issues SET org = ? WHERE id = ? AND org IS NULL",
+                        (claim_org, bid),
+                    )
+                    db.commit()
                 _board_changed()
                 return self._json(_item_by_id(bid))
 
@@ -41706,19 +41600,26 @@ class CCHandler(BaseHTTPRequestHandler):
                                  f"acknowledged (force={bool(body.get('force'))}, "
                                  f"checked={len(_chk) if isinstance(_chk, list) else 0}/{len(eff_gate)})")
                     set_clauses, params = [], []
-                    for k in ("title", "desc", "status", "session", "due", "due_time", "owner_type", "pinned", "pos"):
+                    for k in ("title", "desc", "status", "session", "due", "due_time", "owner_type", "pinned", "pos", "org"):
                         if k in body:
                             set_clauses.append(f"{k} = ?")
                             v = body[k]
-                            params.append(None if v == "" and k in ("session", "due", "due_time") else v)
-                    if "gate" in body:
-                        g = body.get("gate")
-                        items = [str(x).strip() for x in g if str(x).strip()] if isinstance(g, list) else []
-                        set_clauses.append("gate = ?")
-                        params.append(json.dumps(items) if items else None)
+                            params.append(None if v == "" and k in ("session", "due", "due_time", "org") else v)
                     if "creator" in body:
                         set_clauses.append("creator = ?")
                         params.append(body["creator"])
+                    # First assignment sets the org if it was never partitioned.
+                    # Org does NOT follow later reassignments — work belongs to the
+                    # org that owns it even if an outside session executes a step.
+                    if "org" not in body and "session" in body and body.get("session"):
+                        prior_org = db.execute(
+                            "SELECT org FROM issues WHERE id = ?", (bid,)
+                        ).fetchone()
+                        if prior_org and prior_org["org"] is None:
+                            derived = _session_org(body["session"])
+                            if derived:
+                                set_clauses.append("org = ?")
+                                params.append(derived)
                     # If session is being changed, reset notified so the new assignee gets pinged
                     if "session" in body and (body.get("session") or None) != prior_session:
                         set_clauses.append("notified = 0")
@@ -41739,6 +41640,7 @@ class CCHandler(BaseHTTPRequestHandler):
                                 )
                     db.commit()
                     _board_changed()
+                    _push_ical_bg()
                     updated_item = _item_by_id(bid)
                     _gcal_sync_bg(bid, title=updated_item.get("title", ""),
                                   due=updated_item.get("due", "") or "",
@@ -41752,6 +41654,34 @@ class CCHandler(BaseHTTPRequestHandler):
                             and updated_item.get("owner_type") == "agent"
                             and updated_item.get("status") in ("todo", "backlog")):
                         _notify_session_of_task(new_session, bid, updated_item.get("title", ""))
+                    # C3: auto-apply adjudication verdicts on *-Research items.
+                    # C4: auto-verify targets when an audit pair closes.
+                    # Audit-mint: when a worker item PATCHes INTO review (was
+                    # not previously at review), mint the org's audit pair.
+                    try:
+                        cascaded = (_auto_apply_adjudication(updated_item, db)
+                                    or _auto_verify_from_audit_pair(updated_item, db)
+                                    or _auto_on_build_verify_close(updated_item, db))
+                        # Audit-mint fires on a fresh review transition.
+                        if (updated_item.get("status") == "review"
+                                and prior and prior["status"] != "review"):
+                            minted = _auto_mint_audit_pair(updated_item, db)
+                            if minted:
+                                cascaded = cascaded or minted
+                            # Writeup handoff auto-mint: when a Nightly
+                            # billable-notes writeup source item transitions
+                            # to review, mint the Cypra-PAA CP-* handoff so
+                            # step 4 (agent-side) is deterministic. Idempotent
+                            # via existing-CP-* lookup.
+                            handoff = _maybe_auto_mint_writeup_handoff(updated_item, db)
+                            if handoff:
+                                cascaded = cascaded or handoff
+                    except Exception as _ce:
+                        slog(f"[hooks] {bid}: hook error: {_ce}")
+                        cascaded = None
+                    if cascaded:
+                        slog(f"[hooks] {cascaded}")
+                        updated_item["_cascaded"] = cascaded
                     return self._json(updated_item)
 
                 if method == "DELETE":
@@ -41759,8 +41689,18 @@ class CCHandler(BaseHTTPRequestHandler):
                     db.execute("UPDATE issues SET deleted = ? WHERE id = ?", (now, bid))
                     db.commit()
                     _board_changed()
+                    _push_ical_bg()
                     _gcal_sync_bg(bid, deleted=True)
                     return self._json({"ok": True, "deleted": bid})
+
+                # GET /api/board/{id} — single-item fetch. Was missing until
+                # 2026-07-03; agents that hit their own board tasks always
+                # got 404 back and treated genuine assignments as phantoms
+                # (see AH-18..23 discussion). The existence check above
+                # already validated deleted IS NULL, so this always returns
+                # the current row.
+                if method == "GET":
+                    return self._json(_item_by_id(bid))
 
             return self._json({"error": "not found"}, 404)
 
@@ -41838,6 +41778,9 @@ class CCHandler(BaseHTTPRequestHandler):
                     "trigger_on": (data.get("trigger_on") or "").strip() or None,
                     "trigger_cooldown": int(data.get("trigger_cooldown") or 120),
                     "trigger_sessions": (data.get("trigger_sessions") or "").strip() or None,
+                    # Event-triggered schedules fire on every matching event —
+                    # default their run-notifications off to avoid feed spam.
+                    "notify": int(data.get("notify", 0 if (data.get("trigger_on") or "").strip() else 1)),
                     "created": now_ts, "updated": now_ts, "deleted": None,
                 }
                 # compute next_run — prefer schedule_expr if provided
@@ -41851,8 +41794,8 @@ class CCHandler(BaseHTTPRequestHandler):
                     """INSERT INTO schedules (id,title,session,command,kind,sched_type,recurrence,
                        run_at,next_run,last_run,enabled,run_count,schedule_expr,
                        watch,watch_timeout,done_pattern,done_action,trigger_on,trigger_cooldown,trigger_sessions,
-                       created,updated,deleted)
-                       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                       notify,created,updated,deleted)
+                       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                     (sched["id"], sched["title"], sched["session"], sched["command"], sched["kind"],
                      sched["sched_type"], sched["recurrence"], sched["run_at"],
                      sched["next_run"], sched["last_run"], sched["enabled"],
@@ -41860,11 +41803,9 @@ class CCHandler(BaseHTTPRequestHandler):
                      sched["watch"], sched["watch_timeout"],
                      sched["done_pattern"], sched["done_action"],
                      sched["trigger_on"], sched["trigger_cooldown"], sched["trigger_sessions"],
-                     sched["created"], sched["updated"], sched["deleted"])
+                     sched["notify"], sched["created"], sched["updated"], sched["deleted"])
                 )
                 db.commit()
-                _push_ical_bg()   # schedules drive the calendar feed now
-                _gcal_sync_schedule_bg(sched["id"])   # real-time push to Google Calendar
                 self._json(sched, 201)
                 return
 
@@ -41899,27 +41840,6 @@ class CCHandler(BaseHTTPRequestHandler):
                 self._json({"ok": True, "ran": sched["title"]})
                 return
 
-            # POST /api/schedules/<id>/skip — skip the next occurrence (recurring only)
-            if method == "POST" and sched_id.endswith("/skip"):
-                sid = sched_id[:-5]  # strip "/skip"
-                db = get_db()
-                row = db.execute("SELECT * FROM schedules WHERE id=? AND deleted IS NULL", (sid,)).fetchone()
-                if not row:
-                    self._json({"error": "not found"}, 404); return
-                sched = _sched_row_to_dict(row, _sched_cols(db))
-                if sched.get("sched_type") == "once":
-                    self._json({"error": "only recurring schedules can be skipped"}, 400); return
-                new_next = _skip_next_run(sched)
-                if not new_next:
-                    self._json({"error": "could not compute the next occurrence"}, 400); return
-                db.execute("UPDATE schedules SET next_run=?, updated=? WHERE id=?",
-                           (new_next, int(_time.time()), sid))
-                db.commit()
-                _push_ical_bg()                 # refresh iCal feed
-                _gcal_sync_schedule_bg(sid)      # push the new time to Google Calendar
-                self._json({"ok": True, "next_run": new_next})
-                return
-
             # GET /api/schedules/<id>
             if method == "GET":
                 db = get_db()
@@ -41939,7 +41859,7 @@ class CCHandler(BaseHTTPRequestHandler):
                 sched = _sched_row_to_dict(row, cols)
                 body = self._read_body()
                 for k in ("title","session","command","kind","sched_type","recurrence","run_at","enabled","schedule_expr",
-                          "watch","watch_timeout","done_pattern","done_action","trigger_on","trigger_cooldown","trigger_sessions"):
+                          "watch","watch_timeout","done_pattern","done_action","notify","trigger_on","trigger_cooldown","trigger_sessions"):
                     if k in body:
                         sched[k] = body[k]
                 expr = (sched.get("schedule_expr") or "").strip()
@@ -41954,7 +41874,7 @@ class CCHandler(BaseHTTPRequestHandler):
                 db.execute(
                     """UPDATE schedules SET title=?,session=?,command=?,kind=?,sched_type=?,recurrence=?,
                        run_at=?,next_run=?,enabled=?,schedule_expr=?,
-                       watch=?,watch_timeout=?,done_pattern=?,done_action=?,trigger_on=?,trigger_cooldown=?,trigger_sessions=?,
+                       watch=?,watch_timeout=?,done_pattern=?,done_action=?,notify=?,trigger_on=?,trigger_cooldown=?,trigger_sessions=?,
                        updated=? WHERE id=?""",
                     (sched["title"], sched["session"], sched["command"], sched.get("kind") or "tmux",
                      sched["sched_type"],
@@ -41962,12 +41882,11 @@ class CCHandler(BaseHTTPRequestHandler):
                      sched["enabled"], sched.get("schedule_expr"),
                      int(sched.get("watch") or 0), int(sched.get("watch_timeout") or 120),
                      sched.get("done_pattern"), sched.get("done_action") or "disable",
+                     int(sched.get("notify", 1)),
                      _trig, int(sched.get("trigger_cooldown") or 120), _trig_sess,
                      sched["updated"], sched_id)
                 )
                 db.commit()
-                _push_ical_bg()   # schedule changed → refresh calendar feed
-                _gcal_sync_schedule_bg(sched_id)   # real-time push to Google Calendar
                 self._json(sched)
                 return
 
@@ -41977,8 +41896,7 @@ class CCHandler(BaseHTTPRequestHandler):
                 db.execute("UPDATE schedules SET deleted=?,updated=? WHERE id=?",
                            (int(_time.time()), int(_time.time()), sched_id))
                 db.commit()
-                _push_ical_bg()   # schedule removed → refresh calendar feed
-                _gcal_sync_schedule_bg(sched_id, deleted=True)   # remove from Google Calendar
+
                 self._json({"deleted": sched_id})
                 return
 
@@ -42103,7 +42021,6 @@ class CCHandler(BaseHTTPRequestHandler):
                 """SELECT i.id, i.title, i.desc, i.status, i.session, i.creator,
                           i.due, i.due_time, i.created, i.updated, i.deleted,
                           COALESCE(i.pinned, 0) AS pinned,
-                          i.gate,
                           GROUP_CONCAT(t.tag) AS tags_csv
                    FROM issues i
                    LEFT JOIN issue_tags t ON t.issue_id = i.id
@@ -42116,20 +42033,11 @@ class CCHandler(BaseHTTPRequestHandler):
                 item = dict(row)
                 tags_csv = item.pop("tags_csv") or ""
                 item["tags"] = [t for t in tags_csv.split(",") if t]
-                g = item.get("gate")
-                try:
-                    item["gate"] = json.loads(g) if g else []
-                except Exception:
-                    item["gate"] = []
                 issues.append(item)
-            statuses = []
-            for r in db.execute("SELECT id, label, position, gate FROM statuses ORDER BY position").fetchall():
-                sd = {"id": r["id"], "label": r["label"], "position": r["position"]}
-                try:
-                    sd["gate"] = json.loads(r["gate"]) if r["gate"] else []
-                except Exception:
-                    sd["gate"] = []
-                statuses.append(sd)
+            statuses = [
+                dict(r)
+                for r in db.execute("SELECT id, label, position FROM statuses ORDER BY position").fetchall()
+            ]
             return self._json({
                 "ts": int(time.time()),
                 "issues": issues,
@@ -42159,7 +42067,7 @@ class CCHandler(BaseHTTPRequestHandler):
             # Get working dir from tmux
             try:
                 r = subprocess.run(
-                    ["tmux", "display-message", "-t", tmux_session, "-p", "#{pane_current_path}"],
+                    [*_tmux_prefix(name), "display-message", "-t", tmux_session, "-p", "#{pane_current_path}"],
                     capture_output=True, text=True, timeout=5,
                 )
                 cwd = r.stdout.strip() if r.returncode == 0 else ""
@@ -42172,7 +42080,7 @@ class CCHandler(BaseHTTPRequestHandler):
             if tmux_session != expected_tmux:
                 try:
                     subprocess.run(
-                        ["tmux", "rename-session", "-t", tmux_session, expected_tmux],
+                        [*_tmux_prefix(name), "rename-session", "-t", tmux_session, expected_tmux],
                         capture_output=True, timeout=5,
                     )
                 except Exception:
@@ -42338,17 +42246,10 @@ class CCHandler(BaseHTTPRequestHandler):
             creator = body.get("creator", "").strip()
             if creator:
                 cfg["CC_CREATOR"] = creator
+            cfg["CC_FLAGS"] = ""
             provider = body.get("provider", "").strip().lower()
             if provider and provider in _SESSION_PROVIDERS:
                 cfg["CC_PROVIDER"] = provider
-            # Yolo (bypass-permissions) is the DEFAULT for new sessions — pass
-            # {"yolo": false} to create one that keeps the approval prompts. The
-            # per-provider flag is stripped for root (cloud) in start_session, where
-            # settings.json grants the same permissions instead.
-            if body.get("yolo", True):
-                cfg["CC_FLAGS"] = _provider_yolo_flag(provider or "claude")
-            else:
-                cfg["CC_FLAGS"] = ""
             if provider == "iterm2":
                 iterm2_sid = body.get("iterm2_session_id", "").strip()
                 if not iterm2_sid:
@@ -42445,21 +42346,6 @@ class CCHandler(BaseHTTPRequestHandler):
                     self.send_response(400); self.send_header("Content-Type","text/html"); self.end_headers()
                     self.wfile.write(html.encode()); return
                 account, flow = entry
-                if account == "__gcal__":   # calendar OAuth (shares this callback) → save calendar token
-                    try:
-                        flow.fetch_token(code=code)
-                        creds = flow.credentials
-                        _GCAL_TOKEN_PATH.write_text(json.dumps({
-                            "token": creds.token, "refresh_token": creds.refresh_token,
-                            "token_uri": creds.token_uri, "client_id": creds.client_id,
-                            "client_secret": creds.client_secret}))
-                        html = "<html><body style='font-family:sans-serif'><h2>&#x2705; amux calendar connected!</h2><p>You can close this tab — real-time schedule sync is enabling now.</p></body></html>"
-                        self.send_response(200); self.send_header("Content-Type","text/html"); self.end_headers()
-                        self.wfile.write(html.encode()); return
-                    except Exception as e:
-                        html = f"<html><body><h2>Calendar token exchange failed</h2><pre>{e}</pre></body></html>"
-                        self.send_response(500); self.send_header("Content-Type","text/html"); self.end_headers()
-                        self.wfile.write(html.encode()); return
                 try:
                     flow.fetch_token(code=code)
                     creds = flow.credentials
@@ -42520,18 +42406,6 @@ class CCHandler(BaseHTTPRequestHandler):
                     reply_msg_id=body.get("reply_to_message_id", ""),
                     thread_id=body.get("thread_id", ""),
                 )
-                # Audit-log this legacy send path too, so there are NO untraced
-                # API sends (same reason as /api/email/*). Only on success.
-                if result.get("ok"):
-                    _email_log({"endpoint": "gmail_send_legacy", "via": "gmail",
-                                "from": body.get("account", ""),
-                                "to": body.get("to", ""),
-                                "subject": body.get("subject", ""),
-                                "body_chars": len(body.get("body", "")),
-                                "body_preview": (body.get("body", ""))[:240],
-                                "in_reply_to": body.get("reply_to_message_id") or None,
-                                "id": result.get("id"), "thread_id": result.get("thread_id"),
-                                "session": self.headers.get("X-Amux-Session")})
                 return self._json(result)
 
             return self._json({"error": "not found"}, 404)
@@ -42698,17 +42572,10 @@ class CCHandler(BaseHTTPRequestHandler):
                 lookback_secs = max(lookback_days * 86400, 3600)
                 max_msgs = min(count, 100)
                 lookback_days_frac = lookback_secs / 86400
-                # Prefer Gmail API for a connected account (clean, no AppleScript).
-                if account_filter and account_filter in _gmail_connected_accounts():
-                    res = _gmail_inbox_messages(account_filter, count=count)
-                    if res.get("error"):
-                        return self._json(res, 502)
-                    return self._json(res.get("messages", []))
-                # No-account script: iterate every account's INBOX. The
-                # per-account filter case has its own dedicated script below.
-                # (Earlier this branch interpolated a stray `end if` with no
-                # opening `if` when no account filter was given, which made the
-                # default inbox read fail with AppleScript syntax error -2741.)
+                acct_filter_line = ""
+                if account_filter:
+                    safe_acct = account_filter.replace('"', '\\"')
+                    acct_filter_line = f'if acctName is not equal to "{safe_acct}" then'
                 script = f"""
 set NL to ASCII character 10
 set output to ""
@@ -42717,6 +42584,9 @@ set msgCount to 0
 tell application "Mail"
     repeat with acct in accounts
         set acctName to name of acct
+        {acct_filter_line}
+        {"" if not account_filter else "-- skip non-matching accounts"}
+        {("end if" if not account_filter else "")}
         try
             repeat with mb in mailboxes of acct
                 if name of mb is "INBOX" then
@@ -42829,9 +42699,7 @@ return output
                 except Exception as e:
                     return self._json({"error": str(e)}, 500)
 
-            # POST /api/email/send — send a new email (NOT a reply). Routes to the
-            # Gmail API when `from` is a connected Gmail account (clean send + real
-            # signature); falls back to Mail.app/AppleScript for non-Gmail accounts.
+            # POST /api/email/send — send email via Mail.app (new messages only, NOT replies)
             if method == "POST" and path == "/api/email/send":
                 body = self._read_body()
                 # Reject threading headers — Mail.app blocks custom headers on outgoing
@@ -42854,24 +42722,6 @@ return output
                     return self._json({"error": f"invalid email address: {to}"}, 400)
                 if cc and not re.match(r'^[^@\s]+@[^@\s]+\.[^@\s]+$', cc):
                     return self._json({"error": f"invalid cc address: {cc}"}, 400)
-                # Prefer the Gmail API when sending from a connected Gmail account:
-                # robust delivery, no AppleScript, and the real Gmail signature.
-                # Falls through to Mail.app/AppleScript for non-Gmail accounts.
-                include_sig = body.get("signature", True) is not False
-                if from_acct and from_acct in _gmail_connected_accounts():
-                    res = _gmail_compose_send(from_acct, to, subject, message, cc=cc,
-                                              include_signature=include_sig)
-                    if res.get("error"):
-                        return self._json(res, 502)
-                    _email_log({"endpoint": "send", "via": "gmail", "from": from_acct,
-                                "to": to, "cc": cc or None, "subject": subject,
-                                "body_chars": len(message), "body_preview": message[:240],
-                                "id": res.get("id"), "thread_id": res.get("thread_id"),
-                                "session": self.headers.get("X-Amux-Session")})
-                    return self._json({"ok": True, "to": to, "subject": subject,
-                                       "from": from_acct, "cc": cc or None, "via": "gmail",
-                                       "id": res.get("id"), "thread_id": res.get("thread_id"),
-                                       "signature_included": res.get("signature_included")})
                 cc_line = f'\nset cc of new_msg to "{cc}"' if cc else ""
                 subj_safe = subject.replace('"', '\\"')
                 to_safe = to.replace('"', '\\"')
@@ -42881,24 +42731,13 @@ return output
                 if from_acct:
                     from_safe = from_acct.replace('"', '\\"')
                     from_line = f"""
-        -- Set the sending account. Mail rejects a BARE address as `sender`
-        -- (-10006); it requires the full "Full Name <addr>" identity string.
-        -- Find the account that owns this address (by address or by account
-        -- name), then build the identity from its full name.
+        set sender to "{from_safe}"
         repeat with acct in accounts
-            set matchedAcct to false
-            try
-                repeat with addr in email addresses of acct
-                    if address of addr is "{from_safe}" then set matchedAcct to true
-                end repeat
-            end try
-            if (name of acct) is "{from_safe}" then set matchedAcct to true
-            if matchedAcct then
-                set fn to (full name of acct)
-                if fn is missing value then set fn to ""
-                set sender of new_msg to (fn & " <{from_safe}>")
-                exit repeat
-            end if
+            repeat with addr in email addresses of acct
+                if address of addr is "{from_safe}" then
+                    set sender of new_msg to (address of addr as string)
+                end if
+            end repeat
         end repeat"""
                 script = f"""
 tell application "Mail"
@@ -42909,11 +42748,8 @@ tell application "Mail"
         {cc_line}
     end tell
     {from_line}
-    -- Verify content was actually applied before sending. NOTE: `length of
-    -- (content of new_msg)` inline fails on outgoing messages (-1728/-1700);
-    -- assign content to a variable first, then count its characters.
-    set actualBody to content of new_msg
-    set actualLen to (count of characters of actualBody)
+    -- Verify content was actually applied before sending
+    set actualLen to length of (content of new_msg)
     if actualLen < {expected_len} then
         error "Content verification failed: expected {expected_len} chars, got " & actualLen & " chars. Aborting send."
     end if
@@ -42926,19 +42762,13 @@ end tell
                     if r.returncode != 0:
                         return self._json({"error": r.stderr.strip() or "AppleScript failed"}, 500)
                     actual_len = r.stdout.strip()
-                    _email_log({"endpoint": "send", "via": "mailapp", "from": from_acct or "(default)",
-                                "to": to, "cc": cc or None, "subject": subject,
-                                "body_chars": len(message), "body_preview": message[:240],
-                                "session": self.headers.get("X-Amux-Session")})
                     return self._json({"ok": True, "to": to, "subject": subject,
                                        "from": from_acct or "(default)", "cc": cc or None,
                                        "body_length": int(actual_len) if actual_len.isdigit() else actual_len})
                 except Exception as e:
                     return self._json({"error": str(e)}, 500)
 
-            # POST /api/email/reply — reply to an existing email in-thread. Routes
-            # to the Gmail API when from/account is a connected Gmail account (clean
-            # threaded body + signature); Mail.app/AppleScript fallback otherwise.
+            # POST /api/email/reply — reply to an existing email in-thread
             if method == "POST" and path == "/api/email/reply":
                 body = self._read_body()
                 message_id = body.get("message_id", "").strip()
@@ -42947,27 +42777,6 @@ end tell
                 from_acct = body.get("from", "").strip()
                 if not message_id or not reply_body:
                     return self._json({"error": "message_id and body are required"}, 400)
-                # Prefer Gmail API when replying from a connected Gmail account:
-                # correct In-Reply-To/References/threadId, a clean (non-quoted)
-                # body, and the real Gmail signature. Mail.app fallback otherwise.
-                gmail_from = from_acct or body.get("account", "").strip()
-                include_sig = body.get("signature", True) is not False
-                if gmail_from and gmail_from in _gmail_connected_accounts():
-                    res = _gmail_reply_send(gmail_from, message_id, reply_body,
-                                            include_signature=include_sig,
-                                            reply_all=bool(reply_all))
-                    if res.get("error"):
-                        return self._json(res, 502)
-                    _email_log({"endpoint": "reply", "via": "gmail", "from": gmail_from,
-                                "in_reply_to": message_id, "reply_all": bool(reply_all),
-                                "body_chars": len(reply_body), "body_preview": reply_body[:240],
-                                "id": res.get("id"), "thread_id": res.get("thread_id"),
-                                "session": self.headers.get("X-Amux-Session")})
-                    return self._json({"ok": True, "message_id": message_id,
-                                       "reply_all": bool(reply_all), "from": gmail_from,
-                                       "via": "gmail", "id": res.get("id"),
-                                       "thread_id": res.get("thread_id"),
-                                       "signature_included": res.get("signature_included")})
                 msg_id_safe = message_id.replace('"', '\\"')
                 body_expr = _ascript_str(reply_body)
                 expected_len = len(reply_body)
@@ -42977,75 +42786,37 @@ end tell
                 if from_acct:
                     from_safe = from_acct.replace('"', '\\"')
                     from_block = f"""
-    -- Set sender on reply. Mail rejects a BARE address as `sender` (-10006);
-    -- it requires the full "Full Name <addr>" identity string.
+    -- Set sender on reply
     repeat with acct in accounts
-        set matchedAcct to false
-        try
-            repeat with addr in email addresses of acct
-                if address of addr is "{from_safe}" then set matchedAcct to true
-            end repeat
-        end try
-        if (name of acct) is "{from_safe}" then set matchedAcct to true
-        if matchedAcct then
-            set fn to (full name of acct)
-            if fn is missing value then set fn to ""
-            set sender of replyMsg to (fn & " <{from_safe}>")
-            exit repeat
-        end if
+        repeat with addr in email addresses of acct
+            if address of addr is "{from_safe}" then
+                set sender of replyMsg to (address of addr as string)
+            end if
+        end repeat
     end repeat"""
-                acct_hint = body.get("account", "").strip()
-                if acct_hint:
-                    acct_hint_safe = acct_hint.replace('"', '\\"')
-                    acct_scope = f'(accounts whose name is "{acct_hint_safe}")'
-                else:
-                    acct_scope = "accounts"
                 script = f"""
 tell application "Mail"
     set targetMsg to missing value
-    -- Fast path: search the INBOX of the scoped account(s) first. Replies are
-    -- almost always to a message just read from an inbox. Scanning every
-    -- mailbox of every account (Gmail "All Mail"/Archive, etc.) with a `whose`
-    -- filter is what made this time out. Pass `account` to scope it; we fall
-    -- back to a full mailbox sweep of the scoped accounts only on an inbox miss.
-    repeat with acct in {acct_scope}
+    -- Search ALL mailboxes, not just INBOX
+    repeat with acct in accounts
         try
-            set inb to mailbox "INBOX" of acct
-            set msgs to (messages of inb whose message id is "{msg_id_safe}")
-            if (count of msgs) > 0 then
-                set targetMsg to item 1 of msgs
-                exit repeat
-            end if
+            repeat with mb in mailboxes of acct
+                set msgs to (messages of mb whose message id is "{msg_id_safe}")
+                if (count of msgs) > 0 then
+                    set targetMsg to item 1 of msgs
+                    exit repeat
+                end if
+            end repeat
         end try
+        if targetMsg is not missing value then exit repeat
     end repeat
-    if targetMsg is missing value then
-        repeat with acct in {acct_scope}
-            try
-                repeat with mb in mailboxes of acct
-                    set msgs to (messages of mb whose message id is "{msg_id_safe}")
-                    if (count of msgs) > 0 then
-                        set targetMsg to item 1 of msgs
-                        exit repeat
-                    end if
-                end repeat
-            end try
-            if targetMsg is not missing value then exit repeat
-        end repeat
-    end if
     if targetMsg is missing value then
         error "Message not found in any mailbox"
     end if
     set replyMsg to {reply_cmd} targetMsg opening window no
-    -- The reply draft needs ~3s to materialize before `set content` sticks
-    -- (with a shorter delay the set silently no-ops and a blank reply goes out).
     delay 3
     set replyBody to {body_expr}
-    -- Set the body as a PLAIN string. Concatenating the existing quoted-original
-    -- content into its own `set content` clears the body on a windowless reply
-    -- (Mail quirk), so we don't quote. Threading is preserved by the `reply`
-    -- command's In-Reply-To / References headers, not by body quoting.
-    set content of replyMsg to replyBody
-    delay 1
+    set content of replyMsg to replyBody & linefeed & linefeed & (content of replyMsg)
     {from_block}
     -- Verify body was actually applied before sending
     set finalContent to content of replyMsg
@@ -43053,23 +42824,19 @@ tell application "Mail"
         error "Content verification failed: reply body was not applied. Aborting send."
     end if
     send replyMsg
-    return (count of characters of finalContent) as string
+    return (length of finalContent) as string
 end tell
 """
                 try:
-                    r = subprocess.run(["osascript", "-e", script], capture_output=True, text=True, timeout=90)
+                    r = subprocess.run(["osascript", "-e", script], capture_output=True, text=True, timeout=60)
                     if r.returncode != 0:
                         err = r.stderr.strip()
                         if "Message not found" in err:
-                            return self._json({"error": "message not found — check message_id, or pass the owning 'account' (from /inbox or /search) to scope the search"}, 404)
+                            return self._json({"error": "message not found in any mailbox — check message_id"}, 404)
                         if "Content verification failed" in err:
                             return self._json({"error": err}, 500)
                         return self._json({"error": err or "AppleScript failed"}, 500)
                     actual_len = r.stdout.strip()
-                    _email_log({"endpoint": "reply", "via": "mailapp", "from": from_acct or "(default)",
-                                "in_reply_to": message_id, "reply_all": reply_all,
-                                "body_chars": len(reply_body), "body_preview": reply_body[:240],
-                                "session": self.headers.get("X-Amux-Session")})
                     return self._json({"ok": True, "message_id": message_id, "reply_all": reply_all,
                                        "from": from_acct or "(default)",
                                        "body_length": int(actual_len) if actual_len.isdigit() else actual_len})
@@ -43088,20 +42855,6 @@ end tell
                 mailbox = (qs.get("mailbox", [""])[0]).strip()
                 if not q:
                     return self._json({"error": "q parameter is required"}, 400)
-                # Prefer Gmail API for a connected account — maps mailbox to a
-                # Gmail query (e.g. Sent -> in:sent) so "read sent" works too.
-                if account and account in _gmail_connected_accounts():
-                    gq, mb = q, mailbox.lower()
-                    if mb in ("sent", "sent mail"):
-                        gq += " in:sent"
-                    elif mb == "inbox":
-                        gq += " in:inbox"
-                    elif mb and mb != "all":
-                        gq += f" label:{mailbox}"
-                    res = _gmail_inbox_messages(account, count=limit, q=gq.strip())
-                    if res.get("error"):
-                        return self._json(res, 502)
-                    return self._json(res.get("messages", []))
                 q_safe = q.replace('"', '\\"')
                 acct_filter = ""
                 if account:
@@ -43296,7 +43049,7 @@ return "not_found"
                     _l = _l.strip()
                     if _l.startswith("ANTHROPIC_API_KEY="):
                         _val = _l[len("ANTHROPIC_API_KEY="):].strip()
-                        if _val and not _is_placeholder_api_key(_val):
+                        if _val.startswith("sk-ant-"):
                             has_key_in_env = True
                         break
             # Also check for OAuth login in ~/.claude.json
@@ -43334,9 +43087,7 @@ return "not_found"
                 return self._json({"ok": True, "name": name}, 201)
         if path.startswith("/api/layout-presets/") and method == "DELETE":
             name = path[len("/api/layout-presets/"):]
-            # `unquote` is imported at module level; a local re-import here would
-            # shadow it for the whole handler and break earlier uses (e.g.
-            # /api/email/message) with "cannot access local variable 'unquote'".
+            from urllib.parse import unquote
             name = unquote(name)
             db = get_db()
             db.execute("DELETE FROM layout_presets WHERE name=?", (name,))
@@ -43430,27 +43181,8 @@ return "not_found"
                 os.environ["AMUX_COMMIT_GUARD"] = val  # live effect
                 return self._json({"ok": True, "enabled": enabled})
 
-        if path == "/api/settings/task-guard":
-            if method == "GET":
-                return self._json({"enabled": _task_guard_enabled()})
-            if method == "PATCH":
-                body = self._read_body()
-                enabled = bool(body.get("enabled", False))
-                val = "1" if enabled else "0"
-                lines = _server_env_file.read_text().splitlines() if _server_env_file.exists() else []
-                found = False
-                for i, line in enumerate(lines):
-                    if line.startswith("AMUX_TASK_GUARD=") or line.startswith("AMUX_TASK_GUARD ="):
-                        lines[i] = f"AMUX_TASK_GUARD={val}"; found = True; break
-                if not found:
-                    lines.append(f"AMUX_TASK_GUARD={val}")
-                _server_env_file.parent.mkdir(parents=True, exist_ok=True)
-                _server_env_file.write_text("\n".join(lines) + "\n")
-                os.environ["AMUX_TASK_GUARD"] = val  # live effect
-                return self._json({"ok": True, "enabled": enabled})
-
         if path == "/api/settings/env":
-            _allowed_env_keys = {"ANTHROPIC_API_KEY", "OPENAI_API_KEY", "GEMINI_API_KEY", "GOOGLE_API_KEY"}
+            _allowed_env_keys = {"ANTHROPIC_API_KEY", "OPENAI_API_KEY", "AMUX_PUSHOVER_TOKEN", "AMUX_PUSHOVER_USER"}
             if method == "GET":
                 result = {}
                 for k in _allowed_env_keys:
@@ -43494,6 +43226,15 @@ return "not_found"
                     except Exception:
                         pass
                 return self._json({"ok": True})
+
+        # ── Pushover test ──────────────────────────────────────────────────────
+        if path == "/api/pushover/test" and method == "POST":
+            token = os.environ.get("AMUX_PUSHOVER_TOKEN", "")
+            user  = os.environ.get("AMUX_PUSHOVER_USER", "")
+            if not token or not user:
+                return self._json({"error": "Pushover keys not configured"}, 400)
+            _send_pushover("amux — test", "Pushover notifications are working!")
+            return self._json({"ok": True})
 
         # ── Org / Team / Invites ──────────────────────────────────────────────
         if path.startswith("/api/org") or path.startswith("/invite/"):
@@ -44070,8 +43811,6 @@ p{{color:#888;margin:12px 0 28px;font-size:0.9rem;line-height:1.5}}
                         except Exception: pass
                 db.commit()
                 _crm_version += 1
-                _crm_sync_external("create", cid, name, body.get("company", ""),
-                                   body.get("email", ""), body.get("notes", ""))
                 return self._json({"id": cid, "ok": True}, 201)
 
             # GET/PATCH/DELETE /api/crm/contacts/:id
@@ -44101,16 +43840,6 @@ p{{color:#888;margin:12px 0 28px;font-size:0.9rem;line-height:1.5}}
                                 except Exception: pass
                     db.commit()
                     _crm_version += 1
-                    # Mirror a notes change to the configured external CRM as an
-                    # activity note (fields-only/tag-only edits are not synced to
-                    # avoid note spam). Read current values in this (DB-owning) thread.
-                    if "notes" in fields:
-                        _r = db.execute(
-                            "SELECT name,company,email,notes FROM crm_contacts WHERE id=?",
-                            (cid,)).fetchone()
-                        if _r:
-                            _crm_sync_external("update", cid, _r["name"], _r["company"],
-                                               _r["email"], _r["notes"])
                     return self._json({"ok": True})
                 if method == "DELETE":
                     db.execute("UPDATE crm_contacts SET deleted=? WHERE id=?", (now, cid))
@@ -44195,19 +43924,11 @@ p{{color:#888;margin:12px 0 28px;font-size:0.9rem;line-height:1.5}}
                 _term_write(tid, data)
                 return self._json({"ok": True})
 
-            # GET /api/terminal/<id>/output[?wait=<seconds>]
-            # wait>0 long-polls (returns the instant output is available, up to
-            # `wait`s) so the client streams output with ~round-trip latency
-            # instead of a fixed poll interval. wait=0 keeps the quick read.
+            # GET /api/terminal/<id>/output
             m_term = re.match(r"^/api/terminal/([^/]+)/output$", path)
             if method == "GET" and m_term:
                 tid = m_term.group(1)
-                try:
-                    wait = float(parse_qs(urlparse(self.path).query).get("wait", ["0"])[0])
-                except Exception:
-                    wait = 0.0
-                wait = max(0.0, min(wait, 30.0))
-                data = _term_read_wait(tid, wait) if wait > 0 else _term_read(tid)
+                data = _term_read(tid)
                 alive = _term_alive(tid)
                 return self._json({
                     "data": base64.b64encode(data).decode() if data else "",
@@ -44248,51 +43969,29 @@ p{{color:#888;margin:12px 0 28px;font-size:0.9rem;line-height:1.5}}
         if path.startswith("/api/browser"):
 
             # GET /api/browser/profiles
-            # Returns the profile REGISTRY (name + domains + label) so an agent
-            # can see which named profile is logged into which sites. Opening a
-            # URL via /start or /navigate auto-loads the matching profile — a
-            # caller need only pass a URL and it lands already-logged-in.
-            # Also returns `chrome_profiles`: the real local Chrome sub-profiles.
             if method == "GET" and path == "/api/browser/profiles":
-                reg = _bu_registry_load()
-                profiles = [
-                    {"name": n,
-                     "domains": (m.get("domains") or []) if isinstance(m, dict) else [],
-                     "label": (m.get("label") or "") if isinstance(m, dict) else "",
-                     "updated": (m.get("updated") or 0) if isinstance(m, dict) else 0}
-                    for n, m in sorted(reg.items())
-                ]
-                return self._json({
-                    "profiles": profiles,
-                    "registry": reg,
-                    "chrome_profiles": _bu_list_profiles(),
-                })
+                return self._json({"profiles": _bu_list_profiles()})
 
-            # POST /api/browser/start  {"url":"...","session":"...","profile":"...","fresh":false}
-            # Omit `profile` to auto-select the registered profile matching the
-            # URL host (else 'default'). Response includes the chosen `profile`
-            # and `auto_profile` (True when it was inferred).
+            # POST /api/browser/start  {"url":"...","session":"...","profile":"..."}
             if method == "POST" and path == "/api/browser/start":
                 body = self._read_body()
                 url = body.get("url", "about:blank")
                 session = body.get("session", "amux")
-                profile = (body.get("profile") or "").strip()
-                fresh = bool(body.get("fresh"))
-                return self._json(_bu_open(url, session=session,
-                                           explicit_profile=profile, fresh=fresh,
-                                           timeout_s=30))
+                profile = body.get("profile", "default")
+                args = []
+                if profile:
+                    args += ["-b", "real", "--profile", profile]
+                args += ["open", url]
+                return self._json(_bu_call(args, session=session, timeout_s=30))
 
-            # POST /api/browser/navigate  {"url":"...","session":"...","profile":"..."}
-            # Same auto-profile logic as /start (keeps you logged in across hops).
+            # POST /api/browser/navigate  {"url":"...","session":"..."}
             if method == "POST" and path == "/api/browser/navigate":
                 body = self._read_body()
                 url = body.get("url", "")
                 if not url:
                     return self._json({"error": "url required"}, 400)
                 session = body.get("session", "amux")
-                profile = (body.get("profile") or "").strip()
-                return self._json(_bu_open(url, session=session,
-                                           explicit_profile=profile, timeout_s=30))
+                return self._json(_bu_call(["open", url], session=session))
 
             # GET /api/browser/screenshot?session=amux&url=...
             if method == "GET" and path == "/api/browser/screenshot":
@@ -44306,49 +44005,10 @@ p{{color:#888;margin:12px 0 28px;font-size:0.9rem;line-height:1.5}}
                 return self._json(_bu_screenshot(session=session))
 
             # GET /api/browser/state?session=amux
-            # Structured (accessibility-first) perception snapshot. In addition
-            # to browser-use's raw state, we surface a parsed `elements` list
-            # ([{index,tag,label}]) + `viewport` for ref-based clicking.
             if method == "GET" and path == "/api/browser/state":
                 session = (qs.get("session", ["amux"])[0] if isinstance(qs.get("session"), list)
                            else qs.get("session", "amux"))
-                res = _bu_call(["state"], session=session)
-                try:
-                    raw = (res.get("data") or {}).get("_raw_text", "") if isinstance(res, dict) else ""
-                    if raw:
-                        parsed = _bu_parse_elements(raw)
-                        res = dict(res)
-                        res["elements"] = parsed["elements"]
-                        res["viewport"] = parsed["viewport"]
-                except Exception:
-                    pass
-                return self._json(res)
-
-            # GET /api/browser/inspect?session=amux&clear=0&limit=200&type=all
-            # Full browser troubleshooting surface: captured console logs, network
-            # (fetch/XHR with status codes), JS errors, and the Resource Timing
-            # waterfall. `clear=1` empties the buffers after reading; `type` filters
-            # to console|network|errors|resources.
-            if method == "GET" and path == "/api/browser/inspect":
-                def _q(k, d=""):
-                    v = qs.get(k, [d])
-                    return (v[0] if isinstance(v, list) else v) or d
-                session = _q("session", "amux")
-                clear = _q("clear", "0") in ("1", "true", "yes")
-                try: limit = max(1, min(500, int(_q("limit", "200"))))
-                except Exception: limit = 200
-                data = _bu_inspect(session=session, clear=clear, limit=limit)
-                tfilter = _q("type", "all")
-                if isinstance(data, dict) and tfilter in ("console", "network", "errors", "resources"):
-                    data = {"url": data.get("url"), "installed": data.get("installed"),
-                            tfilter: data.get(tfilter, []), "counts": data.get("counts")}
-                return self._json(data)
-
-            # POST /api/browser/inspect/clear?session=amux — reset capture buffers
-            if method == "POST" and path == "/api/browser/inspect/clear":
-                body = self._read_body()
-                session = body.get("session", "amux")
-                return self._json(_bu_inspect(session=session, clear=True, limit=1))
+                return self._json(_bu_call(["state"], session=session))
 
             # POST /api/browser/action  {"action":"click|type|key|scroll|eval","session":"...","..."}
             if method == "POST" and path == "/api/browser/action":
@@ -44452,32 +44112,19 @@ p{{color:#888;margin:12px 0 28px;font-size:0.9rem;line-height:1.5}}
                     profiles.add("default")
                 return self._json({"profiles": sorted(profiles)})
 
-            # POST /api/browser/save-profile  {"name":"...", "session":"...", "host":"...", "label":"..."}
-            # "Saving" a profile = registering it and recording the domain(s) it
-            # is logged into. The login itself already persists in the profile's
-            # Chrome user-data-dir (that's automatic with `-b real --profile`);
-            # this just teaches the registry so the domain auto-selects the
-            # profile next time. `name` defaults to the session's active profile.
+            # POST /api/browser/save-profile  {"name":"...", "session":"..."}
             if method == "POST" and path == "/api/browser/save-profile":
                 body = self._read_body()
+                name = body.get("name", "").strip()
+                if not name:
+                    return self._json({"error": "name required"}, 400)
                 session = body.get("session", "amux")
-                name = (body.get("name") or "").strip() or _bu_session_profile(session) or "default"
-                label = (body.get("label") or "").strip()
-                host = (body.get("host") or "").strip().lower()
-                if not host:
-                    # Derive the current page's host from the live session
-                    ev = _bu_call(["eval", "location.hostname"], session=session)
-                    if isinstance(ev, dict) and ev.get("success"):
-                        host = str((ev.get("data") or {}).get("result", "") or "").lower()
+                # Save current browser-use session cookies to a Playwright auth profile
+                dest = CC_HOME / "playwright-auth" / "profiles" / name
+                dest.mkdir(parents=True, exist_ok=True)
                 try:
-                    entry = _bu_registry_register(name, host=host, label=label)
-                    return self._json({
-                        "success": True,
-                        "profile": name,
-                        "host": host,
-                        "domains": entry.get("domains", []),
-                        "label": entry.get("label", ""),
-                    })
+                    result = _bu_call(["save-cookies", str(dest)], session=session, timeout_s=15)
+                    return self._json({"success": True, "profile": name, "path": str(dest)})
                 except Exception as e:
                     return self._json({"error": str(e)}, 500)
 
@@ -44604,12 +44251,6 @@ p{{color:#888;margin:12px 0 28px;font-size:0.9rem;line-height:1.5}}
                     _peek_cache[name] = (now, lines, resp)
                     return self._json_etag(resp)
                 saved = load_session_log(name, tail_bytes=65_536)
-                if saved and _log_looks_torn(saved):
-                    clean = _render_session_transcript(name, max_chars=120_000)
-                    if clean:
-                        saved = clean
-                        threading.Thread(target=_heal_log_from_transcript,
-                                         args=(name,), daemon=True).start()
                 if saved:
                     live = _strip_launch_noise(output.strip()) if output else ""
                     if live and not saved.rstrip().endswith(live):
@@ -45050,7 +44691,7 @@ p{{color:#888;margin:12px 0 28px;font-size:0.9rem;line-height:1.5}}
             if action == "clear":
                 try:
                     subprocess.run(
-                        ["tmux", "clear-history", "-t", tmux_target(name)],
+                        [*_tmux_prefix(name), "clear-history", "-t", tmux_target(name)],
                         capture_output=True, timeout=5,
                     )
                     return self._json({"ok": True, "message": "cleared"})
@@ -45102,7 +44743,7 @@ p{{color:#888;margin:12px 0 28px;font-size:0.9rem;line-height:1.5}}
                     scrollback = ""
                     try:
                         r = subprocess.run(
-                            ["tmux", "capture-pane", "-t", tmux_target(name), "-p", "-S", "-3000"],
+                            [*_tmux_prefix(name), "capture-pane", "-t", tmux_target(name), "-p", "-S", "-3000"],
                             capture_output=True, text=True, timeout=10,
                         )
                         raw = r.stdout
@@ -45125,10 +44766,10 @@ p{{color:#888;margin:12px 0 28px;font-size:0.9rem;line-height:1.5}}
                             f"```\n{scrollback}\n```"
                         )
                         t = tmux_name(new_name)
-                        subprocess.run(["tmux", "send-keys", "-t", t, "-l", prompt],
+                        subprocess.run([*_tmux_prefix(new_name), "send-keys", "-t", t, "-l", prompt],
                                        capture_output=True, timeout=30)
                         _time.sleep(1)
-                        subprocess.run(["tmux", "send-keys", "-t", t, "Enter"],
+                        subprocess.run([*_tmux_prefix(new_name), "send-keys", "-t", t, "Enter"],
                                        capture_output=True, timeout=5)
                 return self._json({"ok": True, "message": f"cloned as {new_name} (method: {method_used})", "started": ok})
             if action == "archive":
@@ -45222,7 +44863,7 @@ p{{color:#888;margin:12px 0 28px;font-size:0.9rem;line-height:1.5}}
                     # Rename tmux session if running
                     if is_running(name):
                         subprocess.run(
-                            ["tmux", "rename-session", "-t", tmux_target(name), tmux_name(new_name)],
+                            [*_tmux_prefix(name), "rename-session", "-t", tmux_target(name), tmux_name(new_name)],
                             capture_output=True, timeout=5,
                         )
                     env_file.rename(new_file)
@@ -45252,61 +44893,16 @@ p{{color:#888;margin:12px 0 28px;font-size:0.9rem;line-height:1.5}}
                     new_log = CC_LOGS / f"{new_name}.log"
                     if old_log.exists() and not new_log.exists():
                         old_log.rename(new_log)
-                    # Cascade the rename across every table/queue that keys off the
-                    # session name, so nothing is orphaned under the old name.
+                    # Update board items referencing old session name
                     try:
                         db = get_db()
-                        # Board items (active only — historical/deleted keep old name).
                         db.execute(
                             "UPDATE issues SET session=? WHERE session=? AND deleted IS NULL",
                             (new_name, name),
                         )
-                        # Scheduler tasks that target this session.
-                        db.execute(
-                            "UPDATE schedules SET session=? WHERE session=?",
-                            (new_name, name),
-                        )
-                        # Per-session gate overrides.
-                        db.execute(
-                            "UPDATE session_gates SET session=? WHERE session=?",
-                            (new_name, name),
-                        )
-                        # Saved (quick-send) messages scoped to this session.
-                        db.execute(
-                            "UPDATE saved_messages SET session=? WHERE session=?",
-                            (new_name, name),
-                        )
                         db.commit()
-                    except Exception as _e:
-                        slog(f"[rename] DB cascade failed for {name}->{new_name}: {_e}")
-                    # Migrate the in-memory steering queue (keyed by session name) so
-                    # any still-queued nudges/steers deliver to the renamed session.
-                    try:
-                        with _steering_lock:
-                            q = _steering_queue.pop(name, None)
-                            if q:
-                                _steering_queue.setdefault(new_name, []).extend(q)
-                        db2 = get_db()
-                        db2.execute("UPDATE steering_queue SET session=? WHERE session=?", (new_name, name))
-                        db2.commit()
                     except Exception:
                         pass
-                    # Re-export AMUX_SESSION in the running tmux session so new panes
-                    # and commands (e.g. the `amux` CLI stub) see the new name.
-                    # NOTE: tmux setenv only affects the tmux *environment* used for
-                    # future processes — the already-running interactive shell (and the
-                    # live claude process) will NOT pick this up until it is restarted or
-                    # re-reads its env. We set it best-effort so at least new panes/commands
-                    # inside the session get the correct $AMUX_SESSION.
-                    try:
-                        if is_running(new_name):
-                            subprocess.run(
-                                ["tmux", "setenv", "-t", tmux_target(new_name), "AMUX_SESSION", new_name],
-                                capture_output=True, timeout=5,
-                            )
-                    except Exception:
-                        pass
-                    _board_changed()
                     return self._json({"ok": True, "message": f"renamed to {new_name}"})
 
                 # Change provider
@@ -45392,18 +44988,6 @@ p{{color:#888;margin:12px 0 28px;font-size:0.9rem;line-height:1.5}}
                         )
                     else:
                         flags = flags_no_model
-                    # Apply reasoning effort (Claude --effort flag) when the UI
-                    # sends it alongside the model. Only present for Claude.
-                    if "effort" in body:
-                        ok_e, effort_val, err_e = _validate_effort(body.get("effort", ""))
-                        if not ok_e:
-                            return self._json({"error": err_e}, 400)
-                        try:
-                            flags = _set_effort_flag(flags, effort_val)
-                        except ValueError as e:
-                            return self._json({
-                                "error": f"existing CC_FLAGS for session '{name}' is malformed ({e}); fix the .env file manually before updating effort"
-                            }, 400)
                     cfg["CC_FLAGS"] = flags
                     current_provider = cfg.get("CC_PROVIDER", "claude").strip().lower() or "claude"
                     if current_provider not in _SESSION_PROVIDERS:
@@ -45442,45 +45026,6 @@ p{{color:#888;margin:12px 0 28px;font-size:0.9rem;line-height:1.5}}
                             pass
                     suffix = " (session restarted; log reload queued)" if restarted else ""
                     return self._json({"ok": True, "message": f"model set to {model_val}{suffix}"})
-
-                # Change reasoning effort only (no model change). Claude --effort flag.
-                if "effort" in body:
-                    ok_e, effort_val, err_e = _validate_effort(body.get("effort", ""))
-                    if not ok_e:
-                        return self._json({"error": err_e}, 400)
-                    try:
-                        flags = _set_effort_flag(cfg.get("CC_FLAGS", ""), effort_val)
-                    except ValueError as e:
-                        return self._json({
-                            "error": f"existing CC_FLAGS for session '{name}' is malformed ({e}); fix the .env file manually before updating effort"
-                        }, 400)
-                    cfg["CC_FLAGS"] = flags
-                    current_provider = cfg.get("CC_PROVIDER", "claude").strip().lower() or "claude"
-                    if current_provider not in _SESSION_PROVIDERS:
-                        current_provider = "claude"
-                    was_running = is_running(name)
-                    if _capture_log_tail_for_reload(name, "effort change"):
-                        _mark_pending_log_reload(name, "effort change")
-                    _write_env(env_file, cfg)
-                    # Restart so the new --effort takes effect (same rationale as model).
-                    restarted = False
-                    if was_running:
-                        try:
-                            if current_provider == "claude":
-                                work_dir_pre = str(Path(cfg.get("CC_DIR", str(Path.home()))).expanduser().resolve())
-                                conv_id = _live_conv_id(name, work_dir_pre)
-                                if conv_id:
-                                    meta_pre = _load_meta(name)
-                                    if meta_pre.get("cc_conversation_id") != conv_id:
-                                        meta_pre["cc_conversation_id"] = conv_id
-                                        _save_meta(name, meta_pre)
-                            _stop_session_for_restart(name, current_provider)
-                            ok_r, _ = start_session(name)
-                            restarted = bool(ok_r)
-                        except Exception:
-                            pass
-                    suffix = " (session restarted; log reload queued)" if restarted else ""
-                    return self._json({"ok": True, "message": f"effort set to {effort_val or 'default'}{suffix}"})
 
                 # Toggle YOLO (permissions skip + auto-continue combined)
                 if body.get("toggle_yolo") or body.get("toggle_auto_continue"):
@@ -45537,16 +45082,42 @@ p{{color:#888;margin:12px 0 28px;font-size:0.9rem;line-height:1.5}}
                         return self._json({"ok": True, "message": "directory updated — restarting session"})
                     return self._json({"ok": True, "message": "directory updated"})
 
-                # Override task label (empty string clears the override so model re-generates)
-                if "task_summary" in body:
-                    _update_meta(name, task_summary=body["task_summary"].strip())
-                    return self._json({"ok": True, "message": "task label updated"})
-
                 # Change description
                 if "desc" in body:
                     cfg["CC_DESC"] = body["desc"].strip()
                     _write_env(env_file, cfg)
                     return self._json({"ok": True, "message": "description updated"})
+
+                # Set icon (emoji)
+                if "icon" in body:
+                    cfg["CC_ICON"] = body["icon"].strip()
+                    _write_env(env_file, cfg)
+                    _sse_cache["sessions"]["time"] = 0
+                    return self._json({"ok": True, "message": "icon updated"})
+
+                # Set card color
+                if "color" in body:
+                    new_color = body["color"].strip()
+                    cfg["CC_COLOR"] = new_color
+                    _write_env(env_file, cfg)
+                    _sse_cache["sessions"]["time"] = 0
+                    # Apply immediately to running tmux session's status bar
+                    try:
+                        _tsess = tmux_name(session_name)
+                        if new_color:
+                            subprocess.run(
+                                [*_tmux_prefix(session_name), "set-option", "-t", _tsess, "status-style",
+                                 f"bg={new_color},fg=white"],
+                                capture_output=True, timeout=5,
+                            )
+                        else:
+                            subprocess.run(
+                                [*_tmux_prefix(session_name), "set-option", "-t", _tsess, "-u", "status-style"],
+                                capture_output=True, timeout=5,
+                            )
+                    except Exception:
+                        pass
+                    return self._json({"ok": True, "message": "color updated"})
 
                 # Toggle pin
                 if body.get("toggle_pin"):
@@ -45624,6 +45195,340 @@ _AUTO_UPDATE_BRANCH = os.environ.get("AMUX_AUTO_UPDATE_BRANCH", "main")
 _AUTO_UPDATE_INTERVAL = int(os.environ.get("AMUX_AUTO_UPDATE_INTERVAL", "60"))  # seconds
 
 
+def _repos_scan():
+    """Scan /mnt/gitdata/ for git repos and cache status (branch, dirty, unpushed, last commit).
+
+    Callers: schedule_job every 60s, GET /api/repos (serves from cache).
+    Preconditions: git must be on PATH; /mnt/gitdata/ must be readable.
+    Side effects: writes to _sse_cache["repos"].
+    """
+    scan_root = "/mnt/gitdata"
+    repos = []
+    try:
+        r = subprocess.run(
+            ["find", scan_root, "-maxdepth", "3", "-name", ".git", "-type", "d"],
+            capture_output=True, text=True, timeout=20
+        )
+        git_dirs = [l for l in r.stdout.splitlines() if l.strip()]
+    except Exception:
+        return
+
+    for git_dir in git_dirs:
+        repo_path = os.path.dirname(git_dir)
+        repo_name = os.path.basename(repo_path)
+        try:
+            def _git(*args, cwd=repo_path):
+                return subprocess.run(
+                    ["git", "-C", cwd] + list(args),
+                    capture_output=True, text=True, timeout=8
+                )
+
+            branch = _git("branch", "--show-current").stdout.strip() or "HEAD"
+
+            log_out = _git("log", "-1", "--format=%h\x1f%s\x1f%ar").stdout.strip()
+            sha = msg = when = ""
+            if log_out:
+                parts = log_out.split("\x1f", 2)
+                sha  = parts[0] if len(parts) > 0 else ""
+                msg  = parts[1] if len(parts) > 1 else ""
+                when = parts[2] if len(parts) > 2 else ""
+
+            dirty_lines = [l for l in _git("status", "--porcelain").stdout.splitlines() if l.strip()]
+            dirty = len(dirty_lines)
+
+            up_r = _git("rev-list", "--count", "@{u}..HEAD")
+            unpushed = int(up_r.stdout.strip()) if up_r.returncode == 0 and up_r.stdout.strip().isdigit() else 0
+
+            repos.append({
+                "name": repo_name,
+                "path": repo_path,
+                "branch": branch,
+                "sha": sha,
+                "last_commit": msg,
+                "last_commit_when": when,
+                "dirty": dirty,
+                "unpushed": unpushed,
+            })
+        except Exception:
+            continue
+
+    # Sort: repos with issues first (unpushed > dirty > clean), then alpha
+    repos.sort(key=lambda r: (r["unpushed"] == 0 and r["dirty"] == 0, r["name"].lower()))
+
+    with _sse_cache_lock:
+        _sse_cache["repos"]["data"] = repos
+        _sse_cache["repos"]["json"] = json.dumps(repos)
+        _sse_cache["repos"]["time"] = time.time()
+
+
+def _board_watcher():
+    """Nudge idle sessions that have unread todo board items assigned to them.
+
+    Runs every 30s. For each session with todo items:
+      - idle   → send a one-line nudge so it picks up the task
+      - active → skip, retry next cycle
+      - waiting / not running → skip
+    Tracks which (session, item_id) pairs have already been nudged to avoid
+    spamming the same task repeatedly until it is claimed or status changes.
+    """
+    try:
+        db = get_db()
+        rows = db.execute(
+            "SELECT id, title, session FROM issues "
+            "WHERE status='todo' AND session IS NOT NULL AND session != '' AND deleted IS NULL"
+        ).fetchall()
+        if not rows:
+            return
+
+        # Group by session
+        by_session: dict[str, list] = {}
+        for row in rows:
+            s = row["session"]
+            by_session.setdefault(s, []).append(dict(row))
+
+        # Capture current pane output once per session (cheap — tmux capture-pane)
+        for session_name, items in by_session.items():
+            if not is_running(session_name):
+                continue
+            try:
+                r = subprocess.run(
+                    [*_tmux_prefix(session_name), "capture-pane", "-p", "-t", tmux_target(session_name)],
+                    capture_output=True, text=True, timeout=5,
+                )
+                raw = r.stdout if r.returncode == 0 else ""
+            except Exception:
+                continue
+
+            status = _detect_claude_status(raw)
+            if status != "idle":
+                continue  # busy or waiting — retry next cycle
+
+            # Find items not yet nudged
+            already_nudged: set = _board_watcher._nudged  # type: ignore[attr-defined]
+            pending = [i for i in items if (session_name, i["id"]) not in already_nudged]
+            if not pending:
+                continue
+
+            # Send a single nudge listing all pending tasks
+            task_lines = "\n".join(f"- [{i['id']}] {i['title']}" for i in pending)
+            nudge = (
+                f"You have {len(pending)} task(s) waiting on the board assigned to you:\n"
+                f"{task_lines}\n"
+                f"Check the board and claim the next task when you are ready:\n"
+                f"curl -sk $AMUX_URL/api/board | python3 -c \""
+                f"import json,sys,os; s=os.getenv('AMUX_SESSION',''); "
+                f"[print(i['id'],i['title']) for i in json.load(sys.stdin) "
+                f"if i.get('session')==s and i['status']=='todo']\""
+            )
+            ok, _ = send_text(session_name, nudge)
+            if ok:
+                for i in pending:
+                    already_nudged.add((session_name, i["id"]))
+                slog(f"[board_watcher] nudged {session_name} with {len(pending)} task(s)")
+
+    except Exception as e:
+        slog(f"[board_watcher] error: {e}")
+
+
+# Track nudged (session, item_id) pairs — cleared when item leaves todo status
+_board_watcher._nudged = set()  # type: ignore[attr-defined]
+
+
+def _board_watcher_clear_nudged():
+    """Remove completed/claimed items from the nudge-tracking set so re-assignments work."""
+    try:
+        db = get_db()
+        active_ids = {
+            row["id"] for row in db.execute(
+                "SELECT id FROM issues WHERE status='todo' AND deleted IS NULL"
+            ).fetchall()
+        }
+        _board_watcher._nudged = {  # type: ignore[attr-defined]
+            (s, iid) for s, iid in _board_watcher._nudged  # type: ignore[attr-defined]
+            if iid in active_ids
+        }
+    except Exception:
+        pass
+
+
+# ── Threads stale-working reaper ───────────────────────────────────────
+#
+# When an agent POSTs a partial reply (`partial: true`), the message sits at
+# status='working' until they PATCH it with the final body. Sometimes agents
+# forget — they got interrupted, hit context limits, or crashed mid-write.
+# Every 5 min this job scans for messages that have been 'working' for >15 min
+# and pings the SENDER via a board task with the 3-branch script so they
+# either flip to complete, keep working (reset timer), or discard.
+#
+# 30-min dedup per message so we don't spam the same agent every cycle.
+# Successor to the deleted _inbox_stale_working_reaper (July 2026).
+_threads_reaper_last: dict[str, int] = {}
+_THREADS_WORKING_THRESHOLD_SECS = 15 * 60
+_THREADS_REAPER_NUDGE_GAP_SECS  = 30 * 60
+
+
+def _threads_stale_working_reaper():
+    try:
+        db = get_db()
+        now = int(time.time())
+        rows = db.execute(
+            "SELECT m.id AS mid, m.thread_id AS tid, m.from_session, m.to_session, "
+            "       m.updated, t.title "
+            "  FROM messages m JOIN threads t ON t.id = m.thread_id "
+            " WHERE m.status = 'working' "
+            "   AND m.from_session IS NOT NULL AND m.from_session != '' "
+            "   AND m.updated < ? "
+            "   AND t.discarded = 0",
+            (now - _THREADS_WORKING_THRESHOLD_SECS,),
+        ).fetchall()
+        for r in rows:
+            mid = r["mid"]
+            last = _threads_reaper_last.get(mid, 0)
+            if now - last < _THREADS_REAPER_NUDGE_GAP_SECS:
+                continue
+            _threads_reaper_last[mid] = now
+            agent = r["from_session"]
+            tid = r["tid"]
+            age_min = (now - int(r["updated"])) // 60
+            title = f"Stale working message {mid} — {(r['title'] or '')[:60]}"
+            desc = (
+                f"Your message **{mid}** in thread **{tid}** (_{r['title']}_) has been "
+                f"in `working` state for **{age_min} min** with no follow-up PATCH.\n\n"
+                f"Pick whichever branch matches reality — the CLI does the work:\n\n"
+                f"1. **Still actively computing** — reset the timer by PATCHing partial again:\n\n"
+                f"       amux threads reply --partial <parent_mid> \"still on it — <what you're doing>\"\n\n"
+                f"   (Or if you meant to update {mid} itself: `curl -sk -X PATCH "
+                f"-H 'Content-Type: application/json' -d '{{\"body\":\"<current text>\","
+                f"\"partial\":true}}' $AMUX_URL/api/messages/{mid}`.)\n\n"
+                f"2. **Done — here's the final answer:**\n\n"
+                f"       amux threads finalize {mid} \"<final content>\"\n\n"
+                f"3. **Discard — I don't need this any more:**\n\n"
+                f"       curl -sk -X DELETE $AMUX_URL/api/messages/{mid}\n\n"
+                f"Convention: `working` means you're actively computing and will PATCH "
+                f"again soon. Stuck-working is a bug on the sender's side, not the reader's."
+            )
+            board_id = _next_issue_id(_prefix_from_session(agent))
+            try:
+                db.execute(
+                    "INSERT INTO issues (id, title, desc, status, session, "
+                    "  creator, created, updated, owner_type) "
+                    "VALUES (?, ?, ?, 'todo', ?, 'threads-reaper', ?, ?, 'agent')",
+                    (board_id, title, desc, agent, now, now),
+                )
+                db.commit()
+                _board_changed()
+                try:
+                    _notify_session_of_task(agent, board_id, title)
+                except Exception:
+                    pass
+                slog(f"[threads-reaper] nudged {agent} about stale {mid} ({age_min}m)")
+            except Exception as e:
+                slog(f"[threads-reaper] {mid}: board insert failed: {e}")
+    except Exception as e:
+        slog(f"[threads-reaper] error: {e}")
+
+
+# ── Workflow runner ────────────────────────────────────────────────────────
+#
+# Workflow modules live at /mnt/gitdata/amux/workflows/<name>.py. Each exposes
+# a `run(ctx: dict) -> dict` function and a `META` dict. The runner imports
+# the module fresh on each invocation so authors can edit workflows without
+# restarting the server. Every run is persisted to workflow_runs with its
+# inputs, outputs, per-step events, and duration.
+#
+# See workflows/_amux_workflow.py for the helper module (llm.invoke, log,
+# http_*) and workflows/audit_pair_adjudicate.py for the flagship example
+# (auto-close known-safe audit-pair splits before they burn Fable tokens).
+_WORKFLOWS_DIR = Path("/mnt/gitdata/amux/workflows")
+
+
+def _list_workflows() -> list:
+    """Enumerate available workflow modules. Skips _*.py and __init__.py.
+    Loads META via a fresh import so schema drift is visible immediately."""
+    import importlib
+    import sys as _sys
+    if not _WORKFLOWS_DIR.exists():
+        return []
+    out = []
+    for f in sorted(_WORKFLOWS_DIR.glob("*.py")):
+        if f.name.startswith("_") or f.name == "__init__.py":
+            continue
+        name = f.stem
+        meta = {"name": name, "description": "", "input_schema": {}, "output_schema": {}}
+        try:
+            mod_name = f"workflows.{name}"
+            if mod_name in _sys.modules:
+                del _sys.modules[mod_name]
+            mod = importlib.import_module(mod_name)
+            if hasattr(mod, "META") and isinstance(mod.META, dict):
+                meta.update(mod.META)
+        except Exception as e:
+            meta["error"] = str(e)[:200]
+        out.append(meta)
+    return out
+
+
+def _run_workflow(name: str, ctx: dict) -> dict:
+    """Load and run a workflow. Persists a workflow_runs row. Returns:
+        {run_id, status, result, error, duration_ms}
+    """
+    import importlib
+    import sys as _sys
+    import traceback
+    if not re.match(r"^[a-zA-Z0-9_]+$", name):
+        return {"error": "invalid workflow name"}
+    module_path = _WORKFLOWS_DIR / f"{name}.py"
+    if not module_path.exists():
+        return {"error": f"workflow '{name}' not found"}
+    run_id = "wfr-" + uuid.uuid4().hex[:12]
+    now = int(time.time())
+    db = get_db()
+    db.execute(
+        "INSERT INTO workflow_runs (id, name, ctx_in, status, started_at) "
+        "VALUES (?, ?, ?, 'running', ?)",
+        (run_id, name, json.dumps(ctx), now),
+    )
+    db.commit()
+    # Import the helper module first so we can plumb the run_id in.
+    try:
+        helper_name = "workflows._amux_workflow"
+        if helper_name in _sys.modules:
+            del _sys.modules[helper_name]
+        helper = importlib.import_module(helper_name)
+        helper._set_run(run_id)
+        mod_name = f"workflows.{name}"
+        if mod_name in _sys.modules:
+            del _sys.modules[mod_name]
+        mod = importlib.import_module(mod_name)
+        result = mod.run(dict(ctx))
+        events = helper._drain_events()
+        finished = int(time.time())
+        db.execute(
+            "UPDATE workflow_runs SET result = ?, events = ?, status = 'ok', "
+            "  finished_at = ? WHERE id = ?",
+            (json.dumps(result), json.dumps(events), finished, run_id),
+        )
+        db.commit()
+        return {
+            "run_id": run_id,
+            "status": "ok",
+            "result": result,
+            "duration_ms": (finished - now) * 1000,
+        }
+    except Exception as e:
+        tb = traceback.format_exc()
+        try:
+            events = helper._drain_events()
+        except Exception:
+            events = []
+        finished = int(time.time())
+        db.execute(
+            "UPDATE workflow_runs SET events = ?, status = 'error', "
+            "  error = ?, finished_at = ? WHERE id = ?",
+            (json.dumps(events), tb[:4000], finished, run_id),
+        )
+        db.commit()
+        return {"run_id": run_id, "status": "error", "error": str(e), "duration_ms": (finished - now) * 1000}
 def _tree_has_recent_activity(path: Path, cutoff: float) -> bool:
     """True if `path` OR anything nested inside it was modified at/after cutoff.
     Short-circuits on the first recent entry, so active trees are cheap to test;
@@ -45670,7 +45575,7 @@ def _cleanup_tmp():
                 continue
             d = (parse_env_file(env_file).get("CC_DIR") or "").strip()
             if d:
-                live.add(_project_name(d))
+                live.add(os.path.expanduser(d).rstrip("/").replace("/", "-"))
     except Exception:
         pass
     cutoff = time.time() - 4 * 3600  # older than 4h (was 1h — too aggressive)
@@ -45714,7 +45619,7 @@ def _auto_archive_idle():
         # Check tmux pane last activity time
         try:
             r = subprocess.run(
-                ["tmux", "display-message", "-t", tmux_target(name), "-p", "#{pane_activity}"],
+                [*_tmux_prefix(name), "display-message", "-t", tmux_target(name), "-p", "#{pane_activity}"],
                 capture_output=True, text=True, timeout=5,
             )
             if r.returncode != 0 or not r.stdout.strip():
@@ -45730,44 +45635,30 @@ def _auto_archive_idle():
         slog(f"[auto-archive] archived {len(archived)} idle sessions: {', '.join(archived)}")
 
 
-def _tmux_session_exists(name: str) -> bool:
-    """True if a tmux session backs this amux session (regardless of whether
-    Claude is running in it). Unlike is_running(), this also catches an archived
-    session that's been reduced to an idle shell — which still holds memory."""
-    try:
-        r = subprocess.run(
-            ["tmux", "has-session", "-t", tmux_name(name)],
-            capture_output=True, timeout=5,
-        )
-        return r.returncode == 0
-    except Exception:
-        return False
-
-
 def _enforce_archived_stopped():
-    """Tear down any tmux session backing an archived (or blocked) amux session.
-
-    Gate on tmux *existence*, not is_running(): an archived session whose Claude
-    process already exited still leaves an idle `/bin/bash` pane holding a few MB
-    each. is_running() reports those as not-running (shell prompt, no child), so
-    gating on it would skip exactly the orphans we want to reap."""
+    """Stop and remove any tmux processes for archived sessions."""
     stopped = []
     for env_file in sorted(CC_SESSIONS.glob("*.env")):
         name = env_file.stem
         cfg = parse_env_file(env_file)
-        blocked = _is_session_blocked(name)
-        archived = cfg.get("CC_ARCHIVED") == "1"
-        if not (blocked or archived):
+        if _is_session_blocked(name):
+            if is_running(name):
+                try:
+                    stop_session(name)
+                    _kill_tmux_session(name)
+                    stopped.append(f"{name} (blocked)")
+                except Exception:
+                    pass
             continue
-        if _tmux_session_exists(name):
+        if cfg.get("CC_ARCHIVED") == "1" and is_running(name):
             try:
                 stop_session(name)
                 _kill_tmux_session(name)
-                stopped.append(f"{name} (blocked)" if blocked else name)
+                stopped.append(name)
             except Exception:
                 pass
     if stopped:
-        slog(f"[cleanup] reaped {len(stopped)} orphan tmux session(s) for archived/blocked: {', '.join(stopped)}")
+        slog(f"[cleanup] stopped {len(stopped)} archived sessions still running: {', '.join(stopped)}")
 
 
 def _cleanup_old_transcripts():
@@ -46034,35 +45925,11 @@ def _watch_notes_dir():
             pass
 
 
-# Obvious placeholder/template values that are not real API keys. Lets us avoid
-# treating a templated env file (e.g. ANTHROPIC_API_KEY=changeme) as configured,
-# which would otherwise suppress the onboarding prompt.
-_PLACEHOLDER_API_KEYS = frozenset({
-    "changeme", "change-me", "change_me",
-    "your-api-key", "your_api_key", "your-key", "yourkey",
-    "your_key_here", "your-key-here", "your-api-key-here",
-    "placeholder", "dummy", "example", "sample",
-    "test", "test-key", "testkey",
-    "replace-me", "replace_me",
-    "xxx", "xxxx",
-    "sk-ant-xxx", "sk-ant-your-key", "sk-ant-example", "sk-ant-placeholder",
-})
-
-
-def _is_placeholder_api_key(val: str) -> bool:
-    """Return True if ``val`` is an obvious placeholder/template, not a real key."""
-    v = val.strip().strip('"').strip("'").lower()
-    return v in _PLACEHOLDER_API_KEYS
-
-
 def _validate_api_key() -> tuple[bool, str]:
     """Check if the current ANTHROPIC_API_KEY is valid with a minimal API call.
 
-    Returns (is_valid, error_message). Skips validation if OAuth or custom API base is configured.
+    Returns (is_valid, error_message). Skips validation if OAuth is configured.
     """
-    # Skip if custom API base is configured (third-party provider)
-    if os.environ.get("ANTHROPIC_API_BASE", "").strip():
-        return True, ""
     # Skip if OAuth is present — key isn't needed
     try:
         import json as _j
@@ -46300,125 +46167,6 @@ def _kill_stale_port(port: int):
         pass
 
 
-# ── amux tunnel client ──────────────────────────────────────────────────────
-# Dials out to the amux cloud gateway and long-polls for public requests hitting
-# our tunnel URL (cloud.amux.io/t/<tid>/…), serving them from a local target
-# (this server by default, or any localhost port). Exposes localhost publicly
-# with no inbound port — gated on an active amux-cloud subscription (the token).
-_TUNNEL_GATEWAY = os.environ.get("AMUX_TUNNEL_GATEWAY", "https://cloud.amux.io")
-_TUNNEL_TOKEN = os.environ.get("AMUX_TUNNEL_TOKEN", "")
-_AMUX_SELF_PORT = 8822
-_AMUX_SELF_SCHEME = "https"
-_tunnel_client = {"running": False, "url": None, "tid": None, "error": None,
-                  "target": None, "thread": None, "requests": 0}
-
-
-def _tunnel_serve_one(req, target_base):
-    """Fetch one relayed request against the local target; return a reply dict."""
-    import ssl as _ssl, urllib.request, urllib.error
-    path = req.get("path", "/")
-    qs = req.get("qs", "")
-    url = target_base + path + (("?" + qs) if qs else "")
-    body = base64.b64decode(req.get("body", "")) if req.get("body") else None
-    skip = {"host", "content-length", "connection", "accept-encoding"}
-    hdrs = {k: v for k, v in (req.get("headers") or {}).items() if k.lower() not in skip}
-    r = urllib.request.Request(url, data=body, method=req.get("method", "GET"), headers=hdrs)
-    ctx = None
-    if target_base.startswith("https"):
-        ctx = _ssl.create_default_context()
-        ctx.check_hostname = False
-        ctx.verify_mode = _ssl.CERT_NONE
-    def _pack(status, headers, raw):
-        return {"status": status,
-                "headers": {k: v for k, v in headers.items()
-                            if k.lower() not in ("transfer-encoding", "connection", "content-encoding")},
-                "body": base64.b64encode(raw).decode()}
-    try:
-        resp = urllib.request.urlopen(r, timeout=30, context=ctx)
-        return _pack(resp.status, resp.headers, resp.read())
-    except urllib.error.HTTPError as e:
-        return _pack(e.code, e.headers, e.read())
-    except Exception as e:
-        return {"status": 502, "headers": {"Content-Type": "text/plain"},
-                "body": base64.b64encode(f"tunnel local fetch error: {e}".encode()).decode()}
-
-
-def _tunnel_loop(token, gateway, target_base):
-    import urllib.request, urllib.error, ssl as _ssl
-    try:                       # verify the gateway's real cert (macOS python lacks a system CA bundle)
-        import certifi
-        gwctx = _ssl.create_default_context(cafile=certifi.where())
-    except Exception:
-        gwctx = _ssl.create_default_context()
-    backoff = 1
-    while _tunnel_client["running"]:
-        try:
-            req = urllib.request.Request(gateway + "/tunnel/register", method="POST",
-                                         headers={"Authorization": "Bearer " + token})
-            reg = json.loads(urllib.request.urlopen(req, timeout=20, context=gwctx).read())
-            _tunnel_client.update({"tid": reg["tid"], "url": reg["url"], "error": None})
-            backoff = 1
-            slog(f"[tunnel] registered → {reg['url']}")
-        except Exception as e:
-            _tunnel_client["error"] = f"register failed: {e}"
-            time.sleep(min(backoff, 30)); backoff = min(backoff * 2, 30)
-            continue
-        tid = _tunnel_client["tid"]
-        while _tunnel_client["running"]:
-            try:
-                pr = urllib.request.Request(gateway + "/tunnel/poll?tid=" + tid,
-                                            headers={"Authorization": "Bearer " + token})
-                item = json.loads(urllib.request.urlopen(pr, timeout=40, context=gwctx).read())
-            except urllib.error.HTTPError as e:
-                if e.code == 409:   # gateway lost our tunnel (restart) — re-register
-                    break
-                _tunnel_client["error"] = f"poll HTTP {e.code}"; time.sleep(2); continue
-            except Exception:
-                continue   # long-poll timeout / transient — just re-poll
-            if item.get("idle") or not item.get("rid"):
-                continue
-            _tunnel_client["requests"] += 1
-
-            def _handle(it):
-                reply = _tunnel_serve_one(it, target_base)
-                try:
-                    rr = urllib.request.Request(
-                        gateway + "/tunnel/reply?rid=" + it["rid"],
-                        data=json.dumps(reply).encode(), method="POST",
-                        headers={"Authorization": "Bearer " + token, "Content-Type": "application/json"})
-                    urllib.request.urlopen(rr, timeout=30, context=gwctx).read()
-                except Exception as e:
-                    slog(f"[tunnel] reply failed: {e}")
-            threading.Thread(target=_handle, args=(item,), daemon=True).start()
-    _tunnel_client.update({"url": None, "tid": None})
-    slog("[tunnel] stopped")
-
-
-def _tunnel_start(token=None, target_port=None):
-    if _tunnel_client["running"]:
-        return {"running": True, "url": _tunnel_client["url"], "already": True}
-    token = (token or _TUNNEL_TOKEN or "").strip()
-    if not token:
-        return {"error": "no tunnel token — set AMUX_TUNNEL_TOKEN (from your amux cloud account)"}
-    port = int(target_port) if target_port else _AMUX_SELF_PORT
-    scheme = _AMUX_SELF_SCHEME if port == _AMUX_SELF_PORT else "http"
-    target_base = f"{scheme}://127.0.0.1:{port}"
-    _tunnel_client.update({"running": True, "target": target_base, "error": None, "requests": 0})
-    t = threading.Thread(target=_tunnel_loop, args=(token, _TUNNEL_GATEWAY, target_base), daemon=True)
-    _tunnel_client["thread"] = t
-    t.start()
-    for _ in range(40):   # wait briefly for first registration
-        if _tunnel_client["url"] or _tunnel_client["error"]:
-            break
-        time.sleep(0.1)
-    return {"running": _tunnel_client["running"], "url": _tunnel_client["url"], "error": _tunnel_client["error"]}
-
-
-def _tunnel_stop():
-    _tunnel_client["running"] = False
-    return {"running": False}
-
-
 def main():
     # CLI: optional positional port, optional --bind host[,host,...]
     # Examples:
@@ -46522,10 +46270,6 @@ def main():
             print(f"\033[33m  TLS setup failed ({e}), falling back to HTTP\033[0m")
 
     _install_signal_handlers()
-    global _AMUX_SELF_PORT, _AMUX_SELF_SCHEME
-    _AMUX_SELF_PORT, _AMUX_SELF_SCHEME = port, scheme
-    if _TUNNEL_TOKEN:   # auto-start the cloud tunnel when a subscription token is configured
-        threading.Thread(target=_tunnel_start, daemon=True).start()
     slog(f"[startup] server starting — pid={os.getpid()}, port={port}, scheme={scheme}, python={sys.version.split()[0]}")
     _log_resource_snapshot("startup")
     print("\033[1m\033[34mamux\033[0m web dashboard running")
@@ -46593,7 +46337,7 @@ def main():
             class IPv4HTTPServer(HTTPServer):
                 address_family = socket.AF_INET
                 allow_reuse_address = True
-                allow_reuse_port = True
+                allow_reuse_port = False  # see ResilientHTTPSServer — no silent double-bind
             for _att in range(10):
                 try:
                     IPv4HTTPServer((_host, port + 1), H).serve_forever()
@@ -46610,21 +46354,25 @@ def main():
     schedule_job(_yolo_loop,             interval=3,                    name="yolo",        initial_delay=3)
     schedule_job(_rate_limit_loop,       interval=15,                   name="rate_limit",  initial_delay=4)
     schedule_job(_snapshot_loop,         interval=60,                   name="snapshot",    initial_delay=0)
-    schedule_job(_steering_fast_tick,    interval=4,                    name="steering_fast", initial_delay=8)
     schedule_job(_tmux_size_watchdog,    interval=60,                   name="tmux_size",   initial_delay=45)
     schedule_job(_reap_stale_browsers,  interval=120,                  name="browser_reap", initial_delay=60)
     schedule_job(_kill_stale_ray,        interval=600,                  name="ray_reap",     initial_delay=120)
     schedule_job(_refresh_token_cache,   interval=120,                  name="token_cache", initial_delay=5)
     schedule_job(_email_sync_job,        interval=_EMAIL_SYNC_INTERVAL, name="email_sync",  initial_delay=20)
+    schedule_job(_repos_scan,            interval=60,                   name="repos_scan",    initial_delay=5)
+    schedule_job(_board_watcher,         interval=30,                   name="board_watcher", initial_delay=30)
+    schedule_job(_board_watcher_clear_nudged, interval=60,             name="board_watcher_gc", initial_delay=60)
     schedule_job(_evict_stale_caches,    interval=300,                  name="cache_evict", initial_delay=60)
     schedule_job(_cleanup_tmp,           interval=1800,                 name="tmp_cleanup", initial_delay=60)
+    schedule_job(_threads_stale_working_reaper, interval=300,           name="threads_stale_working", initial_delay=120)
     schedule_job(_auto_archive_idle,     interval=3600,                 name="auto_archive", initial_delay=300)
-    # DISABLED 2026-07-06 — auto-steering every idle session about stale doing/review
-    # cards woke ~20 sessions at once into a churn storm and created a nag loop
-    # (each nudge is a message → _summarize_task_bg re-titles the session's active
-    # card). Two live reports within minutes of deploy. The `stale` UI flag on
-    # board items stays (advisory, harmless); only the auto-steer is off. Re-enable
-    # behind an explicit opt-in / gentler design before turning back on.
+    # DISABLED 2026-07-06 (upstream f088f8e) — auto-steering every idle session
+    # about stale doing/review cards woke ~20 sessions at once into a churn storm
+    # and created a nag loop (each nudge is a message → _summarize_task_bg
+    # re-titles the session's active card). Two live reports within minutes of
+    # deploy. The `stale` UI flag on board items stays (advisory, harmless);
+    # only the auto-steer is off. Re-enable behind an explicit opt-in / gentler
+    # design before turning back on.
     # schedule_job(_board_stale_nudge,     interval=120,                  name="board_stale", initial_delay=30)
     schedule_job(_enforce_archived_stopped, interval=600,                name="archive_enforce", initial_delay=30)
     schedule_job(_cleanup_old_transcripts, interval=86400,              name="transcript_cleanup", initial_delay=600)

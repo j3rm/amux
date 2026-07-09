@@ -5,7 +5,7 @@ Verifies Clerk JWTs, starts/stops Docker containers per user, reverse-proxies re
 """
 
 import os, json, time, sqlite3, subprocess, threading, urllib.request, urllib.error, base64
-import hmac, hashlib, secrets, queue as _queue
+import hmac, hashlib
 from http.server import HTTPServer, BaseHTTPRequestHandler, ThreadingHTTPServer
 
 # ── Config ────────────────────────────────────────────────────────────────────
@@ -39,52 +39,6 @@ COOKIE_MAX_AGE = 86400 * 7  # 7 days
 ADMIN_EMAILS    = set(e.strip() for e in os.environ.get("ADMIN_EMAILS", "").split(",") if e.strip())
 GATEWAY_LOG     = "/var/log/amux-gateway.log"
 
-# ── Starting HTML (shown while container boots) ──────────────────────────────
-_STARTING_HTML = """<!DOCTYPE html>
-<html lang="en">
-<head>
-  <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Starting — amux cloud</title>
-  <style>
-    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
-    body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
-      background: #0a0a0a; color: #e5e5e5;
-      min-height: 100vh; display: flex; align-items: center; justify-content: center;
-      flex-direction: column; gap: 24px; }
-    .logo { font-size: 1.4rem; font-weight: 700; color: #fff; }
-    .logo span { color: #555; font-weight: 400; }
-    .spinner { width: 32px; height: 32px; border: 3px solid #333; border-top-color: #888;
-      border-radius: 50%; animation: spin 0.8s linear infinite; }
-    @keyframes spin { to { transform: rotate(360deg); } }
-    .msg { color: #888; font-size: 0.92rem; }
-    .sub { color: #555; font-size: 0.78rem; }
-  </style>
-</head>
-<body>
-  <div class="logo">amux <span>cloud</span></div>
-  <div class="spinner"></div>
-  <div class="msg">Starting your workspace…</div>
-  <div class="sub">This usually takes 10–20 seconds</div>
-  <script>
-    let checks = 0;
-    (function poll() {
-      checks++;
-      if (checks > 60) {
-        document.querySelector('.msg').textContent = 'Taking longer than expected…';
-        document.querySelector('.sub').innerHTML = '<a href="/" style="color:#a78bfa;">Retry</a>';
-        return;
-      }
-      setTimeout(() => {
-        fetch('/api/sessions', { credentials: 'same-origin' })
-          .then(r => { if (r.ok) location.reload(); else poll(); })
-          .catch(() => poll());
-      }, 3000);
-    })();
-  </script>
-</body>
-</html>"""
-
 # ── Login HTML ─────────────────────────────────────────────────────────────────
 _LOGIN_HTML = """<!DOCTYPE html>
 <html lang="en">
@@ -101,9 +55,9 @@ _LOGIN_HTML = """<!DOCTYPE html>
       align-items: center; justify-content: center; gap: 28px;
     }
     .logo { font-size: 1.4rem; font-weight: 700; letter-spacing: -0.5px; color: #fff; }
-    .logo span { color: #999; font-weight: 400; }
+    .logo span { color: #555; font-weight: 400; }
     #clerk-root { min-width: 320px; }
-    #status { color: #bbb; font-size: 0.85rem; min-height: 1.2em; text-align: center; }
+    #status { color: #aaa; font-size: 0.85rem; min-height: 1.2em; text-align: center; }
     #status.error { color: #f87171; }
     .spinner {
       width: 18px; height: 18px;
@@ -117,8 +71,8 @@ _LOGIN_HTML = """<!DOCTYPE html>
       padding: 8px 20px; font-size: 0.85rem; cursor: pointer; margin-top: 12px;
     }
     .retry-btn:hover { background: #444; }
-    .promo-toggle { color: #aaa; font-size: 0.82rem; cursor: pointer; text-decoration: underline; text-decoration-color: #555; text-underline-offset: 3px; }
-    .promo-toggle:hover { color: #ccc; }
+    .promo-toggle { color: #888; font-size: 0.82rem; cursor: pointer; text-decoration: underline; text-decoration-color: #444; text-underline-offset: 3px; }
+    .promo-toggle:hover { color: #aaa; }
     .promo-box { display: none; margin-top: 4px; }
     .promo-box.open { display: flex; }
     .promo-input {
@@ -135,23 +89,6 @@ _LOGIN_HTML = """<!DOCTYPE html>
     .promo-msg { font-size: 0.8rem; margin-top: 4px; min-height: 1.2em; }
     .promo-msg.ok { color: #34d399; }
     .promo-msg.err { color: #f87171; }
-    /* Clerk contrast overrides */
-    .cl-card { border: 1px solid #666 !important; background: #1e1e38 !important; box-shadow: 0 0 40px rgba(100,90,180,0.08) !important; }
-    .cl-socialButtonsBlockButton { color: #fff !important; border-color: #666 !important; }
-    .cl-socialButtonsBlockButtonText { color: #fff !important; }
-    .cl-socialButtonsBlockButtonArrow { color: #fff !important; }
-    .cl-headerTitle { color: #fff !important; }
-    .cl-headerSubtitle { color: #ddd !important; }
-    .cl-dividerText { color: #ccc !important; }
-    .cl-dividerLine { border-color: #555 !important; }
-    .cl-formFieldLabel { color: #f0f0f0 !important; }
-    .cl-formFieldHintText { color: #bbb !important; }
-    .cl-formFieldInput { background: #141430 !important; color: #f0f0f0 !important; border-color: #555 !important; }
-    .cl-formFieldInput::placeholder { color: #999 !important; }
-    .cl-footerActionText { color: #ddd !important; }
-    .cl-footerActionLink { color: #b5a8f5 !important; }
-    .cl-footerPages { color: #ccc !important; }
-    .cl-footerPagesLink { color: #ccc !important; }
   </style>
 </head>
 <body>
@@ -167,12 +104,12 @@ _LOGIN_HTML = """<!DOCTYPE html>
     </div>
     <div id="promo-msg" class="promo-msg"></div>
   </div>
-  <a href="https://apps.apple.com/us/app/amux-agent-multiplexer/id6760410435" target="_blank" rel="noopener" style="display:inline-flex;align-items:center;gap:6px;color:#aaa;font-size:0.82rem;text-decoration:none;margin-top:8px;">
+  <a href="https://apps.apple.com/us/app/amux-agent-multiplexer/id6760410435" target="_blank" rel="noopener" style="display:inline-flex;align-items:center;gap:6px;color:#888;font-size:0.82rem;text-decoration:none;margin-top:8px;">
     <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><path d="M18.71 19.5c-.83 1.24-1.71 2.45-3.05 2.47-1.34.03-1.77-.79-3.29-.79-1.53 0-2 .77-3.27.82-1.31.05-2.3-1.32-3.14-2.53C4.25 17 2.94 12.45 4.7 9.39c.87-1.52 2.43-2.48 4.12-2.51 1.28-.02 2.5.87 3.29.87.78 0 2.26-1.07 3.8-.91.65.03 2.47.26 3.64 1.98-.09.06-2.17 1.28-2.15 3.81.03 3.02 2.65 4.03 2.68 4.04-.03.07-.42 1.44-1.38 2.83M13 3.5c.73-.83 1.94-1.46 2.94-1.5.13 1.17-.34 2.35-1.04 3.19-.69.85-1.83 1.51-2.95 1.42-.15-1.15.41-2.35 1.05-3.11z"/></svg>
     Get the iOS App
   </a>
   <div id="self-host-back" style="display:none;margin-top:24px;">
-    <a href="#" id="self-host-link" style="color:#aaa;font-size:0.82rem;text-decoration:underline;text-decoration-color:#555;text-underline-offset:3px;">Back to self-hosted</a>
+    <a href="#" id="self-host-link" style="color:#888;font-size:0.82rem;text-decoration:underline;text-decoration-color:#444;text-underline-offset:3px;">Back to self-hosted</a>
   </div>
   <script>
     // Show "back to self-hosted" if user has amux_connections in localStorage
@@ -328,43 +265,8 @@ _LOGIN_HTML = """<!DOCTYPE html>
       }
     })();
 
-    const _clerkAppearance = {
-      variables: {
-        colorBackground: '#1c1c2e',
-        colorText: '#f5f5f5',
-        colorTextSecondary: '#d4d4d4',
-        colorPrimary: '#a99cf0',
-        colorInputBackground: '#14142a',
-        colorInputText: '#f5f5f5',
-        borderRadius: '8px',
-      },
-      elements: {
-        socialButtonsBlockButton: { color: '#e0e0e0', borderColor: '#3a3a5c' },
-        headerSubtitle: { color: '#d4d4d4' },
-        dividerText: { color: '#bbb' },
-        dividerLine: { borderColor: '#3a3a5c' },
-        footerActionText: { color: '#ccc' },
-        footerActionLink: { color: '#a99cf0' },
-        formFieldLabel: { color: '#e0e0e0' },
-        card: { borderColor: '#3a3a5c', border: '1px solid #3a3a5c' },
-      },
-    };
-
     function mountSignIn() {
-      const isSignUp = location.pathname.startsWith('/sign-up');
-      if (isSignUp) {
-        window.Clerk.mountSignUp(document.getElementById('clerk-root'), {
-          routing: 'path', path: '/sign-up',
-          signInUrl: '/sign-in',
-          appearance: _clerkAppearance,
-        });
-      } else {
-        window.Clerk.mountSignIn(document.getElementById('clerk-root'), {
-          routing: 'path', path: '/sign-in',
-          signUpUrl: '/sign-up',
-          appearance: _clerkAppearance,
-        });
-      }
+      window.Clerk.mountSignIn(document.getElementById('clerk-root'), { routing: 'path', path: '/sign-in' });
       window.Clerk.addListener(({ user }) => {
         if (user && !exchanging) exchangeAndRedirect();
       });
@@ -377,7 +279,7 @@ _LOGIN_HTML = """<!DOCTYPE html>
     s.onload = async () => {
       try {
         if (!window.Clerk) { showError('Auth library failed to initialize.'); return; }
-        await window.Clerk.load({ signInUrl: '/sign-in', signUpUrl: '/sign-up' });
+        await window.Clerk.load();
         hideRetry();
         setStatus('');
         // If redirected from logout, sign out of Clerk too
@@ -672,14 +574,6 @@ def get_db():
             used_at     INTEGER,
             used_by     TEXT
         );
-        CREATE TABLE IF NOT EXISTS tunnel_tokens (
-            token       TEXT PRIMARY KEY,
-            org_id      TEXT NOT NULL,
-            email       TEXT,
-            label       TEXT,
-            created_at  INTEGER NOT NULL,
-            last_used   INTEGER
-        );
     """)
     # ── Migrate: user-as-org → proper orgs table ──
     # If users still have port column and orgs table is empty, migrate
@@ -926,25 +820,6 @@ def _resolve_api_key(db, user_id):
     """, (user_id,)).fetchone()
     return row["api_key"] if row else None
 
-_starting_containers = set()
-_starting_lock = threading.Lock()
-
-def _ensure_container_starting(user_id, port):
-    """Kick off container startup in a background thread (idempotent)."""
-    with _starting_lock:
-        if user_id in _starting_containers:
-            return
-        _starting_containers.add(user_id)
-    def _run():
-        try:
-            start_container(user_id, port)
-        except Exception as e:
-            print(f"[docker] background start failed for {user_id}: {e}", flush=True)
-        finally:
-            with _starting_lock:
-                _starting_containers.discard(user_id)
-    threading.Thread(target=_run, daemon=True).start()
-
 def start_container(user_id, port):
     _write_compose(user_id, port)
     _restore_user_files(user_id)
@@ -1181,151 +1056,6 @@ def _resolve_share_token(token: str) -> int | None:
     return None
 
 
-# ── amux tunnel (ngrok-style reverse proxy) ─────────────────────────────────────
-# A paid, authenticated user's LOCAL amux server dials out and holds a long-poll
-# loop; the gateway relays public requests hitting /t/<tid>/... down to it. This
-# exposes any localhost service (calendar feed, dev server, …) at a public HTTPS
-# URL on cloud.amux.io — no inbound port opened on the user's machine, and gated
-# on an active (pro/trial) amux-cloud subscription.
-_tunnels: dict = {}          # tid -> {"org_id", "q": Queue, "last_seen", "created"}
-_tunnel_pending: dict = {}   # rid -> {"ev": Event, "resp": dict|None}
-_tunnel_lock = threading.Lock()
-
-
-def _tunnel_gate_ok(org_row) -> bool:
-    """True if the org may use tunnels (pro or still in trial). Mirrors the container gate."""
-    if not org_row:
-        return False
-    if org_row["plan"] == "pro":
-        return True
-    return (org_row["trial_ends_at"] or 0) >= int(time.time())
-
-
-def _tunnel_auth(handler):
-    """Resolve the caller's tunnel token → active org row (or None). Token via
-    Authorization: Bearer <tok> or ?token=."""
-    from urllib.parse import urlparse, parse_qs
-    tok = ""
-    auth = handler.headers.get("Authorization", "")
-    if auth.startswith("Bearer "):
-        tok = auth[7:].strip()
-    if not tok:
-        tok = parse_qs(urlparse(handler.path).query).get("token", [""])[0]
-    if not tok:
-        return None
-    db = get_db()
-    row = db.execute("SELECT org_id FROM tunnel_tokens WHERE token=?", (tok,)).fetchone()
-    if not row:
-        return None
-    try:
-        db.execute("UPDATE tunnel_tokens SET last_used=? WHERE token=?", (int(time.time()), tok))
-        db.commit()
-    except Exception:
-        pass
-    org = db.execute("SELECT id, plan, trial_ends_at FROM orgs WHERE id=?", (row["org_id"],)).fetchone()
-    return org if _tunnel_gate_ok(org) else None
-
-
-def _tunnel_serve_public(handler, tid, path, qs):
-    """Relay a public /t/<tid>/... request down the tunnel and return the reply."""
-    with _tunnel_lock:
-        tun = _tunnels.get(tid)
-    if not tun:
-        return handler._json({"error": "tunnel not found"}, 404)
-    length = int(handler.headers.get("Content-Length", 0))
-    body = handler.rfile.read(length) if length else b""
-    rid = secrets.token_urlsafe(10)
-    ev = threading.Event()
-    with _tunnel_lock:
-        _tunnel_pending[rid] = {"ev": ev, "resp": None}
-    skip = {"host", "content-length", "connection"}
-    fwd = {k: v for k, v in handler.headers.items() if k.lower() not in skip}
-    tun["q"].put({
-        "rid": rid, "method": handler.command, "path": path, "qs": qs,
-        "headers": fwd, "body": base64.b64encode(body).decode(),
-    })
-    got = ev.wait(timeout=35)
-    with _tunnel_lock:
-        pend = _tunnel_pending.pop(rid, None)
-    if not got or not pend or not pend["resp"]:
-        return handler._json({"error": "tunnel timeout — local amux not responding"}, 504)
-    resp = pend["resp"]
-    rbody = base64.b64decode(resp.get("body", "")) if resp.get("body") else b""
-    handler.send_response(int(resp.get("status", 200)))
-    for k, v in (resp.get("headers") or {}).items():
-        if k.lower() in ("transfer-encoding", "connection", "content-length"):
-            continue
-        handler.send_header(k, v)
-    handler.send_header("Content-Length", str(len(rbody)))
-    handler.end_headers()
-    try:
-        handler.wfile.write(rbody)
-    except (BrokenPipeError, ConnectionResetError):
-        pass
-
-
-def _tunnel_routes(handler, path, qs):
-    """Handle /t/<tid>/… (public) and /tunnel/{register,poll,reply} (token-authed).
-    Returns True if the request was handled."""
-    from urllib.parse import parse_qs
-    if path.startswith("/t/"):
-        tid, _, tail = path[3:].partition("/")
-        if tid:
-            _tunnel_serve_public(handler, tid, "/" + tail, qs)
-            return True
-    if path == "/tunnel/register" and handler.command == "POST":
-        org = _tunnel_auth(handler)
-        if not org:
-            handler._json({"error": "unauthorized or no active subscription"}, 402)
-            return True
-        # Stable tid derived from the token → the public URL persists across
-        # restarts/reconnects (essential for calendar subscriptions).
-        from urllib.parse import urlparse as _up
-        _auth = handler.headers.get("Authorization", "")
-        _tok = _auth[7:].strip() if _auth.startswith("Bearer ") else parse_qs(_up(handler.path).query).get("token", [""])[0]
-        tid = hashlib.sha256(("amux-tunnel:" + _tok).encode()).hexdigest()[:16]
-        with _tunnel_lock:
-            _tunnels[tid] = {"org_id": org["id"], "q": _queue.Queue(),
-                             "last_seen": time.time(), "created": time.time()}
-        base = f"https://{handler.headers.get('Host', 'cloud.amux.io')}"
-        handler._json({"tid": tid, "url": f"{base}/t/{tid}/"})
-        return True
-    if path == "/tunnel/poll" and handler.command == "GET":
-        org = _tunnel_auth(handler)
-        if not org:
-            handler._json({"error": "unauthorized"}, 402)
-            return True
-        tid = parse_qs(qs).get("tid", [""])[0]
-        with _tunnel_lock:
-            tun = _tunnels.get(tid)
-        if not tun or tun["org_id"] != org["id"]:
-            handler._json({"error": "tunnel not registered — re-register"}, 409)
-            return True
-        tun["last_seen"] = time.time()
-        try:
-            item = tun["q"].get(timeout=25)
-            handler._json(item)
-        except _queue.Empty:
-            handler._json({"idle": True})
-        return True
-    if path == "/tunnel/reply" and handler.command == "POST":
-        org = _tunnel_auth(handler)
-        if not org:
-            handler._json({"error": "unauthorized"}, 402)
-            return True
-        rid = parse_qs(qs).get("rid", [""])[0]
-        length = int(handler.headers.get("Content-Length", 0))
-        data = json.loads(handler.rfile.read(length)) if length else {}
-        with _tunnel_lock:
-            pend = _tunnel_pending.get(rid)
-        if pend:
-            pend["resp"] = data
-            pend["ev"].set()
-        handler._json({"ok": True})
-        return True
-    return False
-
-
 # ── Proxy helper ───────────────────────────────────────────────────────────────
 def proxy(handler, port, path, qs, user_email="", user_id=None):
     url = f"http://127.0.0.1:{port}{path}"
@@ -1525,11 +1255,6 @@ class Handler(BaseHTTPRequestHandler):
                 self.end_headers()
             return
 
-        # ── amux tunnel: /t/<tid>/… (public) + /tunnel/* (token-authed) ──
-        if path.startswith("/t/") or path.startswith("/tunnel/"):
-            if _tunnel_routes(self, path, qs):
-                return
-
         # ── Public: Clerk path-based routing (sign-in/sign-up sub-pages) ──
         if path.startswith("/sign-in") or path.startswith("/sign-up"):
             from urllib.parse import parse_qs
@@ -1673,7 +1398,7 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/api/cloud-logout" and self.command in ("GET", "POST"):
             sec = self._secure_cookie_flags()
             self.send_response(302)
-            self.send_header("Location", "/sign-in?logout")
+            self.send_header("Location", "/?logout")
             self.send_header("Set-Cookie",
                 f"amux_session=; HttpOnly{sec}; SameSite=Lax; Max-Age=0; Path=/")
             self.send_header("Content-Length", "0")
@@ -2198,20 +1923,7 @@ class Handler(BaseHTTPRequestHandler):
                 checkout_params["subscription_data"] = {
                     "trial_period_days": TRIAL_DAYS,
                 }
-            try:
-                session = stripe.checkout.Session.create(**checkout_params)
-            except stripe._error.InvalidRequestError as e:
-                if "No such customer" in str(e):
-                    db.execute("UPDATE orgs SET stripe_customer_id=NULL WHERE id=?", (target_org,))
-                    db.execute("UPDATE users SET stripe_customer_id=NULL WHERE id=?", (target_org,))
-                    db.commit()
-                    checkout_params.pop("customer", None)
-                    checkout_params["customer_email"] = user_email
-                    session = stripe.checkout.Session.create(**checkout_params)
-                else:
-                    return self._json({"error": str(e)}, 400)
-            except Exception as e:
-                return self._json({"error": f"stripe error: {e}"}, 500)
+            session = stripe.checkout.Session.create(**checkout_params)
             return self._json({"url": session.url})
 
         if path == "/api/stripe/portal" and self.command == "POST":
@@ -2464,11 +2176,10 @@ class Handler(BaseHTTPRequestHandler):
 
         # Wake target container if needed
         if not container_healthy(target_org_id):
-            _ensure_container_starting(target_org_id, target_port)
-            accept = self.headers.get("Accept", "")
-            if "text/html" in accept or not path.startswith("/api/"):
-                return self._html(_STARTING_HTML)
-            return self._json({"error": "starting", "retry_after": 3}, 503)
+            try:
+                start_container(target_org_id, target_port)
+            except Exception as e:
+                return self._json({"error": f"failed to start instance: {e}"}, 503)
 
         proxy(self, target_port, path, qs, user_email=user_email, user_id=target_org_id)
 

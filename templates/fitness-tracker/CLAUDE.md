@@ -58,3 +58,23 @@ Log each meal as you eat it. Daily entry format:
 
 ## Program
 See `workout/program.md` for the current training block.
+
+## vCenter / VMware infrastructure — Scorpio only
+
+**Unless `$AMUX_SESSION` is `Scorpio`, you must NOT:**
+- Run `govc` or any VMware vSphere CLI commands
+- Connect to vCenter, ESXi hosts, or any VMware API endpoint
+- Deploy, clone, snapshot, power on/off, or reconfigure virtual machines
+- Read or modify vCenter inventory, datastores, networks, or resource pools
+
+If a task requires VM deployment or vCenter interaction, post a board task to
+Scorpio instead and do not proceed yourself:
+
+```bash
+curl -sk -X POST -H 'Content-Type: application/json' \
+  -d '{"title":"<describe the VM task>","session":"Scorpio","status":"todo"}' \
+  $AMUX_URL/api/board
+```
+
+Scorpio is the sole authorized agent for infrastructure provisioning.
+Bypassing this risks conflicting deployments and untracked VM state.
