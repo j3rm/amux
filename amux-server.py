@@ -21932,7 +21932,7 @@ function _peekGeoBeacon() {
     setTimeout(_syncPeekOverlayToVisualViewport, 400);
   });
   } catch (e) {}
-})();
+}
 // Standalone top inset — FINAL (2026-07-05 device ruler + oscillation beacons):
 // DO NOT gate layout on innerHeight. In the iOS 26 home-screen webview innerHeight
 // OSCILLATES 762<->812 every ~2s and is COUPLED to our own layout: any JS inset that
