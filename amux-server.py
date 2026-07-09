@@ -9374,10 +9374,23 @@ curl -sk -X POST -H 'Content-Type: application/json' \\
   -d '{"session":"'"$AMUX_SESSION"'"}' \\
   $AMUX_URL/api/board/TASK-ID/claim
 
-# Mark task done
-curl -sk -X PATCH -H 'Content-Type: application/json' \\
-  -d '{"status":"done","desc":"Result: ..."}' \\
-  $AMUX_URL/api/board/TASK-ID
+# Mark task done — USE THE CLI, NOT RAW CURL. The CLI exits non-zero when
+# a status transition is blocked by a gate and prints the checklist to
+# stderr, so a wrapper that logs the exit code will actually catch it.
+# Raw curl piped to /dev/null silently swallows 409/500 responses; every
+# session that has ever done fire-and-forget PATCHes has had items sit
+# stranded because the caller never noticed the failure.
+amux board done TASK-ID              # exits 2 if the gate is unmet
+amux board done TASK-ID --gate-ack   # acknowledges the gate checklist
+amux board done TASK-ID --force      # bypass gate entirely (rare)
+
+# If you MUST use raw curl (why?), you must inspect the response body
+# and status code — do NOT pipe to /dev/null:
+resp=$(curl -sk -w '\\n%{http_code}' -X PATCH -H 'Content-Type: application/json' \\
+  -d '{"status":"done","gate_ack":true,"desc":"Result: ..."}' \\
+  $AMUX_URL/api/board/TASK-ID)
+code=$(echo "$resp" | tail -1); body=$(echo "$resp" | head -n -1)
+[ "$code" = "200" ] || { echo "PATCH failed ($code): $body" >&2; exit 1; }
 ```
 
 ### Threads — conversations with Jeremy or between agents
