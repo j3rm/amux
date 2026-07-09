@@ -1696,12 +1696,22 @@ def is_running(session: str) -> bool:
         # shell actually has a child process (Claude).
         try:
             r_pp = subprocess.run(
-                [*_tmux_prefix(name), "list-panes", "-t", tmux_sess, "-F", "#{pane_pid}"],
+                [*_tmux_prefix(session), "list-panes", "-t", tmux_sess, "-F", "#{pane_pid}"],
                 capture_output=True, text=True, timeout=5)
             if r_pp.returncode == 0 and r_pp.stdout.strip():
                 shell_pid = r_pp.stdout.strip().split("\n")[0]
+                # shell_pid is namespaced to the session's runtime. For docker
+                # sessions it's the container-internal PID and must be checked
+                # inside the container — a host pgrep returns empty and turns
+                # this cross-check into a false-negative for every docker
+                # session (same bug shape as fd6d294 in the 4b watchdog).
+                _rt = _session_runtime(session)
+                _pgrep_pfx = (
+                    ["docker", "exec", f"amux-org-{_rt.split(':', 1)[1]}"]
+                    if _rt.startswith("docker:") else []
+                )
                 r_ch = subprocess.run(
-                    ["pgrep", "-P", shell_pid],
+                    [*_pgrep_pfx, "pgrep", "-P", shell_pid],
                     capture_output=True, text=True, timeout=5)
                 if not r_ch.stdout.strip():
                     return False
