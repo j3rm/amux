@@ -7691,6 +7691,15 @@ def _parse_tmux_info_output(text: str, result: dict) -> None:
             pass
 
 
+# Format used by _tmux_info_map / _parse_tmux_info_output when calling
+# `tmux list-panes -F`. Four tab-separated fields, in order: session name,
+# activity timestamp (most recent), session creation timestamp, pane title.
+# Do not add fields here without updating _parse_tmux_info_output's parts[]
+# indices to match — a silent NameError here would return running=False for
+# every session and universally break the dashboard's Send button.
+_TMUX_INFO_FMT = "#{session_name}\t#{window_activity}\t#{session_created}\t#{pane_title}"
+
+
 def _tmux_info_map() -> dict:
     """Get activity, creation time, and pane title for all tmux sessions.
 
