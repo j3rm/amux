@@ -369,7 +369,7 @@ def _install_signal_handlers():
             except Exception:
                 pass
         try:
-            _db_conn().close()
+            get_db().close()
         except Exception:
             pass
         slog(f"[SIGNAL] exiting due to {sig_name}")
