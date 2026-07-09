@@ -205,8 +205,15 @@ import json,sys; d=json.load(sys.stdin); print(d.get('name','error: '+d.get('err
       delete|rm|del)
         name="$1"
         if [ -z "$name" ]; then echo "Usage: amux skills delete <name>" >&2; exit 1; fi
-        curl -sk -X DELETE "$AMUX_URL/api/skills/$name" | python3 -c "
-import json,sys; d=json.load(sys.stdin); print('deleted' if d.get('ok') else 'error: '+str(d.get('error','?')))" ;;
+        # X-Amux-Session identifies the caller as an agent when set; the server
+        # rejects agent deletes so a rogue/confused agent can't wipe skills.
+        # If AMUX_SESSION is unset (Jeremy's direct shell), the header is empty
+        # and the delete proceeds.
+        curl -sk -X DELETE -H "X-Amux-Session: ${AMUX_SESSION:-}" \
+          "$AMUX_URL/api/skills/$name" | python3 -c "
+import json,sys; d=json.load(sys.stdin)
+print('deleted' if d.get('ok') else 'error: '+str(d.get('error','?')))
+if d.get('hint'): print(' hint:', d['hint'])" ;;
       *) echo "amux skills: unknown subcommand: $sub" >&2
          echo "  try: list | get <name> | set <name> [content|<file] | delete <name>" >&2
          exit 1 ;;

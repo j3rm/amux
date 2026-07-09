@@ -37316,11 +37316,31 @@ class CCHandler(BaseHTTPRequestHandler):
             _sync_skills_to_commands()
             return self._json({"ok": True, "name": name})
 
-        # DELETE /api/skills/<name> — delete a skill
+        # DELETE /api/skills/<name> — delete a skill (Jeremy-only)
         if method == "DELETE" and path.startswith("/api/skills/"):
             name = path.split("/api/skills/", 1)[1]
             if not name or "/" in name:
                 return self._json({"error": "invalid name"}, 400)
+            # Auth: agents cannot delete skills (they can list/get/set, not delete).
+            # An agent request carries X-Amux-Session; the dashboard carries the
+            # UI guard token. Direct human curl (no headers) is also allowed —
+            # matches how session-archive is gated. Env var override for trusted
+            # automation.
+            _from_agent = bool((self.headers.get("X-Amux-Session") or "").strip())
+            _from_dashboard = _session_destructive_allowed(self.headers)
+            _override = os.environ.get("AMUX_ALLOW_AGENT_SKILL_DELETE", "") in ("1", "true", "yes")
+            if _from_agent and not (_from_dashboard or _override):
+                _sender = self.headers.get("X-Amux-Session", "").strip()
+                slog(f"[guard] skill DELETE {name} rejected — agent {_sender!r} not allowed to delete skills")
+                return self._json({
+                    "error": "agents cannot delete skills",
+                    "hint": (
+                        "Skill deletion is reserved for Jeremy (dashboard or direct curl). "
+                        "If your agent believes a skill needs to be removed, post to Threads "
+                        "so Jeremy can review and delete it manually. Automation opt-in: set "
+                        "AMUX_ALLOW_AGENT_SKILL_DELETE=1 in ~/.amux/server.env."
+                    ),
+                }, 403)
             db = get_db()
             db.execute("DELETE FROM skills WHERE name=?", (name,))
             db.commit()
