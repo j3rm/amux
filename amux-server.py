@@ -4565,17 +4565,23 @@ def _kill_stale_ray():
         _ray_sweep(["docker", "exec", _ctr], f" [{_ctr}]")
 
 
-def get_claude_stats(work_dir: str) -> dict:
+def get_claude_stats(work_dir: str, session: str = "") -> dict:
     """Get token usage and last activity from Claude Code session files for a directory.
 
     Only reads the tail of the JSONL file (last 5MB) to avoid loading
     hundreds of MB into memory for long-running sessions.
+
+    `session` is optional and used to pick the correct projects dir for
+    docker-runtime sessions (their JSONLs live under CC_ORGS/<org>/home/
+    .claude/projects/). Without it, docker sessions always report
+    tokens=0.
     """
     if not work_dir:
         return {"tokens": 0, "last_active": ""}
     # Map dir path to Claude project directory name
     project_name = work_dir.replace("/", "-")
-    project_dir = CLAUDE_HOME / "projects" / project_name
+    base = _claude_projects_dir_for_session(session) if session else (CLAUDE_HOME / "projects")
+    project_dir = base / project_name
     if not project_dir.is_dir():
         return {"tokens": 0, "last_active": ""}
     # Find the most recent JSONL file
@@ -44641,7 +44647,7 @@ p{{color:#888;margin:12px 0 28px;font-size:0.9rem;line-height:1.5}}
                 return self._json({"files": tracked})
             if action == "stats":
                 cfg = parse_env_file(env_file)
-                stats = get_claude_stats(cfg.get("CC_DIR", ""))
+                stats = get_claude_stats(cfg.get("CC_DIR", ""), name)
                 return self._json(stats)
             if action == "git":
                 wd = _session_work_dir(name)
