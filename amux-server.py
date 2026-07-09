@@ -1786,33 +1786,50 @@ def _tmux_size_watchdog():
     turns render at a stable, wide width for the peek. resize-window flips
     the window to manual sizing, so 'latest' is reset right after to keep
     the next human attach working normally.
+
+    Unions the host tmux daemon with every running amux-org-* container's
+    tmux (same pattern as _tmux_info_map / _find_claude_pid) so this
+    watchdog covers docker-runtime sessions too — without this, container
+    tmux windows drift to 80x24 whenever the last attached client detaches
+    and every subsequent peek renders reflowed/mangled.
     """
-    try:
-        r = subprocess.run(
-            ["tmux", "list-windows", "-a", "-F",
-             "#{session_name}\t#{session_attached}\t#{window_width}\t#{window_height}"],
-            capture_output=True, text=True, timeout=5,
-        )
-        if r.returncode != 0:
-            return
-        for line in r.stdout.splitlines():
-            try:
-                name, attached, w, h = line.split("\t")
-            except ValueError:
-                continue
-            if not name.startswith("amux-") or attached != "0":
-                continue
-            if w == str(_TMUX_COLS) and h == str(_TMUX_ROWS):
-                continue
-            subprocess.run(["tmux", "resize-window", "-t", name,
-                            "-x", str(_TMUX_COLS), "-y", str(_TMUX_ROWS)],
-                           capture_output=True, timeout=5)
-            subprocess.run(["tmux", "set-option", "-w", "-t", name,
-                            "window-size", "latest"],
-                           capture_output=True, timeout=5)
-            slog(f"[tmux-size] {name}: {w}x{h} -> {_TMUX_COLS}x{_TMUX_ROWS} (detached drift restored)")
-    except Exception:
-        pass
+    def _run_pass(prefix: list):
+        """One enumerate-and-fix pass against a tmux daemon at `prefix`
+        (empty list = host; ["docker", "exec", "amux-org-<x>"] = container).
+        The prefix is threaded through resize-window / set-option too so the
+        follow-up mutations land against the same daemon that reported the
+        drift — anything less turns this into a spurious host-side resize
+        against a name that only exists inside the container."""
+        try:
+            r = subprocess.run(
+                [*prefix, "tmux", "list-windows", "-a", "-F",
+                 "#{session_name}\t#{session_attached}\t#{window_width}\t#{window_height}"],
+                capture_output=True, text=True, timeout=5,
+            )
+            if r.returncode != 0:
+                return
+            for line in r.stdout.splitlines():
+                try:
+                    name, attached, w, h = line.split("\t")
+                except ValueError:
+                    continue
+                if not name.startswith("amux-") or attached != "0":
+                    continue
+                if w == str(_TMUX_COLS) and h == str(_TMUX_ROWS):
+                    continue
+                subprocess.run([*prefix, "tmux", "resize-window", "-t", name,
+                                "-x", str(_TMUX_COLS), "-y", str(_TMUX_ROWS)],
+                               capture_output=True, timeout=5)
+                subprocess.run([*prefix, "tmux", "set-option", "-w", "-t", name,
+                                "window-size", "latest"],
+                               capture_output=True, timeout=5)
+                where = " [" + prefix[2] + "]" if len(prefix) >= 3 else ""
+                slog(f"[tmux-size]{where} {name}: {w}x{h} -> {_TMUX_COLS}x{_TMUX_ROWS} (detached drift restored)")
+        except Exception:
+            pass
+    _run_pass([])  # host
+    for ctr in _running_org_containers():
+        _run_pass(["docker", "exec", ctr])
 
 
 def _tmux_alt_screen(session: str) -> bool:
