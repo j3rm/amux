@@ -2807,7 +2807,13 @@ def backup_session_jsonl(session: str, reason: str = "manual") -> str | None:
     if not wd:
         return None
     resolved = str(Path(wd).expanduser().resolve())
-    project_dir = CLAUDE_HOME / "projects" / resolved.replace("/", "-")
+    # Route to the session's runtime home — docker sessions store JSONLs under
+    # ~/.amux/orgs/<org>/home/.claude/projects/, not host ~/.claude/projects/.
+    # Before this, backup_session_jsonl silently no-op'd on every docker
+    # session; the auto-compact and manual-backup paths returned None without
+    # writing anything, so a bad /compact on a container agent had no
+    # recoverable prior JSONL. High-impact fix.
+    project_dir = _claude_projects_dir_for_session(session) / resolved.replace("/", "-")
     if not project_dir.is_dir():
         return None
     jsonl_files = sorted(project_dir.glob("*.jsonl"), key=lambda f: f.stat().st_mtime, reverse=True)
