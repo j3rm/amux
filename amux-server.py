@@ -29385,7 +29385,7 @@ function renderScheduler(opts) {
       <div style="font-size:0.82rem;">Create a schedule to run commands in sessions on a recurring timer.</div>
     </div>`;
   } else {
-    listEl.innerHTML = schedules.map(s => {
+    const renderCard = (s) => {
       const nextRun = s.next_run ? s.next_run.replace('T', ' ') : '—';
       const lastRun = s.last_run ? s.last_run.replace('T', ' ') : 'never';
       const recLabel = s.schedule_expr || (s.sched_type === 'once' ? 'once' : (s.recurrence || 'recurring'));
