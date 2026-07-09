@@ -1,6 +1,6 @@
 # AMUX per-org container isolation — ops reference
 
-> The architecture is: **AMUX server runs on host, spawns tmux+claude INSIDE per-org containers.** Each org (RTG / iSchedule / EmberCRM / ShareScore / CD-*) is one long-lived Docker container. Every AMUX agent for that org is a tmux session inside that one container. `CC_RUNTIME=docker:<product>` on a session's env file is the switch that routes it. Sessions with no `CC_RUNTIME` keep running on host as before.
+> The architecture is: **AMUX server runs on host, spawns tmux+claude INSIDE per-org containers.** Each org (RTG / iSchedule / EmberCRM / ShareScore / CD-*) is one long-lived Docker container. Every AMUX agent for that org is a tmux session inside that one container. `CC_RUNTIME=docker:<org>` on a session's env file is the switch that routes it. Sessions with no `CC_RUNTIME` keep running on host as before.
 
 ## Reading map — where to look first
 
@@ -39,8 +39,8 @@ Every org container also gets `/mnt/gitdata/amux` **read-only** so the `amux` CL
 ```
 HOST                                          CONTAINER (bind-mounted / env-set)
 ────────────────────────────────────────────────────────────────────────────────
-~/.amux/orgs/<product>.yml                (read at spawn — never mounted)
-~/.amux/orgs/<product>/home/              /home/amux/                (rw)
+~/.amux/orgs/<org>.yml                (read at spawn — never mounted)
+~/.amux/orgs/<org>/home/              /home/amux/                (rw)
   ├── .claude/                                  ~/.claude/               ← shared login
   │     ├── .credentials.json                     └── OAuth token per org
   │     └── projects/<slug>/*.jsonl               └── conversation history
@@ -53,7 +53,7 @@ HOST                                          CONTAINER (bind-mounted / env-set)
 ~/.amux/logs/<session>.log                    /logs/<session>.log        (rw, same inode)
                                                 pipe-pane inside container writes here
 
-/mnt/gitdata/<product-repo>/                  /mnt/gitdata/<product-repo>/ (rw, same path)
+/mnt/gitdata/<org-repo>/                  /mnt/gitdata/<org-repo>/ (rw, same path)
 /mnt/gitdata/amux/                            /mnt/gitdata/amux/          (ro)
   └── amux CLI                                  /usr/local/bin/amux → this
 ```
@@ -66,7 +66,7 @@ The switches that matter for isolation:
 
 | Key | Values | Effect |
 |---|---|---|
-| `CC_RUNTIME` | unset (default) / `docker:<product>` | Runtime target. Unset = host. Docker = spawn tmux via `docker exec` into that product's container. |
+| `CC_RUNTIME` | unset (default) / `docker:<org>` | Runtime target. Unset = host. Docker = spawn tmux via `docker exec` into that org's container. |
 | `CC_CLAUDE_AUTH_SHARED` | `"1"` (default) / `"0"` | Docker-only. `1` = share the container's `/home/amux/.claude/`. `0` = get own `/homes/<session>/.claude/` via `-e HOME` override. |
 | `CC_DIR` | absolute path | Working dir. For docker sessions this MUST be a path that resolves inside the container via mounts. |
 | `CC_PROVIDER` | `claude` / `codex` / `gemini` | Which CLI runs. `codex` sessions need the Codex CLI in the image (already installed). |
@@ -76,30 +76,30 @@ The switches that matter for isolation:
 
 ## Auth model in one paragraph
 
-Every org container mounts `~/.amux/orgs/<product>/home/` at `/home/amux/`, and the container image sets the amux user's home to `/home/amux/`. Every tmux session in the container inherits that HOME by default, so every session's `~/.claude/` (OAuth token, `.claude.json` project trust, `projects/*.jsonl` history) points to the same shared dir. **One `/login` per container covers all sessions in it.** If Jeremy wants a specific session on a different Claude account, set `CC_CLAUDE_AUTH_SHARED="0"` in that session's env — spawn adds `-e HOME=/homes/<session>` overriding the container default, giving that one session its own `.claude/` dir at `~/.amux/homes/<session>/` on host.
+Every org container mounts `~/.amux/orgs/<org>/home/` at `/home/amux/`, and the container image sets the amux user's home to `/home/amux/`. Every tmux session in the container inherits that HOME by default, so every session's `~/.claude/` (OAuth token, `.claude.json` project trust, `projects/*.jsonl` history) points to the same shared dir. **One `/login` per container covers all sessions in it.** If Jeremy wants a specific session on a different Claude account, set `CC_CLAUDE_AUTH_SHARED="0"` in that session's env — spawn adds `-e HOME=/homes/<session>` overriding the container default, giving that one session its own `.claude/` dir at `~/.amux/homes/<session>/` on host.
 
 **Consequence for rate limits:** hitting a Claude account's usage limit stops every session in that container together, but no other container is affected. The whole point of the per-container split is that RTG hitting its ceiling doesn't take iSchedule / EmberCRM / ShareScore / Christine-work down.
 
 ## How to add a new session to an existing product
 
 1. `~/.amux/sessions/<name>.env` — write it (or copy an existing one, edit `CC_DIR`, `CC_FLAGS`, `CC_ORG`)
-2. Append `CC_RUNTIME="docker:<product>"` to it
-3. Add the session name to the `sessions:` list in `~/.amux/orgs/<product>.yml`
-4. If the org's container is currently running, **stop it** so the next wake rebuilds with the new per-session home mount: `docker rm -f amux-org-<product>` (destroys nothing important; it's tini+tail). Next wake of any session in that org re-creates it with the updated mount set.
-5. If you want conversation-history continuity, copy the relevant `~/.claude/projects/<slug>/*.jsonl` into `~/.amux/orgs/<product>/home/.claude/projects/<slug>/` before waking.
+2. Append `CC_RUNTIME="docker:<org>"` to it
+3. Add the session name to the `sessions:` list in `~/.amux/orgs/<org>.yml`
+4. If the org's container is currently running, **stop it** so the next wake rebuilds with the new per-session home mount: `docker rm -f amux-org-<org>` (destroys nothing important; it's tini+tail). Next wake of any session in that org re-creates it with the updated mount set.
+5. If you want conversation-history continuity, copy the relevant `~/.claude/projects/<slug>/*.jsonl` into `~/.amux/orgs/<org>/home/.claude/projects/<slug>/` before waking.
 
 ## How to add a new product
 
 1. Write `~/.amux/orgs/<name>.yml` — see `agent-container/example-org.yml` for the schema
 2. Copy it to the corresponding `.agents/` dir in a backup git repo:
-   - RTG/iSchedule/EmberCRM/ShareScore → `<product-tree>/.agents/org-spec.yml` → `github.com/j3rm/amux-agents-<product>`
+   - RTG/iSchedule/EmberCRM/ShareScore → `<org-tree>/.agents/org-spec.yml` → `github.com/j3rm/amux-agents-<org>`
    - CD-<client> / misc → `/mnt/gitdata/amux-agents-mono/<name>/org-spec.yml` → `github.com/j3rm/amux-agents-mono`
 3. Commit + push the backup
 4. Set `CC_RUNTIME="docker:<name>"` on each of the sessions listed in the spec's `sessions:`
 
 That's it — no code change. `ensure_org_container(name)` reads the spec on demand.
 
-## How to give a container read-only access to another product's code
+## How to give a container read-only access to another org's code
 
 Springboard pattern (e.g., let an RTG agent reference EmberCRM's Angular code without granting write access):
 
@@ -213,7 +213,7 @@ done | sort | uniq -c
 
 **Right now, containers have NO secrets mounted by default.** The current specs only mount working repos + amux repo (ro) + logs. Meaning: inside a docker container, `~/.ssh/` is empty, `~/.aws/credentials` doesn't exist, `~/.zoho/<client>/` isn't there. Sessions will fail on git-over-SSH, AWS CLI calls, or Zoho token reads until Phase 8 (the secrets partition) lands.
 
-**Phase 8 plan** (not yet implemented): per-org secret dirs at `/opt/amux/secrets/<product>/` (or an equivalent under `~/.amux/secrets/<product>/` since AMUX runs as jwesley), bind-mounted read-only into each container's `/home/amux/.ssh/`, `/home/amux/.zoho/`, etc. Per-product SSH keys/Zoho tokens/etc. means an RTG agent physically can't read iSchedule's secrets.
+**Phase 8 plan** (not yet implemented): per-org secret dirs at `/opt/amux/secrets/<org>/` (or an equivalent under `~/.amux/secrets/<org>/` since AMUX runs as jwesley), bind-mounted read-only into each container's `/home/amux/.ssh/`, `/home/amux/.zoho/`, etc. Per-product SSH keys/Zoho tokens/etc. means an RTG agent physically can't read iSchedule's secrets.
 
 **For the transition:** the current `/mnt/gitdata/amux` mount is ro, so agents can still read the amux repo. If a specific org needs a secret before Phase 8, add a per-org `mounts:` entry temporarily.
 
@@ -249,17 +249,17 @@ Without this, everything about a docker session looks "not running" to the serve
 |---|---|---|
 | amux-server code | `/mnt/gitdata/amux/amux-server.py` (single file) | `github.com/j3rm/amux` `jwesley-main` |
 | Container image spec | `/mnt/gitdata/amux/agent-container/Dockerfile` | same repo |
-| Org specs | `~/.amux/orgs/*.yml` (14 files) | Backups in `github.com/j3rm/amux-agents-<product>` at `<product-tree>/.agents/org-spec.yml` (RTG/iSchedule/EmberCRM/ShareScore) or in `github.com/j3rm/amux-agents-mono` under `<product>/org-spec.yml` (CD-*) |
+| Org specs | `~/.amux/orgs/*.yml` (14 files) | Backups in `github.com/j3rm/amux-agents-<org>` at `<org-tree>/.agents/org-spec.yml` (RTG/iSchedule/EmberCRM/ShareScore) or in `github.com/j3rm/amux-agents-mono` under `<org>/org-spec.yml` (CD-*) |
 | Session env files | `~/.amux/sessions/*.env` | not backed up offsite — flatten into a git repo if that concerns you |
-| Agent role configs (`CLAUDE.md`, `AGENTS.md`) | Product-repo `.agents/<agent>/CLAUDE.md` | `amux-agents-<product>` (Big-4) or `amux-agents-mono` (rest) — all pushed 2026-07-08 |
-| Per-container `~/.claude/` (auth + JSONLs) | `~/.amux/orgs/<product>/home/.claude/` | **NOT backed up.** OAuth tokens shouldn't sync anyway. Conversation JSONLs would fit in a snapshot to R2 or similar. |
+| Agent role configs (`CLAUDE.md`, `AGENTS.md`) | Product-repo `.agents/<agent>/CLAUDE.md` | `amux-agents-<org>` (Big-4) or `amux-agents-mono` (rest) — all pushed 2026-07-08 |
+| Per-container `~/.claude/` (auth + JSONLs) | `~/.amux/orgs/<org>/home/.claude/` | **NOT backed up.** OAuth tokens shouldn't sync anyway. Conversation JSONLs would fit in a snapshot to R2 or similar. |
 | Per-session logs | `~/.amux/logs/<name>.log` | not backed up — 10 MB rolling |
 
 ## Agent orientation: how they know they're in a container
 
 Zero per-agent `CLAUDE.md` edits needed. The server auto-injects a container-context preamble into every docker-mode session's composed `MEMORY.md` at spawn time (`_container_context_preamble` in `amux-server.py`, prepended by `_write_claude_memory`).
 
-The preamble is regenerated on every `_ensure_memory` call (i.e. every session start), so any change to `~/.amux/orgs/<product>.yml` — new sibling session added, new mount, new cross-mount — is picked up on the next wake without touching anything else.
+The preamble is regenerated on every `_ensure_memory` call (i.e. every session start), so any change to `~/.amux/orgs/<org>.yml` — new sibling session added, new mount, new cross-mount — is picked up on the next wake without touching anything else.
 
 What each docker session sees at the top of its `MEMORY.md`:
 - Its container name (`amux-org-<X>`)
