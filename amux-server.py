@@ -1470,6 +1470,10 @@ def _load_product_spec(product_name: str) -> "dict | None":
                 print(f"[product-spec] {product_name}: {mount_list_name}[{i}] must have source+target")
                 return None
             m.setdefault("mode", "ro" if mount_list_name == "readonly_cross_mounts" else "rw")
+            # docker -v does NOT expand ~ — do it here so specs can write
+            # ~/.amux/... as a source path naturally.
+            m["source"] = str(Path(m["source"]).expanduser())
+            m["target"] = str(Path(m["target"]).expanduser())
     return spec
 
 
