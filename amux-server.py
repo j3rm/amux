@@ -4216,11 +4216,22 @@ def _snapshot_all_sessions_inner():
                                            capture_output=True, text=True, timeout=5)
                         if r.returncode == 0 and r.stdout.strip():
                             shell_pid = r.stdout.strip().split("\n")[0]
-                            r2 = subprocess.run(["pgrep", "-P", shell_pid],
+                            # Follow-up pgrep/ps must run in the session's runtime.
+                            # shell_pid is the container-internal PID for docker
+                            # sessions; host pgrep -P returns empty and this
+                            # whole 48h reaper no-ops for CD-* / RTG / EmberCRM /
+                            # Cypra — stale claude processes there never get
+                            # recycled. Same shape as fd6d294 / e7a4a57.
+                            _rt5 = _session_runtime(name)
+                            _pfx5 = (
+                                ["docker", "exec", f"amux-org-{_rt5.split(':', 1)[1]}"]
+                                if _rt5.startswith("docker:") else []
+                            )
+                            r2 = subprocess.run([*_pfx5, "pgrep", "-P", shell_pid],
                                                 capture_output=True, text=True, timeout=5)
                             if r2.stdout.strip():
                                 claude_pid = r2.stdout.strip().split("\n")[0]
-                                r3 = subprocess.run(["ps", "-o", "etime=", "-p", claude_pid],
+                                r3 = subprocess.run([*_pfx5, "ps", "-o", "etime=", "-p", claude_pid],
                                                     capture_output=True, text=True, timeout=5)
                                 if r3.stdout.strip():
                                     # Parse etime format: [[DD-]HH:]MM:SS
