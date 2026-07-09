@@ -148,6 +148,12 @@ def _is_path_allowed(p: Path) -> bool:
     return True
 
 # ── Authentication ───────────────────────────────────────────────────────────
+# Bridge network range docker uses by default (172.17.0.0/16 default bridge +
+# 172.18.0.0/16 etc. for user-defined networks). Precomputed at import so
+# _check_auth doesn't re-parse it per request.
+import ipaddress as _ipa_init
+_DOCKER_BRIDGE_NET = _ipa_init.ip_network("172.16.0.0/12")
+del _ipa_init
 _AUTH_TOKEN_FILE = _amux_home / "auth_token"
 def _load_or_create_auth_token() -> str:
     env_token = os.environ.get("AMUX_AUTH_TOKEN", "")
@@ -39026,10 +39032,24 @@ class CCHandler(BaseHTTPRequestHandler):
         """Return True if request is authorized. Sends 401 and returns False if not."""
         if not AUTH_TOKEN:
             return True
-        # Localhost always bypasses auth (local sessions, CLI tools)
+        # Localhost bypass — this same-host traffic never leaves the machine.
+        # 127.0.0.0/8 = loopback. 172.16.0.0/12 = docker's default private
+        # network range: the default bridge is 172.17.0.0/16 and every
+        # user-created network docker allocates lands somewhere in
+        # 172.16.0.0/12. Every amux-org-* container hits us via
+        # host.docker.internal:8822, source-address'd from its bridge IP,
+        # so without this bypass container agents get HTTP 401 on every
+        # /api/* call and can't reach board / threads / notes / channels.
         ip = self.client_address[0] if self.client_address else ""
         if ip in ("127.0.0.1", "::1"):
             return True
+        try:
+            import ipaddress as _ipa
+            _ipobj = _ipa.ip_address(ip)
+            if _ipobj in _DOCKER_BRIDGE_NET or _ipobj.is_loopback:
+                return True
+        except (ValueError, TypeError):
+            pass
         if path in _PUBLIC_PATHS or any(path.startswith(p) for p in _PUBLIC_PREFIXES):
             return True
         if method == "GET" and not path.startswith("/api/") and not path.startswith("/proxy/"):
