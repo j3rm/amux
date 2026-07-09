@@ -5716,6 +5716,33 @@ def _init_db():
             db.commit()
         except Exception:
             pass  # column already exists
+    # Seed default status gates — generic wording so the checklists apply
+    # equally to workers writing code, researchers writing thread answers,
+    # and coordinators moving items around. Original defaults were worker-
+    # shaped ("Diff / PR is up", "CI/CD green") which made no sense for
+    # thread-answer items. INSERT via UPDATE-where-NULL so existing
+    # customizations (edited via the UI's per-status gate editor) are
+    # preserved untouched.
+    _DEFAULT_GATES = {
+        "doing":    ["Scope & acceptance criteria are clear", "No blocking dependency", "Has an owner"],
+        "review":   ["Work is complete and self-reviewed",
+                     "Deliverable captured (diff / PR / thread reply / write-up)",
+                     "Ready for another set of eyes"],
+        "done":     ["Deliverable complete",
+                     "Self-verified (tests / self-review / re-read output)"],
+        "verified": ["Independently confirmed (peer review / CI / user acceptance)",
+                     "Working in the target environment",
+                     "No known regressions"],
+    }
+    for _sid, _items in _DEFAULT_GATES.items():
+        try:
+            db.execute(
+                "UPDATE statuses SET gate = ? WHERE id = ? AND (gate IS NULL OR gate = '' OR gate = '[]')",
+                (json.dumps(_items), _sid),
+            )
+        except Exception:
+            pass
+    db.commit()
     _load_steering_from_db()
     # One-time migration: import existing flat skill files into SQLite
     skills_dir = CC_HOME / "skills"
