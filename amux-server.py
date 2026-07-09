@@ -23299,6 +23299,13 @@ setTimeout(_updateSendSplit, 0);
 
 async function sendPeekCmd() {
   if (!peekSession) return;
+  // Look up the current session object — sendPeekCmd's active-session branch
+  // reads sess.status, so this MUST be declared. Without it the async function
+  // throws a silent ReferenceError on every click and the Send button appears
+  // dead (rejection is unhandled because onclick doesn't await). Queue mode
+  // takes an earlier branch and never trips it, which is why the queue
+  // workaround kept working while direct Send stopped.
+  const sess = sessions.find(s => s.name === peekSession);
   const inp = document.getElementById('peek-cmd-input');
   const text = inp.value.trim();
   const files = peekFiles.filter(f => f.path);
