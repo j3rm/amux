@@ -3648,12 +3648,20 @@ def _iter_jsonl_tail(filepath: Path, max_bytes: int = 5_000_000):
         pass
 
 
-def _last_meaningful_user_message(work_dir: str) -> str:
-    """Extract the last meaningful user message (>20 chars) from the session's JSONL history."""
+def _last_meaningful_user_message(work_dir: str, session: str = "") -> str:
+    """Extract the last meaningful user message (>20 chars) from the session's JSONL history.
+
+    `session` is optional and used to pick the correct projects dir for
+    docker-runtime sessions (their JSONLs live under CC_ORGS/<org>/home/
+    .claude/projects/, not host CLAUDE_HOME/projects/). Callers that
+    know the session name should pass it — otherwise this silently
+    fails to find any messages on container agents and no last-message
+    replay happens after auto-restart."""
     if not work_dir:
         return ""
     resolved = str(Path(work_dir).expanduser().resolve())
-    project_dir = CLAUDE_HOME / "projects" / resolved.replace("/", "-")
+    base = _claude_projects_dir_for_session(session) if session else (CLAUDE_HOME / "projects")
+    project_dir = base / resolved.replace("/", "-")
     if not project_dir.is_dir():
         return ""
     jsonl_files = sorted(project_dir.glob("*.jsonl"), key=lambda f: f.stat().st_mtime, reverse=True)
@@ -4000,7 +4008,7 @@ def _snapshot_all_sessions_inner():
                     now - actions.get("last_restart", 0) > 120):
                 actions["last_restart"] = now
                 wd = _session_work_dir(name)
-                last_msg = _last_meaningful_user_message(wd)
+                last_msg = _last_meaningful_user_message(wd, name)
                 _hard_kill_claude(name)
                 start_session(name)
                 if last_msg:
@@ -4019,7 +4027,7 @@ def _snapshot_all_sessions_inner():
                     now - actions.get("last_restart", 0) > 120):
                 actions["last_restart"] = now
                 wd = _session_work_dir(name)
-                last_msg = _last_meaningful_user_message(wd)
+                last_msg = _last_meaningful_user_message(wd, name)
                 _hard_kill_claude(name)
                 start_session(name)
                 if last_msg:
