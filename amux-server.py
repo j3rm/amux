@@ -21859,6 +21859,7 @@ function _syncPeekOverlayToVisualViewport() {
   ov.classList.toggle('vv-compact', constrained && vv.height < window.innerHeight * 0.7);
 }
 (function() {
+  try {
   if (!window.visualViewport) return;
   window.visualViewport.addEventListener('resize', () => {
     if (document.getElementById('peek-overlay')?.classList.contains('active')) {
