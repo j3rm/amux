@@ -11347,6 +11347,13 @@ def send_text(name: str, text: str) -> tuple[bool, str]:
     try:
         _out_st = tmux_capture(name, 15)
         if _out_st and _at_resume_picker(_out_st):
+            # Empty send while at the picker = user hit Enter/Send with no
+            # text, wanting to select the highlighted conversation. Route
+            # to the Enter key directly instead of refusing. Text sends are
+            # still refused because they would land in the picker search box
+            # and corrupt selection.
+            if not text:
+                return send_keys(name, "Enter")
             return False, "session is in resume picker"
         if _out_st is not None and _at_shell_prompt(_out_st):
             # Terminal visible but Claude has exited — treat as not running
@@ -44845,8 +44852,14 @@ p{{color:#888;margin:12px 0 28px;font-size:0.9rem;line-height:1.5}}
                     _update_meta(name, last_send=int(time.time()), last_send_text=text[:200])
                     _session_prev_status[name] = "active"  # seed for idle detection
                     _summarize_task_bg(name, text)
-                # 409 = session exists but is not running (user-caused, not a server error)
-                code = 200 if ok else (409 if msg == "not running" else 500)
+                # 409 = session exists but couldn't accept the send in its
+                # current state — user-caused, not a server error. Includes
+                # "not running" (session offline) and "session is in resume
+                # picker" (text would land in the search box; caller should
+                # send Enter / arrow keys via /keys instead).
+                code = 200 if ok else (
+                    409 if msg in ("not running", "session is in resume picker") else 500
+                )
                 return self._json({"ok": ok, "message": msg}, code)
             if action == "instructions":
                 # Set the per-session standing instruction and/or apply it now.
