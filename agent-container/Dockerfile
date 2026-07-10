@@ -49,9 +49,36 @@ RUN ln -s /mnt/gitdata/amux/amux /usr/local/bin/amux
 ENV TMUX_TMPDIR=/run/tmux
 RUN mkdir -p /run/tmux && chmod 0777 /run/tmux
 
+# Opt Claude Code out of the fullscreen alternate-screen renderer. Amux drives
+# every session through tmux + docker exec; the amux dashboard peek reads the
+# tmux capture-pane; SMS/thread webhooks send text via tmux load-buffer. All of
+# those rely on Claude Code's UI staying in the terminal's *native* scrollback
+# stream, not the alternate-screen buffer. When Claude Code enters alternate
+# screen (its default), the pane content Amux captures becomes an empty screen
+# with just the input prompt at the bottom — peek text is garbled, /tui default
+# has to be re-typed by hand every restart, and clients like the mobile web UI
+# see stale/empty screens. Setting this env var globally in the image forces
+# native-scrollback mode for every claude spawn in every session in every
+# container — no per-session opt-in required, no drift when a session's config
+# is reset by /compact or a wipe-cascade.
+ENV CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN=1
+
 # Uid 1000 = jwesley on host, so bind-mounted files owned by jwesley are
 # read/write to the container process without any chown dance.
 RUN useradd -m -s /bin/bash -u 1000 amux
+
+# Hand the global-npm tree to the amux user so `claude` and `codex` can
+# auto-update themselves in place without root. Without this, every container
+# start emits "✘ Auto-update failed: no write permission to npm prefix" and
+# some sessions hard-exit to bash on the failure. `/usr/local/lib/node_modules`
+# holds the packages; `/usr/local/bin` holds the CLI shims npm rewrites on
+# upgrade. Both need `amux:amux` ownership. Blast radius: an agent could
+# npm-install a malicious replacement into its own container image — but
+# containers are already discardable per product, and every agent already runs
+# `--dangerously-skip-permissions`, so this is not a widening of the trust
+# model.
+RUN chown -R amux:amux /usr/local/lib/node_modules /usr/local/bin
+
 USER amux
 WORKDIR /home/amux
 

@@ -112,3 +112,44 @@ Requires Chrome remote debugging + Node 22+.
 - **Supervisor outage** (06/18): user systemd manager was down + system unit
   disabled → server self-execv'd on save with nothing to catch it. Fix:
   re-enabled the system unit as the single supervisor.
+- **Credential wipe cascade — NWDDI side** (07/10 23:32 UTC): all 10 CD-*
+  containers lost their `.claude/.credentials.json` at the same moment.
+  Root cause: Anthropic DOES rotate the OAuth refresh token on every access
+  refresh (contrary to earlier assumption). Every CD-* container held an
+  independent copy of the same NWDDI refresh token; when `amux-helper`
+  refreshed, all container copies invalidated at once. Fix: switch every org
+  container from per-container credential file to a shared bind-mounted file
+  (`~/.amux/shared-creds/nwddi.credentials.json` for NWDDI, `personal.credentials.json`
+  for Jeremy-personal). See Container-Isolation.md § Shared credential files.
+- **Credential wipe cascade — Gmail side** (07/10, during fleet reboot): shared
+  `personal.credentials.json` got wiped when ~40 Gmail-side sessions all fired
+  their initial token refresh simultaneously; one won the race, the rest wrote
+  stale-in-memory copies over the shared file. Recovered by copying a
+  still-valid credential from a container (Scorpio) that hadn't been touched.
+  Long-term: stagger session wake after a fleet cutover.
+- **Claude Code auto-update crash-loop** (07/10 03:00 UTC): iSchedule-Auth,
+  iSchedule-Client_Web, iSchedule-Provider (and others) crash-looped at
+  startup. Root cause: `npm install -g @anthropic-ai/claude-code` failed
+  EACCES on `/usr/local/lib/node_modules` (root-owned in image, amux user
+  can't write), and Claude Code **exits to bash** on the failure instead of
+  warning. Fix: `chown -R amux:amux /usr/local/lib/node_modules /usr/local/bin`
+  baked into the Dockerfile so amux user can auto-update in place. See
+  Container-Isolation.md § What the amux-agent-base image gives you.
+- **Root LV disk-full** (07/10 01:00 UTC): `/dev/mapper/ubuntu--vg-ubuntu--lv`
+  hit 100% during a runtime `chown -R` across running containers. Root cause:
+  the chown triggered docker's copy-on-write to duplicate ~1.1GB of
+  `node_modules` into each container's writable layer, ballooning fleet-wide
+  overlay from ~30MB to ~11GB in seconds. This cascaded into blocking Claude
+  Code's own tmpfs at `/tmp/claude-<uid>/` (0MB free), which stopped `amux-helper`
+  from running any command until Jeremy grew the LV and manually pruned images.
+  Fix: recreate all containers so their writable layers reset (~11GB reclaim),
+  bake the chown into the image so it lives in the shared image layer instead
+  of the per-container writable layer, and monitor `docker ps --size` for
+  containers hitting `>1GB`. See Container-Isolation.md § Fleet-wide container
+  recreation.
+- **Fullscreen alt-screen breaks peek** (07/10): some Claude Code sessions ended
+  up in the terminal alternate-screen buffer, which made `tmux capture-pane`
+  return an empty screen with just the input prompt — peek text was garbled,
+  SMS reply detection lost the conversation context. Fix:
+  `ENV CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN=1` in the Dockerfile so every claude
+  spawn is in native-scrollback mode.

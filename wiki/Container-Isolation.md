@@ -78,26 +78,202 @@ The switches that matter for isolation:
 
 Every org container mounts `~/.amux/orgs/<org>/home/` at `/home/amux/`, and the container image sets the amux user's home to `/home/amux/`. Every tmux session in the container inherits that HOME by default, so every session's `~/.claude/` (OAuth token, `.claude.json` project trust, `projects/*.jsonl` history) points to the same shared dir. **One `/login` per container covers all sessions in it.** If Jeremy wants a specific session on a different Claude account, set `CC_CLAUDE_AUTH_SHARED="0"` in that session's env — spawn adds `-e HOME=/homes/<session>` overriding the container default, giving that one session its own `.claude/` dir at `~/.amux/homes/<session>/` on host.
 
-**Consequence for rate limits:** hitting a Claude account's usage limit stops every session in that container together, but no other container is affected. The whole point of the per-container split is that RTG hitting its ceiling doesn't take iSchedule / EmberCRM / ShareScore / Christine-work down.
+**Consequence for rate limits:** hitting a Claude account's usage limit stops every session in that container together, but no other container is affected. The whole point of the per-container split is that RTG hitting its ceiling doesn't take iSchedule / EmberCRM / ShareScore / CD-* work down.
 
-## How to add a new session to an existing product
+## Shared credential files (2026-07-10)
+
+`~/.amux/orgs/<org>/home/.claude/.credentials.json` used to be **per-container** — every org container had its own file, created by that container's own `/login`. The theory: refresh-token rotation would happen inside the container that used the token, and the file would stay valid.
+
+**The theory was wrong.** Anthropic's OAuth flow DOES rotate the refresh token on every access-token refresh. When any session (including host `amux-helper`) with the same Anthropic account refreshes its access token, the old refresh token is invalidated — every OTHER container holding a stale copy of that refresh token is now dead. This bit us as a **wipe cascade** on 2026-07-10: 10 CD-* containers were all logged in as `jeremy@nwddi.com`; the moment `amux-helper` (also NWDDI) refreshed, all 10 containers were locked out simultaneously.
+
+**Fix — shared bind-mounted credential files, per Anthropic account:**
+
+```
+/home/jwesley/.amux/shared-creds/
+  ├── nwddi.credentials.json      (shared by all CD-* containers — jeremy@nwddi.com)
+  └── personal.credentials.json   (shared by all Gmail-side containers — jeremywesley@gmail.com)
+```
+
+Every org container mounts the appropriate file into its home:
+
+```yaml
+# In ~/.amux/orgs/<org>.yml:
+mounts:
+  - source: /home/jwesley/.amux/shared-creds/nwddi.credentials.json   # or personal.credentials.json
+    target: /home/amux/.claude/.credentials.json
+    mode: rw
+```
+
+**Which file per org (as of 2026-07-10):**
+- **NWDDI (`jeremy@nwddi.com`) — shared `nwddi.credentials.json`:** All 10 CD-* containers.
+- **Jeremy-personal (`jeremywesley@gmail.com`) — shared `personal.credentials.json`:** RTG, iSchedule, EmberCRM, ShareScore, Cypra, Personal, Scorpio.
+- **Independent (this session's host cred, NOT shared):** `amux-helper` on host. Stays at `~/.claude/.credentials.json`; this is the operator's cred and mustn't be pinned by any container to preserve one working access path when things break.
+
+Whichever container's claude refreshes first rotates the token pair once; the shared file gets the new pair; every other container reads the fresh pair on its next check. No wipe cascade.
+
+**Failure mode still possible — reboot-startup race:** If all Gmail-side containers restart simultaneously and each fires an initial token refresh, one of them will race the others and briefly hold a stale copy in memory, which can wipe the shared file. Recovery: copy a still-valid credentials file from a container that hasn't had claude re-read it yet (e.g., Scorpio, if it wasn't restarted at the same time as the others). Long-term mitigation: stagger session waking after a fleet cutover.
+
+## How to add a new session to an existing org
 
 1. `~/.amux/sessions/<name>.env` — write it (or copy an existing one, edit `CC_DIR`, `CC_FLAGS`, `CC_ORG`)
 2. Append `CC_RUNTIME="docker:<org>"` to it
-3. Add the session name to the `sessions:` list in `~/.amux/orgs/<org>.yml`
-4. If the org's container is currently running, **stop it** so the next wake rebuilds with the new per-session home mount: `docker rm -f amux-org-<org>` (destroys nothing important; it's tini+tail). Next wake of any session in that org re-creates it with the updated mount set.
-5. If you want conversation-history continuity, copy the relevant `~/.claude/projects/<slug>/*.jsonl` into `~/.amux/orgs/<org>/home/.claude/projects/<slug>/` before waking.
+3. Append `CC_FLAGS="--dangerously-skip-permissions"` (YOLO mode is the default — the whole point of container isolation is that agents can run freely)
+4. Add the session name to the `sessions:` list in `~/.amux/orgs/<org>.yml`
+5. If the org's container is currently running, **stop it** so the next wake rebuilds with the new per-session home mount: `docker rm -f amux-org-<org>` (destroys nothing important; it's tini+tail). Next wake of any session in that org re-creates it with the updated mount set.
+6. If you want conversation-history continuity, copy the relevant `~/.claude/projects/<slug>/*.jsonl` into `~/.amux/orgs/<org>/home/.claude/projects/<slug>/` before waking. See [Conversation-History-Locations](Conversation-History-Locations.md) for the encoding rules.
 
-## How to add a new product
+## How to add a new org
 
-1. Write `~/.amux/orgs/<name>.yml` — see `agent-container/example-org.yml` for the schema
+1. Write `~/.amux/orgs/<name>.yml`. Use the checklist below — every entry protects against a specific defect we've hit before, so **do not skip any mount** unless you have a documented reason:
+
+   ```yaml
+   # ~/.amux/orgs/<name>.yml — new org checklist (2026-07-10)
+   name: <NewOrg>
+   image: amux-agent-base:latest
+
+   sessions:
+     - <SessionName>
+
+   mounts:
+     # (1) Working repo — the code the agents actually edit. Same path both sides.
+     - source: /mnt/gitdata/<repo>
+       target: /mnt/gitdata/<repo>
+       mode: rw
+
+     # (2) amux repo read-only — makes the `amux` CLI shim at /usr/local/bin/amux
+     # resolvable and lets agents read wiki/CLAUDE.md.
+     - source: /mnt/gitdata/amux
+       target: /mnt/gitdata/amux
+       mode: ro
+
+     # (3) SHARED credential file — pick the account this org belongs to.
+     # See "Shared credential files" section for which file per org.
+     # WHY: per-container creds hit a wipe cascade when Anthropic rotates
+     # refresh tokens (2026-07-10 incident).
+     - source: /home/jwesley/.amux/shared-creds/personal.credentials.json  # or nwddi.credentials.json
+       target: /home/amux/.claude/.credentials.json
+       mode: rw
+
+     # (4) Thread attachments (uploads). Agents receive @-mentions like
+     # @/home/jwesley/.amux/uploads/<uid>-<file>; without this bind mount the
+     # container's Read tool says "file not found". Same-path both sides so
+     # @-mention paths resolve verbatim. Read-only — containers don't upload.
+     # See sub-shape F in reference-amux-container-host-state-family.
+     - source: /home/jwesley/.amux/uploads
+       target: /home/jwesley/.amux/uploads
+       mode: ro
+
+   readonly_cross_mounts: []
+   env:
+     # Per-org MCP credentials (Mixpeek, GDrive, etc.) — usually empty at
+     # first rollout; fill in as needed.
+     MIXPEEK_API_KEY: ""
+   ```
+
 2. Copy it to the corresponding `.agents/` dir in a backup git repo:
-   - RTG/iSchedule/EmberCRM/ShareScore → `<org-tree>/.agents/org-spec.yml` → `github.com/j3rm/amux-agents-<org>`
+   - Big-4 (RTG/iSchedule/EmberCRM/ShareScore) → `<org-tree>/.agents/org-spec.yml` → `github.com/j3rm/amux-agents-<org>`
    - CD-<client> / misc → `/mnt/gitdata/amux-agents-mono/<name>/org-spec.yml` → `github.com/j3rm/amux-agents-mono`
 3. Commit + push the backup
 4. Set `CC_RUNTIME="docker:<name>"` on each of the sessions listed in the spec's `sessions:`
+5. Wake one session in the org first (serial — avoids `ensure_org_container` race). Verify the container comes up. Then wake the rest.
+6. Next section for the shared amux-agent-base image behaviors your new container inherits from tonight's changes.
 
 That's it — no code change. `ensure_org_container(name)` reads the spec on demand.
+
+## What the amux-agent-base image gives you (Dockerfile behaviors, 2026-07-10)
+
+Every container built from `amux-agent-base:latest` inherits three defaults that were added after live-incident debugging. **Do not remove these from the Dockerfile without reading the WHY first — each one exists because it burned us.**
+
+1. **`/usr/local/lib/node_modules` and `/usr/local/bin` are chowned to `amux:amux`.** Claude Code and Codex both auto-update themselves via `npm install -g` on startup. The base image runs `npm install -g` as root, so those dirs are root-owned by default. When the amux user (uid 1000) tries to update, it EACCES and — critically — Claude Code **exits to bash on the failure** instead of just warning. Half the fleet crash-looped on 2026-07-10 morning until we chowned. Blast radius: an agent could `npm install -g` a malicious replacement into its own container image, but every agent already runs `--dangerously-skip-permissions` so this doesn't widen the trust model.
+
+2. **`CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN=1` is set globally.** Amux drives every session through `tmux capture-pane` (for dashboard peek, mobile web UI, SMS/thread reply detection). When Claude Code enters the terminal's alternate-screen buffer (its default), `capture-pane` returns an empty screen with just the input prompt — peek text is garbled, SMS reply detection breaks, `/tui default` has to be typed by hand every restart. The env var forces native-scrollback mode so `capture-pane` sees the full conversation. Set at ENV level so every claude spawn in every session in every container inherits it — no per-session opt-in, no drift when `/compact` resets config.
+
+3. **`ENV TMUX_TMPDIR=/run/tmux`.** Keeps container's tmux daemon distinct from host's under sloppy mount configs (in case a spec ever bind-mounts `/tmp`).
+
+## Fleet-wide container recreation (rollout procedure)
+
+When you change the Dockerfile — new base package, new ENV var, new chown — running containers **do not** pick it up until they're recreated. `docker restart` only restarts the tini process; it doesn't re-pull the image. Full procedure:
+
+```bash
+# 1. Verify the Dockerfile change is valid.
+python3 -c "import ast; ast.parse(open('/mnt/gitdata/amux/amux-server.py').read())"  # sanity
+
+# 2. Rebuild the image. Tag stays `amux-agent-base:latest`.
+cd /mnt/gitdata/amux
+docker build -t amux-agent-base:latest agent-container/
+# Verify the change is in the new image:
+docker run --rm amux-agent-base:latest sh -c '<check-command>'
+
+# 3. Snapshot non-archived container sessions BEFORE stopping.
+# (Skips host-mode sessions like amux-helper — they don't need swapping.)
+curl -sk https://localhost:8822/api/sessions | python3 -c "
+import json,sys
+d = json.load(sys.stdin)
+for s in d:
+    if s.get('archived'): continue
+    if not s.get('runtime','').startswith('docker:'): continue
+    print(s['name'])
+" > /tmp/cutover-sessions.txt
+
+# 4. Stop every session in parallel (fast — /stop is async 202).
+cat /tmp/cutover-sessions.txt | xargs -I {} -P 10 -n 1 \
+  curl -sk -X POST -o /dev/null "https://localhost:8822/api/sessions/{}/stop"
+sleep 20   # let /stop drain
+
+# 5. Force-remove every org container. The writable layer is discarded here —
+# this reclaims the disk that auto-update bloat consumed.
+for c in $(docker ps --format '{{.Names}}' | grep '^amux-org-'); do
+  docker rm -f "$c"
+done
+
+# 6. Wake ONE session per org first (serial), so ensure_org_container runs
+# cleanly before the rest race it. Then parallel-wake the remainder.
+# (Use the by-org first-name selector from the amux-helper session's turn on
+# 2026-07-10 for exact code.)
+
+# 7. Verify fleet — sample peek per org:
+for s in RTG-Research iSchedule-Main Ember-Research CD-WattcoAccMigration; do
+  curl -sk "https://localhost:8822/api/sessions/$s/peek" | python3 -c "..."
+done
+
+# 8. Handle stragglers manually:
+#    - Codex sessions may need `codex_session_id` cleared from their
+#      <name>.meta.json (see "Codex session-id gotcha" below).
+#    - Any session at the resume picker: send `Enter` via /keys.
+#    - Any session at a Codex update prompt: Down Down Enter (Skip until next).
+#    - Any session showing "Fullscreen feedback": Esc.
+```
+
+**Expected reclaim:** Immediately after the swap, each container's writable layer is ~7MB. Within a few minutes, it grows to ~500MB per container as Claude Code / Codex auto-update and rewrite `/usr/local/lib/node_modules`. Net: fleet-wide the swap trades ~11GB (accumulated cruft) for ~8GB (fresh package trees). **Budget for this: keep at least 20GB free on the root LV before starting a cutover, and monitor `df -h /` afterward.**
+
+**When you MUST run a cutover:**
+- Dockerfile changed (image needs to rebuild + containers need to see it)
+- Writable-layer bloat is eating disk (any container hits `>1GB` in `docker ps --size`)
+- A shared bind mount was added/changed in an org spec (container needs `docker rm -f` for the new mount to take effect on wake — an existing container doesn't dynamically remount)
+
+**When you MUST NOT run a cutover:**
+- During active agent work — every claude/codex process inside the containers dies. Bind-mounted state (conversations, creds) survives, but any in-memory context is lost. Do it during quiet hours.
+- Without confirming disk headroom — the cutover writes ~500MB per container as auto-update runs.
+
+## Codex session-id gotcha (post-cutover)
+
+`~/.amux/sessions/<name>.meta.json` for Codex sessions holds a `codex_session_id`. Amux uses it to `codex resume --session <id>` on wake. **When a container is recreated (fleet cutover), the codex session inside is gone; the meta's session ID is now stale, and codex prints `ERROR: No saved session found with ID <uuid>. Run "codex resume".` The session sits idle.**
+
+Fix — clear the stale ID:
+
+```bash
+python3 -c "
+import json
+p = '/home/jwesley/.amux/sessions/<name>.meta.json'
+d = json.load(open(p)); d.pop('codex_session_id', None)
+json.dump(d, open(p, 'w'), indent=2)
+"
+curl -sk -X POST https://localhost:8822/api/sessions/<name>/stop
+sleep 8
+curl -sk -X POST https://localhost:8822/api/sessions/<name>/wake
+```
+
+Cleanest way to spot these after a cutover: peek every codex-provider session; any "No saved session found" needs this fix.
 
 ## How to give a container read-only access to another org's code
 
