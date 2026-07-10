@@ -28544,6 +28544,17 @@ function _updateThreadsBadge(list) {
   b.textContent = String(needsYou);
   b.style.display = needsYou > 0 ? 'inline-block' : 'none';
 }
+// _tInlineReplyFor tracks which message id is currently showing an inline
+// reply form. Declared here — BEFORE any function that reads it — because
+// `let` bindings are in the Temporal Dead Zone until the declaration line
+// runs. Placing this at the bottom of the file with the reply-flow helpers
+// (as it was originally) caused iOS PWA to intermittently show an empty
+// Threads list: cache-warm `_threadsLoad()` at page-init fired the render
+// before the `let` line executed → `_tRenderMsg` threw a ReferenceError on
+// its first `_tInlineReplyFor === m.id` read → `#threads-list.innerHTML`
+// never got assigned, leaving the tab visible but the history missing.
+let _tInlineReplyFor = null;
+
 function _threadsRender() {
   const root = document.getElementById('threads-list');
   if (!root) return;
@@ -29005,10 +29016,9 @@ async function _threadsOpenNew() {
 // Reply flow — inline under the message being replied to, so Jeremy can
 // still see the original context, copy-paste from it, and scroll siblings
 // in the same thread while composing. Previous behavior was a fixed overlay
-// modal that hid the thread. The "Attach…" button in the inline form
-// re-opens the modal for the file-attachment flow, which is heavier and
-// benefits from the wider composer.
-let _tInlineReplyFor = null;   // message id currently showing an inline reply form
+// modal that hid the thread.
+// (Note: `let _tInlineReplyFor` is declared UP by _threadsRender — see the
+// TDZ comment there for why. Moving it here again will re-break iOS PWA.)
 function _tReplyTo(tid, parentMid) {
   const t = _threadsCache.find(x => x.id === tid);
   if (!t) return;
