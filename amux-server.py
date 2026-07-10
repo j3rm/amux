@@ -3013,11 +3013,19 @@ _SESSION_LIMIT_RE = re.compile(
 # above. Phrased "You've reached your Fable 5 limit. Run /usage-credits to
 # continue or switch models with /model." There is NO reset time: the fix is to
 # top up credits or switch models, so "continue" won't unblock it (and auto
-# resume must NOT fire on it). Anchor on the two strings unique to this banner
-# (/usage-credits, "switch models with /model") so normal content never matches;
-# like the other banners it's only tested against the LIVE tail.
+# resume must NOT fire on it). Like the other banners it's only tested against
+# the LIVE tail.
+#
+# The earlier regex `/usage-credits\b|switch models? with /model` was too broad:
+# `/exit` in Claude Code prints a slash-command list that includes the literal
+# line `/usage-credits    Configure usage credits to keep working when you hit
+# a limit`, which matched and false-flagged every session that had ever typed
+# `/exit`. Vid-TM-{Builder,Orchestrator,QC} were reported as credit-limited
+# on 2026-07-10 for this reason. Anchor on the phrase "Run /usage-credits to
+# continue" — that appears in the banner but never in the command list or
+# in normal conversation.
 _MODEL_CREDIT_LIMIT_RE = re.compile(
-    r"/usage-credits\b|switch\s+models?\s+with\s+/model",
+    r"Run\s+/usage-credits\s+to\s+continue",
     re.IGNORECASE,
 )
 # Pull the model name out for display ("Fable 5", "Opus", ...). Best-effort.
@@ -11347,6 +11355,19 @@ def archive_session(name: str) -> tuple[bool, str]:
     cfg = parse_env_file(f)
     cfg["CC_ARCHIVED"] = "1"
     _write_env(f, cfg)
+    # Drop any rate-limit / credit-limit flags the detector left on this
+    # session. The detector gates on `tmux_name(name) in running_sessions`
+    # (~L3293), so after archive_session kills tmux, the detector never
+    # revisits and any lingering flag survives forever — the dashboard
+    # would keep counting an archived session as "hit its limit". Clear
+    # them here at the archive boundary since we own the transition.
+    _actions = _session_auto_actions.get(name)
+    if _actions:
+        for _k in ("rate_limit_reset_at", "rate_limit_reset_at_fallback",
+                   "rate_limit_weekly", "rate_limit_banner",
+                   "rate_limit_credits", "rate_limit_model_name",
+                   "rate_limit_last_event_ts"):
+            _actions.pop(_k, None)
     return True, "archived"
 
 
