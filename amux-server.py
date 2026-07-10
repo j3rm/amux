@@ -44676,16 +44676,30 @@ p{{color:#888;margin:12px 0 28px;font-size:0.9rem;line-height:1.5}}
                     # materializes an ANSI-stripped mirror and returns ITS path +
                     # size, so the session Reads clean text rather than a wall of
                     # escape codes.
+                    #
+                    # IMPORTANT: return the RUNTIME-VISIBLE path (host-absolute for
+                    # host sessions, /logs/<name>.log for docker sessions), because
+                    # the dashboard bakes this path into a message telling the
+                    # session's own agent to Read it. If we return the host
+                    # /home/jwesley/.amux/logs/... path to a docker session, its
+                    # Claude Code inside the container can't see it — the file is
+                    # mounted at /logs/, not the host path. Same defect shape as
+                    # the thread-attachments issue fixed 2026-07-10.
+                    def _runtime_path(host_path):
+                        rt = _session_runtime(name)
+                        if rt.startswith("docker:"):
+                            return f"/logs/{host_path.name}"
+                        return str(host_path)
                     if want_plain:
                         res = _write_plain_log(name)
                         if not res:
-                            return self._json({"exists": False, "size": 0, "path": str(_plain_log_path(name)), "plain": True})
+                            return self._json({"exists": False, "size": 0, "path": _runtime_path(_plain_log_path(name)), "plain": True})
                         cp, size = res
-                        return self._json({"exists": True, "size": size, "mtime": int(cp.stat().st_mtime), "path": str(cp), "plain": True})
+                        return self._json({"exists": True, "size": size, "mtime": int(cp.stat().st_mtime), "path": _runtime_path(cp), "plain": True})
                     if not lp.exists():
-                        return self._json({"exists": False, "size": 0, "path": str(lp)})
+                        return self._json({"exists": False, "size": 0, "path": _runtime_path(lp)})
                     st = lp.stat()
-                    return self._json({"exists": True, "size": st.st_size, "mtime": int(st.st_mtime), "path": str(lp)})
+                    return self._json({"exists": True, "size": st.st_size, "mtime": int(st.st_mtime), "path": _runtime_path(lp)})
                 # Download the saved terminal log. Default streams it raw (colour
                 # SGR intact, so the download / `cat` matches the coloured peek).
                 # ?plain=1 strips ALL ANSI (colour + torn cursor-move garbage) and
