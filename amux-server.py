@@ -3010,22 +3010,30 @@ _SESSION_LIMIT_RE = re.compile(
 )
 
 # Per-model credit/usage limit — a DIFFERENT class than the weekly/session caps
-# above. Phrased "You've reached your Fable 5 limit. Run /usage-credits to
-# continue or switch models with /model." There is NO reset time: the fix is to
-# top up credits or switch models, so "continue" won't unblock it (and auto
-# resume must NOT fire on it). Like the other banners it's only tested against
-# the LIVE tail.
+# above. Claude Code's banner tells the user to either top up credits or switch
+# models. There is NO reset time, so auto-resume must NOT fire on it. Matched
+# only against a narrow LIVE tail (see `tail_narrow` in the detector loop);
+# see history note below for why.
 #
-# The earlier regex `/usage-credits\b|switch models? with /model` was too broad:
-# `/exit` in Claude Code prints a slash-command list that includes the literal
-# line `/usage-credits    Configure usage credits to keep working when you hit
-# a limit`, which matched and false-flagged every session that had ever typed
-# `/exit`. Vid-TM-{Builder,Orchestrator,QC} were reported as credit-limited
-# on 2026-07-10 for this reason. Anchor on the phrase "Run /usage-credits to
-# continue" — that appears in the banner but never in the command list or
-# in normal conversation.
+# The three tokens the regex anchors on are (in order): the imperative
+# "run", the u\x73age-credits slash command, and the word "continue". Deliberately
+# NOT joining them into one visible phrase in this source so that grep, cat, or
+# any Claude Code Read of this file doesn't leave the exact banner text sitting
+# in some session's scrollback. That's a real bug shape (see history note).
+#
+# History (2026-07-10):
+#   Round 1: pattern was too broad (matched the usage-credits slash-command
+#   name inside Claude Code's /exit farewell list), false-flagging every
+#   session that had ever /exit'd — Vid-TM-{Builder,Orchestrator,QC}.
+#   Round 2: tightened to the exact banner-instruction phrase; then the
+#   amux-helper session wrote a status message containing the exact anchor
+#   phrase, matched its own output, and re-flagged itself.
+#   Fix: keep the specific phrase anchor AND narrow the match window to the
+#   last ~10 lines so only a live on-screen banner matches, not scrollback
+#   containing prose about the banner. Also stop writing the full phrase into
+#   this source file (see above).
 _MODEL_CREDIT_LIMIT_RE = re.compile(
-    r"Run\s+/usage-credits\s+to\s+continue",
+    r"Run\s+/u" + r"sage-credits\s+to\s+continue\b",
     re.IGNORECASE,
 )
 # Pull the model name out for display ("Fable 5", "Opus", ...). Best-effort.
@@ -3354,8 +3362,16 @@ def _rate_limit_auto_respond():
             # banner on screen until reset — group them as "banner" limits.
             is_banner = is_weekly or is_session_banner
             # Per-model credit limit: menu-less, no reset time, NOT auto-resumable.
+            # Narrow the credit-limit match window to the last 10 lines. A live
+            # credit-limit banner sits IMMEDIATELY above the input prompt (the
+            # last ~4-5 lines of the pane), so 10 lines gives a small margin
+            # without picking up recent prose in scrollback. Wider windows
+            # false-flag any session whose recent conversation MENTIONED the
+            # banner phrase — including the amux-helper session that wrote
+            # this comment (self-referential loop hit on 2026-07-10 08:50).
+            tail_narrow = "\n".join(clean.splitlines()[-10:])
             is_credit = (matched_idx < 0 and not is_banner
-                         and bool(_MODEL_CREDIT_LIMIT_RE.search(tail)))
+                         and bool(_MODEL_CREDIT_LIMIT_RE.search(tail_narrow)))
             if matched_idx < 0 and not is_banner and not is_credit:
                 # No live rate-limit UI. A real banner cap keeps its banner on
                 # screen until reset, so a session flagged from a banner without a
