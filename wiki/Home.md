@@ -40,6 +40,7 @@ HTML/CSS/JS). This fork keeps that single-file design and adds:
 | [Server-Hooks-And-Scripts](Server-Hooks-And-Scripts.md) | Substrate features added 2026-06-24: C3/C4 cascade hooks, escalation gate, RD routing hook, watchdog script, silently-dead detector, context-exhaustion auto-restart. Retires AMUX-Watchdog, RTG-Dispatch, Ember-Dispatch agents. |
 | [Container-Isolation](Container-Isolation.md) | Per-product Docker container isolation (2026-07-08+): `CC_RUNTIME=docker:<product>` switch, per-container Claude Code login, host↔container path map, product spec YAML schema, add-a-session / add-a-product / debugging recipes, secrets Phase 8 plan. |
 | [Conversation-History-Locations](Conversation-History-Locations.md) | Canonical reference for where Claude Code stores conversation JSONLs — host vs container, the work_dir → project-dir encoding rule (drops dots → double-dash for `.hidden` segments), migration recipe when moving a session to a container, drift-detection script, incident log. |
+| [Deploy-New-Amux-Server](Deploy-New-Amux-Server.md) | End-to-end playbook to provision a fresh Ubuntu VM (or take an existing box) and bring an amux server online — VM clone via govc, OS bootstrap, install.sh, systemd unit, TLS, container image build, first org registration. Written for Scorpio; anyone with SSH + govc + deploy key can execute. |
 
 ## Relationship to upstream
 
