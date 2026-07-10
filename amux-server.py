@@ -28547,9 +28547,17 @@ function _updateThreadsBadge(list) {
 function _threadsRender() {
   const root = document.getElementById('threads-list');
   if (!root) return;
-  // Preserve reply drafts across re-renders.
+  // Preserve reply drafts AND selection/scroll state across re-renders. The
+  // SSE-driven refresh replaces innerHTML wholesale, which destroys every
+  // textarea DOM node — restoring just .value + .focus() lands the cursor at
+  // the end of the text and moves scroll to the top. Capture (selectionStart,
+  // selectionEnd, scrollTop) alongside the draft so Jeremy can keep typing
+  // (or editing in the middle of an existing draft) through a refresh
+  // without losing his place.
   const drafts = {};
-  root.querySelectorAll('textarea[id^="t-reply-"]').forEach(el => { drafts[el.id] = el.value; });
+  root.querySelectorAll('textarea[id^="t-reply-"]').forEach(el => {
+    drafts[el.id] = {value: el.value, selStart: el.selectionStart, selEnd: el.selectionEnd, scrollTop: el.scrollTop};
+  });
   const focused = document.activeElement;
   const focusedId = focused && focused.id && focused.id.startsWith('t-reply-') ? focused.id : null;
 
@@ -28561,12 +28569,42 @@ function _threadsRender() {
   let html = _tRenderFlagSection(list);
   for (const t of list) html += _tRenderThread(t);
   root.innerHTML = html;
-  // Restore drafts + focus
-  for (const [id, val] of Object.entries(drafts)) {
+  // Restore drafts, then focus + selection + scroll. Order matters:
+  //   1. set .value FIRST so selection ranges are valid
+  //   2. focus() BEFORE setSelectionRange() because setSelectionRange on an
+  //      unfocused textarea can be a no-op in some browsers
+  //   3. setSelectionRange() to put the cursor back where it was
+  //   4. restore scrollTop last (focus() can trigger a scroll adjustment)
+  //   5. auto-size the textarea to its content so post-restore height matches
+  //      the pre-refresh height
+  for (const [id, saved] of Object.entries(drafts)) {
     const el = document.getElementById(id);
-    if (el) el.value = val;
+    if (!el) continue;
+    el.value = saved.value;
+    _tAutoSize(el);
   }
-  if (focusedId) { const el = document.getElementById(focusedId); if (el && el.focus) el.focus(); }
+  if (focusedId) {
+    const el = document.getElementById(focusedId);
+    const saved = drafts[focusedId];
+    if (el && el.focus) {
+      el.focus();
+      if (saved && saved.selStart != null) {
+        try { el.setSelectionRange(saved.selStart, saved.selEnd); } catch(e) {}
+      }
+      if (saved && saved.scrollTop != null) el.scrollTop = saved.scrollTop;
+    }
+  }
+}
+// Auto-grow a textarea to fit its content. Called from the inline reply
+// textarea's `input` handler and once at render restore. Uses `scrollHeight`
+// which reports the natural content height; setting `height:auto` first
+// forces a reflow so scrollHeight shrinks when text is deleted (otherwise
+// only grow works, never shrink).
+function _tAutoSize(el) {
+  if (!el) return;
+  el.style.height = 'auto';
+  // +2px covers the border so no scroll appears at the edge case.
+  el.style.height = (el.scrollHeight + 2) + 'px';
 }
 // Cross-thread "Flagged" summary section at the top of the list. Shows one
 // row per flagged message across every thread, so bookmarks stay findable
@@ -28796,11 +28834,17 @@ function _tRenderMsg(t, m) {
     const replyId = 't-reply-' + midEsc;
     const blockId = 't-reply-block-' + midEsc;
     const attachBarId = 't-reply-attach-bar-' + midEsc;
-    const form = `<div style="margin:8px 0 4px 0;padding:10px 12px;border:1px solid var(--border);border-radius:6px;background:var(--card-bg,rgba(255,255,255,0.03));">
-      <div style="font-size:0.72rem;color:var(--muted);margin-bottom:6px;">Reply to <b>${midEsc}</b> — original message shown below</div>
-      <textarea id="${replyId}" placeholder="Type your reply — the original message stays visible below." style="width:100%;min-height:100px;padding:6px 8px;border:1px solid var(--border);border-radius:5px;background:var(--card-bg,#0a0a0a);color:var(--fg);font-family:inherit;box-sizing:border-box;resize:vertical;font-size:0.88rem;" onkeydown="if(event.key==='Escape'){event.preventDefault();_tInlineReplyCancel();}else if((event.metaKey||event.ctrlKey)&&event.key==='Enter'){event.preventDefault();_tInlineReplySubmit('${tidEsc}','${midEsc}');}" onpaste="_threadsHandlePaste(event)"></textarea>
-      <div class="peek-attach-bar" id="${attachBarId}" style="margin-top:6px;"></div>
-      <label style="display:flex;align-items:center;gap:6px;font-size:0.78rem;margin:8px 0 6px 0;color:var(--muted);">
+    // Form card gets a distinct blue-tinted background + accent border-left
+    // so it visually pops off the thread card underneath (previous background
+    // was near-transparent and blended in). Textarea auto-grows: no fixed
+    // min-height with an invisible scrollbar — content sets the height via
+    // _tAutoSize on every input, so as the reply grows the whole card grows
+    // and Jeremy always sees his whole message.
+    const form = `<div style="margin:8px 0 4px 0;padding:12px 14px;border:1px solid #468;border-left:4px solid #468;border-radius:6px;background:rgba(70,136,190,0.10);box-shadow:0 2px 6px rgba(0,0,0,0.25);">
+      <div style="font-size:0.72rem;color:var(--muted);margin-bottom:8px;">✎ Reply to <b>${midEsc}</b> — original message shown below</div>
+      <textarea id="${replyId}" placeholder="Type your reply — the original message stays visible below." rows="4" style="width:100%;padding:8px 10px;border:1px solid var(--border);border-radius:5px;background:var(--bg,#050505);color:var(--fg);font-family:inherit;box-sizing:border-box;resize:none;font-size:0.9rem;line-height:1.45;overflow:hidden;" oninput="_tAutoSize(this)" onkeydown="if(event.key==='Escape'){event.preventDefault();_tInlineReplyCancel();}else if((event.metaKey||event.ctrlKey)&&event.key==='Enter'){event.preventDefault();_tInlineReplySubmit('${tidEsc}','${midEsc}');}" onpaste="_threadsHandlePaste(event)"></textarea>
+      <div class="peek-attach-bar" id="${attachBarId}" style="margin-top:8px;"></div>
+      <label style="display:flex;align-items:center;gap:6px;font-size:0.78rem;margin:10px 0 8px 0;color:var(--muted);">
         <input id="${blockId}" type="checkbox">
         Blocking (inject into agent's terminal — interrupts current work)
       </label>
