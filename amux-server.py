@@ -28741,7 +28741,12 @@ function _tRenderMsg(t, m) {
   const isUnreadToMe = (m.status === 'complete' && !m.to_session && !m.read);
   const isWorking = (m.status === 'working');
   const expandByDefault = isUnreadToMe || isWorking || !!m.flagged;
-  const expanded = _tMsgExpanded.has(m.id) ? true
+  // When the inline reply form is open on this message, force the body
+  // expanded — the whole point of inline reply is being able to see the
+  // original while typing, so collapsing it would defeat the purpose.
+  const inlineReplyOpen = _tInlineReplyFor === m.id;
+  const expanded = inlineReplyOpen ? true
+                  : _tMsgExpanded.has(m.id) ? true
                   : _tMsgExpanded.has('!' + m.id) ? false
                   : expandByDefault;
   const chev = expanded ? '▾' : '▸';
@@ -28778,6 +28783,30 @@ function _tRenderMsg(t, m) {
   // /home/jwesley/.amux/uploads/abc-doc.pdf becomes a click-to-preview link,
   // same behavior as session peek output. It escapes non-match text internally.
   if (m.body) html += `<div style="white-space:pre-wrap;font-size:0.88rem;color:var(--fg);opacity:0.92;margin:4px 0 8px 0;">${linkifyOutput(_tNormalizeBody(m.body))}</div>`;
+  // Inline reply form — expanded here (right under the message body) so
+  // Jeremy can still see the original while composing, unlike the old
+  // fixed-overlay modal. Textarea id uses the `t-reply-<mid>` pattern that
+  // _threadsRender's draft-preservation loop already keys off, so re-renders
+  // (SSE, filter changes) don't wipe an in-progress draft. Attachments in a
+  // reply still fall back to the modal path — hit the paperclip button to
+  // open the fuller composer.
+  if (inlineReplyOpen) {
+    const replyId = 't-reply-' + midEsc;
+    const blockId = 't-reply-block-' + midEsc;
+    html += `<div style="margin:6px 0 4px 0;padding:10px;border:1px solid var(--border);border-radius:6px;background:var(--card-bg,rgba(255,255,255,0.03));">
+      <div style="font-size:0.72rem;color:var(--muted);margin-bottom:6px;">Reply to <b>${midEsc}</b></div>
+      <textarea id="${replyId}" placeholder="Type your reply — you can still see the original message above." style="width:100%;min-height:100px;padding:6px 8px;border:1px solid var(--border);border-radius:5px;background:var(--card-bg,#0a0a0a);color:var(--fg);font-family:inherit;box-sizing:border-box;resize:vertical;font-size:0.88rem;" onkeydown="if(event.key==='Escape'){event.preventDefault();_tInlineReplyCancel();}else if((event.metaKey||event.ctrlKey)&&event.key==='Enter'){event.preventDefault();_tInlineReplySubmit('${tidEsc}','${midEsc}');}"></textarea>
+      <label style="display:flex;align-items:center;gap:6px;font-size:0.78rem;margin:8px 0 6px 0;color:var(--muted);">
+        <input id="${blockId}" type="checkbox">
+        Blocking (inject into agent's terminal — interrupts current work)
+      </label>
+      <div style="display:flex;gap:8px;justify-content:flex-end;align-items:center;">
+        <button class="btn" style="opacity:0.7;font-size:0.8rem;padding:4px 10px;" onclick="_tInlineReplyCancel()" title="Esc">Cancel</button>
+        <button class="btn" style="font-size:0.8rem;padding:4px 12px;" onclick="_tInlineReplyOpenModal('${tidEsc}','${midEsc}')" title="Open full composer with attachments">Attach…</button>
+        <button class="btn" style="font-size:0.8rem;padding:4px 12px;" onclick="_tInlineReplySubmit('${tidEsc}','${midEsc}')" title="Ctrl/⌘+Enter">Send</button>
+      </div>
+    </div>`;
+  }
   html += '</div></div>';
   return html;
 }
@@ -28912,20 +28941,86 @@ async function _threadsOpenNew() {
   document.getElementById('t-new-modal').style.display = 'flex';
   setTimeout(() => document.getElementById('t-new-title').focus(), 50);
 }
+// Reply flow — inline under the message being replied to, so Jeremy can
+// still see the original context, copy-paste from it, and scroll siblings
+// in the same thread while composing. Previous behavior was a fixed overlay
+// modal that hid the thread. The "Attach…" button in the inline form
+// re-opens the modal for the file-attachment flow, which is heavier and
+// benefits from the wider composer.
+let _tInlineReplyFor = null;   // message id currently showing an inline reply form
 function _tReplyTo(tid, parentMid) {
   const t = _threadsCache.find(x => x.id === tid);
   if (!t) return;
+  _tInlineReplyFor = parentMid;
+  // Force the message body expanded — _tRenderMsg reads _tInlineReplyFor
+  // and overrides collapse state accordingly, but the user may have
+  // explicitly collapsed this message earlier, so clear that too.
+  _tMsgExpanded.delete('!' + parentMid);
+  _tMsgExpanded.add(parentMid);
+  _threadsRender();
+  // Focus + scroll after the render lands. RAF isn't enough here because
+  // the DOM mutation happens synchronously in _threadsRender but layout
+  // may still be pending for the just-injected textarea.
+  setTimeout(() => {
+    const el = document.getElementById('t-reply-' + parentMid);
+    if (el) {
+      el.focus();
+      el.scrollIntoView({behavior: 'smooth', block: 'center'});
+    }
+  }, 50);
+}
+function _tInlineReplyCancel() {
+  const mid = _tInlineReplyFor;
+  _tInlineReplyFor = null;
+  // Drop any draft for this message so the next reply-open starts clean.
+  // Without this the draft-preservation loop in _threadsRender would
+  // re-populate the textarea if the same message is reopened later.
+  if (mid) {
+    const el = document.getElementById('t-reply-' + mid);
+    if (el) el.value = '';
+  }
+  _threadsRender();
+}
+// Escape hatch when Jeremy wants attachments — hand off to the full modal,
+// carrying over any text already typed inline so nothing's lost.
+function _tInlineReplyOpenModal(tid, parentMid) {
+  const el = document.getElementById('t-reply-' + parentMid);
+  const draft = el ? el.value : '';
+  const blockEl = document.getElementById('t-reply-block-' + parentMid);
+  const blocking = blockEl ? blockEl.checked : false;
+  _tInlineReplyFor = null;
   _tNewCtx = {mode: 'reply', tid, parentMid};
   document.getElementById('t-new-header').textContent = `Reply to ${parentMid} in ${tid}`;
   document.getElementById('t-new-target-row').style.display = 'none';
   document.getElementById('t-new-title-row').style.display = 'none';
   document.getElementById('t-new-body-label').textContent = 'Reply';
   document.getElementById('t-new-title').value = '';
-  document.getElementById('t-new-body').value = '';
-  document.getElementById('t-new-blocking').checked = false;
+  document.getElementById('t-new-body').value = draft;
+  document.getElementById('t-new-blocking').checked = blocking;
   _threadsClearFiles();
   document.getElementById('t-new-modal').style.display = 'flex';
+  _threadsRender();  // remove the inline form
   setTimeout(() => document.getElementById('t-new-body').focus(), 50);
+}
+async function _tInlineReplySubmit(tid, parentMid) {
+  const el = document.getElementById('t-reply-' + parentMid);
+  const blockEl = document.getElementById('t-reply-block-' + parentMid);
+  const body = (el ? el.value : '').trim();
+  const blocking = blockEl ? blockEl.checked : false;
+  if (!body) { alert('Reply body required.'); return; }
+  const r = await fetch(API + '/api/threads/' + encodeURIComponent(tid) + '/messages', {
+    method: 'POST', headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({body, parent_id: parentMid, blocking}),
+  });
+  if (r.ok) {
+    _tInlineReplyFor = null;
+    if (el) el.value = '';                    // clear draft so re-render doesn't restore it
+    _tExpanded.add(tid); _tExpandedSave();
+    _threadsLoad();                           // reloads + re-renders
+  } else {
+    const errTxt = await r.text();
+    alert('Reply failed: ' + r.status + ' — ' + errTxt);
+  }
 }
 async function _tLoadTargets() {
   const sel = document.getElementById('t-new-target');
