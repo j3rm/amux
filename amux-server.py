@@ -41781,15 +41781,29 @@ class CCHandler(BaseHTTPRequestHandler):
                 # org — RTG-Research RR-*, Ember-Research ER-*, future orgs.
                 # Full spec lives in the rtg-follow-up-gate amux note.
                 if _is_research_session(session):
-                    # Extract the target id — prefer TITLE (short, deterministic;
-                    # convention is "ESCALATE <target>:" or "Re-take of <target>")
-                    # then fall back to desc. Prevents cross-references in desc
-                    # bodies from being mis-identified as the escalation target.
-                    m = re.search(r"\b((?:RA|RP|RAC|RAO|RM|RD|AW|AH|RR)-\d+)\b", title or "")
-                    if not m:
-                        m = re.search(r"\b((?:RA|RP|RAC|RAO|RM|RD|AW|AH|RR)-\d+)\b", desc or "")
+                    # Gate ONLY explicit escalations — items whose TITLE begins
+                    # with `ESC-<target>:` (the RTG-Research / iSchedule-
+                    # Reviewer split-verdict re-audit convention, e.g.
+                    # `ESC-RA-784: split verdict (PASS-WITH-WARNINGS vs FAIL)`).
+                    #
+                    # A `*-Research` session ALSO legitimately mints routing
+                    # directives ("RD: ActAS staging-redirect P0 fix (routed
+                    # → RA-785)"), thread replies, follow-up specs, and
+                    # coordination items that must cite other board ids in
+                    # title or desc as context. The previous "any id-token
+                    # anywhere in title or desc" regex 409'd all of those.
+                    # T-89 (2026-07-10): an RD merely CITED RR-694 in desc
+                    # and hit "24h cooldown, target RA-785, prior RR-694";
+                    # after stripping that token, the desc cited RAC-7279 and
+                    # hit "target is settled". Reference by commit hash was
+                    # the only workaround. Restricting the gate to titles
+                    # that explicitly declare escalation intent fixes both.
+                    m = re.match(
+                        r"^\s*ESC-((?:RA|RP|RAC|RAO|RM|RD|AW|AH|RR)-\d+)\b",
+                        title or "", re.IGNORECASE,
+                    )
                     if m:
-                        target_id = m.group(1)
+                        target_id = m.group(1).upper()
                         # (b) Target-status guard
                         if target_id != item_id:  # don't gate against self
                             t_row = db.execute(
@@ -41810,24 +41824,23 @@ class CCHandler(BaseHTTPRequestHandler):
                                         "error": "escalation-gate: target marked VOID",
                                         "target": target_id,
                                     }, 409)
-                        # (c) 24h cooldown across non-discarded escalation items.
-                        # Match only on TITLE — desc bodies routinely mention
-                        # other target ids as cross-refs/coordination context
-                        # and would false-positive if we matched desc too.
-                        # RTG-Research caught this 2026-07-01 on RA-663: RR-476
-                        # (for RA-664) mentioned RA-663 in coordination context
-                        # and was mis-tagged as a prior escalation of RA-663.
-                        # Session-based (LIKE '%-Research') so it covers RR-*
-                        # (RTG) and ER-* (Ember) and any future org uniformly.
+                        # (c) 24h cooldown — look ONLY for prior ESC-<target>
+                        # titles. Substring-matching the target id anywhere in
+                        # a prior title was the second half of the T-89 bug:
+                        # RR-694's title `RD: … (routed → RA-785)` contains
+                        # `RA-785`, so a `%RA-785%` LIKE match found RR-694
+                        # and mis-tagged it as a prior escalation. An
+                        # escalation MUST have title `ESC-<target>...`, so
+                        # `ESC-<target>%` is the tightest legal match.
                         cooldown_secs = 86400
                         prior = db.execute(
                             "SELECT id, created FROM issues "
                             "WHERE session LIKE '%-Research' AND deleted IS NULL "
                             "  AND status != 'discarded' "
                             "  AND created > ? "
-                            "  AND title LIKE ? "
+                            "  AND UPPER(title) LIKE ? "
                             "ORDER BY created DESC LIMIT 1",
-                            (now - cooldown_secs, f"%{target_id}%")
+                            (now - cooldown_secs, f"ESC-{target_id}%")
                         ).fetchone()
                         if prior:
                             age_h = (now - int(prior["created"])) / 3600.0
