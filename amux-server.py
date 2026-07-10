@@ -4166,21 +4166,17 @@ def _snapshot_all_sessions_inner():
                 if cfg_d.get("CC_ARCHIVED") != "1":
                     last_seen = actions.get("last_claude_pid_seen", now)
                     try:
-                        # Route pgrep through the session's runtime; a host
-                        # pgrep would miss the claude process for docker
-                        # sessions (identical shape to fd6d294 / 511c518).
-                        _rt_d = _session_runtime(name)
-                        _pgrep_pfx_d = (
-                            ["docker", "exec", f"amux-org-{_rt_d.split(':', 1)[1]}"]
-                            if _rt_d.startswith("docker:") else []
-                        )
-                        r_pg = subprocess.run(
-                            [*_pgrep_pfx_d, "pgrep", "-f", f"claude .* --name {name}( |$)"],
-                            capture_output=True, text=True, timeout=5,
-                        )
-                        # If exit 0 with output → claude is alive (refresh last_seen)
-                        # If exit 1 (no match) → claude is dead (don't refresh)
-                        alive = bool(r_pg.stdout.strip())
+                        # 2026-07-10: replaced argv-regex `pgrep -f "claude .*
+                        # --name <session>"` with _find_claude_pid because the
+                        # regex flagged every session whose argv shape wasn't
+                        # `--name <session>` — pushover-storm sources tonight:
+                        # Vid-TM-* (auto-restart uses `--resume <uuid>`, no
+                        # --name); Scorpio (spawned as raw `claude.exe` with
+                        # different flags); any session amux resumed after a
+                        # container swap. `_find_claude_pid` walks tmux
+                        # pane_pid → shell → children → session-file lookup —
+                        # correct for every argv shape and both runtimes.
+                        alive = _find_claude_pid(name) > 1
                     except Exception:
                         alive = True  # uncertain → don't flag
                     if alive:
