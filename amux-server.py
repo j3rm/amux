@@ -28783,31 +28783,35 @@ function _tRenderMsg(t, m) {
   // /home/jwesley/.amux/uploads/abc-doc.pdf becomes a click-to-preview link,
   // same behavior as session peek output. It escapes non-match text internally.
   if (m.body) html += `<div style="white-space:pre-wrap;font-size:0.88rem;color:var(--fg);opacity:0.92;margin:4px 0 8px 0;">${linkifyOutput(_tNormalizeBody(m.body))}</div>`;
-  // Inline reply form — expanded here (right under the message body) so
-  // Jeremy can still see the original while composing, unlike the old
-  // fixed-overlay modal. Textarea id uses the `t-reply-<mid>` pattern that
-  // _threadsRender's draft-preservation loop already keys off, so re-renders
-  // (SSE, filter changes) don't wipe an in-progress draft. Attachments in a
-  // reply still fall back to the modal path — hit the paperclip button to
-  // open the fuller composer.
+  html += '</div></div>';
+  // Inline reply form is rendered ABOVE the message card (prepended in the
+  // return) — the message being replied to sits directly below the form for
+  // consistency with the "compose above target" convention Jeremy prefers.
+  // Textarea id uses the `t-reply-<mid>` pattern that _threadsRender's
+  // draft-preservation loop keys off, so SSE re-renders don't wipe an
+  // in-progress draft. Attach button triggers the file input directly and
+  // uploaded files appear as chips in a per-message chip bar right in the
+  // inline form — no need to detour through the modal.
   if (inlineReplyOpen) {
     const replyId = 't-reply-' + midEsc;
     const blockId = 't-reply-block-' + midEsc;
-    html += `<div style="margin:6px 0 4px 0;padding:10px;border:1px solid var(--border);border-radius:6px;background:var(--card-bg,rgba(255,255,255,0.03));">
-      <div style="font-size:0.72rem;color:var(--muted);margin-bottom:6px;">Reply to <b>${midEsc}</b></div>
-      <textarea id="${replyId}" placeholder="Type your reply — you can still see the original message above." style="width:100%;min-height:100px;padding:6px 8px;border:1px solid var(--border);border-radius:5px;background:var(--card-bg,#0a0a0a);color:var(--fg);font-family:inherit;box-sizing:border-box;resize:vertical;font-size:0.88rem;" onkeydown="if(event.key==='Escape'){event.preventDefault();_tInlineReplyCancel();}else if((event.metaKey||event.ctrlKey)&&event.key==='Enter'){event.preventDefault();_tInlineReplySubmit('${tidEsc}','${midEsc}');}"></textarea>
+    const attachBarId = 't-reply-attach-bar-' + midEsc;
+    const form = `<div style="margin:8px 0 4px 0;padding:10px 12px;border:1px solid var(--border);border-radius:6px;background:var(--card-bg,rgba(255,255,255,0.03));">
+      <div style="font-size:0.72rem;color:var(--muted);margin-bottom:6px;">Reply to <b>${midEsc}</b> — original message shown below</div>
+      <textarea id="${replyId}" placeholder="Type your reply — the original message stays visible below." style="width:100%;min-height:100px;padding:6px 8px;border:1px solid var(--border);border-radius:5px;background:var(--card-bg,#0a0a0a);color:var(--fg);font-family:inherit;box-sizing:border-box;resize:vertical;font-size:0.88rem;" onkeydown="if(event.key==='Escape'){event.preventDefault();_tInlineReplyCancel();}else if((event.metaKey||event.ctrlKey)&&event.key==='Enter'){event.preventDefault();_tInlineReplySubmit('${tidEsc}','${midEsc}');}" onpaste="_threadsHandlePaste(event)"></textarea>
+      <div class="peek-attach-bar" id="${attachBarId}" style="margin-top:6px;"></div>
       <label style="display:flex;align-items:center;gap:6px;font-size:0.78rem;margin:8px 0 6px 0;color:var(--muted);">
         <input id="${blockId}" type="checkbox">
         Blocking (inject into agent's terminal — interrupts current work)
       </label>
       <div style="display:flex;gap:8px;justify-content:flex-end;align-items:center;">
+        <button class="peek-attach-btn" title="Attach file" onclick="document.getElementById('t-new-file-input').click()">&#128206;</button>
         <button class="btn" style="opacity:0.7;font-size:0.8rem;padding:4px 10px;" onclick="_tInlineReplyCancel()" title="Esc">Cancel</button>
-        <button class="btn" style="font-size:0.8rem;padding:4px 12px;" onclick="_tInlineReplyOpenModal('${tidEsc}','${midEsc}')" title="Open full composer with attachments">Attach…</button>
         <button class="btn" style="font-size:0.8rem;padding:4px 12px;" onclick="_tInlineReplySubmit('${tidEsc}','${midEsc}')" title="Ctrl/⌘+Enter">Send</button>
       </div>
     </div>`;
+    return form + html;
   }
-  html += '</div></div>';
   return html;
 }
 async function _tStarToggle(tid, starred) {
@@ -28858,7 +28862,16 @@ let _tNewCtx = null;   // {mode:'new'} or {mode:'reply', tid, parentMid}
 // session send-command row don't stomp each other.
 let _threadsFiles = []; // [{name, path, url, isImage, previewUrl}]
 function _threadsRenderAttach() {
-  const bar = document.getElementById('t-new-attach-bar');
+  // Render attach chips into whichever bar is currently visible — the
+  // per-message inline bar when an inline reply is open (Jeremy's shared
+  // hidden file input feeds the same _threadsFiles array), otherwise the
+  // modal's bar. Both fall through to the same removal handler so the
+  // chip UI stays consistent regardless of which composer is active.
+  const inlineBar = _tInlineReplyFor
+    ? document.getElementById('t-reply-attach-bar-' + _tInlineReplyFor)
+    : null;
+  const modalBar = document.getElementById('t-new-attach-bar');
+  const bar = inlineBar || modalBar;
   if (!bar) return;
   bar.classList.toggle('has-files', _threadsFiles.length > 0);
   bar.innerHTML = _threadsFiles.map((f, i) => {
@@ -28872,6 +28885,10 @@ function _threadsRenderAttach() {
       ${isUploading ? '<span style="color:var(--dim);font-size:0.7rem;">↑</span>' : `<span class="chip-remove" onclick="_threadsRemoveFile(${i})">×</span>`}
     </div>`;
   }).join('');
+  // Clear the OTHER bar so chips don't ghost when Jeremy switches contexts
+  // (e.g. cancels inline and opens the modal for New Thread).
+  const otherBar = bar === inlineBar ? modalBar : inlineBar;
+  if (otherBar) { otherBar.innerHTML = ''; otherBar.classList.remove('has-files'); }
 }
 function _threadsRemoveFile(idx) {
   const f = _threadsFiles[idx];
@@ -28951,6 +28968,10 @@ let _tInlineReplyFor = null;   // message id currently showing an inline reply f
 function _tReplyTo(tid, parentMid) {
   const t = _threadsCache.find(x => x.id === tid);
   if (!t) return;
+  // Clear any pending attachments from an earlier compose (modal or another
+  // inline reply Jeremy switched away from) so they don't ghost into this
+  // reply — _threadsFiles is a module-level array shared by both flows.
+  _threadsClearFiles();
   _tInlineReplyFor = parentMid;
   // Force the message body expanded — _tRenderMsg reads _tInlineReplyFor
   // and overrides collapse state accordingly, but the user may have
@@ -28979,35 +29000,26 @@ function _tInlineReplyCancel() {
     const el = document.getElementById('t-reply-' + mid);
     if (el) el.value = '';
   }
-  _threadsRender();
-}
-// Escape hatch when Jeremy wants attachments — hand off to the full modal,
-// carrying over any text already typed inline so nothing's lost.
-function _tInlineReplyOpenModal(tid, parentMid) {
-  const el = document.getElementById('t-reply-' + parentMid);
-  const draft = el ? el.value : '';
-  const blockEl = document.getElementById('t-reply-block-' + parentMid);
-  const blocking = blockEl ? blockEl.checked : false;
-  _tInlineReplyFor = null;
-  _tNewCtx = {mode: 'reply', tid, parentMid};
-  document.getElementById('t-new-header').textContent = `Reply to ${parentMid} in ${tid}`;
-  document.getElementById('t-new-target-row').style.display = 'none';
-  document.getElementById('t-new-title-row').style.display = 'none';
-  document.getElementById('t-new-body-label').textContent = 'Reply';
-  document.getElementById('t-new-title').value = '';
-  document.getElementById('t-new-body').value = draft;
-  document.getElementById('t-new-blocking').checked = blocking;
+  // Also drop any pending file uploads — Jeremy said cancel.
   _threadsClearFiles();
-  document.getElementById('t-new-modal').style.display = 'flex';
-  _threadsRender();  // remove the inline form
-  setTimeout(() => document.getElementById('t-new-body').focus(), 50);
+  _threadsRender();
 }
 async function _tInlineReplySubmit(tid, parentMid) {
   const el = document.getElementById('t-reply-' + parentMid);
   const blockEl = document.getElementById('t-reply-block-' + parentMid);
-  const body = (el ? el.value : '').trim();
+  const text = (el ? el.value : '').trim();
   const blocking = blockEl ? blockEl.checked : false;
-  if (!body) { alert('Reply body required.'); return; }
+  // Wait for any in-flight uploads before sending — otherwise we'd omit the
+  // path (still null) and the recipient wouldn't see the attachment.
+  if (_threadsFiles.some(f => !f.path)) { alert('Wait for attachments to finish uploading.'); return; }
+  const attachPaths = _threadsFiles.filter(f => f.path).map(f => f.path);
+  if (!text && attachPaths.length === 0) { alert('Body or attachment required.'); return; }
+  // Append attachment paths on their own lines so linkifyOutput picks them up
+  // as clickable file-preview links on the recipient's side (same shape as
+  // _threadsSubmitNew).
+  const body = attachPaths.length
+    ? (text ? text + '\n\n' : '') + attachPaths.join('\n')
+    : text;
   const r = await fetch(API + '/api/threads/' + encodeURIComponent(tid) + '/messages', {
     method: 'POST', headers: {'Content-Type': 'application/json'},
     body: JSON.stringify({body, parent_id: parentMid, blocking}),
@@ -29015,6 +29027,7 @@ async function _tInlineReplySubmit(tid, parentMid) {
   if (r.ok) {
     _tInlineReplyFor = null;
     if (el) el.value = '';                    // clear draft so re-render doesn't restore it
+    _threadsClearFiles();
     _tExpanded.add(tid); _tExpandedSave();
     _threadsLoad();                           // reloads + re-renders
   } else {
