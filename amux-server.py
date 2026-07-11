@@ -3242,6 +3242,16 @@ _RATE_LIMIT_DRIFT_LOG_COOLDOWN = 600  # don't repeat the drift warning more than
 _rate_limit_last_responded: dict = {}
 _rate_limit_last_drift_log: float = 0.0
 
+# Per-agent per-thread reply rate limit (2026-07-11, Jeremy). Agents were
+# blasting Jeremy with multiple messages in the same thread instead of
+# forming one complete thought — burning attention on partial answers.
+# Only enforced on COMPLETE agent messages (partial/streaming writes bypass;
+# so does Jeremys own dashboard-attributed reply, and the Move-to-Threads
+# no_deliver migration path). Key = (from_session, thread_id); value =
+# last-successful-complete-post unix ts.
+_thread_reply_rate_limits: dict = {}
+_THREAD_REPLY_WINDOW = 10  # seconds between complete replies to the same thread from the same agent
+
 
 def _rate_limit_budget_state(actions: dict, today_utc: str, budget: int) -> tuple[bool, int]:
     """Return (exhausted, used) for a session's auto-resume budget.
@@ -40191,6 +40201,31 @@ class CCHandler(BaseHTTPRequestHandler):
                     addressed = _check_thread_addressing(from_session, to_session, mbody)
                     if addressed:
                         return self._json(_addressing_error(addressed, from_session), 400)
+                # Per-agent per-thread reply rate limit. Only applies to
+                # COMPLETE agent replies — partials (initial "working..."
+                # placeholder) and dashboard-attributed messages (Jeremy) are
+                # exempt. Rationale: agents were blasting Jeremy with 3-4
+                # fragmentary messages instead of composing one coherent
+                # reply. See _thread_reply_rate_limits definition for context.
+                if (not partial) and (not _is_dashboard) and from_session:
+                    _now_f = time.time()
+                    _key = (from_session, tid)
+                    _last = _thread_reply_rate_limits.get(_key, 0.0)
+                    _elapsed = _now_f - _last
+                    if _elapsed < _THREAD_REPLY_WINDOW:
+                        _wait = int(_THREAD_REPLY_WINDOW - _elapsed) + 1
+                        return self._json({
+                            "error": f"rate limited: this thread only accepts one reply from you every {_THREAD_REPLY_WINDOW}s",
+                            "hint": "Consider your entire thought before you send a reply to the human. One well-formed reply beats three fragments — combine your points into a single message.",
+                            "retry_after_seconds": _wait,
+                            "thread": tid,
+                        }, 429)
+                    # Record the attempt now (not after INSERT). Rationale: if
+                    # the INSERT fails downstream, the agent will retry — and
+                    # we WANT the retry to still hit the rate window, not
+                    # bypass it. Prevents a rapid-retry loop from becoming a
+                    # blast vector.
+                    _thread_reply_rate_limits[_key] = _now_f
                 now = int(time.time())
                 pos_row = db.execute(
                     "SELECT COALESCE(MAX(position), -1) + 1 AS next_pos FROM messages "
