@@ -13128,12 +13128,22 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
     white-space: nowrap;
   }
   .peek-copy-btn:active { background: var(--accent); color: #fff; }
-  .overlay-body a { color: var(--accent); text-decoration: underline; text-underline-offset: 2px; cursor: pointer; }
+  /* Links inside body text inherit the surrounding text color so contrast
+     against the (dark or light) background always matches normal prose.
+     The underline is what signals "clickable," not the color — matches
+     Jeremy's readability preference (2026-07-11). Opacity dip on hover
+     is the only distinguishing visual since we lost the color signal. */
+  .overlay-body a { color: inherit; text-decoration: underline; text-underline-offset: 2px; cursor: pointer; }
+  .overlay-body a:hover { opacity: 0.75; }
   .overlay-body a:active { color: #79c0ff; }
-  .overlay-body .file-link { color: var(--cyan); text-decoration: none; border-bottom: 1px dashed var(--cyan); cursor: pointer; }
-  .overlay-body .file-link:active { color: #79ead3; }
-  .overlay-body .md-link { color: var(--yellow); text-decoration: none; border-bottom: 1px dashed var(--yellow); cursor: pointer; }
-  .overlay-body .md-link:active { color: #e8c547; }
+  /* File-path and .md-file spans — same treatment as inline links:
+     inherit text color, but keep the dashed underline so they're still
+     visually distinguishable from prose. Uses currentColor so the dash
+     always follows the text color. */
+  .overlay-body .file-link { color: inherit; text-decoration: none; border-bottom: 1px dashed currentColor; cursor: pointer; }
+  .overlay-body .file-link:hover { opacity: 0.75; }
+  .overlay-body .md-link { color: inherit; text-decoration: none; border-bottom: 1px dashed currentColor; cursor: pointer; }
+  .overlay-body .md-link:hover { opacity: 0.75; }
   /* Box-drawing tables/frames: keep monospace alignment, scroll sideways instead
      of wrapping (which detached borders and shredded rows on narrow screens). */
   .overlay-body .peek-box { display: block; white-space: pre; overflow-x: auto; max-width: 100%;
@@ -13311,7 +13321,9 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
   .md-content pre code { background: none; padding: 0; font-size: 0.9em; }
   .md-content blockquote { border-left: 3px solid var(--border); margin: 0 0 10px; padding: 2px 12px; color: var(--dim); }
   .md-content hr { border: none; border-top: 1px solid var(--border); margin: 12px 0; }
-  .md-content a { color: var(--accent); text-decoration: underline; }
+  /* Same treatment as .overlay-body a — inherit text color, keep underline. */
+  .md-content a { color: inherit; text-decoration: underline; text-underline-offset: 2px; }
+  .md-content a:hover { opacity: 0.75; }
   .md-content strong { font-weight: 700; }
   .md-content em { font-style: italic; }
   .md-content del { color: var(--dim); text-decoration: line-through; }
@@ -15557,7 +15569,8 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
   .notes-preview pre { background: var(--card); border: 1px solid var(--border); border-radius: 6px; padding: 12px 14px; overflow-x: auto; font-size: 0.82rem; margin: 10px 0; }
   .notes-preview code { background: var(--card); border-radius: 3px; padding: 1px 5px; font-size: 0.85em; }
   .notes-preview pre code { background: none; padding: 0; }
-  .notes-preview a { color: var(--accent); }
+  .notes-preview a { color: inherit; text-decoration: underline; text-underline-offset: 2px; }
+  .notes-preview a:hover { opacity: 0.75; }
   .notes-preview ul, .notes-preview ol { padding-left: 22px; margin: 6px 0; }
   .notes-preview li { margin: 3px 0; }
   /* Checklist items */
