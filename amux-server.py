@@ -29075,7 +29075,12 @@ async function _tInlineReplySubmit(tid, parentMid) {
     ? (text ? text + '\n\n' : '') + attachPaths.join('\n')
     : text;
   const r = await fetch(API + '/api/threads/' + encodeURIComponent(tid) + '/messages', {
-    method: 'POST', headers: {'Content-Type': 'application/json'},
+    // X-Amux-UI-Token proves this POST is from the dashboard (a human,
+    // Jeremy). Without it the server's spoof-protection treats the request
+    // as an agent context and requires X-Amux-Session — see T-81 M-1007
+    // incident in the /api/threads POST handler comment. Server-injected
+    // window._AMUX_UI_TOKEN is defined per session in the served HTML.
+    method: 'POST', headers: {'Content-Type': 'application/json', 'X-Amux-UI-Token': (window._AMUX_UI_TOKEN || '')},
     body: JSON.stringify({body, parent_id: parentMid, blocking}),
   });
   if (r.ok) {
@@ -29124,7 +29129,9 @@ async function _threadsSubmitNew() {
   if (_tNewCtx && _tNewCtx.mode === 'reply') {
     const {tid, parentMid} = _tNewCtx;
     const r = await fetch(API + '/api/threads/' + encodeURIComponent(tid) + '/messages', {
-      method: 'POST', headers: {'Content-Type': 'application/json'},
+      // Dashboard identity via the UI token — see spoof-protection note
+      // on the inline-reply POST above.
+      method: 'POST', headers: {'Content-Type': 'application/json', 'X-Amux-UI-Token': (window._AMUX_UI_TOKEN || '')},
       body: JSON.stringify({body, parent_id: parentMid, blocking}),
     });
     if (r.ok) { _threadsCloseNew(); _tExpanded.add(tid); _tExpandedSave(); _threadsLoad(); }
@@ -29136,7 +29143,9 @@ async function _threadsSubmitNew() {
   if (!target) { alert('Pick a target session.'); return; }
   if (!title) { alert('Title required.'); return; }
   const r = await fetch(API + '/api/threads', {
-    method: 'POST', headers: {'Content-Type': 'application/json'},
+    // See spoof-protection note on inline-reply POST above — dashboard
+    // proves Jeremy identity via the UI token.
+    method: 'POST', headers: {'Content-Type': 'application/json', 'X-Amux-UI-Token': (window._AMUX_UI_TOKEN || '')},
     body: JSON.stringify({title, body, to_session: target, blocking}),
   });
   if (r.ok) { _threadsCloseNew(); _threadsLoad(); }
@@ -40037,9 +40046,29 @@ class CCHandler(BaseHTTPRequestHandler):
                 if not title:
                     return self._json({"error": "title required"}, 400)
                 mbody = (bj.get("body") or "").strip()
-                from_session = (bj.get("from_session")
-                                or self.headers.get("X-Amux-Session")
-                                or "").strip()
+                # SPOOF PROTECTION (T-81 M-1007, 2026-07-10):
+                # Previously the handler took `from_session` from body OR
+                # X-Amux-Session header OR empty. An agent that hit /api/threads
+                # via raw curl with no X-Amux-Session (or with `from_session:""`
+                # in the body to intentionally bypass) ended up posting as
+                # Jeremy — CD-WattcoAccMigration posted M-1007 with content
+                # authored by the agent but "SENT Jeremy → CD-Wattco…" in the
+                # UI. Only the dashboard (identified by the UI token) may
+                # attribute a message to Jeremy. Every other caller is treated
+                # as an agent and MUST carry X-Amux-Session; body-level
+                # from_session is ignored for them.
+                _is_dashboard = _session_destructive_allowed(self.headers)
+                _hdr_session = (self.headers.get("X-Amux-Session") or "").strip()
+                if _is_dashboard:
+                    from_session = (bj.get("from_session") or _hdr_session or "").strip()
+                else:
+                    if not _hdr_session:
+                        return self._json({
+                            "error": "missing X-Amux-Session header",
+                            "hint": ("Agents must set X-Amux-Session (or use the `amux threads` CLI). "
+                                     "Only the dashboard may post as Jeremy."),
+                        }, 403)
+                    from_session = _hdr_session
                 to_session = (bj.get("to_session") or "").strip()
                 if not from_session and not to_session:
                     return self._json({"error": "must specify either from_session (agent posting) or to_session (Jeremy posting)"}, 400)
@@ -40120,9 +40149,24 @@ class CCHandler(BaseHTTPRequestHandler):
                 mbody = (bj.get("body") or "").strip()
                 if not mbody:
                     return self._json({"error": "body required"}, 400)
-                from_session = (bj.get("from_session")
-                                or self.headers.get("X-Amux-Session")
-                                or "").strip()
+                # Spoof protection — same shape as POST /api/threads above;
+                # see the T-81 M-1007 comment there for the incident context.
+                # Only the dashboard (UI token) may attribute a reply to
+                # Jeremy. Every other caller is treated as an agent and MUST
+                # carry X-Amux-Session; body-level from_session is ignored
+                # for them.
+                _is_dashboard = _session_destructive_allowed(self.headers)
+                _hdr_session = (self.headers.get("X-Amux-Session") or "").strip()
+                if _is_dashboard:
+                    from_session = (bj.get("from_session") or _hdr_session or "").strip()
+                else:
+                    if not _hdr_session:
+                        return self._json({
+                            "error": "missing X-Amux-Session header",
+                            "hint": ("Agents must set X-Amux-Session (or use the `amux threads` CLI). "
+                                     "Only the dashboard may reply as Jeremy."),
+                        }, 403)
+                    from_session = _hdr_session
                 # Default to_session = the other participant in the thread.
                 to_session = bj.get("to_session")
                 if to_session is None:
