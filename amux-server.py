@@ -5693,14 +5693,21 @@ def _init_db():
     db.commit()
     db.executescript(_DB_SCHEMA)
     # Ensure built-in statuses have correct positions (idempotent for existing DBs)
+    # `needs-approval` (2026-07-12): when an agent's work-in-progress hits an
+    # approval gate (Jeremy must decide something), the agent PATCHes to this
+    # status and the watchdog stops nudging every 15 min. Sits between `doing`
+    # and `review` because it's "actively-in-my-hands-until-Jeremy-answers".
+    # Watchdog's ACTIVE_STATUSES = {"todo"} — anything non-todo is naturally
+    # silent, no watchdog code change needed.
     for pos, (sid, label) in enumerate([
-        ("backlog",   "Backlog"),
-        ("todo",      "To Do"),
-        ("doing",     "In Progress"),
-        ("review",    "In Review"),
-        ("done",      "Done"),
-        ("verified",  "Verified"),
-        ("discarded", "Discarded"),
+        ("backlog",        "Backlog"),
+        ("todo",           "To Do"),
+        ("doing",          "In Progress"),
+        ("needs-approval", "Needs Approval"),
+        ("review",         "In Review"),
+        ("done",           "Done"),
+        ("verified",       "Verified"),
+        ("discarded",      "Discarded"),
     ]):
         db.execute(
             "INSERT INTO statuses (id, label, position, is_builtin) VALUES (?, ?, ?, 1)"
@@ -6097,7 +6104,7 @@ def _migrate_flat_to_sqlite():
         return  # nothing to migrate
     # Import statuses
     statuses = raw.get("statuses", list(_DEFAULT_STATUSES))
-    builtin_ids = {"backlog", "todo", "doing", "review", "done", "verified", "discarded"}
+    builtin_ids = {"backlog", "todo", "doing", "needs-approval", "review", "done", "verified", "discarded"}
     existing_ids = {s["id"] for s in statuses}
     for s in _DEFAULT_STATUSES:
         if s["id"] not in existing_ids:
@@ -6431,13 +6438,14 @@ def _notify_session_of_retake(session_name: str, item_id: str, title: str,
 
 
 _DEFAULT_STATUSES = [
-    {"id": "backlog",   "label": "Backlog"},
-    {"id": "todo",      "label": "To Do"},
-    {"id": "doing",     "label": "In Progress"},
-    {"id": "review",    "label": "In Review"},
-    {"id": "done",      "label": "Done"},
-    {"id": "verified",  "label": "Verified"},
-    {"id": "discarded", "label": "Discarded"},
+    {"id": "backlog",        "label": "Backlog"},
+    {"id": "todo",           "label": "To Do"},
+    {"id": "doing",          "label": "In Progress"},
+    {"id": "needs-approval", "label": "Needs Approval"},
+    {"id": "review",         "label": "In Review"},
+    {"id": "done",           "label": "Done"},
+    {"id": "verified",       "label": "Verified"},
+    {"id": "discarded",      "label": "Discarded"},
 ]
 
 
@@ -9426,6 +9434,41 @@ resp=$(curl -sk -w '\\n%{http_code}' -X PATCH -H 'Content-Type: application/json
 code=$(echo "$resp" | tail -1); body=$(echo "$resp" | head -n -1)
 [ "$code" = "200" ] || { echo "PATCH failed ($code): $body" >&2; exit 1; }
 ```
+
+### Hitting an approval gate on a task — use `needs-approval`
+
+When you're working an item (`doing`) and you hit a point where JEREMY has to
+decide something before you can continue — a permission grant, a strategic
+choice, a security clearance, a password to hand you, a "should I DROP this
+DATABASE" question — do this:
+
+1. Post the question to Jeremy via a Thread (that's where he sees his inbox).
+2. PATCH the board item to `needs-approval` with the specific question you're
+   waiting on written in `desc`, and reference the thread id if you opened
+   one:
+   ```bash
+   amux board needs-approval TASK-ID
+   # or via curl:
+   curl -sk -X PATCH -H 'Content-Type: application/json' \\
+     -d '{"status":"needs-approval","desc":"Blocked on: <one-line question>. Thread T-NNN."}' \\
+     $AMUX_URL/api/board/TASK-ID
+   ```
+
+**Why this matters:** the board watchdog nudges you every 15 min while items
+sit in `todo`. If you leave an item in `todo` (or refuse to claim it) while
+you actually wait on Jeremy, the watchdog burns tokens re-poking you and
+Jeremy can't see the item is his to answer. Moving to `needs-approval`
+silences the watchdog AND flags the item in Jeremy's dashboard as awaiting
+his decision.
+
+When Jeremy answers, either he PATCHes the item back to `doing` himself, or
+he tells you in the thread — at which point YOU PATCH it back to `doing`
+and resume.
+
+`needs-approval` is only for items where the blocker is Jeremy's decision.
+For "I'm waiting on another agent's dependency" use `doing` and note it in
+`desc`; the watchdog doesn't nudge `doing`. For "I'm parking this indefinitely"
+use `backlog`.
 
 ### Threads — conversations with Jeremy or between agents
 
