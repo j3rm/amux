@@ -12744,7 +12744,13 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
     --text: #1f2328; --dim: #656d76; --accent: #0969da;
     --green: #1a7f37; --red: #cf222e; --yellow: #9a6700;
     --cyan: #0550ae;
-    /* aliases inherit through cascade — no re-declaration needed */
+    /* Aliases MUST be re-declared here — CSS custom properties are
+       computed at declaration point, so :root's `--fg: var(--text)`
+       locked in the DARK --text value. Without these lines, light mode
+       inherits dark thread titles → near-white text on white bg. */
+    --card-bg: var(--card);
+    --fg: var(--text);
+    --muted: var(--dim);
   }
   body.light .board-sortable-ghost { background: rgba(9,105,218,0.08) !important; }
   body.light .log-line { filter: none; }
