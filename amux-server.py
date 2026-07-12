@@ -12729,12 +12729,22 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
     --text: #e6edf3; --dim: #8b949e; --accent: #58a6ff;
     --green: #3fb950; --red: #f85149; --yellow: #d29922;
     --cyan: #39d2c0;
+    /* Aliases for legacy var names used in inline styles across the
+       dashboard (New Thread modal, peek overlay, etc.). The modal at
+       #t-new-modal was rendering with browser-default black text on
+       black card-bg because these vars were referenced but never
+       defined — Jeremy screenshot 2026-07-12 17:09. Aliasing them to
+       the real vars fixes both modes without touching every callsite. */
+    --card-bg: var(--card);
+    --fg: var(--text);
+    --muted: var(--dim);
   }
   body.light {
     --bg: #ffffff; --card: #f6f8fa; --border: #d0d7de;
     --text: #1f2328; --dim: #656d76; --accent: #0969da;
     --green: #1a7f37; --red: #cf222e; --yellow: #9a6700;
     --cyan: #0550ae;
+    /* aliases inherit through cascade — no re-declaration needed */
   }
   body.light .board-sortable-ghost { background: rgba(9,105,218,0.08) !important; }
   body.light .log-line { filter: none; }
