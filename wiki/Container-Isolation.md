@@ -200,13 +200,20 @@ The Anthropic auth-refresh code inside Claude uses in-place writes, which is why
        target: /mnt/gitdata/agent-skills
        mode: ro
 
-     # (7) CD-* ONLY — shared developer OAuth apps + setup runbooks. Read-only.
-     # /mnt/gitdata/ClientData/_shared/ holds `zoho_app.json`, `qbo_app.json`
-     # (the shared `Claude.Ai.Migration` OAuth apps used across every CD-*
-     # client) plus the two SETUP.md runbooks. CD-Wattco flagged
-     # qbo_app.json as unreachable 2026-07-13 (the AccountingMigration work
-     # needs QBO credentials to refresh tokens). Same pattern as (6): CD-*
-     # only, other orgs have no reason to hold these.
+     # (7) QBO-MIGRATION CD-* ONLY — currently CD-Wattco + CD-Shurloc.
+     # /mnt/gitdata/ClientData/_shared/ holds the shared `Claude.Ai.Migration`
+     # OAuth app credentials (qbo_app.json + zoho_app.json) plus the two
+     # SETUP.md runbooks. Only the CD-* clients doing QBO->Zoho work should
+     # need `qbo_app.json`; the Zoho half is already seeded fleet-wide as
+     # `zohoDirectOAuth` in `nwddi.credentials.json`, so non-QBO CD-* orgs
+     # skip this mount entirely. Ruled by Jeremy 2026-07-13: "change to
+     # Wattco and Shurloc only having access to that."
+     #
+     # Add a new client here only if they start a QBO->Zoho migration —
+     # otherwise leave this mount off. If you find yourself adding it for
+     # everyone again, revisit whether qbo_app.json needs to be split off
+     # from _shared/ into a separate qbo/ subdir so this mount can stay
+     # narrow.
      - source: /mnt/gitdata/ClientData/_shared
        target: /mnt/gitdata/ClientData/_shared
        mode: ro
