@@ -182,13 +182,14 @@ Whichever container's claude refreshes first rotates the token pair once; the sh
        target: /home/amux/.gitconfig
        mode: ro
 
-     # (6) Shared agent-skills library (Zoho REST API playbooks, etc.).
-     # Read-only — skills are curated in github.com/j3rm/agent-skills and
-     # mounted so every agent can consult the same procedures without
-     # duplicating them into each org tree. Added fleet-wide 2026-07-13
-     # per Jeremy after discovering CD-* containers had no way to reach
-     # the shared skills (agents were operating from CLAUDE.md-encoded
-     # procedures alone).
+     # (6) CD-* ONLY — shared agent-skills library (Zoho REST API playbooks).
+     # Read-only. Skills are curated in github.com/j3rm/agent-skills (mirrored
+     # from ~/.claude/skills → /mnt/gitdata/agent-skills). Every CD-* client
+     # agent hits the same Zoho procedures, so they consult one shared library
+     # instead of re-deriving the same auth/write/quirks each time. Do NOT add
+     # this mount to non-CD-* orgs (RTG/iSchedule/EmberCRM/ShareScore/Cypra
+     # etc.) — those agents don't do Zoho work and the skills would just be
+     # noise. Ruled by Jeremy 2026-07-13.
      - source: /mnt/gitdata/agent-skills
        target: /mnt/gitdata/agent-skills
        mode: ro
