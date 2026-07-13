@@ -200,20 +200,27 @@ The Anthropic auth-refresh code inside Claude uses in-place writes, which is why
        target: /mnt/gitdata/agent-skills
        mode: ro
 
-     # (7) QBO-MIGRATION CD-* ONLY — currently CD-Wattco + CD-Shurloc.
-     # /mnt/gitdata/ClientData/_shared/ holds the shared `Claude.Ai.Migration`
-     # OAuth app credentials (qbo_app.json + zoho_app.json) plus the two
-     # SETUP.md runbooks. Only the CD-* clients doing QBO->Zoho work should
-     # need `qbo_app.json`; the Zoho half is already seeded fleet-wide as
-     # `zohoDirectOAuth` in `nwddi.credentials.json`, so non-QBO CD-* orgs
-     # skip this mount entirely. Ruled by Jeremy 2026-07-13: "change to
-     # Wattco and Shurloc only having access to that."
-     #
-     # Add a new client here only if they start a QBO->Zoho migration —
-     # otherwise leave this mount off. If you find yourself adding it for
-     # everyone again, revisit whether qbo_app.json needs to be split off
-     # from _shared/ into a separate qbo/ subdir so this mount can stay
-     # narrow.
+     # (7a) ALL CD-* — shared Zoho developer OAuth app + setup runbook.
+     # File-level mounts (not the whole `_shared/` dir) so QBO-side files
+     # can be kept separate. Every CD-* client agent needs Zoho access
+     # to build consent URLs against the shared `Claude.Ai.Migration`
+     # app; the Zoho half is safe to expose fleet-wide (already seeded
+     # as `zohoDirectOAuth` in the shared cred file too — this is the
+     # source-of-truth copy). Ruled by Jeremy 2026-07-13.
+     - source: /mnt/gitdata/ClientData/_shared/zoho_app.json
+       target: /mnt/gitdata/ClientData/_shared/zoho_app.json
+       mode: ro
+     - source: /mnt/gitdata/ClientData/_shared/Zoho-OAuth-SETUP.md
+       target: /mnt/gitdata/ClientData/_shared/Zoho-OAuth-SETUP.md
+       mode: ro
+
+     # (7b) QBO-MIGRATION CD-* ONLY — currently CD-Wattco + CD-Shurloc.
+     # Full `_shared/` dir mount (supersedes (7a) — covers qbo_app.json,
+     # QBO-OAuth-SETUP.md, and the Zoho files). Only CD-* clients doing
+     # QBO->Zoho work should reach QBO credentials — Jeremy ruled 2026-
+     # 07-13 that qbo_app.json must stay narrow. When adding a new QBO
+     # migration client: DROP the two (7a) file mounts and replace with
+     # this single dir mount (the dir mount shadows the file mounts).
      - source: /mnt/gitdata/ClientData/_shared
        target: /mnt/gitdata/ClientData/_shared
        mode: ro
