@@ -200,6 +200,17 @@ The Anthropic auth-refresh code inside Claude uses in-place writes, which is why
        target: /mnt/gitdata/agent-skills
        mode: ro
 
+     # (7) CD-* ONLY — shared developer OAuth apps + setup runbooks. Read-only.
+     # /mnt/gitdata/ClientData/_shared/ holds `zoho_app.json`, `qbo_app.json`
+     # (the shared `Claude.Ai.Migration` OAuth apps used across every CD-*
+     # client) plus the two SETUP.md runbooks. CD-Wattco flagged
+     # qbo_app.json as unreachable 2026-07-13 (the AccountingMigration work
+     # needs QBO credentials to refresh tokens). Same pattern as (6): CD-*
+     # only, other orgs have no reason to hold these.
+     - source: /mnt/gitdata/ClientData/_shared
+       target: /mnt/gitdata/ClientData/_shared
+       mode: ro
+
    readonly_cross_mounts: []
    env:
      # Per-org MCP credentials (Mixpeek, GDrive, etc.) — usually empty at
