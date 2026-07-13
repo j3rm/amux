@@ -194,8 +194,17 @@ Whichever container's claude refreshes first rotates the token pair once; the sh
    - CD-<client> / misc → `/mnt/gitdata/amux-agents-mono/<name>/org-spec.yml` → `github.com/j3rm/amux-agents-mono`
 3. Commit + push the backup
 4. Set `CC_RUNTIME="docker:<name>"` on each of the sessions listed in the spec's `sessions:`
-5. Wake one session in the org first (serial — avoids `ensure_org_container` race). Verify the container comes up. Then wake the rest.
-6. Next section for the shared amux-agent-base image behaviors your new container inherits from tonight's changes.
+5. **Seed the container home from a sibling org — for shared-cred orgs only.** The shared `.credentials.json` mount alone is NOT enough; Claude Code also needs `.claude.json` (config file that says "you're logged in as this account, here's your trust map"). If missing, the session lands at the OAuth login screen even though tokens are present (2026-07-13: CD-CPAP hit this on first wake). Fix:
+   ```bash
+   SRC=~/.amux/orgs/<sibling-org>/home        # e.g. CD-Wattco for a new CD-*, EmberCRM for a new Big-4
+   DST=~/.amux/orgs/<name>/home
+   cp -a "$SRC/.claude.json"           "$DST/.claude.json"
+   cp -a "$SRC/.claude/.mcp.json"      "$DST/.claude/.mcp.json"      # if the sibling has one
+   cp -a "$SRC/.claude/settings.json"  "$DST/.claude/settings.json"  # if the sibling has one
+   ```
+   Skip this step for a first-of-a-kind org that will do a fresh `/login` — those need to authenticate to populate `.claude.json` and the shared cred file organically.
+6. Wake one session in the org first (serial — avoids `ensure_org_container` race). Verify the container comes up. Then wake the rest.
+7. Next section for the shared amux-agent-base image behaviors your new container inherits from tonight's changes.
 
 That's it — no code change. `ensure_org_container(name)` reads the spec on demand.
 
