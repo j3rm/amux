@@ -163,6 +163,25 @@ Whichever container's claude refreshes first rotates the token pair once; the sh
        target: /home/jwesley/.amux/uploads
        mode: ro
 
+     # (5) Per-org SSH deploy key + gitconfig. Every existing CD-* / Big-4
+     # org has these; new orgs should too if the agent will do any git work
+     # (clone client repos, commit + push to per-client repos, ssh into
+     # provisioned VMs). The SSH content is COPIED (not symlinked) from any
+     # existing sibling org so a compromise on one org can't reach another's
+     # key file. All CD-* orgs happen to share the same deploy_key CONTENT
+     # (jwesley@btrcc01 ed25519) already authorized on the NWDDI org's
+     # GitHub repos + per-client hosts — new CD-* orgs reuse it. Big-4 orgs
+     # each have their own scoped key. Playbook step (below): amux-helper
+     # `mkdir -p ~/.amux/orgs/<name>/secrets/ssh`, `cp` `deploy_key` +
+     # `deploy_key.pub` + `config` + empty `known_hosts` from a sibling
+     # org's secrets dir, `cp` `gitconfig` too, chmod 700/600/644 per file.
+     - source: ~/.amux/orgs/<name>/secrets/ssh
+       target: /home/amux/.ssh
+       mode: rw
+     - source: ~/.amux/orgs/<name>/secrets/gitconfig
+       target: /home/amux/.gitconfig
+       mode: ro
+
    readonly_cross_mounts: []
    env:
      # Per-org MCP credentials (Mixpeek, GDrive, etc.) — usually empty at
