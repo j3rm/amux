@@ -113,6 +113,12 @@ Whichever container's claude refreshes first rotates the token pair once; the sh
 
 **Failure mode still possible — reboot-startup race:** If all Gmail-side containers restart simultaneously and each fires an initial token refresh, one of them will race the others and briefly hold a stale copy in memory, which can wipe the shared file. Recovery: copy a still-valid credentials file from a container that hasn't had claude re-read it yet (e.g., Scorpio, if it wasn't restarted at the same time as the others). Long-term mitigation: stagger session waking after a fleet cutover.
 
+**Failure mode #2 — inode replacement invisible to running containers (2026-07-13):** Docker file-level bind mounts (`--mount type=bind,source=<file>,target=<file>`) bind to the **inode**, not the path. Any tmp-write-then-rename update to the shared cred file (the Pythonic `open(tmp,'w'); os.replace(tmp, target)` pattern, `mv`, `install`, `cp` with `--remove-destination`, most editors' "save" flow) allocates a **new inode** at the host path. Host sees new content instantly. **Every running container still sees the old (now-unlinked) inode via its bind mount, indefinitely.** Symptom: you write a change; `python3 -c 'import json; print(json.load(open("~/.amux/shared-creds/nwddi.credentials.json")).keys())'` from host shows the new key; the same command via `docker exec amux-org-<any-CD-org> …` still shows the pre-change keys. Fix — pick one:
+- **In-place write:** `open(path, 'r+')` (or `w`) — truncates the current inode without unlinking. Both host and containers see the update on next read. Only safe if writes are atomic on your filesystem and you can accept the brief moment where the file is truncated. This is the pattern that must be used for one-off manual edits.
+- **Fleet recreate after write:** `for c in $(docker ps --filter name=amux-org-CD- --format '{{.Names}}'); do docker rm -f "$c"; done`, then re-wake each session. Only pick this if the in-place write can't be arranged (e.g., third-party tool insists on rename semantics). This is what we did on 2026-07-13 after `os.replace()` swapped the inode during a `zohoDirectOAuth` seed.
+
+The Anthropic auth-refresh code inside Claude uses in-place writes, which is why the wipe-cascade fix works day-to-day — that machinery preserves the inode. Manual edits from host tools are the trap.
+
 ## How to add a new session to an existing org
 
 1. `~/.amux/sessions/<name>.env` — write it (or copy an existing one, edit `CC_DIR`, `CC_FLAGS`, `CC_ORG`)
