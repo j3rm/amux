@@ -5423,16 +5423,23 @@ import json,sys; print(json.dumps({'body':sys.argv[1]}))" "$body")
 import json,sys; d=json.load(sys.stdin)
 print(d.get('id','error: '+str(d.get('error','?'))),d.get('status',''))" ;;
       new)
-        # amux threads new <session> <title> [body]  — start a new thread with an agent
+        # amux threads new <session|Jeremy> <title> [body]  — start a new thread.
+        # `Jeremy` (case-insensitive) is a shorthand for "message for Jeremy" —
+        # the server encodes that as to_session="", so we normalize here before
+        # the POST. Any other target routes to that agent session.
         target="$1"; title="$2"; shift 2 2>/dev/null || true
         if [ -z "$target" ] || [ -z "$title" ]; then
-          echo "Usage: amux threads new <session> <title> [body]" >&2; exit 1
+          echo "Usage: amux threads new <session|Jeremy> <title> [body]" >&2; exit 1
         fi
+        case "$(printf %s "$target" | tr '[:upper:]' '[:lower:]')" in
+          jeremy) target="" ;;
+        esac
         body="$*"
         if [ -z "$body" ] && [ ! -t 0 ]; then body=$(cat); fi
         payload=$(python3 -c "
 import json,sys; print(json.dumps({'title':sys.argv[1],'body':sys.argv[2],'to_session':sys.argv[3]}))" "$title" "$body" "$target")
         curl -sk -X POST -H 'Content-Type: application/json' \
+          -H "X-Amux-Session: ${AMUX_SESSION:-}" \
           -d "$payload" "$AMUX_URL/api/threads" | python3 -c "
 import json,sys; d=json.load(sys.stdin)
 print(d.get('id','error: '+str(d.get('error','?'))))" ;;
