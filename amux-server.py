@@ -44478,7 +44478,16 @@ p{{color:#888;margin:12px 0 28px;font-size:0.9rem;line-height:1.5}}
                     closer, other = a, b
                     ok, msg = _channel_end(closer, other)
                     return self._json({"ok": ok, "message": msg}, 200 if ok else 500)
-            return self._json({"error": "channel route not found"}, 404)
+            return self._json({
+                "error": "channel route not found",
+                "hint": ("valid routes: "
+                         "POST /api/channels/<from>/<to>/messages {\"text\":\"...\"} to send, "
+                         "GET /api/channels/<a>/<b>/messages to read history, "
+                         "GET /api/channels?session=<name> to list channels, "
+                         "DELETE /api/channels/<a>/<b>/messages to close. "
+                         "<from>/<to> are session names — both required, no /send suffix."),
+                "attempted_path": path,
+            }, 404)
 
         # ── CRM / People ─────────────────────────────────────────────────────
         if path == "/api/crm/contacts" or path.startswith("/api/crm/"):
