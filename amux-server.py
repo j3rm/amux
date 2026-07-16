@@ -28861,7 +28861,7 @@ function _tRenderMessages(t) {
   // Discard-thread button lives at the very bottom, right-aligned, so it
   // doesn't eat a whole row above the messages just to hold one icon.
   html += `<div style="display:flex;justify-content:flex-end;margin-top:4px;">
-      <button style="${_TICON_BTN_STYLE}opacity:0.55;" onclick="_tDiscardThread('${tidEsc}')" title="Discard thread">${_TICON_TRASH}</button>
+      <button style="${_TICON_BTN_STYLE}opacity:0.55;" onclick="event.stopPropagation();_tDiscardThread('${tidEsc}')" title="Discard thread">${_TICON_TRASH}</button>
     </div>`;
   html += '</div>';
   return html;

@@ -20,10 +20,15 @@ FROM python:3.11-slim
 
 # Base tools every agent needs at runtime. openssh-client is here so git can
 # use ssh remotes; ca-certificates for TLS.
+# postgresql-client is needed by the J3-Marketing analytics agent (per
+# marketing-brain DEPLOY.md D3) to reach the marketing metrics DB via psql;
+# adding it to the base image so every container ships with it uniformly
+# rather than a per-org variant. Cost: ~15 MB.
 RUN apt-get update && apt-get install -y --no-install-recommends \
         tini tmux curl git ca-certificates procps openssh-client \
         nodejs npm \
         less jq sqlite3 vim-tiny \
+        postgresql-client \
     && rm -rf /var/lib/apt/lists/*
 
 # Claude Code CLI + OpenAI Codex CLI, installed globally so every session's
@@ -62,6 +67,20 @@ RUN mkdir -p /run/tmux && chmod 0777 /run/tmux
 # container — no per-session opt-in required, no drift when a session's config
 # is reset by /compact or a wipe-cascade.
 ENV CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN=1
+
+# Suppress the periodic session-rating modal ("How is Claude doing this
+# session? 1: Bad 2: Fine 3: Good 0: Dismiss"). The modal captures Enter for
+# the rating response, so when auto-continue composes a next-step prompt WHILE
+# the modal is visible, the composed text lands in the input buffer but the
+# submit never fires — the session sits idle indefinitely with actionable
+# intent stranded in the pane. Root cause of the CC_AUTO_CONTINUE compose-
+# no-submit failure — see wiki/Container-Isolation.md and notes/
+# substrate-finding-2026-07-14-auto-continue-no-submit. Observed 3 instances
+# across 2 days on 2 different sessions before we identified the modal as the
+# mechanism; live scan on 2026-07-15 flagged 6 sessions currently stuck with
+# unsubmitted buffer text. Disabling the survey eliminates the failure at
+# source. Env var extracted from the Claude Code 2.1.206 binary via `strings`.
+ENV CLAUDE_CODE_DISABLE_FEEDBACK_SURVEY=1
 
 # Uid 1000 = jwesley on host, so bind-mounted files owned by jwesley are
 # read/write to the container process without any chown dance.
