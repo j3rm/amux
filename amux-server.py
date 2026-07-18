@@ -28707,7 +28707,7 @@ function _threadsRender() {
   }
   if (hidden > 0) {
     html += `<div style="text-align:center;padding:14px 8px 24px;">
-      <a href="javascript:void(0)" onclick="_tToggleShowAllThreads()" style="font-size:0.85rem;color:var(--accent, #6aa);text-decoration:none;border-bottom:1px dashed currentColor;padding:8px 14px;display:inline-block;min-height:44px;line-height:28px;">Show \${hidden} older thread\${hidden === 1 ? '' : 's'}</a>
+      <a href="javascript:void(0)" onclick="_tToggleShowAllThreads()" style="font-size:0.85rem;color:var(--accent, #6aa);text-decoration:none;border-bottom:1px dashed currentColor;padding:8px 14px;display:inline-block;min-height:44px;line-height:28px;">Show ${hidden} older thread${hidden === 1 ? '' : 's'}</a>
     </div>`;
   } else if (_tShowAllThreads && ranked.length > _T_THREADS_PAGE_SIZE) {
     html += `<div style="text-align:center;padding:14px 8px 24px;">
