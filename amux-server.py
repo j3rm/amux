@@ -28644,6 +28644,21 @@ function _updateThreadsBadge(list) {
 // never got assigned, leaving the tab visible but the history missing.
 let _tInlineReplyFor = null;
 
+// Threads-list smart paging (added 2026-07-18). Mobile PWA was slow to render
+// the full threads list — every SSE refresh rebuilds the whole innerHTML and
+// every visible thread has to render its messages too. Cap the visible set at
+// the N most recent, but ALWAYS show any thread with an unread-to-Jeremy
+// message (regardless of age) or a star, so nothing actionable is hidden.
+// Older-and-quiet threads collapse behind a "Show N older threads" toggle
+// mirroring the per-thread "Show N older messages" pattern already in the
+// message renderer.
+const _T_THREADS_PAGE_SIZE = 10;
+let _tShowAllThreads = false;
+function _tToggleShowAllThreads() {
+  _tShowAllThreads = !_tShowAllThreads;
+  _threadsRender();
+}
+
 function _threadsRender() {
   const root = document.getElementById('threads-list');
   if (!root) return;
@@ -28667,7 +28682,38 @@ function _threadsRender() {
     return;
   }
   let html = _tRenderFlagSection(list);
-  for (const t of list) html += _tRenderThread(t);
+  // Smart paging: default = 10 most-recently-updated threads + any thread
+  // with an unread-to-Jeremy message or a star (regardless of age). Older
+  // quiet threads collapse behind a "Show N older threads" link so mobile
+  // doesn't render everything up front. Toggle via _tToggleShowAllThreads.
+  const ranked = list.map(t => {
+    const anyUnread = t.messages.some(m => !m.to_session && !m.read && m.status === 'complete');
+    const newestUpdated = t.messages.reduce((mx, m) => Math.max(mx, m.updated || 0), t.updated || 0);
+    return {t, anyUnread, newestUpdated};
+  });
+  // Sort: starred first, then newest-updated first. Same order as before —
+  // paging just clips the tail.
+  ranked.sort((a, b) => (b.t.starred - a.t.starred) || (b.newestUpdated - a.newestUpdated));
+  let shown = 0;
+  let hidden = 0;
+  for (const {t, anyUnread} of ranked) {
+    const mustShow = anyUnread || !!t.starred;
+    if (_tShowAllThreads || mustShow || shown < _T_THREADS_PAGE_SIZE) {
+      html += _tRenderThread(t);
+      shown++;
+    } else {
+      hidden++;
+    }
+  }
+  if (hidden > 0) {
+    html += `<div style="text-align:center;padding:14px 8px 24px;">
+      <a href="javascript:void(0)" onclick="_tToggleShowAllThreads()" style="font-size:0.85rem;color:var(--accent, #6aa);text-decoration:none;border-bottom:1px dashed currentColor;padding:8px 14px;display:inline-block;min-height:44px;line-height:28px;">Show \${hidden} older thread\${hidden === 1 ? '' : 's'}</a>
+    </div>`;
+  } else if (_tShowAllThreads && ranked.length > _T_THREADS_PAGE_SIZE) {
+    html += `<div style="text-align:center;padding:14px 8px 24px;">
+      <a href="javascript:void(0)" onclick="_tToggleShowAllThreads()" style="font-size:0.85rem;color:var(--muted);text-decoration:none;padding:8px 14px;display:inline-block;min-height:44px;line-height:28px;">Collapse older threads</a>
+    </div>`;
+  }
   root.innerHTML = html;
   // Restore drafts, then focus + selection + scroll. Order matters:
   //   1. set .value FIRST so selection ranges are valid
