@@ -84,6 +84,29 @@ if [ -d "${AMUX_DIR}/notes" ]; then
   echo "${LOG_PREFIX} Backed up ${NOTE_COUNT} notes"
 fi
 
+# ── Step 4b: Project memory files (~/.claude/projects/*/memory) ──────────────
+#
+# These are the per-project memory notes agents build up over time
+# (MEMORY.md indexes + reference_*.md / rule_*.md topic files). Small
+# (~5MB total across all projects) and change rarely, but they hold
+# hard-won rules that would be painful to lose. The large per-session
+# .jsonl transcripts under ~/.claude/projects/*/ are deliberately NOT
+# included — only the `memory/` subdirs.
+
+if [ -d "${HOME}/.claude/projects" ]; then
+  mkdir -p "${BACKUP_DIR}/memory"
+  # rsync every project's memory/ subdir, preserving the project dir
+  # name (e.g. -mnt-gitdata-amux) so restore knows where each file
+  # belongs. --delete keeps the backup in sync with removals.
+  rsync -a --delete \
+    --include='*/' \
+    --include='*/memory/***' \
+    --exclude='*' \
+    "${HOME}/.claude/projects/" "${BACKUP_DIR}/memory/"
+  MEM_COUNT=$(find "${BACKUP_DIR}/memory" -type f -name '*.md' 2>/dev/null | wc -l)
+  echo "${LOG_PREFIX} Backed up ${MEM_COUNT} project memory files"
+fi
+
 # ── Step 5: Server config (credentials) ──────────────────────────────────────
 
 mkdir -p "${BACKUP_DIR}/config"
