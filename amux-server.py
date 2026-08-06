@@ -41983,6 +41983,16 @@ class CCHandler(BaseHTTPRequestHandler):
                 due = body.get("due", "").strip() or None
                 due_time = body.get("due_time", "").strip() or None
                 creator = body.get("creator", "")
+                # Do NOT default creator from any header. If the poster omits
+                # creator, we treat it as unknown — and the assignee-notify
+                # guard below (creator != session) will FIRE the ping rather
+                # than suppress it. Reasoning: an over-fire is annoying but
+                # visible; a silent miss (agent posts for another agent,
+                # forgets creator, we assume creator=self, notify never
+                # fires, task rots) is invisible and costly. Agents that
+                # want the ping suppressed MUST explicitly send
+                # `creator: <their-session>` in the body. The `amux board
+                # add` CLI does this for self-posts.
                 desc = body.get("desc", "").strip()
                 tags = [t for t in body.get("tags", []) if t]
 

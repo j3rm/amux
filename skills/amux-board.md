@@ -11,9 +11,14 @@ You are adding an item to the **amux local kanban board** at `https://localhost:
 ## Board API
 
 ```bash
-# Add item
+# Add item — SELF-POST (task for yourself). creator == session suppresses the self-ping.
 curl -sk -X POST -H 'Content-Type: application/json' \
-  -d '{"title":"...","desc":"...","status":"todo","session":"..."}' \
+  -d '{"title":"...","desc":"...","status":"todo","session":"'"$AMUX_SESSION"'","creator":"'"$AMUX_SESSION"'"}' \
+  https://localhost:8822/api/board
+
+# Add item — POST FOR ANOTHER AGENT. creator = you; session = them. Assignee gets pinged.
+curl -sk -X POST -H 'Content-Type: application/json' \
+  -d '{"title":"...","desc":"...","status":"todo","session":"OTHER-AGENT","creator":"'"$AMUX_SESSION"'"}' \
   https://localhost:8822/api/board
 
 # List all items
@@ -34,7 +39,8 @@ curl -sk -X DELETE https://localhost:8822/api/board/ITEM_ID
 | `title` | yes | string | Short, imperative task name |
 | `desc` | no | string | Full context: what, why, acceptance criteria |
 | `status` | no | `todo` / `doing` / `done` | Defaults to `todo` |
-| `session` | no | amux session name | Which project/session owns this task |
+| `session` | no | amux session name | **Assignee.** Which session owns this task |
+| `creator` | **yes in practice** | amux session name | Who posted it. **The server does NOT default this.** If omitted, the assignee-notify guard treats creator as unknown and fires the ping — including to yourself on self-posts. Set `creator == session` to suppress the self-ping; set `creator = your session` when posting for another agent so they know it's a real handoff. |
 
 ## Instructions
 
@@ -52,3 +58,7 @@ The user's request is: **$ARGUMENTS**
 6. Confirm success by showing the created item's title and ID
 
 Do not ask clarifying questions — infer context from the arguments and current conversation. If the arguments are empty, add a generic task titled "Untitled task" with an empty desc.
+
+## Gotchas
+
+- **`creator` is not defaulted server-side.** Omit it and the assignee gets pinged even if the assignee is you. Prefer the `amux board add` CLI (it sets `creator=$AMUX_SESSION` for you). On raw curl POSTs, always include `creator` explicitly.

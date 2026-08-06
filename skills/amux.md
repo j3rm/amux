@@ -18,9 +18,16 @@ You are running inside an **amux** managed Claude Code session. amux is a local 
 # List all items
 curl -sk https://localhost:8822/api/board | python3 -m json.tool
 
-# Add item
+# Add item — SELF-POST (task for yourself)
+# creator == session suppresses the self-ping. Prefer `amux board add` — the CLI sets this for you.
 curl -sk -X POST -H 'Content-Type: application/json' \
-  -d '{"title":"...", "desc":"...", "status":"todo", "session":"SESSION_NAME"}' \
+  -d '{"title":"...","desc":"...","status":"todo","session":"'"$AMUX_SESSION"'","creator":"'"$AMUX_SESSION"'"}' \
+  https://localhost:8822/api/board
+
+# Add item — POST FOR ANOTHER AGENT (hand off work)
+# creator = you; session = assignee. Assignee gets the pushover ping.
+curl -sk -X POST -H 'Content-Type: application/json' \
+  -d '{"title":"...","desc":"...","status":"todo","session":"OTHER-AGENT","creator":"'"$AMUX_SESSION"'"}' \
   https://localhost:8822/api/board
 
 # Update item
@@ -36,6 +43,8 @@ curl -sk -X POST -H 'Content-Type: application/json' \
 ```
 
 Statuses: `backlog` · `todo` · `doing` · `done` (plus any custom columns)
+
+**`creator` rule:** The server does NOT default `creator` from your session header. Omit it and the assignee-notify guard fires the ping — even to yourself on self-posts. Always send `creator` explicitly on raw curl (self-post: `creator == session`; handoff: `creator = your session`). The `amux board add` CLI handles this for self-posts.
 
 ---
 

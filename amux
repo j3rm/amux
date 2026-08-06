@@ -25,9 +25,13 @@ print(iid+' -> '+str(d.get('status','?')))
 " "$id"
         done ;;
       add)
+        # Self-post: assignee=session=creator. Sending `creator` matches the
+        # server's notify-guard rule (creator == session ⇒ suppress the
+        # assignee-ping to yourself). Omitting creator would fire an
+        # unnecessary self-ping.
         title="$*"
         curl -sk -X POST -H 'Content-Type: application/json' \
-          -d "{\"title\":\"$title\",\"status\":\"todo\",\"session\":\"${AMUX_SESSION:-}\"}" "$AMUX_URL/api/board" ;;
+          -d "{\"title\":\"$title\",\"status\":\"todo\",\"session\":\"${AMUX_SESSION:-}\",\"creator\":\"${AMUX_SESSION:-}\"}" "$AMUX_URL/api/board" ;;
       list|ls|"")
         curl -sk "$AMUX_URL/api/board" | python3 -c "
 import json,sys
