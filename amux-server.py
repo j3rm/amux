@@ -21177,6 +21177,11 @@ async function doSend(name, text) {
   let skipPrefixForLogin = false;
   if (isSlashCmd && cmdHead === '/login') {
     window._pendingLogin[name] = Date.now();
+    // Also open a blank browser tab NOW (inside the click's user-gesture
+    // chain — required by popup blockers) and later navigate it to the
+    // auth URL Claude Code prints. See RESUME-HERE.md "Plan for change:
+    // /login auto-open browser tab".
+    _loginAutoOpenStart(name);
   } else if (!isSlashCmd) {
     const t0 = window._pendingLogin[name];
     if (t0 && (Date.now() - t0) < LOGIN_WINDOW_MS) {
@@ -21231,6 +21236,86 @@ async function doKeys(name, keys) {
     method: 'POST', headers: {'Content-Type':'application/json'},
     body: JSON.stringify({keys})
   });
+}
+
+// ── /login auto-open ──────────────────────────────────────────────────
+// When the user sends /login in the send bar, we open a blank tab
+// immediately (inside the click's user gesture — required by popup
+// blockers) and then poll the target session's pane for the Claude Code
+// OAuth URL. When we find it, we navigate the pre-opened tab. Scoped
+// to Claude Code /login only (URL pattern claude.com/cai/oauth). See
+// RESUME-HERE.md "Plan for change: /login auto-open browser tab" for
+// full rationale (including why we CAN'T just window.open() after
+// detection — the browser silently kills it).
+const _LOGIN_OAUTH_URL_RE = /https:\/\/claude\.com\/cai\/oauth\/[^\s"'<>]+/g;
+const _LOGIN_POLL_MS = 500;
+const _LOGIN_TIMEOUT_MS = 30000;
+
+function _loginAutoOpenStart(name) {
+  window._loginAutoOpen = window._loginAutoOpen || {};
+  _loginAutoOpenCancel(name);  // cancel any prior in-flight poll for this session
+  // MUST call window.open() synchronously inside the user-gesture callback.
+  // A null return means popups are blocked; fall back to clipboard + toast.
+  const tab = window.open('about:blank', '_blank');
+  const state = { tab, deadline: Date.now() + _LOGIN_TIMEOUT_MS, timer: null };
+  window._loginAutoOpen[name] = state;
+  state.timer = setInterval(() => _loginAutoOpenPoll(name), _LOGIN_POLL_MS);
+}
+
+async function _loginAutoOpenPoll(name) {
+  const state = window._loginAutoOpen && window._loginAutoOpen[name];
+  if (!state) return;
+  if (Date.now() > state.deadline) { _loginAutoOpenGiveUp(name); return; }
+  try {
+    const r = await fetch(API + '/api/sessions/' + encodeURIComponent(name) + '/peek?lines=200');
+    if (!r.ok) return;
+    const d = await r.json();
+    const clean = (d.output || '').replace(/\x1b\[[0-9;]*[a-zA-Z]/g, '');
+    const matches = clean.match(_LOGIN_OAUTH_URL_RE);
+    if (matches && matches.length) {
+      // Take the LAST match — most recent scrollback position (Claude Code
+      // prints the URL after any prior output). If it's a repeat, harmless.
+      _loginAutoOpenNavigate(name, matches[matches.length - 1]);
+    }
+  } catch (e) { /* transient — try again on next tick */ }
+}
+
+function _loginAutoOpenNavigate(name, url) {
+  const state = window._loginAutoOpen && window._loginAutoOpen[name];
+  if (!state) return;
+  clearInterval(state.timer);
+  delete window._loginAutoOpen[name];
+  if (state.tab && !state.tab.closed) {
+    try { state.tab.location.href = url; return; } catch (e) {}
+  }
+  // Popup was blocked (or the tab was closed): copy to clipboard + toast.
+  try { navigator.clipboard.writeText(url); } catch (e) {}
+  showToast('Login URL copied — paste into a new tab to sign in');
+}
+
+function _loginAutoOpenGiveUp(name) {
+  const state = window._loginAutoOpen && window._loginAutoOpen[name];
+  if (!state) return;
+  clearInterval(state.timer);
+  delete window._loginAutoOpen[name];
+  // Close the blank tab we opened, but ONLY if the user hasn't already
+  // navigated it themselves (attempting to read .location on a cross-
+  // origin document throws — that's the "user navigated" signal).
+  if (state.tab && !state.tab.closed) {
+    try {
+      if (state.tab.location.href === 'about:blank') state.tab.close();
+    } catch (e) { /* cross-origin — user navigated it, leave it */ }
+  }
+}
+
+function _loginAutoOpenCancel(name) {
+  const state = window._loginAutoOpen && window._loginAutoOpen[name];
+  if (!state) return;
+  clearInterval(state.timer);
+  delete window._loginAutoOpen[name];
+  if (state.tab && !state.tab.closed) {
+    try { if (state.tab.location.href === 'about:blank') state.tab.close(); } catch (e) {}
+  }
 }
 
 function autoGrow(el) {
