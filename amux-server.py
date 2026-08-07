@@ -21164,8 +21164,28 @@ async function doSend(name, text) {
   // Slash commands (e.g. /clear, /compact) must be sent verbatim — no timestamp prefix
   const isSlashCmd = /^\/[a-z]/.test(text.trim());
   amuxTrack('message_sent', { session: name, is_slash: isSlashCmd, cmd: isSlashCmd ? text.trim().split(/\s+/)[0] : null, length: text.length });
+  // /login flow: when the user sends /login, Claude Code prints a browser
+  // URL and then waits for an OAuth code paste-back. That paste-back must
+  // reach Claude Code EXACTLY as pasted — a `[HH:MM AM]` timestamp glued
+  // to the front makes Anthropic return HTTP 400. Set a per-session flag
+  // on /login and skip the prefix on the next non-slash send within 15
+  // minutes. See RESUME-HERE.md "Plan for change: /login OAuth code
+  // paste → HTTP 400" for the full diagnosis.
+  const cmdHead = text.trim().split(/\s+/)[0];
+  window._pendingLogin = window._pendingLogin || {};
+  const LOGIN_WINDOW_MS = 15 * 60 * 1000;
+  let skipPrefixForLogin = false;
+  if (isSlashCmd && cmdHead === '/login') {
+    window._pendingLogin[name] = Date.now();
+  } else if (!isSlashCmd) {
+    const t0 = window._pendingLogin[name];
+    if (t0 && (Date.now() - t0) < LOGIN_WINDOW_MS) {
+      skipPrefixForLogin = true;
+    }
+    delete window._pendingLogin[name];
+  }
   let payload = text;
-  if (!isSlashCmd) {
+  if (!isSlashCmd && !skipPrefixForLogin) {
     const now = new Date();
     const ts = now.toLocaleTimeString([], {hour: '2-digit', minute: '2-digit', hour12: true});
     const author = _cloudEmail ? ` ${_cloudEmail}` : '';
