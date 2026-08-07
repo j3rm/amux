@@ -296,6 +296,128 @@ Uncommitted PID-guard at ~L10628. Still valid protection against amux's own `res
 
 ---
 
+## Plan for change: thread org isolation + T-143 cleanup (2026-08-07) — DONE ✅ commit `d25707b`
+
+**Verified end-to-end 2026-08-07 14:33 UTC:**
+
+Backfill migration:
+- 116 existing threads got their org populated at startup (T-143 →
+  `CD-SurfPrep`, correctly derived from the first message's
+  from_session).
+- 38 threads remain with empty org (Jeremy-only / legacy) — those
+  stay open to everyone.
+
+Enforcement live:
+- `POST /api/threads/T-143/messages` with `X-Amux-Session: RTG-ActAS`
+  → 403 with clear "thread scoped to org 'CD-SurfPrep'" message.
+  Server log: `[threads] BLOCK cross-org reply: RTG-ActAS(org=RTG) → T-143(org=CD-SurfPrep)`.
+- `GET /api/threads/T-143` with `X-Amux-Session: RTG-ActAS` → 404
+  (existence not leaked).
+- Dashboard (no X-Amux-Session) reads still see everything.
+- `GET /api/threads` filtered per-agent: RTG-ActAS sees only the 25
+  RTG threads + 36 empty-org threads.
+
+T-143 cleanup:
+- 11 RTG-ActAS messages moved out of T-143 into new thread T-155
+  (`org=RTG`, title "RTG-ActAS status updates (moved from T-143 by
+  cleanup)"). `parent_id` cleared on each moved message (cross-thread
+  parent refs would fail the L40484 check).
+- T-143 now: 48 Jeremy + 44 CD-SurfPrep + 4 Cypra-PAA + 2
+  Cypra-EmailAgent = 98 messages. No RTG-* anywhere.
+- The remaining Cypra messages are historical — they stay put. Going
+  forward, Cypra sessions can no longer post to T-143 (different
+  org, blocked by the new enforcement).
+
+**Not shipping** (deferred until asked):
+- Per-thread cross-org allowlist. If Jeremy needs Cypra-PAA to
+  legitimately reply to a specific SurfPrep thread, we'll add a
+  `thread_allowed_orgs` table then. For now: use board tasks or
+  channels for cross-org handoffs.
+
+**Trigger (Jeremy):** T-143 ("SurfPrep Repair System", primary agent
+CD-SurfPrep) has 11 messages from RTG-ActAS about a completely
+different project (Act software gate status). RTG has no business
+posting into a SurfPrep thread. Confirmed via API pull:
+
+```
+44  CD-SurfPrep     (legit, thread owner's org)
+11  RTG-ActAS       (CROSSING — CC_ORG=RTG, wrong project)
+ 4  Cypra-PAA       (legit cross-org handoff pattern — will be blocked by this fix)
+ 2  Cypra-EmailAgent (same — will be blocked)
+48  Jeremy
+```
+
+Jeremy: "The Thread is created with a agents selected, that should be
+its ORG and other ORGS can not read or post to those threads."
+
+**Root cause:** the `threads` table has no `org` column (schema at
+~L4861); the POST `/api/threads/T-N/messages` handler (~L40443) has
+NO org check on the sender. Any authenticated agent can post to any
+thread.
+
+**Design choice (strict per Jeremy's ask):** thread carries an `org`
+set at create time from the primary non-Jeremy participant. Any
+sender whose `_session_org()` doesn't match is rejected. Dashboard
+(Jeremy, identified by UI token) always exempt. Empty org = no
+restriction (Jeremy-only threads, backward-compat).
+
+**Known trade-off:** legit cross-org handoffs (Cypra-PAA fetching
+Notion notes for CD-SurfPrep, Cypra-EmailAgent drafting for CD-SurfPrep)
+will be blocked after this change. Those patterns will need to move to
+channels or board tasks (Cypra was doing thread cross-posts because
+we let it — the routing was never sanctioned). Jeremy's ask is
+explicit; ship strict, adapt if he flags a specific handoff that
+matters.
+
+### Changes (one commit)
+
+1. **Schema:** add `org TEXT NOT NULL DEFAULT ''` to `threads`.
+   Migration runs at startup; safe idempotent `ALTER TABLE` guarded
+   by a `PRAGMA table_info` check.
+2. **Backfill on migration:** for every existing thread, derive org
+   from the first non-Jeremy message's from_session OR to_session
+   (whichever is set), via `_session_org(name)`. Threads with no
+   non-Jeremy participant stay at `org=''`.
+3. **POST `/api/threads`** (new thread): compute org from
+   `from_session or to_session` and store it on the row.
+4. **POST `/api/threads/T-N/messages`** (reply): if thread.org is
+   non-empty, reject with 403 when sender's `_session_org` doesn't
+   match. Dashboard (UI token) bypasses the check.
+5. **GET `/api/threads`** and **GET `/api/threads/T-N`** (read):
+   when request carries `X-Amux-Session` but NOT the UI token
+   (i.e. an agent, not Jeremy), filter/reject threads whose org
+   doesn't match the caller's org.
+6. **Data cleanup for T-143:** one-shot Python inline script (run
+   from this session, no code change needed) that (a) creates a new
+   thread `RTG-ActAS status updates (moved from T-143)` with
+   `org='RTG'`, (b) reassigns the 11 RTG-ActAS messages to it via
+   direct SQL UPDATE, clearing their `parent_id` (cross-thread
+   parent references are invalid per the L40484 check), (c) bumps
+   `_threads_version` for the SSE clients.
+
+### Verification
+
+1. `python3 -c "import ast; ast.parse(open('amux-server.py').read())"`.
+2. Touch + hot-reload preserves PID.
+3. Server log shows a `[threads-migration]` line on startup with the
+   backfill count.
+4. `curl -sk $AMUX_URL/api/threads/T-143 | python3 -m json.tool` —
+   the returned thread has `"org": "CD-SurfPrep"` and NO messages
+   from `RTG-ActAS`.
+5. Curl POST to `/api/threads/T-143/messages` with
+   `X-Amux-Session: RTG-ActAS` → 403 with a clear error naming the
+   thread's org.
+6. Same curl with `X-Amux-Session: CD-SurfPrep` → 200 (allowed).
+7. Dashboard-attributed POST (UI token header) → 200 (Jeremy exempt).
+
+### NOT doing
+
+- No `thread_participants` allowlist table. Strict org rule only.
+- No changes to the channels or board APIs.
+- No changes to `send_text`, `_watch_self`, or the /login fix.
+
+---
+
 ## Plan for change: fix linkifier (real location) + server-side OAuth prefix strip + revert shim (2026-08-07) — DONE ✅ BOOKED
 
 **Confirmed working by Jeremy 09:10 PT** ("Hot DAMN!, you did it.
