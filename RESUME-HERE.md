@@ -279,7 +279,14 @@ Uncommitted PID-guard at ~L10628. Still valid protection against amux's own `res
 
 ---
 
-## Plan for change: verbose linking docs on session-restart machinery (2026-08-07) — IN PROGRESS
+## Plan for change: verbose linking docs on session-restart machinery (2026-08-07) — DONE ✅ commit `b2c0fa1`
+
+**Verified 2026-08-07 11:32 UTC:** post-commit `touch amux-server.py`
+triggered the `os.execv` path. PID 1697930 preserved, systemd NRestarts
+unchanged at 13, log confirmed `[restart] pid=1697930 direct execv →`
+followed by `[startup] pid=1697930`. Pure comment/docstring additions
+(147/+143 −4), zero logic change.
+
 
 **What:** Add verbose docstring/comment blocks to the amux-server.py
 functions that participate in the session-restart chain, explaining how
