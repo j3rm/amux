@@ -21009,8 +21009,29 @@ async function deleteSession(session) {
 
 async function archiveSession(session) {
   closeAllMenus();
-  const r = await apiCall(API + '/api/sessions/' + session + '/archive', { method: 'POST', headers: { 'X-Amux-UI-Token': (window._AMUX_UI_TOKEN || '') } });
-  if (r) showToast(session + ' archived');
+  // NOTE: bypass apiCall on purpose — apiCall swallows non-2xx bodies and
+  // shows a bare "Error: 403" toast. The archive endpoint has meaningful
+  // error text (e.g. "cannot archive pinned session — unpin first") that
+  // the user needs to see verbatim to know how to proceed.
+  const url = API + '/api/sessions/' + session + '/archive';
+  const opts = {
+    method: 'POST',
+    headers: _authHeaders({ 'X-Amux-UI-Token': (window._AMUX_UI_TOKEN || '') }),
+  };
+  try {
+    const r = await fetch(url, opts);
+    if (r.ok) {
+      showToast(session + ' archived');
+    } else {
+      let msg = '';
+      try { const j = await r.json(); msg = (j && j.error) || ''; } catch (_) {}
+      showToast(msg || ('Archive failed (HTTP ' + r.status + ')'));
+      amuxTrack('api_error', { url: url.split('?')[0], status: r.status, method: 'POST' });
+    }
+  } catch (e) {
+    console.error('archiveSession failed:', e);
+    showToast('Archive failed — server unreachable');
+  }
   await fetchSessions();
 }
 
