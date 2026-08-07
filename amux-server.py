@@ -45320,6 +45320,18 @@ p{{color:#888;margin:12px 0 28px;font-size:0.9rem;line-height:1.5}}
 
 
         if method == "GET":
+            if action == "":
+                # Bare GET /api/sessions/<name> — return the same info dict
+                # the list endpoint uses per session. Previously this fell
+                # through to the L45595 404 (no matching action branch),
+                # which caused the dashboard to render live sessions as
+                # "offline" whenever it hit the detail endpoint. See
+                # RESUME-HERE.md "Plan for change: bare GET /api/sessions
+                # /<name> 404" — verified longstanding in log.
+                info = get_session_info(name)
+                if info is None:
+                    return self._json({"error": f"session '{name}' not found"}, 404)
+                return self._json(info)
             if action == "tasks":
                 # Claude Code's native task list (read-only) — the agent's live plan.
                 return self._json(_session_cc_tasks(name))
@@ -46826,6 +46838,15 @@ def _auto_archive_idle():
             continue
         cfg = parse_env_file(env_file)
         if cfg.get("CC_ARCHIVED") == "1":
+            continue
+        # CC_REMOTE=1 opt-out: sessions that drive work on a remote box
+        # (e.g. RTG-VS2017 → Windows VS2017 build agent) have no LOCAL
+        # tmux activity — the pane just sits at the Claude prompt while
+        # the real build/test happens elsewhere. Without this exclusion
+        # `pane_activity < cutoff` fires after 8h and the session gets
+        # auto-archived even though it's working. Opt-in flag so it only
+        # protects sessions explicitly marked. Introduced 2026-08-07.
+        if cfg.get("CC_REMOTE") == "1":
             continue
         if not is_running(name):
             continue
