@@ -5795,12 +5795,56 @@ def _init_db():
         "ALTER TABLE saved_messages ADD COLUMN session TEXT NOT NULL DEFAULT ''",
         "ALTER TABLE statuses ADD COLUMN gate TEXT",
         "ALTER TABLE issues ADD COLUMN gate TEXT",
+        # threads.org — the org (CC_ORG of the primary non-Jeremy
+        # participant) that OWNS this thread. Non-empty = only
+        # same-org agents may read/write the thread; Jeremy (dashboard
+        # UI token) is always exempt. Introduced 2026-08-07 after
+        # RTG-ActAS posted 11 unrelated status pings into T-143
+        # (a SurfPrep thread) — the reply handler had no org check.
+        # Backfill for existing threads runs right after the migration
+        # loop below.
+        "ALTER TABLE threads ADD COLUMN org TEXT NOT NULL DEFAULT ''",
     ]:
         try:
             db.execute(migration)
             db.commit()
         except Exception:
             pass  # column already exists
+
+    # threads.org backfill — one-time on migration. For every thread
+    # with an empty org, derive it from the first message's
+    # from_session (or to_session if from is empty/Jeremy) via
+    # _session_org(). Idempotent: reruns are a no-op because we skip
+    # rows that already have a non-empty org.
+    try:
+        _thread_rows = db.execute(
+            "SELECT id FROM threads WHERE org = '' OR org IS NULL"
+        ).fetchall()
+        _backfilled = 0
+        for _tr in _thread_rows:
+            _tid = _tr["id"]
+            _first = db.execute(
+                "SELECT from_session, to_session FROM messages "
+                "WHERE thread_id = ? ORDER BY position, created LIMIT 1",
+                (_tid,),
+            ).fetchone()
+            if not _first:
+                continue
+            # Prefer from_session (the sender), fall back to to_session.
+            # Both empty = Jeremy on both sides = no org restriction.
+            _participant = (_first["from_session"] or _first["to_session"] or "").strip()
+            if not _participant:
+                continue
+            _org = _session_org(_participant)
+            if not _org:
+                continue
+            db.execute("UPDATE threads SET org = ? WHERE id = ?", (_org, _tid))
+            _backfilled += 1
+        if _backfilled:
+            db.commit()
+            slog(f"[threads-migration] backfilled org on {_backfilled} thread(s)")
+    except Exception as _e:
+        slog(f"[threads-migration] backfill failed (non-fatal): {_e!r}")
     # Seed default status gates — generic wording so the checklists apply
     # equally to workers writing code, researchers writing thread answers,
     # and coordinators moving items around. Original defaults were worker-
@@ -40325,10 +40369,27 @@ class CCHandler(BaseHTTPRequestHandler):
 
             # ── GET /api/threads — list live threads with embedded messages ─
             if method == "GET" and path == "/api/threads":
+                # Thread org isolation on READ (2026-08-07). If the caller
+                # is an agent (X-Amux-Session set, no UI token), filter
+                # out threads whose org differs from the agent's org.
+                # Threads with empty org (Jeremy-only or legacy pre-
+                # migration) are visible to everyone. Dashboard (Jeremy)
+                # sees everything. See RESUME-HERE.md "Plan for change:
+                # thread org isolation".
+                _is_dashboard_read = _session_destructive_allowed(self.headers)
+                _reader_session = (self.headers.get("X-Amux-Session") or "").strip()
+                _reader_org = ""
+                _filter_reads = False
+                if _reader_session and not _is_dashboard_read:
+                    _reader_org = _session_org(_reader_session) or ""
+                    _filter_reads = True
                 rows = db.execute(
                     "SELECT * FROM threads WHERE discarded = 0 "
                     "ORDER BY starred DESC, updated DESC"
                 ).fetchall()
+                if _filter_reads:
+                    rows = [r for r in rows
+                            if not (r["org"] or "").strip() or (r["org"] or "").strip() == _reader_org]
                 all_msgs = db.execute(
                     "SELECT m.* FROM messages m "
                     "JOIN threads t ON t.id = m.thread_id "
@@ -40383,10 +40444,18 @@ class CCHandler(BaseHTTPRequestHandler):
                 now = int(time.time())
                 tid = _next_issue_id("T")
                 mid = _next_issue_id("M")
+                # Thread org isolation (2026-08-07). Derived from the
+                # primary non-Jeremy participant's CC_ORG. Empty = Jeremy-only
+                # thread, no cross-agent restriction. See the reply handler
+                # below (~POST /api/threads/T-N/messages) and the read
+                # filters for how this is enforced. RESUME-HERE.md
+                # "Plan for change: thread org isolation" has the full
+                # rationale (T-143 RTG-ActAS cross-post incident).
+                _thread_org = _session_org(from_session or to_session) or ""
                 db.execute(
-                    "INSERT INTO threads (id, title, starred, created, updated) "
-                    "VALUES (?, ?, 0, ?, ?)",
-                    (tid, title, now, now),
+                    "INSERT INTO threads (id, title, starred, created, updated, org) "
+                    "VALUES (?, ?, 0, ?, ?, ?)",
+                    (tid, title, now, now, _thread_org),
                 )
                 db.execute(
                     "INSERT INTO messages (id, thread_id, parent_id, from_session, "
@@ -40412,6 +40481,18 @@ class CCHandler(BaseHTTPRequestHandler):
                 thread_row = db.execute("SELECT * FROM threads WHERE id = ?", (tid,)).fetchone()
                 if not thread_row:
                     return self._json({"error": "not found"}, 404)
+                # Thread org isolation on READ (2026-08-07). Same rule
+                # as the list handler above — agents don't see other
+                # orgs' threads. Return 404 (not 403) so cross-org
+                # existence isn't leaked.
+                _is_dashboard_read = _session_destructive_allowed(self.headers)
+                _reader_session = (self.headers.get("X-Amux-Session") or "").strip()
+                if _reader_session and not _is_dashboard_read:
+                    _thread_org = (thread_row["org"] or "").strip()
+                    if _thread_org:
+                        _reader_org = _session_org(_reader_session) or ""
+                        if _reader_org != _thread_org:
+                            return self._json({"error": "not found"}, 404)
                 if method == "GET":
                     return self._json(_thread_to_dict(thread_row))
                 if method == "PATCH":
@@ -40469,6 +40550,25 @@ class CCHandler(BaseHTTPRequestHandler):
                                      "Only the dashboard may reply as Jeremy."),
                         }, 403)
                     from_session = _hdr_session
+                # Thread org isolation (2026-08-07): a thread OWNED by
+                # one org rejects replies from agents in a different org.
+                # Dashboard (Jeremy via UI token) always exempt. Empty
+                # thread.org = no restriction (legacy / Jeremy-only
+                # threads). See RESUME-HERE.md "Plan for change: thread
+                # org isolation" — root cause was RTG-ActAS posting 11
+                # status pings into T-143, a SurfPrep thread.
+                if not _is_dashboard and from_session:
+                    _thread_org = (thread_row["org"] or "").strip() if "org" in thread_row.keys() else ""
+                    if _thread_org:
+                        _sender_org = _session_org(from_session) or ""
+                        if _sender_org != _thread_org:
+                            slog(f"[threads] BLOCK cross-org reply: {from_session}(org={_sender_org or '<none>'}) → {tid}(org={_thread_org})")
+                            return self._json({
+                                "error": f"thread {tid} is scoped to org '{_thread_org}'; your session's org is '{_sender_org or '<none>'}'",
+                                "hint": ("Cross-org thread replies are blocked. If this is a legitimate handoff, "
+                                         "use a board task or a channel instead. Only Jeremy (dashboard) can post "
+                                         "across orgs on threads."),
+                            }, 403)
                 # Default to_session = the other participant in the thread.
                 to_session = bj.get("to_session")
                 if to_session is None:
