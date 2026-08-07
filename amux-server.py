@@ -3959,6 +3959,17 @@ def _snapshot_all_sessions_inner():
             clean = _STRIP_ANSI.sub("", output)
             now = time.time()
             actions = _session_auto_actions.setdefault(name, {})
+            # Rehydrate hibernation flag from disk on the first tick after
+            # a server restart. Without this, section 4/4b/4d all false-fire
+            # `session_dead` + `auto_restart` pushovers for every hibernated
+            # CC_AUTO_CONTINUE session, because the in-memory `hibernated`
+            # flag is gone and they see "tmux alive but no claude PID."
+            # Observed source of the ShareScore pushover storm — 22-day-idle
+            # sessions produced ~12 pushovers per systemd restart.
+            if "hibernated" not in actions and not actions.get("_meta_hydrated"):
+                actions["_meta_hydrated"] = True
+                if _load_meta(name).get("hibernated"):
+                    actions["hibernated"] = True
 
             # ── 1. Proactive: auto-compact when context is low ──────────────
             # Skip if the context % appears in /status output (user was just checking)
