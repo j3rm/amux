@@ -21164,13 +21164,16 @@ async function doSend(name, text) {
   // Slash commands (e.g. /clear, /compact) must be sent verbatim — no timestamp prefix
   const isSlashCmd = /^\/[a-z]/.test(text.trim());
   amuxTrack('message_sent', { session: name, is_slash: isSlashCmd, cmd: isSlashCmd ? text.trim().split(/\s+/)[0] : null, length: text.length });
-  // /login flow: when the user sends /login, Claude Code prints a browser
-  // URL and then waits for an OAuth code paste-back. That paste-back must
-  // reach Claude Code EXACTLY as pasted — a `[HH:MM AM]` timestamp glued
-  // to the front makes Anthropic return HTTP 400. Set a per-session flag
-  // on /login and skip the prefix on the next non-slash send within 15
-  // minutes. See RESUME-HERE.md "Plan for change: /login OAuth code
-  // paste → HTTP 400" for the full diagnosis.
+  // /login flow — CLIENT-SIDE BELT-AND-SUSPENDERS (not authoritative).
+  // The AUTHORITATIVE fix for the OAuth paste-back is server-side, in
+  // the /send handler's "[oauth-strip]" block (grep the file for
+  // `oauth-strip`). That block peeks the pane and strips the [HH:MM AM]
+  // prefix whenever Claude Code's "Paste code here" prompt is visible,
+  // regardless of client state. This client-side flag catches the same
+  // case in the fast path when the JS is fresh and the same tab is used
+  // for both /login and the code paste. It's a nice-to-have; the server
+  // side is what makes it stable. Window shortened 15→2 min to reduce
+  // the "typed something else after /login got sent as code" bug.
   const cmdHead = text.trim().split(/\s+/)[0];
   window._pendingLogin = window._pendingLogin || {};
   // Shortened from 15min → 2min after Jeremy reported (2026-08-07 08:47)
@@ -21191,6 +21194,12 @@ async function doSend(name, text) {
   }
   let payload = text;
   if (!isSlashCmd && !skipPrefixForLogin) {
+    // WARNING: this `[HH:MM AM]` prefix mangles Anthropic OAuth codes
+    // pasted after /login → HTTP 400. The server's `[oauth-strip]`
+    // block in the /send handler strips this prefix back off when the
+    // session's pane shows Claude Code's "Paste code here" prompt.
+    // If you change the prefix format, update the server-side regex
+    // `^\[\d{1,2}:\d{2}\s*(?:AM|PM)?(?:\s+\S+@\S+)?\]\s*` to match.
     const now = new Date();
     const ts = now.toLocaleTimeString([], {hour: '2-digit', minute: '2-digit', hour12: true});
     const author = _cloudEmail ? ` ${_cloudEmail}` : '';
@@ -23151,12 +23160,30 @@ function ansiToHtml(text) {
   };
   const eh=s=>s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
   const linkChunk=raw=>{
-    // URL regex allows newlines INSIDE URLs when the next line begins
-    // immediately with URL-safe chars (a genuine tmux wrap continuation).
-    // Claude Code's /login prints the OAuth URL wrapped across 3 physical
-    // lines; without this, only the first line was clickable. This is the
-    // function that actually renders the pane (linkifyOutput is a separate
-    // function used only for message bodies).
+    // ═══════════════════════════════════════════════════════════════════
+    // WORKING /login FIX — DO NOT REGRESS. See also the server-side
+    // "[oauth-strip]" block in the /send handler; the two together are
+    // what makes /login actually work end-to-end. History:
+    //
+    // The pane peek renders here (ansiToHtml → linkChunk), NOT via the
+    // standalone linkifyOutput function (which is called only for
+    // message bodies, see grep `linkifyOutput(`). Committing a
+    // "linkifier fix" to linkifyOutput does NOTHING for the pane — we
+    // wasted a full round-trip on that in commit 51999a1. If you see a
+    // clickable-URL bug in the pane, fix it HERE.
+    //
+    // Claude Code's /login prints the OAuth URL as one very long string;
+    // tmux wraps it across 2–3 physical terminal lines. The old regex
+    // `https?:\/\/[^\s<>...]+` stopped at the first \n, so only the
+    // first line was clickable — and the incomplete URL 404s. The
+    // regex below consumes \n INSIDE a URL when the next line begins
+    // immediately with URL-safe chars (i.e. a real tmux wrap
+    // continuation). Leading whitespace on the next line signals a
+    // genuine new line of output, so we stop.
+    //
+    // href gets internal \n stripped (browsers need a single-line URL);
+    // display text keeps them so the pane's wrapped layout is preserved.
+    // ═══════════════════════════════════════════════════════════════════
     const urlRe=/https?:\/\/(?:[^\s<>\]\)'"`,;]|\n(?=[A-Za-z0-9%\/&?=_\-.+~]))+/g;
     const fileRe=/(?:^|[\s(])((\/[\w./-]+(?:\.\w+)(?::[\d]+)?)|(\.\/[\w./-]+(?:\.\w+)(?::[\d]+)?))/gm;
     const mx=[]; let m;
@@ -23216,13 +23243,13 @@ function ansiToHtml(text) {
 }
 
 function linkifyOutput(text) {
-  // Split text into segments: URLs, file paths, and plain text
-  // URL regex: match http/https URLs, INCLUDING URLs that tmux wrapped
-  // across multiple physical lines. A newline INSIDE a URL is real when
-  // the next line starts immediately with URL-safe chars (no leading
-  // whitespace — leading whitespace is a genuine new line of output).
-  // Claude Code's /login prints its OAuth URL wrapped across 3 lines;
-  // the old single-line regex only linkified the first line.
+  // NOTE: This function is called on MESSAGE BODIES only (grep the
+  // codebase: one call site at ~L29156 in _tNormalizeBody wrapper).
+  // The terminal PANE peek does NOT go through here — it goes through
+  // ansiToHtml.linkChunk (~L23222) which has its OWN copy of this
+  // logic. If a linkifier bug shows up in the pane, fix that copy,
+  // NOT this one. This function still needs the multi-line URL regex
+  // for message bodies that happen to contain wrapped URLs.
   const urlRe = /https?:\/\/(?:[^\s<>\]\)'"`,;]|\n(?=[A-Za-z0-9%\/&?=_\-.+~]))+/g;
   // File path regex: absolute paths or relative paths with extensions
   const fileRe = /(?:^|[\s(])((\/[\w./-]+(?:\.\w+)(?::[\d]+)?)|(\.\/[\w./-]+(?:\.\w+)(?::[\d]+)?))/gm;
@@ -45491,16 +45518,65 @@ p{{color:#888;margin:12px 0 28px;font-size:0.9rem;line-height:1.5}}
                 # Backup JSONL transcript before /compact so we can revert
                 if text.strip().startswith("/compact"):
                     threading.Thread(target=backup_session_jsonl, args=(name, "pre_compact"), daemon=True).start()
-                # OAuth-prompt prefix strip. If the target session's pane
-                # ends in Claude Code's "Paste code here" prompt (the
-                # /login OAuth handoff), strip any client-side timestamp
-                # prefix (e.g. "[08:57 AM] " or "[08:57 AM user@x] ") from
-                # the payload. Without this, the OAuth code arrives glued
-                # to the prefix and Anthropic returns HTTP 400. Server-
-                # side detection is authoritative — works regardless of
-                # client cache, tab reload, cross-tab pastes, or which
-                # browser the user is on. See RESUME-HERE.md "Plan for
-                # change: fix linkifier + server-side OAuth prefix strip".
+                # ═══════════════════════════════════════════════════════════
+                # WORKING /login FIX — DO NOT REGRESS. Companion to the
+                # ansiToHtml.linkChunk multi-line URL regex (~L23222); the
+                # two together are what makes /login work end-to-end.
+                # History and why this exact shape:
+                #
+                # 1. The dashboard's doSend (client-side, ~L21162) prepends
+                #    "[HH:MM AM] " (and _cloudEmail if set) to every non-
+                #    slash message before POSTing here. That prefix is
+                #    great for normal chat but MANGLES an Anthropic OAuth
+                #    code — Anthropic returns HTTP 400 on the malformed
+                #    string, /login fails, user has spent 20 minutes for
+                #    nothing. Real bug that ate hours 2026-08-07.
+                #
+                # 2. We tried a client-side workaround (`_pendingLogin`
+                #    flag, commit 5cc0c23) that skips the prefix on the
+                #    next non-slash send within 2 min of `/login`. That
+                #    helps but is FRAGILE: dies on cache staleness
+                #    (Safari served old JS), tab reloads (window state
+                #    lost), and cross-tab pastes (per-tab window state).
+                #    Keep it as belt-and-suspenders but do NOT rely on it.
+                #
+                # 3. THIS block is the authoritative fix. It:
+                #    (a) Peeks the last ~50 lines of the target session's
+                #        tmux pane.
+                #    (b) ANSI-strips (so terminal colors don't fool the
+                #        substring match).
+                #    (c) Looks for Claude Code's OAuth-code prompt
+                #        signature — "Paste code here" (verified from the
+                #        actual /login pane 2026-08-07 08:56 PT screenshot).
+                #        If Claude Code renames this prompt in a future
+                #        release, update the string; the strip will
+                #        silently stop firing until then and users will
+                #        hit the 400 again — that's the visible regression
+                #        symptom to look for.
+                #    (d) If the prompt is present, strips ANY leading
+                #        `[HH:MM (AM|PM)? ( user@x)?] ` prefix from the
+                #        incoming text via regex — matches every shape the
+                #        client-side prefix can take:
+                #          - `[08:57 AM] `
+                #          - `[08:57 AM jeremy@example.com] `
+                #          - `[8:47] ` (no AM/PM, no email)
+                #        Non-matching text passes through untouched — no
+                #        false strips on legitimate `[bracketed]` message
+                #        bodies (verified with 7 test cases in commit
+                #        5624b97 message).
+                #
+                # 4. Server-side detection works regardless of client
+                #    cache, tab reload, cross-tab paste, or which browser
+                #    the user is on. That's why it's authoritative.
+                #
+                # If this fix ever regresses (Anthropic returns 400 again
+                # on the code paste), the FIRST thing to check is
+                # `~/.amux/logs/server.log` for `[oauth-strip]` lines —
+                # if none appear when Jeremy pastes, the pane-string
+                # match (step 3c) has broken; if they appear but 400
+                # still happens, the send_text path or something further
+                # downstream has changed.
+                # ═══════════════════════════════════════════════════════════
                 try:
                     _pane = tmux_capture(name, 50) or ""
                     if _pane and "Paste code here" in _STRIP_ANSI.sub("", _pane):
