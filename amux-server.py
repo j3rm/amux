@@ -9562,30 +9562,53 @@ For "I'm waiting on another agent's dependency" use `doing` and note it in
 `desc`; the watchdog doesn't nudge `doing`. For "I'm parking this indefinitely"
 use `backlog`.
 
-### Threads — conversations with Jeremy or between agents
+### Threads — Jeremy's inbox, agent → Jeremy ONLY
 
-Threads replaced the old Questions/Inbox module in July 2026. A **thread** is
-a conversation; a **message** is one entry inside it. Every message can be
-replied to individually — `parent_id` points at the specific message.
+**HARD RULE (STRICTLY ENFORCED — 2026-08-07):**
 
-**How to route questions and updates for Jeremy — this is the main rule:**
+> **Threads are Jeremy's personal inbox. Agent-to-agent thread posts
+> are FORBIDDEN and will be rejected 403 by the server.** Threads
+> exist so Jeremy has ONE quiet place to see questions and updates
+> aimed at him, without agent-to-agent chatter drowning it out.
+>
+> - **Agent → Jeremy: threads.** This is the only direction agents
+>   may use threads.
+> - **Agent → other agent (task handoff, status, result): BOARD.**
+>   `POST /api/board` with `session="<recipient>"`. Recipient polls
+>   their queue each turn.
+> - **Agent ↔ other agent (back-and-forth chatter): CHANNELS.**
+>   `POST /api/channels/<from>/<to>/messages`. Persistent 1:1 thread
+>   between two sessions.
+>
+> The server also blocks cross-ORG thread posts: a thread has an
+> `org` (the CC_ORG of the first non-Jeremy participant) and other
+> orgs can't read or reply.
 
-1. **Any question for Jeremy goes into Threads.** Not a board task, not
-   `/send`, not a channel — Threads. That's where he sees his inbox and
-   responds. Board tasks are for discrete work items; Threads are for
-   conversation and questions where you expect a reply.
-2. **Reuse an existing thread if the question relates to one.** Before
-   starting a new thread, run `amux threads list` and check whether Jeremy
-   already has an open thread with you on the same topic. If yes, reply
-   into that thread with `amux threads reply <M-id>` so context stays
-   together. Reserve new threads for genuinely unrelated topics.
+A **thread** is a conversation; a **message** is one entry inside it.
+Every message can be replied to individually — `parent_id` points at
+the specific message.
+
+**How to reach Jeremy on Threads (agent → Jeremy):**
+
+1. **Any question for Jeremy goes into Threads.** Not a board task,
+   not `/send`, not a channel — Threads. That's where Jeremy sees
+   his inbox and responds. Board tasks are for discrete work items;
+   Threads are for conversation and questions where you expect a
+   reply from Jeremy.
+2. **Reuse an existing thread if the question relates to one.**
+   Before starting a new thread, run `amux threads list` and check
+   whether Jeremy already has an open thread with you on the same
+   topic. If yes, reply into that thread with `amux threads reply
+   <M-id>` so context stays together. Reserve new threads for
+   genuinely unrelated topics.
 3. **Start a new thread only when the topic is new.** e.g. a fresh
-   escalation, a deploy blocker, a status/decision request on something not
-   already in flight.
-4. **Flag any incoming message that contains something you need to run
-   later** (a SQL statement, a command, a file path) with
-   `amux threads flag <M-id>` — Jeremy uses the Flagged summary at the top
-   of the Threads UI, so flagging makes actionable content easy to find.
+   escalation, a deploy blocker, a status/decision request on
+   something not already in flight.
+4. **Flag any incoming message that contains something you need to
+   run later** (a SQL statement, a command, a file path) with
+   `amux threads flag <M-id>` — Jeremy uses the Flagged summary at
+   the top of the Threads UI, so flagging makes actionable content
+   easy to find.
 
 **Use the `amux threads` CLI** rather than raw curl — it fills in the
 X-Amux-Session header automatically so message direction stays correct.
@@ -9599,7 +9622,7 @@ MID=$(amux threads reply --partial M-42 "working on it...")
 # ...do the work...
 amux threads finalize $MID "final answer"
 
-# Start a new thread (e.g. escalate a question to Jeremy or another agent)
+# Start a new thread to Jeremy (never to another agent — that will 403)
 amux threads new Jeremy "Deploy blocked" "Migration script hit an ERROR on step 3..."
 
 # List / show / flag / read
@@ -9609,24 +9632,33 @@ amux threads flag M-42       # bookmark actionable content
 amux threads read M-42       # mark a message read
 ```
 
-**Direction rules:**
-- If `AMUX_SESSION` is set (any agent session), the CLI puts your name in
-  `X-Amux-Session` and the message is recorded as coming from you.
-- Without that header, the server treats the sender as Jeremy — so agents
-  MUST use the `amux` CLI (or set the header explicitly), not raw curl.
+**Direction rules (enforced by the server):**
+- `from_session` = your session (via X-Amux-Session header, set
+  automatically by the `amux` CLI). `to_session` = the recipient.
+- Threads permit exactly ONE of `from_session` / `to_session` to be
+  the agent — the OTHER SIDE MUST BE JEREMY (empty). If both are
+  agents, the server returns 403 (`agent-to-agent thread posts are
+  strictly forbidden`).
+- If you skip the CLI and hit raw curl WITHOUT `X-Amux-Session`, the
+  server treats you as Jeremy and rejects the post because it can't
+  attribute the message correctly. Use the CLI.
 
-When Jeremy sends you a message via Threads, you'll get a board task with
-title `Thread T-N: <thread title>` and a `desc` containing the `amux threads
-reply` command pre-filled with the parent message ID. Just paste + fill in
-your answer.
+When Jeremy sends you a message via Threads, you'll get a board task
+with title `Thread T-N: <thread title>` and a `desc` containing the
+`amux threads reply` command pre-filled with the parent message ID.
+Just paste + fill in your answer.
 
 **When to use Threads vs. board vs. notes vs. channels:**
-- **Threads** — back-and-forth conversation with Jeremy or another agent
-  where you expect replies. Every message can be flagged, read, replied to.
-- **Board** — discrete tasks and results. Not conversation. Mark done when
-  finished.
-- **Notes** — reference documents, research, write-ups meant to be read.
-- **Channels** — persistent two-way threads between two agent sessions.
+- **Threads** — agent → Jeremy ONLY. Questions and updates you want
+  Jeremy to see. Not for talking to other agents.
+- **Board** — the workhorse for agent-to-agent handoffs, status
+  updates, results, task delegation. Mark `done` when finished.
+  Pull-based: the recipient polls their queue.
+- **Notes** — reference documents, research, write-ups meant to be
+  read. Not conversation.
+- **Channels** — persistent two-way threads between two agent
+  sessions. Use when you need back-and-forth with another agent and
+  the board's task shape doesn't fit.
 
 ### Notes vs board issues — when to use each
 
@@ -40564,16 +40596,46 @@ class CCHandler(BaseHTTPRequestHandler):
                         if _sender_org != _thread_org:
                             slog(f"[threads] BLOCK cross-org reply: {from_session}(org={_sender_org or '<none>'}) → {tid}(org={_thread_org})")
                             return self._json({
-                                "error": f"thread {tid} is scoped to org '{_thread_org}'; your session's org is '{_sender_org or '<none>'}'",
-                                "hint": ("Cross-org thread replies are blocked. If this is a legitimate handoff, "
-                                         "use a board task or a channel instead. Only Jeremy (dashboard) can post "
-                                         "across orgs on threads."),
+                                "error": (
+                                    f"You can't post to thread {tid} — it's not in your org. "
+                                    f"Thread {tid} belongs to org '{_thread_org}'; your session "
+                                    f"'{from_session}' is in org '{_sender_org or '<none>'}'. "
+                                    f"Find the correct thread in your own org."
+                                ),
+                                "hint": (
+                                    "If you need to talk to another agent, that's what the BOARD is for — "
+                                    "POST /api/board with session=\"<their-session>\". For persistent 1:1 "
+                                    "chatter, use CHANNELS: POST /api/channels/<from>/<to>/messages. "
+                                    "Threads are Jeremy's inbox, not agent-to-agent traffic."
+                                ),
+                                "thread_org": _thread_org,
+                                "your_org": _sender_org or None,
                             }, 403)
                 # Default to_session = the other participant in the thread.
                 to_session = bj.get("to_session")
                 if to_session is None:
                     to_session = _other_party(tid, from_session)
                 to_session = (to_session or "").strip()
+                # HARD RULE (2026-08-07 Jeremy): threads are Jeremy's
+                # personal inbox. Agent-to-agent thread posts are
+                # STRICTLY FORBIDDEN — an agent can send to Jeremy
+                # (to_session='') or Jeremy can send to an agent
+                # (from_session=''), never agent-to-agent. Agents
+                # coordinate via the board (handoffs, status) or
+                # channels (persistent 1:1 chatter). This mirrors the
+                # same check on POST /api/threads (thread create) at
+                # L40378. Dashboard exempt: Jeremy uses UI token,
+                # which puts from_session='' either through the
+                # dashboard code path or via _is_dashboard branch above,
+                # so the guard doesn't fire for him.
+                if from_session and to_session:
+                    slog(f"[threads] BLOCK agent-to-agent reply: {from_session} → {to_session} in {tid}")
+                    return self._json({
+                        "error": "threads are for Jeremy only — agent-to-agent thread posts are strictly forbidden",
+                        "hint": ("Use POST /api/board (task handoffs, status updates, results) "
+                                 "or POST /api/channels/<from>/<to>/messages (persistent 1:1 chatter). "
+                                 "Threads are Jeremy's inbox; agents must not use them for peer traffic."),
+                    }, 403)
                 parent_id = (bj.get("parent_id") or "").strip()
                 if parent_id:
                     p = db.execute(
