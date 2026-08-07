@@ -279,7 +279,94 @@ Uncommitted PID-guard at ~L10628. Still valid protection against amux's own `res
 
 ---
 
-## Plan for change: intercept Claude Code's `xdg-open` → forward to dashboard (2026-08-07) — DEFERRED (recorded per Jeremy 08:12 PT, no code yet)
+## Plan for change: intercept Claude Code's `xdg-open` → forward to dashboard (2026-08-07) — SERVER-SIDE DONE ✅ commit `47da98f`
+
+**Verified end-to-end server-side 2026-08-07 13:52 UTC:**
+- Shim files exist at `~/.amux/xdg-shim/{xdg-open,open}` (chmod 755).
+- Direct shim invocation with env vars POSTs to endpoint and exits 0.
+- Shim without env vars exits 0 silently (safe fallback).
+- `POST /api/browser-open` accepts valid payloads (200 `{ok:true}`),
+  rejects invalid URL and missing session (400).
+- `GET /api/browser-open?session=<name>` returns queued entries with
+  timestamps. 5-min TTL and 5-entry cap enforced.
+- Log line `[browser-open] session=X url=Y` appears in server.log.
+- Hot-reload preserved PID 1697930, systemd NRestarts unchanged at 13.
+
+**Existing amux sessions started BEFORE this commit will NOT have the
+shim in PATH** (tmux `-e PATH=…` only applies at new-session time).
+For those, either restart the session or invoke the shim by full path.
+New sessions get it automatically.
+
+**Deferred (still on the roadmap, not blocking):**
+- Client-side banner UI (SSE-triggered or polling `/api/browser-open`)
+  + click-to-open button. Blocked on Jeremy's Safari cache being
+  verified working — no point shipping UI he can't see.
+- Container session support — shim needs to be mounted into the
+  container or written to the shared home. Follow-up.
+
+**Verification recipe for a fresh session** (once Jeremy starts one):
+```bash
+# From inside a NEW amux session's tmux pane:
+xdg-open https://example.com
+echo $?     # → 0
+
+# From the host, watch it land:
+tail -f ~/.amux/logs/server.log | grep browser-open
+curl -sk https://localhost:8822/api/browser-open?session=<name>
+```
+
+**Trimmed MVP scope** (client-side banner deferred while Jeremy's
+Safari cache issue is unresolved — building it now would produce a
+feature he literally can't see):
+1. Shim script at `~/.amux/xdg-shim/xdg-open` + `~/.amux/xdg-shim/open`.
+   Python script — POSTs `{session, url}` to
+   `POST /api/browser-open`, exits 0.
+2. `_ensure_xdg_shim()` helper — writes the shim (chmod 755) on server
+   startup if missing.
+3. `start_session` (host branch, single tmux new-session call at
+   ~L11057) prepends `~/.amux/xdg-shim` to PATH via `-e "PATH=..."`.
+   Container branch deferred — needs the shim mounted into the
+   container's shared home.
+4. `POST /api/browser-open` endpoint — validates URL, appends to a
+   per-session in-memory queue (keep last 5, 5-min TTL), logs
+   `[browser-open] session=X url=Y` to server.log.
+5. `GET /api/browser-open?session=X` — returns the pending queue,
+   used by client polling. Deferred client will hit this.
+
+**Verify server-side works BEFORE building any UI:**
+- Run `xdg-open https://example.com` inside an amux session's tmux.
+- Check `~/.amux/logs/server.log` for a `[browser-open]` line.
+- Check `curl -sk $AMUX_URL/api/browser-open?session=<name>` returns
+  the URL in a JSON queue.
+- The shim should exit 0 (echo `$?` in the pane → 0).
+
+If all three green, the server side is proven. The client-side banner
+(SSE-triggered + click-to-open button) becomes a small follow-up once
+Jeremy's cache is sorted.
+
+**Deferred within this MVP:**
+- Container support (needs shim mounted or written into shared home).
+- Client-side banner UI + SSE hookup.
+- Fanout security (per-user filtering on cloud installs).
+- Rate limiting on the endpoint (add if we ever see abuse; not
+  needed for local dev).
+
+**Risk audit (per Jeremy's caveat "we've made a whole lot of changes
+trying to fix things and honestly, I don't know that any of those
+changes actually did anything other than potentially introduce bugs
+that we will find at a later date"):**
+- PATH prepending affects every child process in the tmux session,
+  not just Claude Code. If any child ALSO calls xdg-open (unlikely),
+  it too gets intercepted. Harmless — worst case a stray banner.
+- Shim exits 0 even if the POST fails. Claude Code will think the
+  browser opened when it didn't. Trade-off accepted: better than the
+  current "browser didn't open" fallback message, and the URL is
+  still printed in the pane either way.
+- New endpoint adds one route. No auth check on MVP — the endpoint
+  only lives on `$AMUX_URL` which is already firewalled to the local
+  network. On cloud, add auth when we build fanout.
+- No changes to `_watch_self`, `send_text`, `_snapshot_all_sessions_
+  inner`, or `start_session` PID guards. Isolated additions only.
 
 **Ask (Jeremy 08:02 PT):** "Can we listen for claude codes attempt to
 open a new browser, its trying to open the browser, is there any way
