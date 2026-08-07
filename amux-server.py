@@ -23287,8 +23287,13 @@ function ansiToHtml(text) {
 
 function linkifyOutput(text) {
   // Split text into segments: URLs, file paths, and plain text
-  // URL regex: match http/https URLs
-  const urlRe = /https?:\/\/[^\s<>\]\)'"`,;]+/g;
+  // URL regex: match http/https URLs, INCLUDING URLs that tmux wrapped
+  // across multiple physical lines. A newline INSIDE a URL is real when
+  // the next line starts immediately with URL-safe chars (no leading
+  // whitespace — leading whitespace is a genuine new line of output).
+  // Claude Code's /login prints its OAuth URL wrapped across 3 lines;
+  // the old single-line regex only linkified the first line.
+  const urlRe = /https?:\/\/(?:[^\s<>\]\)'"`,;]|\n(?=[A-Za-z0-9%\/&?=_\-.+~]))+/g;
   // File path regex: absolute paths or relative paths with extensions
   const fileRe = /(?:^|[\s(])((\/[\w./-]+(?:\.\w+)(?::[\d]+)?)|(\.\/[\w./-]+(?:\.\w+)(?::[\d]+)?))/gm;
 
@@ -23324,7 +23329,11 @@ function linkifyOutput(text) {
       html += esc(text.slice(last, match.start));
     }
     if (match.type === 'url') {
-      html += `<a href="${esc(match.value)}" target="_blank" rel="noopener noreferrer">${esc(match.value)}</a>`;
+      // href must be a valid single-line URL — strip any internal newlines
+      // that came from tmux line-wrap. The visible text keeps the newlines
+      // so the pane's wrapped layout is preserved.
+      const cleanHref = match.value.replace(/\n/g, '');
+      html += `<a href="${esc(cleanHref)}" target="_blank" rel="noopener noreferrer">${esc(match.value)}</a>`;
     } else if (match.type === 'file') {
       const rawPath = match.value.replace(/:[\d]+$/, '');  // strip :linenum
       const isMd = /\.md$/i.test(rawPath);
