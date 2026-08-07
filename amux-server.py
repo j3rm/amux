@@ -46827,22 +46827,27 @@ def _watch_self(server):
                     slog(f"[restart] ABORTED — syntax error: {se}")
                     mtime = new_mtime  # update mtime so we re-check on next change
                     continue
-                # Shutdown with timeout — don't let stuck threads block restart
-                t = threading.Thread(target=server.shutdown, daemon=True)
-                t.start()
-                t.join(timeout=3)
-                # Close the listening socket so the new process can bind immediately
+                # Direct execv — do NOT call server.shutdown() first.
+                # Prior code shut the server down on a helper thread, which
+                # unblocked serve_forever() in the main thread. The main
+                # thread then exited Python cleanly and this daemon watcher
+                # was killed before it ever reached os.execv. systemd saw
+                # the clean exit and, because amux.service uses the default
+                # KillMode=control-group, killed every process in the
+                # cgroup — including every agent's tmux session. Confirmed
+                # 2026-08-07 by diagnostic slog: "calling server.shutdown()"
+                # appeared but "about to execv" never did.
+                # os.execv replaces the process image; the kernel closes
+                # the listening socket, PID is preserved, systemd sees no
+                # exit, agent sessions live.
+                slog(f"[restart] pid={os.getpid()} direct execv → {sys.executable} {sys.argv}")
+                sys.stdout.flush()
+                sys.stderr.flush()
                 try:
-                    server.socket.close()
-                except Exception:
-                    pass
-                try:
-                    server.server_close()
-                except Exception:
-                    pass
-                # Brief pause to let OS release the socket
-                time.sleep(0.5)
-                os.execv(sys.executable, [sys.executable] + sys.argv)
+                    os.execv(sys.executable, [sys.executable] + sys.argv)
+                except OSError as _execv_err:
+                    slog(f"[restart] execv FAILED: {_execv_err!r}")
+                    raise
         except Exception as e:
             slog(f"[restart] watcher error: {e}")
 
