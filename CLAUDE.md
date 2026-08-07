@@ -15,6 +15,7 @@ Single-file project: everything lives in `amux-server.py` (Python server + inlin
 
 ## Workflow
 
+- **RESUME-HERE.md is mandatory for every amux-server.py change.** Before editing `amux-server.py`, write a "Plan for change: X" section in `/mnt/gitdata/amux/RESUME-HERE.md` describing what you intend to do, why, expected behavior, and how to verify. This is non-negotiable. Server restarts and context resets have repeatedly wiped mid-flight investigations; this file is the only thing that survives. After the change is verified and committed, mark the plan section done (leave it in place as history — do not delete). Read the file at the START of every session before touching amux-server.py.
 - **Commit after every completed task.** When you finish a piece of work (bug fix, feature, refactor), immediately `git add amux-server.py && git commit` with a concise message. Don't batch multiple tasks into one commit.
 - The server auto-restarts on file save (watches its own mtime), so changes are live immediately.
 - Always verify Python syntax after edits: `python3 -c "import ast; ast.parse(open('amux-server.py').read())"`
