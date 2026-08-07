@@ -279,6 +279,133 @@ Uncommitted PID-guard at ~L10628. Still valid protection against amux's own `res
 
 ---
 
+## Plan for change: `/login` OAuth code paste → HTTP 400 (2026-08-07) — DONE ✅ commit `5cc0c23` (awaiting live Jeremy verification)
+
+**Verified server-side 2026-08-07 12:02 UTC:** post-commit `touch
+amux-server.py` triggered the `os.execv` path. PID 1697930 preserved,
+systemd NRestarts unchanged at 13, dashboard HTTP 200. New client code
+loaded into every fresh page reload.
+
+**Live UX verification (needs Jeremy in the browser):**
+1. Hard-refresh the dashboard (Cmd/Ctrl-Shift-R) to pick up the new
+   JS.
+2. Open any session, run `/login` in the send bar.
+3. Do the browser OAuth dance, copy the code.
+4. Paste the code into the send bar and hit Send.
+5. Expected: pane receives the code EXACTLY (no `[HH:MM AM]` prefix),
+   Claude Code accepts it, no HTTP 400.
+6. Send a normal message afterwards — expected: timestamp prefix
+   returns (flag was cleared).
+
+**If it still fails:** capture the actual pane contents at the OAuth
+prompt (`amux peek <session>`) and add to this section. The most
+likely follow-up would be that Claude Code's OAuth prompt has some
+OTHER text-mangling issue (bracketed paste, autocomplete). If it fails
+identically to before, the client-side fix didn't apply — check
+DevTools console for the `_pendingLogin` object shape and confirm the
+JS reloaded.
+
+**Symptom (Jeremy):** `/login` opens a browser URL, he authorizes,
+copies the code back, pastes into the dashboard send bar, hits Send.
+Anthropic returns HTTP 400 (invalid code). Multiple prior attempts to
+fix have not worked. He suspects the prior changes may have introduced
+latent bugs without observable symptoms yet.
+
+**Root cause (identified 2026-08-07 by direct code inspection):** the
+client-side `doSend` (~L21162) prepends a human-readable timestamp
+prefix to every message that does not start with `/[a-z]`:
+
+```js
+const isSlashCmd = /^\/[a-z]/.test(text.trim());
+let payload = text;
+if (!isSlashCmd) {
+  payload = `[${ts}${author}] ${text}`;
+}
+```
+
+- `/login` itself is a slash command → sent verbatim → OAuth flow starts
+  correctly.
+- The OAuth code Jeremy pastes back is NOT a slash command → gets
+  prepended with `[HH:MM AM] ` (and `_cloudEmail` if set).
+- `send_text` on the server sees a `≤400 char` message and uses
+  `send-keys -l`, delivering `[HH:MM AM] <REAL_CODE>` verbatim to
+  Claude Code's OAuth-code readline prompt.
+- Claude Code POSTs `[HH:MM AM] <REAL_CODE>` to Anthropic → 400.
+
+**Ruled out (confirmed by inspection):**
+- `send_text` (~L11536) does NOT mangle short text through `send-keys -l`
+  by itself for URL-safe chars — the character stream is preserved
+  verbatim (verified previously in RESUME-HERE's "Bug A" investigation;
+  the paste-buffer rewrite at L11615 covers the `>400` branch only).
+- No `Escape`, `C-u`, or picker-close key is currently sent before the
+  literal typing in the small-message path (that logic was removed in
+  earlier fixes — see `a9b0352`, `60f1059`).
+- No other `/send` caller in the JS bundle adds the timestamp — only
+  `doSend`. The bug is localized to the send-bar path Jeremy uses.
+
+**Why prior attempts failed to land the fix:** the "Bug A" work in
+prior sessions focused on tmux-side character corruption (paste-buffer
+vs send-keys) rather than the client-side prefix. The prefix is easy
+to miss because the JS is 20K lines away from `send_text` in the same
+file, and normal messages LOOK fine in the pane (timestamps are
+expected human context, not corruption).
+
+**Two candidate fixes, tradeoffs:**
+
+1. **Session-scoped "expecting OAuth code" flag** (matches Jeremy's
+   mental model — "listen for /login, then skip the prefix on the next
+   real message"):
+   - On `doSend` with slash command that starts with `/login`, set
+     `window._pendingLogin[name] = Date.now()`.
+   - On next `doSend` with non-slash text AND flag was set within last
+     ~15 min, skip the timestamp prefix and clear the flag.
+   - Pros: matches Jeremy's exact wording, minimal server changes.
+   - Cons: false-triggers if the user types `/login` then decides to
+     send a normal message; false-misses if the flag times out. Also
+     doesn't help other unusual prompts that expect raw input.
+
+2. **Server-side pane-state detection** (robust, no client memory):
+   - The server, on POST `/api/sessions/<name>/send`, peeks the pane
+     tail. If it matches an OAuth-code-prompt pattern
+     (e.g. `Paste code`, `Enter code`, `authorization code`), STRIP any
+     `^\[\d{1,2}:\d{2}\s?(AM|PM)\]\s*` prefix before calling
+     `send_text`. (Server can't "know" client added it, but it can
+     recognize the pattern and remove it — timestamps of this exact
+     shape are never legitimate OAuth code prefixes.)
+   - Pros: no client state, no flag races, self-heals for other raw-
+     input prompts if we generalize the pane-state check.
+   - Cons: fragile regex — Claude Code's OAuth prompt text may change
+     between releases. Would need a match test on the actual current
+     Claude Code /login screen (which we haven't captured yet).
+
+3. **Combined** (belt-and-suspenders): use (1) as the primary trigger
+   (fast, no pane read) and (2) as a safety net.
+
+**Recommendation:** Option 1 first — it directly answers Jeremy's
+described flow ("when I use /login and then when I give you the token
+which could be not immediately after that"). Small, targeted, easy to
+revert. If it proves flaky in practice, add (2).
+
+**Verification plan (regardless of option chosen):**
+1. Syntax check + `os.execv` hot-reload preserves PID (per SESSION-
+   RESTART CHAIN rules).
+2. Peek a live pane after `/login` to CAPTURE the actual OAuth prompt
+   text; save the capture into this doc for future reference.
+3. Reload the dashboard, click into a test session, run `/login`,
+   navigate the login flow in a browser, paste the code into the send
+   bar, hit Send. Expect: NO timestamp prefix in the pane; Claude Code
+   accepts the code; no HTTP 400.
+4. Send a normal message afterwards. Expect: timestamp prefix returns
+   (flag was cleared).
+
+**Not doing (audit note per Jeremy's caveat):** any refactor of
+`send_text` character-encoding logic, any change to the `>400` paste-
+buffer path, any change to `apiCall`. Those are prior in-flight
+concerns from RESUME-HERE's "Bug A" that are NOT relevant to this
+specific 400 bug.
+
+---
+
 ## Plan for change: friendly error toast when archiving a pinned session (2026-08-07) — DONE ✅ commit `391da8a`
 
 **Verified 2026-08-07 11:37 UTC:** post-commit `os.execv` hot-reload
