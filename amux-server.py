@@ -21247,7 +21247,12 @@ async function doSend(name, text) {
   // paste → HTTP 400" for the full diagnosis.
   const cmdHead = text.trim().split(/\s+/)[0];
   window._pendingLogin = window._pendingLogin || {};
-  const LOGIN_WINDOW_MS = 15 * 60 * 1000;
+  // Shortened from 15min → 2min after Jeremy reported (2026-08-07 08:47)
+  // that typing "continue" a while after /login had that message sent
+  // through prefix-skipped and Claude Code treated it as the OAuth code.
+  // The server-side pane-peek strip is the primary defense; this client
+  // flag is a nice-to-have for the fast path.
+  const LOGIN_WINDOW_MS = 2 * 60 * 1000;
   let skipPrefixForLogin = false;
   if (isSlashCmd && cmdHead === '/login') {
     window._pendingLogin[name] = Date.now();
@@ -45597,6 +45602,28 @@ p{{color:#888;margin:12px 0 28px;font-size:0.9rem;line-height:1.5}}
                 # Backup JSONL transcript before /compact so we can revert
                 if text.strip().startswith("/compact"):
                     threading.Thread(target=backup_session_jsonl, args=(name, "pre_compact"), daemon=True).start()
+                # OAuth-prompt prefix strip. If the target session's pane
+                # ends in Claude Code's "Paste code here" prompt (the
+                # /login OAuth handoff), strip any client-side timestamp
+                # prefix (e.g. "[08:57 AM] " or "[08:57 AM user@x] ") from
+                # the payload. Without this, the OAuth code arrives glued
+                # to the prefix and Anthropic returns HTTP 400. Server-
+                # side detection is authoritative — works regardless of
+                # client cache, tab reload, cross-tab pastes, or which
+                # browser the user is on. See RESUME-HERE.md "Plan for
+                # change: fix linkifier + server-side OAuth prefix strip".
+                try:
+                    _pane = tmux_capture(name, 50) or ""
+                    if _pane and "Paste code here" in _STRIP_ANSI.sub("", _pane):
+                        _stripped = re.sub(
+                            r'^\[\d{1,2}:\d{2}\s*(?:AM|PM)?(?:\s+\S+@\S+)?\]\s*',
+                            '', text, count=1,
+                        )
+                        if _stripped != text:
+                            slog(f"[oauth-strip] session={name} stripped_prefix_len={len(text)-len(_stripped)}")
+                            text = _stripped
+                except Exception as _e:
+                    slog(f"[oauth-strip] check failed (non-fatal): {_e!r}")
                 ok, msg = send_text(name, text)
                 if ok:
                     _update_meta(name, last_send=int(time.time()), last_send_text=text[:200])
