@@ -10623,6 +10623,20 @@ def start_session(name: str, extra_flags: str = "", _skip_conv_id: bool = False)
     with _get_session_lock(name):
         if is_running(name):
             return True, "already running"
+        # AH-55 belt-and-suspenders. is_running() calls _at_shell_prompt
+        # which can transiently false-positive right after an amux-server
+        # os.execv restart (pane state momentarily desynced). A caller
+        # that trusted the false-negative would then take the tmux-exists
+        # path below (~L10960: respawn-pane -k) and hard-kill a healthy
+        # claude — every server edit costs the session its context. A
+        # direct PID check has no pane-state dependency, so use it as a
+        # second gate: treat as already-running whenever claude is really
+        # alive under this session's tmux.
+        try:
+            if _find_claude_pid(name) > 0:
+                return True, "already running"
+        except Exception:
+            pass
         cfg = parse_env_file(f)
         if cfg.get("CC_ARCHIVED") == "1":
             return False, "session is archived; wake it first"
