@@ -296,6 +296,127 @@ Uncommitted PID-guard at ~L10628. Still valid protection against amux's own `res
 
 ---
 
+## Plan for change: threads are Jeremy-only — hard rule + agent-facing docs (2026-08-07) — DONE ✅ commit `01c81fd`
+
+**Verified end-to-end 2026-08-07 14:39 UTC (three tests, three log lines):**
+
+1. **Cross-org POST** — RTG-ActAS → T-143 (SurfPrep):
+   → 403 with `"You can't post to thread T-143 — it's not in your org.
+   Thread T-143 belongs to org 'CD-SurfPrep'; your session
+   'RTG-ActAS' is in org 'RTG'. Find the correct thread in your own
+   org."` + hint pointing at board/channels.
+   Log: `[threads] BLOCK cross-org reply: RTG-ActAS(org=RTG) → T-143(org=CD-SurfPrep)`
+
+2. **Agent-to-agent same-org POST** — RTG-ActAS → T-155 with
+   `to_session=RTG-Other`:
+   → 403 with `"threads are for Jeremy only — agent-to-agent thread
+   posts are strictly forbidden"` + hint pointing at board/channels.
+   Log: `[threads] BLOCK agent-to-agent reply: RTG-ActAS → RTG-Other in T-155`
+
+3. **Legit agent → Jeremy** — RTG-ActAS → T-155 with `to_session=""`:
+   → 201 (accepted). Test message M-2935 was discarded after
+   verification.
+
+**Agent-facing docs updated in both places:**
+- `~/.amux/memory/_global.md` — live file, every running agent's
+  next composed MEMORY.md picks up the new rule.
+- `GLOBAL_MEMORY_DEFAULT` in amux-server.py L9459 — seed for new
+  installs.
+- Section renamed "Threads — Jeremy's inbox, agent → Jeremy ONLY"
+  with a HARD RULE callout, explicit list of alternatives (board
+  for handoffs, channels for chatter), and the note that the server
+  enforces the rule (returns 403).
+
+**Together with `d25707b` (org isolation), threads are now:**
+- Owned by one org (from first non-Jeremy participant).
+- Cross-org reads → 404 (existence not leaked).
+- Cross-org writes → 403 (with clear "not in your org" message).
+- Same-org agent-to-agent writes → 403 (with clear "for Jeremy
+  only" message).
+- Agent → Jeremy (empty to_session) → allowed as before.
+- Jeremy via dashboard → sees + posts everywhere as before.
+
+**Jeremy 09:32 PT — hard rule:** "The Agents should talk using the
+board not the threads. Threads are for ME, they are MY board. It's
+strictly forbidden for agents to use the threads to communicate with
+each other. They have an existing system, the boards, the threads
+were designed for me so I could NOT have to see all the Agent
+chatter. If that's not clear in what the agents get when they are
+started up, then it needs to be."
+
+**Current state (audit):**
+- **Server enforcement (partial):**
+  - `POST /api/threads`: already rejects `from_session AND to_session
+    both non-empty` (agent creating a thread targeted at another
+    agent) — L40378.
+  - `POST /api/threads/T-N/messages`: does NOT reject when both are
+    non-empty. An unrelated agent can reply into an existing thread
+    and have `to_session` default to the OTHER agent (via
+    `_other_party`), completing an agent-to-agent thread post. This
+    is a gap.
+  - The just-shipped org isolation (commit `d25707b`) blocks
+    cross-org agent thread posts but ALLOWS same-org agent-to-agent.
+    Jeremy's rule is stricter: NO agent-to-agent at all, same-org
+    or not.
+- **Agent-facing docs are wrong:** `~/.amux/memory/_global.md` line
+  58 says: `### Threads — conversations with Jeremy OR between
+  agents`. The whole section describes threads as an agent-to-agent
+  channel. Same wording is in `GLOBAL_MEMORY_DEFAULT` in
+  amux-server.py L9459 — the seed for new installs. Every agent that
+  reads MEMORY.md at startup gets the wrong rule.
+
+**Fix (one commit for code, one text edit for the live global):**
+
+### Change 1 — Server guard on reply
+In `POST /api/threads/T-N/messages`, right after `to_session` is
+resolved (~L40476), add:
+```python
+if from_session and to_session:
+    return self._json({
+        "error": "threads are for Jeremy only — agent-to-agent thread posts are strictly forbidden",
+        "hint": "Use POST /api/board (task handoffs, status) or "
+                "POST /api/channels/<from>/<to>/messages (persistent 1:1 chatter). "
+                "Threads are Jeremy's inbox; agents must not use them for peer traffic.",
+    }, 403)
+```
+Dashboard exemption: N/A here — the reply handler already uses X-Amux-Session
+for `from_session`; Jeremy through the dashboard has `from_session=""`, so
+the guard's `if from_session and to_session` never fires for him.
+
+### Change 2 — GLOBAL_MEMORY_DEFAULT rewrite
+Replace the "Threads — conversations with Jeremy or between agents"
+section (L9464 area in amux-server.py) with a rewritten section:
+- Section header renamed: "Threads — Jeremy's inbox, agent → Jeremy ONLY".
+- Explicit rule at the top: "Threads are Jeremy's personal inbox.
+  Agent-to-agent thread posts are strictly forbidden and will be
+  rejected 403 by the server. Use the BOARD for handoffs and status
+  updates to other agents; use CHANNELS for two-way peer chatter."
+- The routing/reuse/flag advice stays but explicitly framed as
+  "Jeremy-facing".
+- The "When to use Threads vs board vs channels" table gets
+  rewritten to be crystal clear.
+
+### Change 3 — Live `_global.md` rewrite
+Same rewrite applied to `~/.amux/memory/_global.md` (the file every
+running agent actually reads). Not a code change — just an edit to
+the file. Every session that composes memory at next startup will
+pick it up.
+
+### Verification
+1. Syntax check + touch + PID preserved.
+2. Curl POST as agent → thread with `to_session` = another agent
+   → 403 with new error.
+3. `grep -n "strictly forbidden" ~/.amux/memory/_global.md` → matches.
+4. Next start of any agent (or manual re-compose) → new text in their
+   Claude memory.
+
+### NOT doing
+- No changes to the channels API (already the right place for peer chatter).
+- No changes to the board API.
+- No changes to /login, cache, or the org isolation shipped this morning.
+
+---
+
 ## Plan for change: thread org isolation + T-143 cleanup (2026-08-07) — DONE ✅ commit `d25707b`
 
 **Verified end-to-end 2026-08-07 14:33 UTC:**
