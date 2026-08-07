@@ -42,6 +42,23 @@ thing that survives every kind of reset.**
 - Auto-memory: `feedback_log_before_server_edit.md` (loaded via
   `MEMORY.md` index).
 
+## 🔒 LOCKED-IN FIXES — do not regress
+
+Working code that took real effort to land. Grep for the tag before
+editing the surrounding area:
+- **`/login` OAuth flow** (2026-08-07): two-part fix, both essential.
+  - Pane linkifier: `ansiToHtml.linkChunk` (~L23222). Multi-line URL
+    regex. NOT `linkifyOutput` — that's message bodies only.
+    Verbose warning banner in the code.
+  - Server-side prefix strip: `/send` handler `[oauth-strip]` block
+    (~L45494). Peeks pane, strips `[HH:MM AM]` when Claude Code's
+    "Paste code here" prompt is visible. Authoritative fix; the
+    client-side `_pendingLogin` flag in `doSend` is belt-and-
+    suspenders only.
+  - Full history in the "Plan for change: fix linkifier + server-side
+    OAuth prefix strip" section below. Landed in commits `6d19314`,
+    `5624b97`, `9c2aed0` (comment lock-in).
+
 ---
 
 ## Environment (verified 2026-08-07 03:55 UTC)
@@ -279,7 +296,18 @@ Uncommitted PID-guard at ~L10628. Still valid protection against amux's own `res
 
 ---
 
-## Plan for change: fix linkifier (real location) + server-side OAuth prefix strip + revert shim (2026-08-07) — DONE ✅
+## Plan for change: fix linkifier (real location) + server-side OAuth prefix strip + revert shim (2026-08-07) — DONE ✅ BOOKED
+
+**Confirmed working by Jeremy 09:10 PT** ("Hot DAMN!, you did it.
+1. The link is clickable 2. the code is pasted in correctly").
+
+**Lock-in commit `9c2aed0`** — added verbose warning banners at every
+touchpoint (ansiToHtml.linkChunk, linkifyOutput, /send [oauth-strip],
+doSend _pendingLogin, doSend [HH:MM] prefix builder) so a future edit
+can't quietly regress the fix without seeing the warning.
+
+**Leftover cleanup:** deleted `~/.amux/xdg-shim/` binaries left over
+from the reverted MVP; codebase no longer manages them.
 
 **Landed:**
 - `6d19314` fix(peek): multi-line linkifier in ansiToHtml.linkChunk —
