@@ -3966,6 +3966,13 @@ def _snapshot_all_sessions_inner():
             # flag is gone and they see "tmux alive but no claude PID."
             # Observed source of the ShareScore pushover storm — 22-day-idle
             # sessions produced ~12 pushovers per systemd restart.
+            #
+            # This is member (2a) of the SESSION-RESTART CHAIN — see the
+            # big comment block just above `_watch_self` (search for
+            # "SESSION-RESTART CHAIN") for how this connects to
+            # `_watch_self`'s `os.execv`, the AH-56 guard just below,
+            # the AH-55 guard in `start_session`, and systemd's cgroup
+            # KillMode. Never edit any of those without reading it.
             if "hibernated" not in actions and not actions.get("_meta_hydrated"):
                 actions["_meta_hydrated"] = True
                 if _load_meta(name).get("hibernated"):
@@ -4111,6 +4118,14 @@ def _snapshot_all_sessions_inner():
             # context (observed via amux-helper.meta.json start_count = 14
             # climbing on every amux-server edit; Jeremy's own session was
             # dying on every edit made during this file's development).
+            #
+            # This is member (2b) of the SESSION-RESTART CHAIN — see the
+            # big comment block just above `_watch_self` (search for
+            # "SESSION-RESTART CHAIN") for the end-to-end story. Paired
+            # with the AH-55 guard in `start_session` (~L10611) and the
+            # `os.execv` fix in `_watch_self`. With execv working
+            # correctly this guard should never actually fire — it's the
+            # safety net for the next unknown unknown.
             if (_at_shell_prompt(clean) and not actions.get("restarting")
                     and not actions.get("hibernated")
                     and _find_claude_pid(name) <= 1):
@@ -10632,6 +10647,14 @@ def start_session(name: str, extra_flags: str = "", _skip_conv_id: bool = False)
         # direct PID check has no pane-state dependency, so use it as a
         # second gate: treat as already-running whenever claude is really
         # alive under this session's tmux.
+        #
+        # This is member (3) of the SESSION-RESTART CHAIN — see the big
+        # comment block just above `_watch_self` (search for
+        # "SESSION-RESTART CHAIN") for the end-to-end story. Paired with
+        # the AH-56 guard in `_snapshot_all_sessions_inner` (~L3950) and
+        # the `os.execv` fix in `_watch_self`. With execv working
+        # correctly this guard should never actually fire — it's the
+        # safety net for the next unknown unknown.
         try:
             if _find_claude_pid(name) > 0:
                 return True, "already running"
@@ -46833,11 +46856,127 @@ def _validate_api_key_job():
         slog(f"[key-validate] API key check failed: {error}")
 
 
-def _watch_self(server):
-    """Watch amux-server.py for changes and restart on modification.
+# ══════════════════════════════════════════════════════════════════════
+# ── SESSION-RESTART CHAIN — how the pieces fit together ──────────────
+# ══════════════════════════════════════════════════════════════════════
+#
+# TL;DR — amux hot-reloads itself on every save. Historically that
+# restart wiped every agent session on the box. The pieces below make
+# hot-reload safe. Read this before touching any of them.
+#
+# The players (all in this file unless noted):
+#
+#   1. `_watch_self`                       (this file, right below)
+#      Daemon thread. Polls its own mtime once/sec. On change: 3s
+#      debounce → syntax-check → `os.execv`. Never calls
+#      `server.shutdown()`.
+#
+#   2. `_snapshot_all_sessions_inner`      (~L3950–L4200)
+#      Runs every ~3s inside the SessionSnapshotter thread. Two of its
+#      responsibilities interact with restart:
+#        (a) Hibernation-flag rehydrate at the top of the loop —
+#            re-reads `hibernated` from `meta.json` on the first tick
+#            after a restart, because in-memory state is gone.
+#        (b) Section 4 auto-restart guard (AH-56) — before restarting
+#            a "shell-prompt" session, cross-check `_find_claude_pid`
+#            to be sure claude is really dead.
+#
+#   3. `start_session`                     (~L10611)
+#      AH-55 PID guard. Before taking the `respawn-pane -k` path that
+#      kills a healthy claude, cross-check `_find_claude_pid`.
+#
+#   4. systemd `amux.service`              (~/.config/systemd/user/)
+#      `Restart=always`, `RestartSec=10`, `KillMode=control-group`
+#      (default). The critical bit: when the main PID exits, systemd
+#      slaughters every process in the cgroup — including every
+#      `tmux new-session` child (i.e. every agent session).
+#
+# THE BUG WE FIXED (commit 277855c, 2026-08-07):
+#
+#   Old `_watch_self` did `server.shutdown()` on a helper thread before
+#   `os.execv`. `shutdown()` unblocked `serve_forever()` on the main
+#   thread; the main thread exited Python cleanly; the daemon watcher
+#   was killed the instant the main thread returned, before it ever
+#   reached `os.execv`. systemd saw a clean exit and
+#   `KillMode=control-group` killed the cgroup → every agent session
+#   died on every edit. Multi-hour investigations kept losing context
+#   mid-fix. See `RESUME-HERE.md` for the full timeline.
+#
+# THE FIX — WHY DIRECT `os.execv` IS LOAD-BEARING:
+#
+#   `os.execv` replaces the process image IN PLACE. The kernel:
+#     - closes all fds (including the listening socket — no need to
+#       call `server.socket.close()`),
+#     - preserves the PID (systemd sees no exit → does NOT fire
+#       `Restart=always` → cgroup is never slaughtered),
+#     - discards all Python state (all threads gone, GIL reset).
+#   The new process re-reads amux-server.py from disk and boots
+#   fresh. Agent tmux children stay alive throughout. NRestarts in
+#   `systemctl --user show amux.service` does NOT increment.
+#
+# DEFENSE IN DEPTH — the two PID guards (AH-55, AH-56):
+#
+#   `_at_shell_prompt(clean)` is a text heuristic on tmux scrollback.
+#   Right after an `os.execv` restart the pane state is momentarily
+#   desynced; the heuristic can transiently false-positive (or
+#   false-negative in the sister case). If ANYTHING got past the
+#   `_watch_self` fix and briefly desynced pane state, either the
+#   `_snapshot_all_sessions_inner` auto-restart path (kills claude
+#   because it "thinks" the pane is idle at shell) or the
+#   `start_session` `respawn-pane -k` path (kills claude because
+#   `is_running()` returned false) would still slaughter sessions.
+#
+#   Both guards do the same thing: cross-check `_find_claude_pid` and
+#   bail out if a live claude child is really there under the pane.
+#   PID is authoritative; text is heuristic. With execv working
+#   correctly these guards should never fire in practice — they are
+#   the safety net for the next unknown unknown.
+#
+# WHY THE HIBERNATION REHYDRATE MATTERS (commit a307405):
+#
+#   Not a session-killer but a pushover-storm generator. If a restart
+#   ever DOES happen (systemd restart, admin `systemctl restart`), the
+#   in-memory `_session_auto_actions[name]["hibernated"]` flag is gone.
+#   Sections 4/4b/4d of `_snapshot_all_sessions_inner` then see "tmux
+#   alive but no claude PID" for every hibernated CC_AUTO_CONTINUE
+#   session and false-fire `session_dead` + `auto_restart` pushovers.
+#   The ShareScore incident: 22-day-idle sessions produced ~12
+#   pushovers per systemd restart. Rehydrating from `meta.json` on the
+#   first tick suppresses the storm.
+#
+# VERIFICATION recipe (kept in RESUME-HERE.md too):
+#
+#     PID=$(pgrep -f 'python3.*amux-server.py' | head -1)
+#     NR_BEFORE=$(systemctl --user show amux.service --property=NRestarts --value)
+#     touch amux-server.py
+#     sleep 6
+#     # Expect: same PID, same NRestarts, log shows
+#     # `[restart] pid=$PID direct execv → …` + `[startup] pid=$PID`
+#     pgrep -f 'python3.*amux-server.py'; \
+#     systemctl --user show amux.service --property=NRestarts --value
+#
+# All future changes to any function in this chain MUST be planned in
+# RESUME-HERE.md first — see the "Workflow" section of CLAUDE.md and
+# the `feedback_log_before_server_edit.md` auto-memory.
+# ══════════════════════════════════════════════════════════════════════
 
-    Uses a 3-second debounce so rapid successive edits (e.g. multiple
-    sessions committing) only trigger a single restart.
+
+def _watch_self(server):
+    """Watch amux-server.py for changes and hot-reload via os.execv.
+
+    Runs in a daemon thread started from main(). Polls the file's mtime
+    once per second; on a change, debounces 3s, syntax-checks, then
+    `os.execv`s the current process image. **Never call
+    server.shutdown() from here** — see the SESSION-RESTART CHAIN block
+    above this function for the full explanation of why.
+
+    Related pieces (see the chain block for how they interact):
+      - `_snapshot_all_sessions_inner` (~L3950) — AH-56 PID guard is the
+        auto-restart safety net.
+      - `start_session` (~L10611) — AH-55 PID guard is the respawn-pane
+        safety net.
+      - systemd `amux.service` — `KillMode=control-group` is the reason
+        a clean process exit here would slaughter every agent session.
     """
     _DEBOUNCE = 3  # seconds to wait for edits to settle
     script = Path(__file__).resolve()
