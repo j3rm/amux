@@ -279,7 +279,103 @@ Uncommitted PID-guard at ~L10628. Still valid protection against amux's own `res
 
 ---
 
-## Plan for change: `/login` auto-open browser tab to the OAuth URL (2026-08-07) — DONE ✅ commit `3b3165b` (awaiting live Jeremy verification)
+## Plan for change: linkifier handles multi-line wrapped URLs + revert auto-open (2026-08-07) — DONE ✅
+
+**Landed:**
+- `51999a1` fix(linkify): reconstruct URLs that tmux wrapped across multiple lines
+- `927ff9f` Revert "feat(dashboard): /login auto-opens the auth URL in a new browser tab"
+
+**Verified 2026-08-07 12:58 UTC:** post-commit `touch amux-server.py`
+triggered `os.execv`, PID 1697930 preserved, systemd NRestarts
+unchanged at 13, dashboard HTTP 200. `doSend` still has the
+prefix-skip logic from `5cc0c23`; the auto-open helpers and the
+`_loginAutoOpenStart(name)` call inside `doSend` are gone.
+
+**Live UX verification (needs Jeremy):** hard-refresh dashboard,
+peek at any session showing a wrapped URL (or trigger `/login`), the
+whole URL should be one clickable link that opens correctly.
+
+**What Jeremy saw (screenshot 07:53 PT):** the terminal peek IS
+linkifying the `/login` OAuth URL, but only the FIRST wrapped line.
+Claude Code prints the full URL across three physical terminal lines:
+```
+https://claude.com/cai/oauth/authorize?code=true&client_id=…&redirect_uri=https%3A%2F%2Fplatform.claude.com%2Foa
+uth%2Fcode%2Fcallback&scope=…
+LxMSsJVo9QpTIykzhwdnq0ftVHfXI1OOWJMjoNl2M&code_challenge_method=S256&state=…
+```
+
+`linkifyOutput` (~L23288) uses `https?:\/\/[^\s<>\]\)'"``,;]+` — `\s`
+includes newline, so match stops at the first wrap. Result: only the
+first line of the URL is clickable and it's an incomplete URL that
+would 404 (or worse, redirect somewhere unrelated).
+
+**Jeremy's suggested fix (this is exactly right):** teach the
+linkifier to reconstruct wrapped URLs. Then the click-through works
+naturally and the pre-opened-blank-tab auto-open (commit `3b3165b`)
+becomes unnecessary — revert it.
+
+**Plan (two steps, in order):**
+
+### Step 1 — fix linkifier
+
+In `linkifyOutput` at ~L23288, extend the URL regex to allow newline
+IF the next line begins directly with URL-safe chars (no leading
+whitespace — which would be a genuine wrap continuation from tmux, not
+a new line of output). Then when building the HTML `<a>`, strip
+newlines from the `href` so the browser gets a valid single-line URL,
+but leave the display text as-is (spans multiple visual lines,
+preserving pane layout).
+
+Concretely:
+```js
+const urlRe = /https?:\/\/(?:[^\s<>\]\)'"`,;]|\n(?=[A-Za-z0-9%\/&?=_\-.+~]))+/g;
+// ...when emitting:
+const cleanHref = match.value.replace(/\n/g, '');
+html += `<a href="${esc(cleanHref)}" target="_blank" rel="noopener noreferrer">${esc(match.value)}</a>`;
+```
+
+Failure modes considered:
+- False positive across two different URLs on consecutive lines: only
+  if the second URL starts with `[A-Za-z0-9%\/&?=_\-.+~]` AND there's
+  NO indentation before it. Terminal output almost never renders two
+  bare URLs back-to-back with no indent or blank line. Acceptable.
+- False positive across URL then a regular word on next line: word
+  would need to start at column 0 with alphanumeric — possible but
+  extremely rare mid-URL, and worst case is a slightly-too-long link
+  target (still parses as a URL, just with garbage query string).
+- Trailing punctuation stripping (`.,;:!?)` at end of match value)
+  still runs — needed because the last line often ends the URL with
+  `)` or `.` in normal prose.
+
+### Step 2 — revert auto-open commit `3b3165b`
+
+`git revert 3b3165b --no-edit`. The auto-open feature was
+belt-and-suspenders; with the linkifier fix, the natural user flow is:
+- `/login` → send bar (still triggers the prefix-skip flag from
+  `5cc0c23` for the code paste-back)
+- User clicks the linkified URL in the pane → new tab, no popup-blocker
+  concerns (it's a real user click on a real link)
+- User signs in, copies code, pastes into send bar → code goes raw
+
+Both steps are independent — Step 1 stands on its own; Step 2 is pure
+cleanup of the now-superseded feature.
+
+**Verification:**
+1. `python3 -c "import ast; ast.parse(open('amux-server.py').read())"`
+   after each step.
+2. Touch + PID-preserved hot-reload after each commit.
+3. Live: hard-refresh dashboard; peek at any session's pane showing
+   the OAuth URL; the whole URL is one clickable link that opens the
+   correct target.
+
+---
+
+## Plan for change: `/login` auto-open browser tab to the OAuth URL (2026-08-07) — DONE, then REVERTED (see next section)
+
+Original commit `3b3165b` — auto-open blank tab + poll for URL.
+Superseded by the linkifier fix above. Reverted for simplicity per
+Jeremy's suggestion after seeing that the linkifier gets us the same
+UX with fewer moving parts.
 
 **Verified server-side 2026-08-07 12:20 UTC:** post-commit `touch
 amux-server.py` triggered `os.execv`. PID 1697930 preserved, systemd
