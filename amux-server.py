@@ -23220,7 +23220,13 @@ function ansiToHtml(text) {
   };
   const eh=s=>s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
   const linkChunk=raw=>{
-    const urlRe=/https?:\/\/[^\s<>\]\)'"`,;]+/g;
+    // URL regex allows newlines INSIDE URLs when the next line begins
+    // immediately with URL-safe chars (a genuine tmux wrap continuation).
+    // Claude Code's /login prints the OAuth URL wrapped across 3 physical
+    // lines; without this, only the first line was clickable. This is the
+    // function that actually renders the pane (linkifyOutput is a separate
+    // function used only for message bodies).
+    const urlRe=/https?:\/\/(?:[^\s<>\]\)'"`,;]|\n(?=[A-Za-z0-9%\/&?=_\-.+~]))+/g;
     const fileRe=/(?:^|[\s(])((\/[\w./-]+(?:\.\w+)(?::[\d]+)?)|(\.\/[\w./-]+(?:\.\w+)(?::[\d]+)?))/gm;
     const mx=[]; let m;
     while((m=urlRe.exec(raw))!==null){const u=m[0].replace(/[.,;:!?)]+$/,'');mx.push({start:m.index,end:m.index+u.length,type:'url',value:u});}
@@ -23229,7 +23235,11 @@ function ansiToHtml(text) {
     let out='',last=0;
     for(const x of mx){
       if(x.start>last)out+=eh(raw.slice(last,x.start));
-      if(x.type==='url'){out+=`<a href="${eh(x.value)}" target="_blank" rel="noopener noreferrer">${eh(x.value)}</a>`;}
+      if(x.type==='url'){
+        // href must be a single-line URL — strip newlines from wrap join.
+        const cleanHref=x.value.replace(/\n/g,'');
+        out+=`<a href="${eh(cleanHref)}" target="_blank" rel="noopener noreferrer">${eh(x.value)}</a>`;
+      }
       else{const rp=x.value.replace(/:[\d]+$/,'');const cls=/\.md$/i.test(rp)?'md-link':'file-link';out+=`<span class="${cls}" onclick="if(window.getSelection().toString())return;event.preventDefault();event.stopPropagation();openFilePreview('${eh(rp)}')">${eh(x.value)}</span>`;}
       last=x.end;
     }
