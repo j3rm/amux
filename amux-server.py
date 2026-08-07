@@ -4098,7 +4098,22 @@ def _snapshot_all_sessions_inner():
             # Always restarts when CC_AUTO_CONTINUE=1 — the user explicitly opted
             # in. Previous logic required last_alive < 600s which failed after
             # macOS hibernate (hours-long SIGKILL gaps).
-            if _at_shell_prompt(clean) and not actions.get("restarting") and not actions.get("hibernated"):
+            #
+            # AH-56 PID cross-check: `_at_shell_prompt(clean)` is a text
+            # heuristic on tmux scrollback. It can false-positive right
+            # after amux-server os.execv (pane state momentarily desynced)
+            # or when Claude renders output whose tail happens to match the
+            # shell-prompt regex. A live claude PID is authoritative —
+            # skip the restart when pgrep still sees a claude child under
+            # the pane, no matter what the pane text looks like. Without
+            # this guard, every amux-server auto-reload restarts every
+            # CC_AUTO_CONTINUE session ~3s later, wiping their conversation
+            # context (observed via amux-helper.meta.json start_count = 14
+            # climbing on every amux-server edit; Jeremy's own session was
+            # dying on every edit made during this file's development).
+            if (_at_shell_prompt(clean) and not actions.get("restarting")
+                    and not actions.get("hibernated")
+                    and _find_claude_pid(name) <= 1):
                 cfg_ar = parse_env_file(f)
                 if cfg_ar.get("CC_ARCHIVED") == "1":
                     pass  # don't auto-restart archived sessions
