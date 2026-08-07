@@ -39004,7 +39004,11 @@ PWA_MANIFEST = json.dumps({
 
 # Robust service worker: cache-first with localStorage fallback for multi-day offline
 SERVICE_WORKER = r"""
-const CACHE = 'amux-v0.8.9';
+// Bump the version string on any ship that includes user-facing JS/HTML
+// changes — the activate handler below deletes every cache whose name !=
+// this constant, so bumping is what evicts stale HTML from prior SW
+// installs. Companion to the Cache-Control: no-cache header on _html().
+const CACHE = 'amux-v0.8.10-2026-08-07';
 const SHELL_URLS = ['/', '/manifest.json', '/icon.svg', '/icon.png', '/icon-192.png', '/icon-512.png'];
 
 // Install: pre-cache entire app shell
@@ -39393,6 +39397,14 @@ class CCHandler(BaseHTTPRequestHandler):
         self.send_response(200)
         self._cors()
         self.send_header("Content-Type", "text/html; charset=utf-8")
+        # no-cache = clients MAY cache but MUST revalidate every navigation.
+        # The dashboard HTML is ~1.3MB and includes all inline JS/CSS; without
+        # this Safari applies heuristic caching (no Last-Modified/ETag → short
+        # but non-zero TTL) and users don't see JS changes even after
+        # shift-refresh. Service worker uses network-first for `/` so this
+        # header doesn't add SW overhead; it only fixes the direct-navigation
+        # path Safari falls into when the SW isn't involved.
+        self.send_header("Cache-Control", "no-cache")
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()
         self.wfile.write(body)
