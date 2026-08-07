@@ -279,6 +279,74 @@ Uncommitted PID-guard at ~L10628. Still valid protection against amux's own `res
 
 ---
 
+## Plan for change: dashboard HTML cache — force Safari to see new JS on every ship (2026-08-07) — DONE ✅ commit `e62f040`
+
+**Verified 2026-08-07 13:06 UTC:** `curl -I https://localhost:8822/`
+now shows `Cache-Control: no-cache` on the HTML response. SW cache
+version bumped to `amux-v0.8.10-2026-08-07`. Hot-reload preserved PID
+1697930, NRestarts unchanged at 13.
+
+**For Jeremy's IMMEDIATE next test** (existing SW install may still be
+running the old version until Safari re-fetches sw.js on next nav):
+- Safari → Develop → Empty Caches (Opt-Cmd-E) → Cmd-R.
+- OR Develop → Service Workers → find amux → Unregister → Cmd-R.
+
+After that one-time cleanup, future ships need only a plain reload
+because `no-cache` forces revalidation.
+
+**Trigger (Jeremy 08:02 PT):** shift-refresh in Safari didn't pick up
+the `51999a1` linkifier fix. Pane still shows only the first line of
+the URL linkified. The commit is on disk and the server is running
+the new code (verified server-side), but Safari is serving stale HTML
+from cache.
+
+**Root cause:** two overlapping cache layers.
+1. `_html()` (~L39391) sends the dashboard HTML with NO
+   `Cache-Control` header. Safari applies heuristic caching (no
+   `Last-Modified` → short but non-zero TTL, and Safari is notorious
+   for being aggressive here).
+2. The service worker (`SERVICE_WORKER` at ~L39006) uses network-first
+   for `/`, which SHOULD be fine — BUT: the SW cache version has been
+   fixed at `amux-v0.8.9` since the `cmux → amux` rename. Any cached
+   fallback served by an older SW install could be stale.
+
+**Fix (two parts, both cheap):**
+
+1. **`_html` sets `Cache-Control: no-cache`** — clients may cache but
+   MUST revalidate every navigation. With `no-cache` (as opposed to
+   `no-store`) Safari can still send `If-None-Match` for 304 replies
+   if we ever add ETags; today it just means "always ask the server."
+   For an internal SPA that's already loaded via SW network-first,
+   this changes almost nothing except making Safari behave.
+2. **Bump SW cache version** from `amux-v0.8.9` to a fresh string
+   (e.g. `amux-v0.8.10-2026-08-07`). The byte change forces every
+   installed SW to update on next page load, and the `activate`
+   handler deletes every cache whose name != new version — clearing
+   any stale `/` HTML from prior SW installs.
+
+**One-time manual workaround for Jeremy RIGHT NOW** (so he can verify
+the linkifier fix without waiting for the next reload cycle):
+- Safari → Develop menu → Empty Caches (Opt-Cmd-E), then Cmd-R.
+- OR: Develop → Service Workers → find `amux` → Unregister → Cmd-R.
+
+**Verification:**
+1. Syntax check + `os.execv` hot-reload preserves PID.
+2. Curl `-I https://localhost:8822/` shows `Cache-Control: no-cache`.
+3. Jeremy hard-refreshes (or does the manual workaround above) —
+   linkified URL now spans all three wrapped lines.
+
+**Related but deferred (Jeremy's second Q — 08:02 PT):**
+"Can we listen for claude codes attempt to open a new browser… pass
+that along to the AMUX browser?" — Claude Code shells out to
+`xdg-open`/`open` when it prints the login URL (the screenshot's
+"Browser didn't open? Use the url below to sign in" is the fallback
+that fires when the subprocess fails). We could shim `xdg-open` per
+session so it POSTs to amux instead → SSE-push → client opens tab.
+Bigger scope — deferring to a separate research + plan section after
+the cache fix lands and the linkifier is confirmed working.
+
+---
+
 ## Plan for change: linkifier handles multi-line wrapped URLs + revert auto-open (2026-08-07) — DONE ✅
 
 **Landed:**
