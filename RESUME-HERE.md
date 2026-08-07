@@ -279,7 +279,164 @@ Uncommitted PID-guard at ~L10628. Still valid protection against amux's own `res
 
 ---
 
-## Plan for change: intercept Claude Code's `xdg-open` → forward to dashboard (2026-08-07) — SERVER-SIDE DONE ✅ commit `47da98f`
+## Plan for change: fix linkifier (real location) + server-side OAuth prefix strip + revert shim (2026-08-07) — DONE ✅
+
+**Landed:**
+- `6d19314` fix(peek): multi-line linkifier in ansiToHtml.linkChunk —
+  the actual function used by the pane peek.
+- `5624b97` fix(/login): server-side [HH:MM] strip when pane shows
+  "Paste code here" prompt + shortened client `_pendingLogin` window
+  from 15min → 2min.
+- `684faf0` Revert xdg-open shim (`47da98f`).
+
+**Verified 2026-08-07 14:02 UTC:**
+- New linkifier regex is in the served HTML (curled the page and
+  grep'd for the pattern).
+- Prefix-strip regex passes 7 correctness cases (real OAuth codes,
+  optional email, edge cases, negatives — see commit `5624b97`
+  message for the tests).
+- Shim endpoints are 404 after revert.
+- Hot-reload preserved PID 1697930, systemd NRestarts unchanged at 13.
+
+**Waiting on Jeremy** to hard-refresh Brave / clear cache and confirm:
+1. Wrapped `/login` URL is one clickable link across all 3 lines.
+2. Paste the OAuth code back — Anthropic accepts it (server strips
+   the `[HH:MM]` prefix if it slipped through the client). Server
+   log should show `[oauth-strip] session=X stripped_prefix_len=N`
+   if the strip fired.
+
+**Jeremy 08:57 PT — "The code sending still is not working. This is
+Critical, Basic, we need to wrap this up. We need real solutions that
+are stable and backed by qualified research not guessing."**
+
+### Research (what I actually verified before writing code)
+
+- `linkifyOutput` (~L23277) is called on ONE thing: message bodies in
+  the messages panel (grep `linkifyOutput(` — one call site at L29156).
+  It is NOT called on the terminal pane peek. My earlier "fix" in
+  commit `51999a1` therefore did nothing for the pane.
+- The pane peek is rendered by `ansiToHtml` (~L23187), which has its
+  own nested `linkChunk` (~L23222) using the OLD single-line URL regex.
+  That is why Jeremy still sees only the first line linkified.
+- The `_pendingLogin` client-side flag from commit `5cc0c23` lives in
+  `window` state. It breaks in three real scenarios:
+  1. Cache/SW served OLD JS when `/login` was sent → flag never set →
+     next paste gets prefixed.
+  2. Tab was reloaded between `/login` and the code paste → flag lost.
+  3. `/login` sent in tab A, code pasted in tab B → flag not shared.
+- Server-side send (`POST /api/sessions/<name>/send`) does NOT peek
+  the pane before delivering. So it has no idea what prompt the
+  session is at.
+
+### Fixes (three commits, one concern each)
+
+1. **ansiToHtml.linkChunk multi-line URL fix** — apply the same regex
+   change as `linkifyOutput` got in `51999a1`, but in the function
+   that ACTUALLY renders the pane. Strip newlines from `href`, keep
+   display text as-is.
+
+2. **Server-side OAuth-prefix strip in `/send`** — before calling
+   `send_text`, peek the last ~50 lines of the pane. If the pane
+   ends in Claude Code's "Paste code here" prompt AND the incoming
+   text begins with a `[HH:MM AM]` (optional email) prefix, strip
+   that prefix and log the fact. Robust against ANY client cache /
+   reload / cross-tab issue. Independent of the `_pendingLogin`
+   client flag (which stays as a belt-and-suspenders that works when
+   the JS is fresh).
+   - Prompt signature (from Jeremy's screenshot 08:56 PT):
+     `Paste code here if prompted >`.
+   - Prefix regex: `^\[\d{1,2}:\d{2}\s*(?:AM|PM)?(?:\s+\S+@\S+)?\]\s*`.
+   - Log line: `[oauth-strip] session=X stripped_prefix=<match>` — so
+     Jeremy can see in server.log whether the strip fired.
+
+3. **Revert `47da98f`** (xdg-open shim server-side MVP) — per Jeremy's
+   ask "revert all the other ideas around opening the link". The shim
+   is not the "opening the link" idea (auto-open was `3b3165b`, already
+   reverted in `927ff9f`), but the shim was scaffolding for a similar
+   idea and Jeremy wants scope pared back. Reverting removes: shim
+   file writers, `_ensure_xdg_shim`, PATH prepend, `/api/browser-open`
+   POST/GET, in-memory queue. `~/.amux/xdg-shim/` files stay on disk
+   (harmless — no code prepends them to PATH after revert).
+
+**NOT reverting** (unrelated to "opening the link"):
+- `5cc0c23` (client-side prefix skip) — stays as best-effort. When it
+  fires it saves a round-trip; when it doesn't fire, fix #2 catches it.
+- `51999a1` (multi-line linkifier in `linkifyOutput`) — harmless on
+  the message-body path, still correct there.
+- `e62f040` (cache-control + SW version bump) — unrelated
+  infrastructure.
+
+**Side-effect Jeremy noticed at 08:47 PT** ("hit continue and it sent
+that as the code"): the `_pendingLogin` flag consumes ANY non-slash
+message within 15 min after `/login`. If he sends `/login`, then
+types `continue` (say to steer another action), that message goes
+through prefix-skipped and Claude Code treats it as the OAuth code.
+Fix in the same commit as #2: shorten the client-side window from
+15 min to 2 min, so the false-consumption blast radius is small.
+The server-side pane-peek strip is the primary defense; the client
+flag is just a nice-to-have.
+
+**Verification (concrete, testable):**
+1. Syntax check + hot-reload preserves PID.
+2. `curl -sk https://localhost:8822/` | grep 'linkChunk' shows the
+   new regex.
+3. Simulate an OAuth-shaped POST /send to a session whose pane
+   contains "Paste code here" — check server.log for `[oauth-strip]`.
+4. Jeremy: hard-refresh Brave, `/login`, click the (now full) URL,
+   sign in, paste the code back → success.
+
+**What went wrong:** the earlier "linkifier fix" (commit `51999a1`)
+patched `linkifyOutput` at ~L23277 — but the terminal pane peek does
+NOT use `linkifyOutput`. It uses `ansiToHtml` (~L23187), which has
+its OWN nested URL matcher `linkChunk` at ~L23222 with the same
+single-line regex bug. `linkifyOutput` is only invoked on message
+bodies (~L29156). That is why Jeremy's screenshot still shows only
+the first line linkified — the fix went to the wrong function.
+
+**This plan (Jeremy's terse ask — "Just make the link clickable. We
+cant spend any more time on this. Revert all the other ideas around
+opening the link"):**
+
+### Step 1 — fix `ansiToHtml.linkChunk` at L23222–L23238
+Apply the same regex change: allow newlines inside URLs when the next
+line begins directly with URL-safe chars. Strip internal newlines from
+`href` so the browser gets a valid URL; keep display text as-is so
+pane layout is preserved.
+
+### Step 2 — revert `47da98f` (xdg-open shim server-side MVP)
+`git revert 47da98f --no-edit`. Removes the shim files (they will
+still exist on disk but the codebase no longer manages them; can be
+manually deleted), the `_ensure_xdg_shim` init, the PATH prepend in
+start_session, and the `/api/browser-open` endpoints. Auto-open
+`3b3165b` was already reverted in `927ff9f`.
+
+**NOT reverting:**
+- `5cc0c23` (skip `[HH:MM]` prefix on OAuth code paste) — this solves
+  a real, separate problem (the code paste-back would still HTTP 400
+  without it) and is not "about opening the link".
+- `51999a1` (multi-line linkifier in `linkifyOutput`) — harmless
+  and correct for the message-body path where it's actually called.
+- `e62f040` (cache fix) — unrelated, infrastructure.
+
+**Side-effect Jeremy noticed but did NOT explicitly ask me to fix:**
+"I noticed that somehow I hit continue and it sent that as the code."
+The `_pendingLogin` flag from `5cc0c23` swallows the NEXT non-slash
+send within 15 minutes of `/login`. When Jeremy typed "continue" (or
+anything else) after `/login`, that message went through without the
+prefix and Claude Code treated it as the OAuth code. Not addressing
+in this change — flagging in the DONE section for follow-up if he
+asks.
+
+**Verification:**
+1. Syntax check.
+2. Touch + hot-reload preserves PID.
+3. Jeremy peeks at the `/login` pane in Brave (cache-safe since it's a
+   fresh cache after switching browsers) — the whole URL should be one
+   clickable link across all three wrapped lines.
+
+---
+
+## Plan for change: intercept Claude Code's `xdg-open` → forward to dashboard (2026-08-07) — SERVER-SIDE DONE ✅ commit `47da98f` (REVERTED — see plan above)
 
 **Verified end-to-end server-side 2026-08-07 13:52 UTC:**
 - Shim files exist at `~/.amux/xdg-shim/{xdg-open,open}` (chmod 755).
