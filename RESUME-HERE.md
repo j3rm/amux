@@ -296,6 +296,117 @@ Uncommitted PID-guard at ~L10628. Still valid protection against amux's own `res
 
 ---
 
+## Plan for change: bare `GET /api/sessions/<name>` 404 + REMOTE session marker (2026-08-07) — DONE ✅ commit `e835d68`
+
+**Verified 2026-08-07 15:57 UTC:**
+- `curl -sk $AMUX_URL/api/sessions/RTG-VS2017` returns 200 with the
+  full session info dict (no more 404).
+- Same fix applies to every session — verified against amux-helper.
+- `~/.amux/sessions/RTG-VS2017.env` now has `CC_REMOTE="1"`; the
+  auto-archive iterator will skip it going forward.
+- Hot-reload preserved PID 1697930, systemd NRestarts unchanged at
+  13.
+
+**Result:** the dashboard card for RTG-VS2017 should no longer render
+as "offline" — the detail endpoint it hits alongside `/peek` now
+returns real data. Refresh the dashboard to see it.
+
+**No regression in this morning's changes** (a307405 rehydrate,
+a84ace6 AH-56, 2cf0807 AH-55) — those READ existing flags only; they
+never write CC_ARCHIVED or archive a session. Behaviour is identical
+for REMOTE sessions (Claude PID is live locally, so the PID guards
+correctly skip false restarts).
+
+**Trigger (Jeremy):** RTG-VS2017 (a REMOTE session — Claude Code
+locally driving a Windows VS2017 build box) "appears offline but its
+not". He suspected one of this morning's hibernated/archived flag
+changes caused it.
+
+**Actual root cause (proven by log, NOT a morning-change regression):**
+
+`GET /api/sessions/<name>` (bare, no `/action` suffix) returns 404 for
+this session. Same 404 in yesterday's log — this is a longstanding
+gap.
+
+```
+2026-08-06 22:17:06 [...] GET /api/sessions/RTG-VS2017/peek       200
+2026-08-06 22:17:07 [...] GET /api/sessions/RTG-VS2017            404
+2026-08-07 15:51:17 [...] GET /api/sessions/RTG-VS2017/peek       200
+2026-08-07 15:51:17 [...] GET /api/sessions/RTG-VS2017            404
+```
+
+The handler at ~L45308 parses `/api/sessions/<name>/<action>` and
+runs branches only when `action` matches a known verb (`peek`,
+`tasks`, `info`, `instructions`, etc). When `action` is empty (bare
+GET), no branch fires and control falls through to
+`return self._json({"error": "not found"}, 404)` at L45595.
+
+Everything else about this session is fine:
+- `env_file` exists, `tmux ls` shows `amux-RTG-VS2017` running.
+- `/api/sessions` (list) reports `running: true, archived: false,
+  status: 'idle'`.
+- `/api/sessions/RTG-VS2017/peek` returns real Claude Code content.
+- No `[auto-archive]` log line for RTG-VS2017. My morning commits
+  (a307405 rehydrate, a84ace6 AH-56, 2cf0807 AH-55) don't write
+  `CC_ARCHIVED`; they only READ existing flags. Nothing I shipped
+  this morning could have archived a session.
+
+**Ruled out (about my morning changes):**
+- `a307405` (hibernation rehydrate) reads `meta.json` hibernated
+  flag → sets an in-memory `actions["hibernated"]` bit. Never
+  writes CC_ARCHIVED, never archives. Behaviour is identical for
+  REMOTE sessions.
+- `a84ace6` (AH-56 PID guard) BLOCKS an auto-restart when a live
+  Claude PID exists. It never archives. On REMOTE sessions where
+  Claude runs locally driving the remote box, PID is live → guard
+  correctly SKIPS the restart. Safer, not more aggressive.
+- `2cf0807` (AH-55 PID guard) same shape in `start_session` — SKIPS
+  a respawn-pane -k when Claude is alive. Never archives.
+
+None of these interact with REMOTE-ness. Jeremy's concern is
+appreciated but the flags I added are read-only against existing
+state; they don't set new state.
+
+### Fix (two changes, one commit)
+
+1. **Add a bare `GET /api/sessions/<name>` handler.** When `action`
+   is empty, return `get_session_info(name)` — the same dict the
+   list endpoint uses for each element. Fixes the 404 that made the
+   dashboard render this and similar sessions as offline. This is
+   what the dashboard was asking for all along and was just being
+   silently refused.
+
+2. **Add `CC_REMOTE` opt-in flag + honor it in `_auto_archive_idle`.**
+   A REMOTE session's local tmux pane has no user activity (the real
+   work happens elsewhere), so `pane_activity < cutoff` after 8h and
+   auto-archive fires. Defensive belt-and-suspenders: any session
+   with `CC_REMOTE=1` in its env is skipped by `_auto_archive_idle`.
+   Then set `CC_REMOTE=1` on RTG-VS2017.env as a data fix so it
+   never gets auto-archived again.
+
+### Verification
+
+1. Syntax check + hot-reload preserves PID.
+2. `curl -sk $AMUX_URL/api/sessions/RTG-VS2017` returns JSON (200),
+   NOT 404. Response matches the same session's entry in the list.
+3. `grep 'CC_REMOTE=' ~/.amux/sessions/RTG-VS2017.env` shows the
+   flag set.
+4. Log line for auto-archive protection (when a REMOTE session
+   would have qualified but was skipped) — not easy to prove
+   directly; the code path is exercised by the skip clause.
+
+### NOT doing
+
+- No changes to the hibernation, auto-restart, or start_session PID
+  guards. They're correct for REMOTE sessions today.
+- No changes to `_watch_self`, /login, or threads work from this
+  morning.
+- Not fabricating a new REMOTE-detection heuristic based on the
+  `REMOTE` prefix in `CC_DESC` — an explicit env flag is cleaner
+  and doesn't misfire on descriptions.
+
+---
+
 ## Plan for change: threads are Jeremy-only — hard rule + agent-facing docs (2026-08-07) — DONE ✅ commit `01c81fd`
 
 **Verified end-to-end 2026-08-07 14:39 UTC (three tests, three log lines):**
