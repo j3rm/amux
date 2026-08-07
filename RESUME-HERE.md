@@ -279,6 +279,54 @@ Uncommitted PID-guard at ~L10628. Still valid protection against amux's own `res
 
 ---
 
+## Plan for change: friendly error toast when archiving a pinned session (2026-08-07) — DONE ✅ commit `391da8a`
+
+**Verified 2026-08-07 11:37 UTC:** post-commit `os.execv` hot-reload
+kept PID 1697930, systemd NRestarts unchanged at 13. Server-side error
+text unchanged. UX toast verification needs a browser click — Jeremy
+to confirm on a pinned session.
+
+**What:** In `archiveSession` (JS, ~L21010), stop routing through
+`apiCall` (which swallows the response body and shows a bare
+`"Error: 403"` toast). Fetch directly, and on non-2xx read the JSON
+error and surface it as a readable toast.
+
+**Why:** Jeremy 2026-08-07: "the dashboard should let me know via a
+message that I cannot archive pinned sessions. Instead of showing me an
+error message." Trigger: he clicked Archive on ShareScore-Main (pinned),
+saw only `Error: 403`, had to ask what was wrong.
+
+The server already returns
+`{"error": "cannot archive pinned session — unpin first"}` with status
+403 (`amux-server.py:45650`). The bug is client-side — `apiCall`
+(~L19377) intercepts the non-2xx, calls `showToast('Error: ' + r.status)`
+and returns null. The body never reaches `archiveSession`.
+
+Narrow fix (this change only): bypass `apiCall` in `archiveSession`,
+do the fetch inline, and show the parsed `error` field on failure.
+Do NOT change `apiCall`'s default behavior — other callers rely on it,
+and generalizing here would sprawl the change.
+
+**Expected behavior:**
+- Success: existing behavior — `"<name> archived"` toast + refresh.
+- Failure with parsed error: toast `"<error message>"` (e.g. "cannot
+  archive pinned session — unpin first").
+- Failure without parsed error (network / non-JSON): toast
+  `"Archive failed (HTTP <status>)"`.
+
+**Verification:**
+1. `python3 -c "import ast; ast.parse(open('amux-server.py').read())"`.
+2. `touch amux-server.py` → confirm hot-reload via `os.execv`, PID
+   preserved.
+3. In the dashboard, pin a test session (or use an already-pinned one),
+   click Archive → expect the "cannot archive pinned session — unpin
+   first" toast, no bare `Error: 403`.
+4. Unpin, click Archive → expect success toast + card disappears.
+
+**Rollback:** trivial — revert this one function.
+
+---
+
 ## Plan for change: verbose linking docs on session-restart machinery (2026-08-07) — DONE ✅ commit `b2c0fa1`
 
 **Verified 2026-08-07 11:32 UTC:** post-commit `touch amux-server.py`
