@@ -279,6 +279,100 @@ Uncommitted PID-guard at ~L10628. Still valid protection against amux's own `res
 
 ---
 
+## Plan for change: intercept Claude Code's `xdg-open` → forward to dashboard (2026-08-07) — DEFERRED (recorded per Jeremy 08:12 PT, no code yet)
+
+**Ask (Jeremy 08:02 PT):** "Can we listen for claude codes attempt to
+open a new browser, its trying to open the browser, is there any way
+we can listen to that and use that or pass that along to the AMUX
+browser etc?"
+
+**Why this is interesting:** the "Browser didn't open? Use the url
+below to sign in" message in the screenshot IS Claude Code's fallback
+for when its subprocess call to `xdg-open`/`open` fails (headless
+server has no display). If we intercept that call BEFORE it fails, we
+can route the URL to the dashboard client and open the right tab.
+Semantically cleaner than the pane-watching / polling approaches we
+tried and reverted.
+
+**Proposed architecture (a per-session PATH shim):**
+
+1. **Server-side setup:** create a shim directory per session (e.g.
+   `~/.amux/orgs/<org>/xdg-shim/`) containing two tiny scripts:
+   ```
+   xdg-shim/xdg-open  (executable)
+   xdg-shim/open      (executable, same script — covers macOS-shaped calls too)
+   ```
+   Each script:
+   - Reads `$1` (the URL).
+   - POSTs `{session: $AMUX_SESSION, url: $1}` to
+     `$AMUX_URL/api/sessions/<session>/browser-open` with the session's
+     auth header.
+   - Exits 0 (Claude Code sees success → does NOT print the "Browser
+     didn't open?" fallback).
+
+2. **Session env:** prepend `~/.amux/orgs/<org>/xdg-shim` to PATH when
+   `start_session` composes the environment. The shim wins over the
+   real `/usr/bin/xdg-open`. `$AMUX_URL` and `$AMUX_SESSION` are
+   already exported per session (verified in current start_session
+   code).
+
+3. **Server endpoint** `POST /api/sessions/<name>/browser-open`:
+   - Rate-limit (say 5 requests / 60s per session — avoid an
+     accidental infinite loop from a misbehaving tool).
+   - Log to server.log (`[browser-open] session=X url=Y`).
+   - Emit an SSE event `{"type":"browser_open","session":X,"url":Y}`
+     on the existing sessions SSE stream.
+
+4. **Client:** the SSE handler for `browser_open` shows a
+   **floating banner** at top-right: "<session> wants to open a URL —
+   [Open in new tab]". The button is the user-gesture handler that
+   calls `window.open(url, '_blank')`. Auto-dismiss after 60s.
+   - Rationale: an auto `window.open()` from an SSE callback WILL be
+     blocked by popup blockers (same trap we hit and reverted with the
+     `_loginAutoOpen` code). A single-click button turns it into a
+     legitimate user gesture — bulletproof.
+   - The banner is preferable to a system Notification because
+     Notification requires a permission grant and the banner works
+     immediately across desktop + iOS PWA.
+
+**Constraints / risks to think about BEFORE building:**
+- **False positives:** any process that calls `xdg-open` in the
+  session (a user typing it, a script) will pop a banner. Probably OK
+  — feels like a useful side effect, not a bug. Rate-limiter covers
+  loops.
+- **Multi-client fanout:** if Jeremy has the dashboard open on desktop
+  AND iPhone, both clients see the SSE event. Both banners fire; he
+  clicks one, the other times out. Acceptable.
+- **Container sessions:** shim path must be readable INSIDE the
+  container. Two options: (a) mount the shim into the container at a
+  known path, prepend that path to PATH in the container's env;
+  (b) put the shim in the shared home already mounted per-org. Option
+  (b) is less work — the shared home is already mounted at
+  `~/.amux/orgs/<org>/home` per amux's current design.
+- **Old sessions** started before the shim is installed won't see the
+  new PATH. They'd need a restart to pick it up. Non-blocking — new
+  sessions get it immediately, existing ones on next start.
+- **Security:** endpoint takes an arbitrary URL and pushes it to
+  clients. In a shared cloud install a session could theoretically
+  spam other clients' banners. Mitigate: only fan out to clients
+  authenticated as the session's owner (check `X-Amux-User-Email`
+  match).
+
+**NOT DOING as part of this idea:** any change to `send_text`, the
+prefix-skip logic, the linkifier. Those stay as they are. This is
+additive — a NEW code path, isolated to start_session env, one new
+endpoint, one SSE event type, one client-side banner component.
+
+**Scope estimate:** ~150 lines total (shim script + endpoint + SSE
+event + banner + PATH plumbing in start_session). Half a session's
+work with proper verification.
+
+**When to build:** after Jeremy confirms the current linkifier /
+prefix-skip / cache fixes are working end-to-end. This is quality-of-
+life, not a bugfix — no rush.
+
+---
+
 ## Plan for change: dashboard HTML cache — force Safari to see new JS on every ship (2026-08-07) — DONE ✅ commit `e62f040`
 
 **Verified 2026-08-07 13:06 UTC:** `curl -I https://localhost:8822/`
