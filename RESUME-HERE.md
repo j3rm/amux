@@ -279,6 +279,100 @@ Uncommitted PID-guard at ~L10628. Still valid protection against amux's own `res
 
 ---
 
+## Plan for change: `/login` auto-open browser tab to the OAuth URL (2026-08-07) — DONE ✅ commit `3b3165b` (awaiting live Jeremy verification)
+
+**Verified server-side 2026-08-07 12:20 UTC:** post-commit `touch
+amux-server.py` triggered `os.execv`. PID 1697930 preserved, systemd
+NRestarts unchanged at 13, dashboard HTTP 200. New JS live on next
+page reload.
+
+**Live UX verification (needs Jeremy in the browser):**
+1. Hard-refresh dashboard (Cmd/Ctrl-Shift-R).
+2. Pick a session, type `/login`, hit Send.
+3. Expected: a new browser tab opens immediately (about:blank), then
+   within a few seconds navigates to `https://claude.com/cai/oauth/…`.
+4. Complete the OAuth flow, copy the code, paste into send bar.
+5. Expected: code goes through raw (from commit `5cc0c23`), Claude
+   accepts, no HTTP 400.
+
+**Fallback path (popups blocked):** if the browser blocks
+`window.open()`, the URL is copied to clipboard and a toast says
+"Login URL copied — paste into a new tab to sign in". User can paste
+into a new tab manually.
+
+**If the auto-open doesn't fire:** check DevTools console. Common
+causes:
+- Popup blocker returned null → clipboard fallback should have fired
+  instead.
+- URL regex doesn't match Claude Code's actual output — capture the
+  pane and update `_LOGIN_OAUTH_URL_RE` in doSend area (~L21247).
+- Peek endpoint returning no matches — inspect `d.output` in
+  DevTools.
+
+**Ask (Jeremy 07:14 PT):** "When I use the login command, would it be
+possible to detect when it gives me the URL to use to log into and
+AMUX open a new tab automatically to that URL."
+
+**Chosen scope (Jeremy):**
+- Claude Code `/login` only. Ignore Codex/Gemini/Gmail for now.
+- Open at most once per `/login` — if Claude reprints the URL later
+  in the same flow, don't reopen. To re-trigger, resend `/login`.
+
+**URL Claude Code prints (Jeremy 07:15 PT sample):**
+`https://claude.com/cai/oauth/authorize?code=true&client_id=9d1c250a-…&response_type=code&redirect_uri=…`
+
+Detection regex: `https:\/\/claude\.com\/cai\/oauth\/[^\s"'<>]+`
+
+**Popup-blocker trap** (why prior "just window.open() when we see it"
+attempts would fail even if the code is right): browsers require
+`window.open()` to run INSIDE the user-gesture callback. If we detect
+the URL 1–3s later via polling and call `window.open()` from that
+timer callback, the browser silently kills it.
+
+**Approach — the pre-opened-blank-tab trick:**
+1. INSIDE the `doSend` click handler (same tick as the user's click),
+   when `/login` is being sent: `window._pendingLoginTab = window.open('about:blank', '_blank')`.
+   That tab is now "authorized" by the click. If it returns null, the
+   user has popups blocked; fall back to a toast with a clickable link.
+2. Kick off a polling loop that fetches `/api/sessions/<name>/peek`
+   every 500ms for up to 30s.
+3. On each response, extract URLs matching the regex above; take the
+   LAST match (most recent scrollback position). If found:
+   - `window._pendingLoginTab.location.href = url`
+   - Stop polling, clear the flag.
+4. If 30s elapse with no match: close `_pendingLoginTab` if it's still
+   `about:blank` (don't disturb the user if they've navigated it).
+5. If a new `/login` fires while polling is in flight: cancel the
+   prior poll and open a fresh tab.
+
+**Deliberate constraints:**
+- Client-side only. No server changes. Reuses existing `/peek` API.
+- Localized to `doSend` — same function we just modified for the
+  `[HH:MM AM]` prefix fix. Keep both fixes cohesive.
+- No new global state beyond `_pendingLoginTab` and a poll-cancel
+  handle. Both are cleared on completion / failure.
+- Do NOT touch `send_text`, `_snapshot_all_sessions_inner`, or SSE.
+  That's out of scope and prior investigations warned to avoid
+  drive-by changes there.
+
+**Expected behavior:**
+- Type `/login` in the send bar, hit Send.
+- A new browser tab opens immediately at about:blank.
+- Within a few seconds, that tab navigates to the real Claude auth URL.
+- Log in, get the code, paste into the send bar. (The prior fix
+  ensures the code isn't prefix-mangled.)
+- If popups are blocked: toast appears with a clickable link.
+
+**Verification:**
+1. `python3 -c "import ast; ast.parse(open('amux-server.py').read())"`.
+2. Touch → hot-reload preserves PID (SESSION-RESTART CHAIN rules).
+3. Live browser test: hard-refresh dashboard, /login on a real session,
+   confirm the new tab opens and navigates.
+
+**Rollback:** revert one commit. Change is self-contained in doSend.
+
+---
+
 ## Plan for change: `/login` OAuth code paste → HTTP 400 (2026-08-07) — DONE ✅ commit `5cc0c23` (awaiting live Jeremy verification)
 
 **Verified server-side 2026-08-07 12:02 UTC:** post-commit `touch
