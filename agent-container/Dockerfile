@@ -35,6 +35,29 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         lftp \
     && rm -rf /var/lib/apt/lists/*
 
+# Headless browser runtime libraries (Chromium / Playwright / Puppeteer).
+# Needed by CD-SurfPrep, CD-Wattco, and any other agent doing browser
+# automation from inside its container. Added 2026-08-11.
+#
+# Debian 13 (Trixie) uses the t64 package variants for glib / atk / atspi /
+# asound (64-bit time_t transition rename) — the libraries are unchanged.
+# libgobject-2.0 and libgio-2.0 are NOT separate packages on Trixie; they
+# ship inside libglib2.0-0t64, so listing them separately here would fail
+# with "unable to locate package". libcups2 is Playwright-recommended (only
+# needed for the print dialog) and can be added if a specific workload
+# needs it.
+#
+# Total install size ~40 MB against a 2.76 GB base image — same "bake it
+# in, no per-org variants" pattern as postgresql-client / lftp.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        libglib2.0-0t64 libnss3 libnspr4 \
+        libatk1.0-0t64 libatk-bridge2.0-0t64 libatspi2.0-0t64 \
+        libdbus-1-3 \
+        libx11-6 libxcomposite1 libxdamage1 libxext6 libxfixes3 libxrandr2 \
+        libxcb1 libxkbcommon0 \
+        libgbm1 libasound2t64 \
+    && rm -rf /var/lib/apt/lists/*
+
 # Claude Code CLI + OpenAI Codex CLI, installed globally so every session's
 # HOME can use them. Postinstall downloads platform-native binaries — must
 # run (do NOT use --ignore-scripts or you get "Error: claude native binary
