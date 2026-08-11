@@ -24,11 +24,15 @@ FROM python:3.11-slim
 # marketing-brain DEPLOY.md D3) to reach the marketing metrics DB via psql;
 # adding it to the base image so every container ships with it uniformly
 # rather than a per-org variant. Cost: ~15 MB.
+# lftp: used by RTG and EmberCRM for FTP transfers (added 2026-08-11 after
+# both orgs needed it and had no sudo to install it in-container). Same
+# "bake it in, no per-org variants" pattern as postgresql-client. Cost: ~2 MB.
 RUN apt-get update && apt-get install -y --no-install-recommends \
         tini tmux curl git ca-certificates procps openssh-client \
         nodejs npm \
         less jq sqlite3 vim-tiny \
         postgresql-client \
+        lftp \
     && rm -rf /var/lib/apt/lists/*
 
 # Claude Code CLI + OpenAI Codex CLI, installed globally so every session's
