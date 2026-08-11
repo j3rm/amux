@@ -296,6 +296,30 @@ Uncommitted PID-guard at ~L10628. Still valid protection against amux's own `res
 
 ---
 
+## Plan for change: PATCH /api/messages supports `blocking` field (2026-08-11) — IN PROGRESS
+
+**Trigger (Jeremy 14:03 PT):** T-147 has `[BLOCKING]` on it, never cleared. The agent said it can't clear. Confirmed: the PATCH `/api/messages/M-N` handler at ~L40717 handles `read`, `flagged`, `body`, `discarded` — but has NO code path for `blocking`. Agents can't clear it because the API silently ignores the field.
+
+The offending message is M-2727 (Jeremy's own, `blocking=1, status=complete`). The thread's `anyBlocking` badge (~L29068) is `some(m => m.blocking === 1 && m.status !== 'discarded')` — so a persistent blocking-flag on any message stamps the whole thread.
+
+**Two fixes, one commit:**
+
+1. **Clear M-2727 blocking now** via direct SQL — one-shot data fix, keeps the message content intact.
+2. **Add `blocking` to PATCH /api/messages/M-N** — same shape as `read` and `flagged`: `if "blocking" in bj: UPDATE messages SET blocking = ?, updated = ? WHERE id = ?`. Then `amux threads` CLI or any agent can `PATCH {"blocking": false}` on a message they've addressed.
+
+**Auth story (no new gate needed):** the existing thread org-isolation from `d25707b` / `01c81fd` already prevents cross-org and agent-to-agent thread posts. Any agent that CAN read the message via the existing rules should be able to flip `blocking` on it — same as they can flip `read`. Jeremy (dashboard UI token) always bypasses org checks so he can clear anything.
+
+**NOT doing:**
+- No new dashboard UI. The blocking checkbox on the compose modal already sets it; a clear-blocking action can be added later if useful, but for now `amux threads` CLI + API is enough.
+- No changes to the SSE / delivery path — clearing blocking after delivery doesn't re-deliver anything.
+
+**Verification:**
+1. Syntax check + hot-reload preserves PID.
+2. Curl PATCH `/api/messages/M-2727` with `{"blocking": false}` as an agent → 200, blocking=0.
+3. GET T-147 → `anyBlocking` computes to false (no `[BLOCKING]` badge in UI).
+
+---
+
 ## Plan for change: bare `GET /api/sessions/<name>` 404 + REMOTE session marker (2026-08-07) — DONE ✅ commit `e835d68`
 
 **Verified 2026-08-07 15:57 UTC:**

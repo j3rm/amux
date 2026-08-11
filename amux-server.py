@@ -40726,6 +40726,22 @@ class CCHandler(BaseHTTPRequestHandler):
                         # or `status`; a message can be flagged in any state.
                         db.execute("UPDATE messages SET flagged = ?, updated = ? WHERE id = ?",
                                    (1 if bj["flagged"] else 0, now, mid))
+                    if "blocking" in bj:
+                        # Toggle blocking on an existing message. Same shape as
+                        # `read` and `flagged` — set/clear per bool. The thread's
+                        # [BLOCKING] badge (JS: `anyBlocking` at ~L29068) is
+                        # `some(m => m.blocking === 1 && m.status !== 'discarded')`,
+                        # so clearing this field on the offending message drops
+                        # the badge without discarding the message content.
+                        # Added 2026-08-11 after T-147 M-2727 got stuck blocking:
+                        # PATCH previously had no code path for `blocking` so
+                        # agents literally could not clear it. Org-isolation
+                        # + agent-to-agent guards already gate WHO can hit
+                        # this endpoint, so no additional auth check is needed
+                        # here — anyone allowed to read the message can also
+                        # flip its blocking flag.
+                        db.execute("UPDATE messages SET blocking = ?, updated = ? WHERE id = ?",
+                                   (1 if bj["blocking"] else 0, now, mid))
                     if "body" in bj:
                         # Streaming update path. partial=true keeps status='working';
                         # omitting partial (or false) flips to 'complete' and triggers
