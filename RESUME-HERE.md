@@ -2,7 +2,45 @@
 
 **If you are Claude and you are about to edit `/mnt/gitdata/amux/amux-server.py`, this file is mandatory.** Every change must be planned here BEFORE you edit code. Completed plans stay in place as history — do NOT delete them. Read this file at the start of every session before touching amux-server.py.
 
-Last updated: 2026-08-07 13:30 UTC / 06:30 PT
+Last updated: 2026-08-13 22:26 UTC
+
+## Plan for change: C3/C4 nudge owning session on flip to `verified` (2026-08-13) — IN PROGRESS
+
+**Trigger:** Ember-Research board escalation (third confirmed occurrence): the audit-pair hook (C4) and the adjudication hook (C3) auto-flip a worker item to `verified`, but the item's owning session is never notified. Workers idle at "waiting for audit results" until manually nudged. Documented cases today: EA-11 (~02:00 UTC, Ember_Auth idle 10+ min post-verify), EA-12 (~13:10 UTC, same), EA-10 chain (~01:00 UTC, related shape). Current workaround: Ember-Research fires SCHED-130/146 one-off tmux schedules into the owner pane manually.
+
+**What already exists (surveyed, not guessed):**
+- `_notify_session_of_retake` (~L6506) — helper that pushes a nudge into the target session's tmux pane when a FAIL adjudication (C3) or FAIL/FAIL audit pair (C4) flips a target back to `doing`. Uses `send_text()`, background thread, best-effort.
+- Call site in C3 (`_auto_apply_verdict_from_rr`, ~L8822): fires the retake nudge when `new_status == "doing"`.
+- Call site in C4 (`_auto_verify_from_audit_pair`, ~L8919): same, fires when `new_status == "doing"`.
+- **Gap:** neither branch has a mirror for `new_status == "verified"`. That's the reported bug.
+
+**Fix (symmetric addition, minimal):**
+1. Add a sibling helper `_notify_session_of_verified` right next to `_notify_session_of_retake`, same shape (session, item_id, title, verdict, source_id, source), same background-thread + `send_text` mechanism, log tag `[verified-nudge]`. Text tells the owner the item flipped to verified and to proceed with any post-verification step in their instructions — neutral, informational, not directive.
+2. Two-line addition in each of the two verdict-apply seams:
+   - C3 (`_auto_apply_verdict_from_rr`, ~L8821): after the existing `if new_status == "doing"` retake branch, add an `elif new_status == "verified" and target["session"]:` calling the new helper.
+   - C4 (`_auto_verify_from_audit_pair`, ~L8919): same elif branch after the FAIL/FAIL retake block.
+
+**Why this is safe:**
+- `send_text` already handles the recipient being restarted, at a resume picker, at a shell prompt, etc. — it auto-wakes and delivers. Established mechanism, used everywhere already.
+- Best-effort background thread, exceptions swallowed — a failed nudge cannot fail the verdict-application itself.
+- The nudge text is informational, not directive. Workers already know to check their board queue; this just kicks their event loop.
+- No schema changes, no new API endpoints, no new state to persist.
+- Zero effect on FAIL paths (they still fire the existing retake nudge unchanged).
+
+**Verification:**
+1. `python3 -c "import ast; ast.parse(open('amux-server.py').read())"`.
+2. `touch amux-server.py` → PID-preserved hot-reload (SESSION-RESTART CHAIN rules).
+3. Grep server.log for `[verified-nudge]` after the next real audit pair closes with a PASS/PASS.
+4. Once seen live, reply to Ember-Research on the board.
+
+**NOT doing:**
+- No change to the C3/C4 flip logic itself, the verdict extractor, or the audit-pair matching.
+- No change to `_notify_session_of_retake` — new helper alongside, not a rename.
+- No change to the SPLIT-verdict escalation path.
+- Skipping the "check `notified` flag on the target" pattern used elsewhere for fresh-mint suppression — this is a post-verify signal for the OWNER, not a mint, and firing more than once (edge case if the flip somehow re-triggers) is harmless.
+
+---
+
 
 ## Why this file exists (permanent rule — Jeremy 2026-08-07)
 

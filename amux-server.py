@@ -6529,6 +6529,42 @@ def _notify_session_of_retake(session_name: str, item_id: str, title: str,
     threading.Thread(target=_run, daemon=True).start()
 
 
+def _notify_session_of_verified(session_name: str, item_id: str, title: str,
+                                verdict: str, source_id: str, source: str):
+    """Symmetric sibling to _notify_session_of_retake, for the PASS path.
+    Push a verified notice into the OWNING session's tmux pane after C3
+    (adjudication) or C4 (audit-pair PASS/PASS) flips a target to
+    'verified'. Same mechanism, same best-effort background thread.
+
+    Motivation: Ember-Research escalation 2026-08-13 (third confirmed
+    occurrence — EA-11, EA-12, EA-10 today) — the audit-pair hook
+    auto-verified worker items but the owning session never got a
+    signal, so post-verify steps (merge-to-master clauses, deploy
+    handoffs) stalled 10+ min at a time. The workaround was Ember-
+    Research firing one-off SCHED-130/146 tmux schedules into the
+    owner pane. Making the C3/C4 hooks push the nudge themselves
+    closes the gap.
+
+    Text is deliberately neutral: informational, not directive. The
+    worker's own instructions decide whether there IS a post-verify
+    step; this just kicks their event loop so they can check.
+    """
+    def _run():
+        try:
+            text = (
+                f"Verified: {item_id} — {(title or '')[:120]} flipped to "
+                f"verified ({source} {source_id}: {verdict}). If your task "
+                f"has a post-verification step (merge, deploy, close-out), "
+                f"proceed. Details in `amux board show {item_id}`."
+            )
+            send_text(session_name, text)
+            slog(f"[verified-nudge] {session_name}: notified verify of {item_id} "
+                 f"({source}={source_id}, verdict={verdict})")
+        except Exception:
+            pass
+    threading.Thread(target=_run, daemon=True).start()
+
+
 _DEFAULT_STATUSES = [
     {"id": "backlog",        "label": "Backlog"},
     {"id": "todo",           "label": "To Do"},
@@ -8818,9 +8854,17 @@ def _auto_apply_adjudication(rr_item: dict, db) -> dict | None:
     # notification so it doesn't have to poll to notice. Fresh mint's
     # notified=1 flag would suppress _notify_session_of_task, so use the
     # dedicated retake helper.
+    # Verified nudge: symmetric — a PASS adjudication flipping the target
+    # to 'verified' is a "you can proceed with any post-verify step" event
+    # for the owner (merge, deploy, close-out clauses). Added 2026-08-13
+    # after Ember-Research escalated the gap; see _notify_session_of_verified
+    # docstring for the incident details.
     if new_status == "doing" and target["session"]:
         _notify_session_of_retake(target["session"], target_id,
                                   target["title"] or "", verdict, rid, "C3")
+    elif new_status == "verified" and target["session"]:
+        _notify_session_of_verified(target["session"], target_id,
+                                    target["title"] or "", verdict, rid, "C3")
     return {"action": "auto-applied", "rr": rid, "target": target_id,
             "verdict": verdict, "new_status": new_status}
 
@@ -8916,12 +8960,22 @@ def _auto_verify_from_audit_pair(audit_item: dict, db) -> dict | None:
     # Re-take nudge: FAIL/FAIL audit pair flipping the target back to 'doing'
     # is a fresh-work event for the assigned worker. Notify the same way C3
     # does so the worker doesn't have to poll.
+    # Verified nudge: symmetric — a PASS/PASS pair flipping the target to
+    # 'verified' unblocks the owner's post-verify step. Third confirmed
+    # occurrence of that gap was Ember-Research 2026-08-13 (EA-11/EA-12/
+    # EA-10 shape); see _notify_session_of_verified docstring.
     if new_status == "doing" and target["session"]:
         pair_verdict = f"{my_verdict}/{their_verdict}"
         pair_source = f"{aid}+{other['id']}"
         _notify_session_of_retake(target["session"], target_id,
                                   target["title"] or "", pair_verdict,
                                   pair_source, "C4")
+    elif new_status == "verified" and target["session"]:
+        pair_verdict = f"{my_verdict}/{their_verdict}"
+        pair_source = f"{aid}+{other['id']}"
+        _notify_session_of_verified(target["session"], target_id,
+                                    target["title"] or "", pair_verdict,
+                                    pair_source, "C4")
     return {"action": "auto-applied", "audits": [aid, other["id"]],
             "verdicts": [my_verdict, their_verdict],
             "target": target_id, "new_status": new_status}
