@@ -2,7 +2,45 @@
 
 **If you are Claude and you are about to edit `/mnt/gitdata/amux/amux-server.py`, this file is mandatory.** Every change must be planned here BEFORE you edit code. Completed plans stay in place as history — do NOT delete them. Read this file at the start of every session before touching amux-server.py.
 
-Last updated: 2026-08-13 22:26 UTC
+Last updated: 2026-08-14
+
+## Plan for change: escalation-dedup gate allows a new ESC after prior closes (2026-08-14) — IN PROGRESS
+
+**Trigger:** Ember-Research board escalation (first confirmed occurrence, ~1h silent stall overnight). Sequence: EAAC-18 round-1 split → ER-326 minted → adjudicated FAIL → re-take → round-2 audits closed with ANOTHER split (EAO-195 PASS vs EAC-218 FAIL) → C4 tried to mint a fresh ESC → the 24h dedup gate blocked it because ER-326 still exists → item stuck silently in review. Ember-Research's night-keeper caught it manually and self-minted ER-327 (which worked).
+
+**Root cause (verified by reading the code, not guessed):**
+- Two identical dedup gates exist:
+  - Internal auto-mint path: `_auto_mint_escalation` at ~L8743-8752
+  - POST board-item explicit-mint path: ~L42450-8
+- Both key on `(target_id in title) AND created < 24h ago AND status != 'discarded'`.
+- **Failure mode:** the check only excludes `discarded`. If a prior ESC closed cleanly with `done` or `verified`, the check STILL matches it — and blocks any new escalation for the target for 24h, even though the prior adjudication is completed.
+- Ember-Research's ask: *"a closed adjudication should not block the next round's escalation"* — exactly correct read of the gate.
+
+**Fix (one-line change in each of two places, symmetric):**
+
+Change `AND status != 'discarded'` → `AND status NOT IN ('discarded', 'done', 'verified')` in both dedup queries.
+
+Result: the gate still blocks concurrent double-mints (prior ESC in flight = still open in todo/doing/review) but allows a fresh mint once the prior adjudication is complete. That's the exact semantics Ember-Research requested.
+
+**Why not the alternative "key on (target + round)" approach they mentioned:**
+- Round number isn't in the schema. It'd have to be inferred from the count of prior audit pairs on the target — real work, more surface area for bugs.
+- The closed-status fix covers the same failure mode with proven safety: it can't false-positive because CLOSED means adjudicated, and adjudicated means "this round is finished, next round's escalation is a fresh event".
+- The 24h cooldown's original purpose was preventing double-mint from a hook edge case / concurrent audit patches. That purpose is preserved — if the prior ESC hasn't closed yet, the gate still blocks.
+
+**Verification:**
+1. `python3 -c "import ast; ast.parse(open('amux-server.py').read())"`.
+2. `touch amux-server.py` → PID-preserved hot-reload (per SESSION-RESTART CHAIN rules).
+3. Reply to Ember-Research via board item when done.
+4. Grep server.log for future `escalation-gate: 24h cooldown` blocks — should now only show on legitimately concurrent mints.
+
+**NOT doing:**
+- No change to the escalation-mint logic itself, C3/C4 flip logic, or the retake/verified nudges (all recent additions still work).
+- No schema change.
+- Not adding a round counter.
+- Not touching the "settled target" or "VOID" gates — different checks, different concerns.
+
+---
+
 
 ## Plan for change: C3/C4 nudge owning session on flip to `verified` (2026-08-13) — IN PROGRESS
 

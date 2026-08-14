@@ -8740,9 +8740,16 @@ def _auto_mint_escalation(target_id: str, org: str, my_audit_id: str,
     # target ids that would false-positive as prior escalations. Aligns with
     # the same fix in the POST-handler gate (2026-07-01).
     # Session LIKE covers both '-Research' and '-Reviewer' suffixes.
+    # CLOSED-STATUS EXCLUSION (2026-08-14): a prior ESC that already reached
+    # `done` / `verified` / `discarded` is a completed adjudication — it
+    # should not block a NEW round's escalation on the same target. Ember-
+    # Research reported round-2 audit splits stuck silently because round-1's
+    # closed ESC still tripped the 24h window. The gate's original intent
+    # was concurrent-mint safety (blocks a still-open ESC); closed ones are
+    # by definition no longer competing.
     prior = db.execute(
         "SELECT id FROM issues WHERE (session LIKE '%-Research' OR session LIKE '%-Reviewer') AND deleted IS NULL "
-        "  AND status != 'discarded' AND created > ? "
+        "  AND status NOT IN ('discarded', 'done', 'verified') AND created > ? "
         "  AND title LIKE ? "
         "ORDER BY created DESC LIMIT 1",
         (now - 86400, f"%{target_id}%"),
@@ -42455,11 +42462,19 @@ class CCHandler(BaseHTTPRequestHandler):
                         # and mis-tagged it as a prior escalation. An
                         # escalation MUST have title `ESC-<target>...`, so
                         # `ESC-<target>%` is the tightest legal match.
+                        # CLOSED-STATUS EXCLUSION (2026-08-14): mirror of the
+                        # internal-mint gate change — a prior ESC in `done` /
+                        # `verified` / `discarded` is a completed adjudication
+                        # and should not block a new round's escalation. The
+                        # cooldown still catches concurrent double-mints
+                        # (still-open ESC in todo/doing/review). Ember-Research
+                        # night-keeper incident: round-2 split blocked by
+                        # round-1's already-adjudicated ESC.
                         cooldown_secs = 86400
                         prior = db.execute(
                             "SELECT id, created FROM issues "
                             "WHERE session LIKE '%-Research' AND deleted IS NULL "
-                            "  AND status != 'discarded' "
+                            "  AND status NOT IN ('discarded', 'done', 'verified') "
                             "  AND created > ? "
                             "  AND UPPER(title) LIKE ? "
                             "ORDER BY created DESC LIMIT 1",
