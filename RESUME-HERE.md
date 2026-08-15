@@ -2,7 +2,35 @@
 
 **If you are Claude and you are about to edit `/mnt/gitdata/amux/amux-server.py`, this file is mandatory.** Every change must be planned here BEFORE you edit code. Completed plans stay in place as history — do NOT delete them. Read this file at the start of every session before touching amux-server.py.
 
-Last updated: 2026-08-14
+Last updated: 2026-08-15
+
+## Plan for change: scheduler catch-up-fire detection (AH-59, 2026-08-15) — IN PROGRESS
+
+**Trigger:** AH-59 (via Cypra-PAA / CP-510). SCHED-44 (nightly billable-notes) had a skipped 23:32 fire on 07-28, and a catch-up at 07-29 04:24 hit 6 HTTPErrors on POST /api/board. 17 clean 23:32 fires since. Cypra correctly hypothesized "off-schedule catch-up runs fail; scheduled runs succeed" (3-for-3 across the retained history). Root cause almost certainly: server was down at 07-28 23:32, restarted between then and 04:24, the scheduler loop saw `next_run <= now` and fired immediately — but something about the just-started server state made board POSTs return 5xx.
+
+**What already works:**
+- Scheduler loop (~L7376) checks `SELECT * FROM schedules WHERE deleted IS NULL AND enabled=1 AND next_run <= now_str` every 10s.
+- On startup, any schedule whose next_run is in the past fires immediately. There's no "recent enough" filter, so a schedule that missed its slot during downtime gets caught up.
+- After firing, `next_run` is advanced to the next cron match (line 7414-7417). No double-fire risk.
+
+**Failure mode (theorized, not fully re-repro'd because runs table only retains 20 rows and the 07-28/07-29 rows are aged out):**
+Server restart / hibernation / execv reload leaves the process ready enough to accept HTTP but the scheduler tick runs before all board-writer dependencies (or a concurrent restart-driven contender for the SQLite write lock) settles. The dispatched script's POSTs 5xx, only the exception class is recorded, and the failure is invisible until SCHED-45's 08:32 silence audit catches it 8h later.
+
+**Fix scope (this change):**
+Add ONE slog line: when `_run_schedule` is about to fire, compare `next_run` to now. If it's >30 min in the past, emit `slog("[sched] CATCH-UP fire: '{title}' next_run was {delta_min}m ago (server likely restarted since scheduled slot)")`. This gives us the correlation on the NEXT incident — no more "why did this fire at 04:24?".
+
+**Explicitly NOT doing in this change:**
+- Not blocking catch-up fires (they can be legitimate — e.g. deploy that took 90s to restart shouldn't drop that night's dispatch).
+- Not adding a "grace period skip" — too easy to accidentally drop a legit run.
+- Not touching the script-side error capture or Pushover-on-0-posted — those are done in-place at /home/jwesley/.amux/scripts/nightly-billable-notes.py (no amux-server.py change needed).
+
+**Verification:**
+1. `python3 -c "import ast; ast.parse(open('amux-server.py').read())"`
+2. `touch amux-server.py` (auto-reload).
+3. Grep server.log after next server restart: any schedule that missed its slot during downtime should emit a `CATCH-UP fire` line.
+4. On the next real incident (SCHED-44 or any other), the log will show whether the errors were on a catch-up (theory confirmed) or a normal fire (new failure mode to hunt).
+
+---
 
 ## Plan for change: escalation-dedup gate allows a new ESC after prior closes (2026-08-14) — IN PROGRESS
 

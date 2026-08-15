@@ -7404,6 +7404,23 @@ def _scheduler_loop():
             cols = [d[0] for d in db.execute("SELECT * FROM schedules LIMIT 0").description]
             for row in due:
                 sched = dict(zip(cols, row))
+                # AH-59 (2026-08-15): correlate future "why did this fire at
+                # a weird time?" questions. If next_run is >30 min in the
+                # past, this fire is a catch-up — most likely the server
+                # missed the scheduled slot (down, hibernated, mid-execv).
+                # Log it so the next incident is easy to line up against a
+                # restart, not another day of forensics with 20-row limits.
+                try:
+                    _nr = sched.get("next_run") or ""
+                    if _nr:
+                        _nr_ts = datetime.strptime(_nr, "%Y-%m-%dT%H:%M").timestamp()
+                        _late_min = int((now - _nr_ts) / 60)
+                        if _late_min > 30:
+                            slog(f"[sched] CATCH-UP fire: '{sched['title']}' "
+                                 f"(SCHED-{sched['id']}) next_run was {_late_min}m ago "
+                                 f"— likely a missed slot during server downtime")
+                except Exception:
+                    pass
                 _run_schedule(sched)
                 _sched_last_fire[sched["id"]] = now  # cron fire counts toward event cooldown
                 now_ts = int(time.time())
