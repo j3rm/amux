@@ -4,6 +4,41 @@
 
 Last updated: 2026-08-15
 
+## Plan for change: per-org skills-deny for EmberCRM + iSchedule (2026-08-15) — IN PROGRESS
+
+**Trigger:** Jeremy (2026-08-15 21:52). EmberCRM and iSchedule agents work on the CRM app internals and medical scheduling respectively — they do NOT touch Zoho. Currently `_sync_skills_to_commands()` (L5606) writes every skill unconditionally into every org's `home/.claude/commands/` — so both containers currently have all 16 Zoho skills as slash commands. Explicit ask: "set it so they can not know anything about zoho".
+
+**Fix (three parts, in order):**
+
+1. **amux-server.py change** — add a per-org skill-deny mechanism:
+   - New helper `_read_org_skills_deny(org_name) -> list[str]` reads `~/.amux/orgs/<org>/skills-deny.txt`, one fnmatch pattern per line, `#` for comments. Missing file → empty list (default = sync everything). Blank/comment lines skipped.
+   - `_sync_skills_to_commands()` (L5606): for each org, filter `rows` by the deny list before writing. Host `~/.claude/commands/` is NEVER filtered — Jeremy's own tools/dashboard should always see the full set.
+   - Skill DELETE handler (L41348): keep unconditional purge — a deletion should always propagate to every container, regardless of deny list.
+
+2. **Deny files:**
+   - `~/.amux/orgs/EmberCRM/skills-deny.txt` = `zoho-*`
+   - `~/.amux/orgs/iSchedule/skills-deny.txt` = `zoho-*`
+
+3. **One-time purge of existing zoho-*.md** from both org homes (touch amux-server.py alone doesn't sweep — the sync function is additive/overwrite, never delete).
+
+4. **CLAUDE.md guardrails** in `/mnt/gitdata/EmberCRM/CLAUDE.md` and `/mnt/gitdata/iSchedule/CLAUDE.md`: explicit "no Zoho" section — you have no Zoho slash commands, no Zoho credentials, do not attempt Zoho API calls, refuse Zoho tasks and route to a CD-* agent.
+
+**Explicitly NOT doing:**
+- Not adding a "skills-allow" whitelist (opposite direction, more brittle).
+- Not extending to RTG (RTG-Research recently mentioned Zoho once in a coordination context — safer to leave RTG unfiltered until Jeremy explicitly asks).
+- Not touching the host commands dir — Jeremy needs the full skill set.
+- Not touching Cypra-PAA or CD-* — they legitimately need Zoho skills.
+
+**Verification:**
+1. `python3 -c "import ast; ast.parse(open('amux-server.py').read())"`
+2. `touch amux-server.py` → hot-reload.
+3. After sync fires: `ls ~/.amux/orgs/EmberCRM/home/.claude/commands/ | grep -c zoho-` → 0
+4. Same for iSchedule → 0
+5. Confirm host `~/.claude/commands/` still has all 16 zoho-*.md files.
+6. POST a test skill update via API, confirm it lands in CD-* org homes but NOT in EmberCRM/iSchedule.
+
+---
+
 ## Plan for change: scheduler catch-up-fire detection (AH-59, 2026-08-15) — IN PROGRESS
 
 **Trigger:** AH-59 (via Cypra-PAA / CP-510). SCHED-44 (nightly billable-notes) had a skipped 23:32 fire on 07-28, and a catch-up at 07-29 04:24 hit 6 HTTPErrors on POST /api/board. 17 clean 23:32 fires since. Cypra correctly hypothesized "off-schedule catch-up runs fail; scheduled runs succeed" (3-for-3 across the retained history). Root cause almost certainly: server was down at 07-28 23:32, restarted between then and 04:24, the scheduler loop saw `next_run <= now` and fired immediately — but something about the just-started server state made board POSTs return 5xx.

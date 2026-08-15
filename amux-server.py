@@ -5603,6 +5603,31 @@ def _auto_trust_codex_dir(work_dir: str, home_dir: "str | None" = None):
         pass
 
 
+def _read_org_skills_deny(org_name: str) -> "list[str]":
+    """Per-org skill-name blocklist. Reads
+    ~/.amux/orgs/<org>/skills-deny.txt — one fnmatch pattern per line,
+    `#` for comments, blank lines ignored.
+
+    Missing file → empty list (default: sync everything). This lets orgs
+    that shouldn't see certain skills (e.g. EmberCRM + iSchedule get no
+    Zoho — they work on the CRM app internals and medical scheduling
+    respectively, not Zoho) opt out via a one-line config file, no code
+    change per org."""
+    try:
+        f = CC_ORGS / org_name / "skills-deny.txt"
+        if not f.is_file():
+            return []
+        out = []
+        for line in f.read_text().splitlines():
+            s = line.strip()
+            if not s or s.startswith("#"):
+                continue
+            out.append(s)
+        return out
+    except Exception:
+        return []
+
+
 def _sync_skills_to_commands():
     """Write all skills as slash commands.
 
@@ -5612,27 +5637,56 @@ def _sync_skills_to_commands():
     next time any session in any container (or on host) starts, it sees
     the new /skill-name available.
 
+    Per-org filter: skills matching any fnmatch pattern in
+    ~/.amux/orgs/<org>/skills-deny.txt are NOT written to that org's home.
+    Host commands dir is NEVER filtered — Jeremy needs the full set for
+    the dashboard and any host-mode session.
+
     Deletions: if a skill row was removed from SQL, this function does NOT
     delete the corresponding .md — that's handled by the delete-skill API
     endpoint via a separate call. Renames rely on the API removing the old
     file. This function is purely an additive/overwrite sync of what's in
     SQL right now."""
+    import fnmatch
     try:
         db = get_db()
         rows = db.execute("SELECT name, content FROM skills").fetchall()
-        # Host commands dir + one per org shared home
-        targets = [Path.home() / ".claude" / "commands"]
+        # Host commands dir is unfiltered.
+        host_target = Path.home() / ".claude" / "commands"
         try:
-            for spec in _list_org_specs():
-                targets.append(CC_ORGS / spec["name"] / "home" / ".claude" / "commands")
+            host_target.mkdir(parents=True, exist_ok=True)
+            for row in rows:
+                try:
+                    (host_target / (row["name"] + ".md")).write_text(row["content"])
+                except Exception:
+                    pass
         except Exception:
             pass
-        for tgt in targets:
+        # Per-org targets, each with its own deny list.
+        try:
+            org_specs = _list_org_specs()
+        except Exception:
+            org_specs = []
+        for spec in org_specs:
+            org_name = spec.get("name") or ""
+            if not org_name:
+                continue
+            tgt = CC_ORGS / org_name / "home" / ".claude" / "commands"
+            deny = _read_org_skills_deny(org_name)
             try:
                 tgt.mkdir(parents=True, exist_ok=True)
                 for row in rows:
+                    name = row["name"]
+                    if any(fnmatch.fnmatchcase(name, pat) for pat in deny):
+                        # Deny list hit — skip write AND remove stale file
+                        # from a prior sync (before the deny was added).
+                        try:
+                            (tgt / (name + ".md")).unlink(missing_ok=True)
+                        except Exception:
+                            pass
+                        continue
                     try:
-                        (tgt / (row["name"] + ".md")).write_text(row["content"])
+                        (tgt / (name + ".md")).write_text(row["content"])
                     except Exception:
                         pass
             except Exception:
