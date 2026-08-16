@@ -4,6 +4,35 @@
 
 Last updated: 2026-08-15
 
+## Plan for change: reject empty command on POST /api/schedules (AH-60, 2026-08-16) — IN PROGRESS
+
+**Trigger:** AH-60 from RTG-Research. SCHED-225 (once, kind=tmux, session=RTG-Research) fired at 20:22:18 on 2026-08-15 with status=ok and run_count=1 — but no wakeup visibly arrived, and RTG-Research's in-flight watch stayed orphaned for hours.
+
+**Root cause (verified by reading the DB record, not guessed):**
+- SCHED-225's `command` field is the empty string `""`.
+- Schedule was armed at 20:22:16 with `run_at=2026-08-15T20:22` (client sent `run_at=now`, not `now+30m` as they intended — a client arithmetic bug).
+- Scheduler fired at 20:22:18 (2s later), called `send_text("RTG-Research", "")`. `send_text` accepts empty text (line 11744 has no guard) and returns success. status=ok logged.
+- Nothing actually appeared in RTG-Research's tmux pane, because we sent zero bytes.
+
+**Fix (one place, tight scope):**
+
+POST /api/schedules at L43016-L43070: reject with HTTP 400 when `kind ∈ {"tmux","shell"}` AND `data.get("command","").strip() == ""`. Applies only to kinds that dispatch a payload — event-triggered / notify-only kinds (if any) unaffected. Message includes the exact reason so a future agent debugging the same shape sees it at post time, not hours later via an orphaned watch.
+
+**Explicitly NOT doing:**
+- Not changing send_text() to reject empty text — an empty send is legitimate at the tmux layer (e.g. "just hit Enter"). The problem is silent-scheduling with no payload, not the send primitive.
+- Not adding a "run_at is in the past" guard — legitimate use cases exist (run-immediately at POST time).
+- Not adding a "delay_minutes" convenience field — that's a separate feature request. Client can compute the timestamp itself; the empty-command bug is the concrete failure to fix.
+- Not touching PATCH /api/schedules/<id> — same guard could apply but is out of scope and less common as an attack surface.
+
+**Verification:**
+1. `python3 -c "import ast; ast.parse(open('amux-server.py').read())"`
+2. `touch amux-server.py` → hot-reload.
+3. POST a bogus schedule with empty command via curl → expect 400 with a clear message.
+4. POST a normal schedule with a real command → expect 201.
+5. Reply to AH-60 with diagnosis + fix.
+
+---
+
 ## Plan for change: per-org skills-deny for EmberCRM + iSchedule (2026-08-15) — IN PROGRESS
 
 **Trigger:** Jeremy (2026-08-15 21:52). EmberCRM and iSchedule agents work on the CRM app internals and medical scheduling respectively — they do NOT touch Zoho. Currently `_sync_skills_to_commands()` (L5606) writes every skill unconditionally into every org's `home/.claude/commands/` — so both containers currently have all 16 Zoho skills as slash commands. Explicit ask: "set it so they can not know anything about zoho".

@@ -43022,6 +43022,25 @@ class CCHandler(BaseHTTPRequestHandler):
                 stype = data.get("sched_type", "once")
                 schedule_expr = (data.get("schedule_expr") or "").strip()
                 run_at = data.get("run_at", _dt.now().strftime("%Y-%m-%dT%H:%M"))
+                # AH-60 (2026-08-16): reject empty command on payload-dispatch
+                # kinds. RTG-Research's SCHED-225 fired with command="" — the
+                # send_text call succeeded (empty string is a valid send at the
+                # tmux layer) so status=ok was logged, but no wakeup arrived
+                # and their in-flight watch orphaned for hours. Silent no-op
+                # schedules help nobody; make this a POST-time failure with a
+                # clear message so the shape is impossible to arm.
+                _kind_check = (data.get("kind") or "tmux").lower()
+                if _kind_check in ("tmux", "shell") and not (data.get("command") or "").strip():
+                    return self._json({
+                        "error": "empty command",
+                        "hint": (
+                            f"kind={_kind_check} schedules dispatch a payload — "
+                            "empty command would fire silently. Either include "
+                            "a real command (e.g. the wakeup text for tmux, or "
+                            "the shell command to run) or use an event-triggered "
+                            "kind if you want a no-op subscription."
+                        ),
+                    }, 400)
                 sched = {
                     "id": sid, "title": data.get("title", ""),
                     "session": data.get("session", ""),
