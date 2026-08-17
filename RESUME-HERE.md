@@ -4,6 +4,42 @@
 
 Last updated: 2026-08-15
 
+## Plan for change: dedup "session needs input" Pushovers (Jeremy 2026-08-17) — IN PROGRESS
+
+**Trigger:** Jeremy. My AskUserQuestion prompt during the skill-hooks feature fired 5 spaced-out Pushovers while he took a minute to respond. He wants exactly one per waiting-cycle.
+
+**Root cause (verified by reading L9434):**
+```python
+if status == "waiting" and prev in ("active", ""):
+    ... _send_pushover ...
+_session_prev_status[name] = status if running else ""
+```
+Transition-based fire — should be one-and-done. But two race conditions defeat it:
+1. Status flap: pane rendering (spinner, tool output) can briefly read as `active`, so waiting → active → waiting counts as a fresh transition.
+2. Running flap: if a tmux capture race reads `running=False` for one snapshot cycle, `prev` gets reset to `""` — next iteration with running=True + status=waiting matches `prev in ("active", "")` again and re-fires.
+
+Either can happen multiple times per minute, hence Jeremy's 5 pings.
+
+**Fix (belt + suspenders, ~8 lines):**
+Add per-session cooldown on top of the transition detection.
+- Module-level dict `_wait_pushover_last: dict[str, float]` (name → epoch of last fire).
+- Constant `_WAIT_PUSHOVER_COOLDOWN_S = 600` (10 min — comfortable margin over any legit user-response window; if Jeremy hasn't responded in 10 min a re-ping is reasonable).
+- Inside the fire branch: skip if `time.time() - _wait_pushover_last.get(name, 0) < _WAIT_PUSHOVER_COOLDOWN_S`. On fire, stamp `_wait_pushover_last[name] = now`.
+- When status leaves waiting (goes idle/active): pop the timestamp so the NEXT waiting-cycle after Jeremy answered gets a fresh Pushover immediately (not blocked by the 10-min cooldown from the prior cycle).
+
+**Explicitly NOT doing:**
+- Not making the cooldown configurable via env — one universal value is simpler, and Jeremy can adjust the constant if needed.
+- Not touching the underlying transition check — leave it as belt AND add cooldown as suspenders. Both firing conditions must be met.
+- Not adding cooldowns to other Pushover paths (auto-restart, context-exhausted, etc.) — those are already mostly one-shot per real event and Jeremy hasn't reported dupes there.
+
+**Verification:**
+1. `python3 -c "import ast; ast.parse(open('amux-server.py').read())"`.
+2. `touch amux-server.py` → hot-reload.
+3. Sanity: any waiting session that flaps status/running should get exactly one Pushover per unique waiting-cycle.
+4. If Jeremy sees dupes again, we add slog on suppression and re-diagnose.
+
+---
+
 ## Plan for change: creator-notify on completion (Jeremy 2026-08-17) — IN PROGRESS
 
 **Trigger:** Jeremy. When agent-A creates a task assigned to agent-B, and agent-B completes it, agent-A currently gets nothing. Requested a completion-push analogous to the existing assignee-notify.

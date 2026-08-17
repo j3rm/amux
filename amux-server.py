@@ -8276,6 +8276,18 @@ def _parse_task_time(raw_output: str) -> str:
 
 
 _session_prev_status: dict[str, str] = {}  # track status changes for board auto-updates
+# Per-session cooldown on the "session needs input" Pushover. The bare
+# transition check at L9434 was firing multiple times per waiting cycle
+# because pane rendering (spinner, tool output) briefly flapped status
+# to 'active' and tmux capture races briefly flipped running=False —
+# both reset `prev` and re-triggered. Jeremy 2026-08-17: "I only need one
+# Pushover" per waiting cycle. This dict maps session → last-fire epoch;
+# a follow-up Pushover for the SAME session is suppressed for
+# _WAIT_PUSHOVER_COOLDOWN_S. The entry is cleared when status leaves
+# 'waiting' (user answered) so the next legitimate waiting-cycle fires
+# immediately, not after 10 min of silence.
+_wait_pushover_last: dict[str, float] = {}
+_WAIT_PUSHOVER_COOLDOWN_S = 600  # 10 min
 _commit_guard_nudged: dict[str, bool] = {}  # session -> nudged this dirty episode (re-armed when clean)
 
 
@@ -9430,15 +9442,28 @@ def list_sessions() -> list:
             elif status == "" and prev in ("active", "waiting", "idle"):
                 # Session went from running to not running
                 threading.Thread(target=_complete_session_board_issue, args=(name,), daemon=True).start()
-            # Pushover notification when session needs input
+            # Pushover notification when session needs input.
+            # Belt (transition check) + suspenders (cooldown) — see
+            # _wait_pushover_last comment above. Status flap or running
+            # flap can defeat the transition check; the cooldown covers
+            # both. When status leaves 'waiting' we clear the entry so
+            # the next legitimate waiting-cycle fires immediately.
             if status == "waiting" and prev in ("active", ""):
                 _cfg_notif = parse_env_file(CC_SESSIONS / f"{name}.env")
                 _auto_cont = _cfg_notif.get("CC_AUTO_CONTINUE", "") in ("1", "true", "yes")
                 if not _auto_cont:
-                    threading.Thread(target=_send_pushover, args=(
-                        f"amux — {name} needs input",
-                        "Session is waiting for your response.",
-                    ), daemon=True).start()
+                    _now_wait = time.time()
+                    _last_wait = _wait_pushover_last.get(name, 0)
+                    if _now_wait - _last_wait >= _WAIT_PUSHOVER_COOLDOWN_S:
+                        _wait_pushover_last[name] = _now_wait
+                        threading.Thread(target=_send_pushover, args=(
+                            f"amux — {name} needs input",
+                            "Session is waiting for your response.",
+                        ), daemon=True).start()
+            elif status != "waiting":
+                # Session left waiting — clear the cooldown so the NEXT
+                # waiting-cycle after this one gets a fresh Pushover.
+                _wait_pushover_last.pop(name, None)
             _session_prev_status[name] = status if running else ""
             # Filter for intelligible content lines
             intelligible = []
