@@ -8453,6 +8453,77 @@ def _try_route_rd(rd_id: str, rd_title: str, rd_desc: str, rd_org: str | None, d
     }
 
 
+def _promote_backlog_when_dep_completes(completed_id: str, new_status: str,
+                                        db) -> list[str]:
+    """When completed_id flips to verified/done, sweep BACKLOG items whose
+    BLOCKED_BY: line lists it and promote them to `todo` IF every dep in
+    the line is now verified/done.
+
+    Filed by Ember-Research 2026-08-17 (second confirmed occurrence, first
+    was ECI-31 2026-08-12): `_try_route_rd` correctly gates the child's
+    initial status on BLOCKED_BY at MINT time, but nothing listens for
+    later dep completions — the child stays backlog forever until manually
+    promoted. This closes the loop symmetrically to `_notify_session_of_task`
+    and reuses the same notified-flag reset so the assignee gets a fresh
+    ping when the item transitions into a workable state.
+
+    Returns list of promoted item IDs (for cascade logging).
+    """
+    if new_status not in ("verified", "done"):
+        return []
+    # Candidate query — LIKE on the substring "BLOCKED_BY" + the id is cheap
+    # since backlog is typically small, and we re-parse below so false
+    # positives (id appears in prose, not the BLOCKED_BY line) don't cause
+    # spurious promotions.
+    like_pat = f"%BLOCKED_BY%{completed_id}%"
+    rows = db.execute(
+        "SELECT id, desc, session, title FROM issues "
+        "WHERE status = 'backlog' AND deleted IS NULL AND desc LIKE ?",
+        (like_pat,),
+    ).fetchall()
+    promoted: list[str] = []
+    for row in rows:
+        desc = row["desc"] or ""
+        m = _BLOCKED_BY_RE.search(desc)
+        if not m:
+            continue
+        deps = []
+        for raw in re.split(r"[\s,]+", m.group(1)):
+            tok = raw.strip().strip(".,;:")
+            if re.match(r"^[A-Z]+-\d+$", tok):
+                deps.append(tok)
+        if completed_id not in deps:
+            continue
+        # Every dep must be verified/done for us to promote
+        all_met = True
+        for dep in deps:
+            r = db.execute(
+                "SELECT status FROM issues WHERE id = ? AND deleted IS NULL",
+                (dep,),
+            ).fetchone()
+            if not r or r["status"] not in ("verified", "done"):
+                all_met = False
+                break
+        if not all_met:
+            continue
+        # Promote — reset notified so assignee gets a fresh ping via the
+        # normal auto-notify path.
+        now_ts = int(time.time())
+        db.execute(
+            "UPDATE issues SET status = 'todo', updated = ?, notified = 0 "
+            "WHERE id = ?",
+            (now_ts, row["id"]),
+        )
+        promoted.append(row["id"])
+        if row["session"]:
+            _notify_session_of_task(row["session"], row["id"], row["title"] or "")
+        slog(f"[unblock] promoted {row['id']} backlog→todo — all deps met "
+             f"(triggered by {completed_id} → {new_status})")
+    if promoted:
+        db.commit()
+    return promoted
+
+
 # ── Auto-apply hooks for adjudications and audit pairs (RTG-Research's C3/C4,
 # 2026-06-24) ────────────────────────────────────────────────────────────────
 #
@@ -43122,6 +43193,20 @@ class CCHandler(BaseHTTPRequestHandler):
                             handoff = _maybe_auto_mint_writeup_handoff(updated_item, db)
                             if handoff:
                                 cascaded = cascaded or handoff
+                        # Ember-Research 2026-08-17: when this item just
+                        # flipped to verified/done, sweep backlog items
+                        # whose BLOCKED_BY listed it and promote any whose
+                        # dep set is now fully met. Second confirmed
+                        # occurrence of the manual-promotion miss (EO-11
+                        # today, ECI-31 08-12).
+                        if _new_status_final in ("verified", "done") and _prior_status not in ("verified", "done"):
+                            _unblocked = _promote_backlog_when_dep_completes(
+                                bid, _new_status_final, db,
+                            )
+                            if _unblocked:
+                                if not cascaded:
+                                    cascaded = {"action": "unblocked"}
+                                cascaded.setdefault("unblocked", []).extend(_unblocked)
                     except Exception as _ce:
                         slog(f"[hooks] {bid}: hook error: {_ce}")
                         cascaded = None

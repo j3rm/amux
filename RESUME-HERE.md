@@ -4,6 +4,44 @@
 
 Last updated: 2026-08-15
 
+## Plan for change: auto-unblock backlog on dep-verified (Ember-Research 2026-08-17) — IN PROGRESS
+
+**Trigger:** Ember-Research reports this recurred for EO-11 today (BLOCKED_BY: EA-35, EA-35 verified ~17:5x, EO-11 stayed backlog until manual promotion ~30 min later). Same shape as ECI-31 on 2026-08-12. Two occurrences = pattern.
+
+**What exists:** `_try_route_rd` (L8320) parses `BLOCKED_BY:` at MINT time. If any listed dep isn't verified/done, child starts in `backlog`. Once minted, NOTHING listens for dep completions — the child stays backlog forever until a human/orchestrator notices and PATCHes it. Ember-Research's ask: hook C4/verdict path to sweep backlog items and promote when the dep set is fully satisfied.
+
+**Fix (one helper + one call site):**
+
+1. **`_promote_backlog_when_dep_completes(completed_id, new_status, db) -> list[str]`** — new function co-located with `_try_route_rd`. When completed_id flips to verified/done:
+   - `SELECT id, desc, session, title FROM issues WHERE status='backlog' AND deleted IS NULL AND desc LIKE '%BLOCKED_BY%{completed_id}%'` (SQLite LIKE is fine — false positives get filtered by the regex parse below, and the query stays cheap since backlog is small).
+   - For each candidate: re-parse `BLOCKED_BY` line with `_BLOCKED_BY_RE`; skip if completed_id isn't actually in the dep list.
+   - Check ALL deps in the list: if any is still not-verified-and-not-done, skip. If all met, `UPDATE ... SET status='todo', notified=0` (reset notified so assignee gets pinged fresh).
+   - Call `_notify_session_of_task` for the assignee.
+   - `slog("[unblock] promoted <id> to todo — all deps now met (triggered by <completed_id> → <new_status>)")`.
+
+2. **Wire into PATCH `/api/board/<id>` handler** at L42933 (same try/except block as C3/C4 cascades). Call after the existing cascade attempts:
+   ```python
+   _unblocked = _promote_backlog_when_dep_completes(bid, _new_status_final, db)
+   if _unblocked:
+       cascaded = cascaded or {"action": "unblocked"}
+       cascaded.setdefault("unblocked", []).extend(_unblocked)
+   ```
+
+**Explicitly NOT doing:**
+- No recursion: promoting X won't cascade to Y-blocked-by-X in the SAME PATCH. Y will promote when whatever verified X flips X's own dep chain — every terminal-flip triggers its own sweep.
+- No sweep on non-terminal transitions (todo→doing, doing→review) — BLOCKED_BY semantic per `_try_route_rd` L8385 gates on `verified`/`done` only.
+- No re-mint of dropped notifications: the notified flag reset handles it, no separate machinery.
+- No changes to the mint-time logic in `_try_route_rd`.
+
+**Verification:**
+1. `python3 -c "import ast; ast.parse(open('amux-server.py').read())"`
+2. `touch amux-server.py` → hot-reload.
+3. Live test: create parent P (todo → verified), create child C with BLOCKED_BY: P (mints backlog), verify P → check C flipped to todo AND assignee got the ping.
+4. Reply on Ember-Research's board item.
+5. Also: check via SQL that no false positives — a backlog item with BLOCKED_BY: OTHER-1 must NOT promote when UNRELATED-1 verifies.
+
+---
+
 ## Plan for change: agent-first memory ordering + description-field fix (AH-61 + AH-62, 2026-08-17) — IN PROGRESS
 
 **Trigger:** CD-SurfPrep filed AH-61 + AH-62 with a beautiful root-cause chain:
