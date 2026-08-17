@@ -4,6 +4,42 @@
 
 Last updated: 2026-08-15
 
+## Plan for change: agent-first memory ordering + description-field fix (AH-61 + AH-62, 2026-08-17) — IN PROGRESS
+
+**Trigger:** CD-SurfPrep filed AH-61 + AH-62 with a beautiful root-cause chain:
+
+- Composed MEMORY.md structure today: `container_preamble + _global.md + <MARKER> + <session>.md`. Prefix is 369+ lines, Claude Code loads ~200. Agent's own session-memory index (starting at line 370) NEVER loads → topic-file pointers orphaned → Skills protocol I broadcast via _global.md never reached them → they didn't know about POST /api/skills, kept doing it wrong.
+- Same root cause: my _global.md advertises an `amux skills list|get|set` CLI that DOESN'T EXIST. The real path is POST /api/skills/<name>. The false CLI reference means anyone trying the "documented" way fails immediately.
+- Real secondary bug: POST /api/skills body's top-level `description` field is silently dropped. There is no `description` column in the DB — description is always parsed from YAML frontmatter at read time. Sending a body with `{"content": "...", "description": "..."}` gains you nothing; the new content lands but the "how it's advertised" (from frontmatter) doesn't change. Silent-drop-of-payload-field is the worst API failure shape.
+
+**Fix (three targeted changes):**
+
+1. **Flip _compose_memory ordering** (L10317) — put session content FIRST, then marker, then composed prefix (container preamble + _global.md). Result: Claude Code's top-200 always includes the agent's own memory index, then whatever container-preamble/_global.md fits. Load budget stops silently orphaning agent memory.
+
+2. **Update _capture_claude_memory_changes** (L10328) to handle BOTH old and new orderings gracefully during the one-write transition. Strategy: split on the marker, and identify the agent portion by "doesn't start with container-preamble anchor `# ─ Container context` or global-anchor `# Shared Context`". Whichever side matches those anchors is composed; the other side is the agent's.
+
+3. **Reject POST /api/skills with silently-ignored fields** — if the request body contains `description` (or any other top-level key besides `content`), return 400 with an error naming the trap: "description lives in the YAML frontmatter of the content field. Extra top-level fields are ignored by the server — reject rather than silently drop. Put your description inside the content's frontmatter."
+
+4. **Aggressive trim of _global.md** (from 405 lines → target ~180) — even after the ordering flip, keeping _global.md smaller is a good defense. Chopping targets:
+   - Remove the FALSE `amux skills` CLI references (they don't work).
+   - Compress "Writing to Jeremy" from 161 lines to ~30 (rule + one example, not paragraph after paragraph).
+   - Consolidate "amux inter-session API" — the 150-line dump is mostly bash examples. Trim to the essential 3-4 commands; move detail to a `/skill:amux-cli` slash command that agents can invoke on demand.
+   - Merge "Skills — how they work, how to add one" with the corrections above; drop the fictional CLI section.
+
+**Explicitly NOT doing:**
+- Not fighting Claude Code's built-in "MEMORY.md too big" warning — the ordering flip solves the underlying orphaning, which is the actual damage. The warning is Claude Code's, not amux's, and it correctly points at file size.
+- Not adding a description column to the skills table — description-from-frontmatter is fine, we just need to reject the misleading API shape.
+- Not touching per-session <session>.md files — they're agent-owned.
+
+**Verification:**
+1. `python3 -c "import ast; ast.parse(open('amux-server.py').read())"`
+2. `touch amux-server.py` → hot-reload.
+3. Wake CD-SurfPrep, watch its composed MEMORY.md — session-memory content should be at the TOP.
+4. POST /api/skills with a stray `description` field → 400 with clear message.
+5. Reply on AH-61 + AH-62 with the fixes + answer CD-SurfPrep's three questions.
+
+---
+
 ## Plan for change: dedup "session needs input" Pushovers (Jeremy 2026-08-17) — IN PROGRESS
 
 **Trigger:** Jeremy. My AskUserQuestion prompt during the skill-hooks feature fired 5 spaced-out Pushovers while he took a minute to respond. He wants exactly one per waiting-cycle.

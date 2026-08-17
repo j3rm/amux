@@ -10314,20 +10314,50 @@ if CC_SESSIONS.is_dir():
             })
 
 
-def _compose_memory(global_content: str, session_content: str) -> str:
-    """Compose global + session memory into a single MEMORY.md for Claude."""
+def _compose_memory(global_content: str, session_content: str,
+                    container_preamble: str = "") -> str:
+    """Compose (session, marker, container preamble, global) into MEMORY.md.
+
+    Ordering (AH-61, 2026-08-17): SESSION content first, then MARKER, then
+    container preamble, then _global.md. Rationale: Claude Code loads
+    MEMORY.md from the top with a ~200-line cutoff. If the composed prefix
+    (container preamble + _global.md ≈ 400+ lines) sits above the marker
+    (former ordering) it eats the entire load budget — CD-SurfPrep
+    2026-08-17: 399-line file, marker at line 370, so the agent's own
+    index was NEVER read. Flipping the order guarantees the agent's memory
+    index is always in the loaded window; composed reference material
+    lands underneath and Claude Code consults it via search / lower
+    priority read."""
     parts = []
-    if global_content.strip():
-        parts.append(global_content.strip())
-    parts.append(_MEM_MARKER)
     if session_content.strip():
         parts.append(session_content.strip())
+    parts.append(_MEM_MARKER)
+    if container_preamble.strip():
+        parts.append(container_preamble.strip())
+    if global_content.strip():
+        parts.append(global_content.strip())
     return "\n\n".join(parts) + "\n"
+
+
+# Anchors identifying the composed-prefix side of the marker split. If a
+# side starts with either of these it's server-composed; the OTHER side is
+# the agent-owned portion. _global.md starts with `# Shared Context`; the
+# container preamble starts with `# ─ Container context`.
+_COMPOSED_ANCHORS = ("# Shared Context", "# ─ Container context")
 
 
 def _capture_claude_memory_changes(name: str, work_dir: str):
     """Capture changes Claude made to MEMORY.md during the previous session.
-    Runtime-aware: reads from the same location _write_claude_memory writes to."""
+    Runtime-aware: reads from the same location _write_claude_memory writes to.
+
+    Marker-agnostic extraction (AH-61, 2026-08-17): _compose_memory's
+    ordering flipped from composed-then-session to session-then-composed.
+    Existing MEMORY.md files on disk may be in EITHER format at the moment
+    of first read after the flip. Strategy: split on the marker; whichever
+    side does NOT start with a _COMPOSED_ANCHORS prefix is the agent's
+    portion. If neither side matches (rare — happens when composed prefix
+    was manually edited), take the shorter side as the agent portion
+    (agent memory is almost always smaller than composed context)."""
     pname = _project_name(work_dir)
     claude_mem_file = _claude_projects_dir_for_session(name) / pname / "memory" / "MEMORY.md"
     session_file = CC_MEMORY / f"{name}.md"
@@ -10335,10 +10365,25 @@ def _capture_claude_memory_changes(name: str, work_dir: str):
         return
     try:
         content = claude_mem_file.read_text(errors="replace")
-        if _MEM_MARKER in content:
-            session_part = content.split(_MEM_MARKER, 1)[1].strip()
-        else:
+        if _MEM_MARKER not in content:
             session_part = content.strip()
+        else:
+            before, after = content.split(_MEM_MARKER, 1)
+            before, after = before.strip(), after.strip()
+            def _looks_composed(text: str) -> bool:
+                return any(text.startswith(a) for a in _COMPOSED_ANCHORS)
+            b_composed, a_composed = _looks_composed(before), _looks_composed(after)
+            if b_composed and not a_composed:
+                session_part = after   # old format
+            elif a_composed and not b_composed:
+                session_part = before  # new format
+            elif not before:
+                session_part = after
+            elif not after:
+                session_part = before
+            else:
+                # Both look composed OR neither does — take the shorter side.
+                session_part = before if len(before) < len(after) else after
         if session_part:
             stored = session_file.read_text(errors="replace").strip() if session_file.exists() else ""
             if session_part != stored:
@@ -10419,9 +10464,13 @@ def _write_claude_memory(name: str, work_dir: str):
     session_file = CC_MEMORY / f"{name}.md"
     global_content = _GLOBAL_MEM_FILE.read_text(errors="replace") if _GLOBAL_MEM_FILE.exists() else ""
     session_content = session_file.read_text(errors="replace") if session_file.exists() else ""
-    composed = _compose_memory(global_content, session_content)
-    # Prepend container-context preamble for docker sessions. No-op for host.
-    composed = _container_context_preamble(name) + composed
+    # AH-61 (2026-08-17): container preamble now flows INTO _compose_memory
+    # as the 3rd arg — landing UNDER the marker with _global.md, not above
+    # the agent's session memory. Prior code prepended the preamble after
+    # compose, which put ~30 lines above the agent-owned portion and
+    # helped push the agent's index past Claude Code's load cutoff.
+    composed = _compose_memory(global_content, session_content,
+                               _container_context_preamble(name))
     claude_mem_dir = _claude_projects_dir_for_session(name) / pname / "memory"
     claude_mem_file = claude_mem_dir / "MEMORY.md"
     try:
@@ -41430,6 +41479,33 @@ class CCHandler(BaseHTTPRequestHandler):
             content = body.get("content", "")
             if not content.strip():
                 return self._json({"error": "content required"}, 400)
+            # AH-62 (2026-08-17, CD-SurfPrep): stray top-level fields were
+            # being silently dropped. `description` in particular is a
+            # trap: agents sent it expecting it to change the skill's
+            # advertised description (which drives discovery), but the
+            # description is always parsed at read time from the content's
+            # YAML frontmatter — there is no `description` column in the
+            # DB. A skill that had its content updated but frontmatter
+            # left stale would gain new knowledge while still advertising
+            # its OLD purpose. Worst-case silent failure. Reject the
+            # request with a message that names the fix.
+            _stray = [k for k in body.keys() if k not in ("content",)]
+            if _stray:
+                return self._json({
+                    "error": "unexpected fields in body",
+                    "unexpected": _stray,
+                    "hint": (
+                        "Only `content` is accepted. Skill metadata "
+                        "(description, argument-hint, etc.) lives in the "
+                        "YAML frontmatter of `content` itself — the server "
+                        "parses it at read time. If you want to change the "
+                        "description, edit the `description:` line inside "
+                        "the frontmatter at the top of `content`. "
+                        "Silently ignoring stray fields caused a real bug "
+                        "(zoho-crm-blueprint gained new content while "
+                        "advertising its old purpose) — hence the 400."
+                    ),
+                }, 400)
             db = get_db()
             db.execute(
                 "INSERT INTO skills(name, content, updated) VALUES(?,?,?)"
