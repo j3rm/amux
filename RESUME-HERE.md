@@ -4,6 +4,38 @@
 
 Last updated: 2026-08-15
 
+## Plan for change: audit-pair re-fire endpoint (AH-70, 2026-08-17) — IN PROGRESS
+
+**Trigger:** RTG-Research filed AH-70. 7 items (RA-1057, 1062, 1063, 1065, 1074, 1077, 1081) are stuck in `review` with no audit pairs minted. Root cause is well-diagnosed by RTG: their original build-verifies (RV-530/536/537/539/552/558/565/566) all FAILed on a shared compile break; they closed each as `done, SUPERSEDED by RV-573` — no `VERDICT:` line — so `_auto_on_build_verify_close` (L8808) short-circuited at L8821 (`_extract_verdict` returns nothing → return). Meanwhile RV-573 (PASS) covered the whole batch but its title only names ONE target, so the close hook only re-fires for that one.
+
+Deadline pressure: last gates before 8/31 rollout; Jeremy actively waiting.
+
+**Fix (small, targeted):**
+
+Add `POST /api/board/<id>/mint-audit-pair` — admin re-fire endpoint. Validates the target exists and is in `review`, then calls the existing `_mint_audit_pair_unguarded`. Follows the pattern of the existing `/api/board/<id>/claim` and `/api/board/<id>/run` endpoints. Small surface: one route, one internal call.
+
+Then use it to mint pairs for the 7 named targets in one script — un-stall the batch.
+
+**Reply to RTG-Research with:**
+- Which items got minted (the 7).
+- Going-forward contract: closing a superseded BV should include `VERDICT: PASS (superseded by RV-573)` — one line, and the close hook fires per-item as designed. That's a docs answer, not a code change.
+- For the static-site class (RA-1081, RV-571 = CANNOT VERIFY / not-applicable): use the new endpoint. Considered adding `VERDICT: N/A` support but it's not worth the surface area for a rare case — one manual `curl POST /api/board/RA-XXXX/mint-audit-pair` is fine.
+
+**Explicitly NOT doing:**
+- Not adding `COVERS: <id> <id> ...` batch-BV support — larger surface area, and the per-item VERDICT contract solves the same problem simpler.
+- Not weakening `_extract_verdict` to accept SUPERSEDED — verdict is signal, silence is silence.
+- Not adding auth on the new endpoint yet — matches the other /api/board/<id>/* patterns which are open.
+- Not fixing RA-1077's review→doing→review bounce that didn't re-trigger; the freshness rule at L8955 IS correct (BV was still fresh vs target update), the target simply never got a fresh BV to close.
+
+**Verification:**
+1. `python3 -c "import ast; ast.parse(open('amux-server.py').read())"`
+2. `touch amux-server.py` → hot-reload.
+3. `curl -sk -X POST /api/board/RA-1057/mint-audit-pair` returns `{"action":"audit-minted","target":"RA-1057","audits":["RAC-...","RAO-..."],"auditors":["RTG-Audit-Codex","RTG-Audit-Opus48"]}`.
+4. Fire for all 7. Confirm audit pairs land on RTG-Audit-Codex + RTG-Audit-Opus48 queues.
+5. Reply on AH-70.
+
+---
+
 ## Plan for change: board list respects limit/status/session + immutable poster audit (AH-69, 2026-08-17) — IN PROGRESS
 
 **Trigger:** Cypra-PAA filed AH-69 with two board-API bugs found during CS-224/CS-225 investigation:

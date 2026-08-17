@@ -43080,6 +43080,63 @@ class CCHandler(BaseHTTPRequestHandler):
                 _board_changed()
                 return self._json(_item_by_id(bid))
 
+            # POST /api/board/<id>/mint-audit-pair — admin re-fire (AH-70,
+            # 2026-08-17). The standard audit-pair mint fires from the PATCH
+            # cascade block on a fresh review transition (see
+            # _auto_mint_audit_pair). If the target is stuck in review
+            # without audits because the build-verify path had an unusual
+            # close shape — e.g. RTG-Research 2026-08-17 closed 8 failed BVs
+            # as "SUPERSEDED by RV-573" with no VERDICT: PASS line, so
+            # _auto_on_build_verify_close short-circuited on _extract_verdict
+            # returning nothing — a manual re-fire is needed. Also covers the
+            # rare "not applicable" class (static-site targets like
+            # RA-1081/ActExporter_com where RV-571 closed CANNOT VERIFY):
+            # POST here bypasses the build-gate entirely.
+            mint_m = re.match(r"^/api/board/([A-Za-z0-9_-]+)/mint-audit-pair$", path)
+            if mint_m and method == "POST":
+                bid = mint_m.group(1)
+                row = db.execute(
+                    "SELECT id, title, desc, status, session, creator, "
+                    "       org, updated, owner_type "
+                    "FROM issues WHERE id = ? AND deleted IS NULL",
+                    (bid,),
+                ).fetchone()
+                if not row:
+                    return self._json({"error": "item not found"}, 404)
+                if row["status"] != "review":
+                    return self._json({
+                        "error": f"item not in review (status: {row['status']})",
+                        "hint": ("mint-audit-pair only re-fires for items "
+                                 "actually in the review column — that's the "
+                                 "signal that the worker believes it's ready "
+                                 "for audit. If you need to force-mint an "
+                                 "audit for a different state, PATCH to "
+                                 "review first."),
+                    }, 409)
+                target_dict = dict(row)
+                result = _mint_audit_pair_unguarded(target_dict, db)
+                if result is None:
+                    # Existing-audit-pair-still-fresh case OR ineligibility
+                    # (control-plane prefix, auditor session missing, etc.).
+                    existing = db.execute(
+                        "SELECT id FROM issues WHERE title LIKE ? "
+                        "AND deleted IS NULL AND status != 'discarded'",
+                        (f"AUDIT {bid}:%",),
+                    ).fetchall()
+                    return self._json({
+                        "action": "no-mint",
+                        "target": bid,
+                        "existing_audits": [r["id"] for r in existing],
+                        "hint": ("Either the audit pair already exists and "
+                                 "is fresh (see existing_audits), the "
+                                 "target's org has no *-Audit-Codex + "
+                                 "*-Audit-Opus48 sessions, or the target's "
+                                 "prefix is control-plane (RD/RR/RAC/RAO/...). "
+                                 "Check existing_audits first."),
+                    }, 409)
+                _board_changed()
+                return self._json(result)
+
             # PATCH/DELETE /api/board/<id>
             board_m = re.match(r"^/api/board/([A-Za-z0-9_-]+)$", path)
             if board_m:
