@@ -5845,6 +5845,13 @@ def _init_db():
         # via GET /api/board?org=X so each org's Dispatch only sees its own items.
         "ALTER TABLE issues ADD COLUMN org TEXT",
         "ALTER TABLE issues ADD COLUMN notified INTEGER NOT NULL DEFAULT 0",
+        # creator_notified: 2026-08-17 completion-push (Jeremy). Mirrors
+        # `notified` but tracks the reverse direction — 1 once the item's
+        # CREATOR has been nudged that the task closed. Set on the first
+        # terminal-status transition (done/verified/discarded); atomic
+        # 0→1 CAS in _notify_creator_of_completion ensures at-most-once
+        # regardless of subsequent PATCH churn.
+        "ALTER TABLE issues ADD COLUMN creator_notified INTEGER NOT NULL DEFAULT 0",
         "ALTER TABLE schedules ADD COLUMN kind TEXT NOT NULL DEFAULT 'tmux'",
         "ALTER TABLE saved_messages ADD COLUMN session TEXT NOT NULL DEFAULT ''",
         "ALTER TABLE statuses ADD COLUMN gate TEXT",
@@ -6555,6 +6562,60 @@ def _notify_session_of_task(session_name: str, item_id: str, title: str):
 
 # process restart — that's fine, a re-delivery after a restart is
 # vanishingly unlikely (would require the set to still be open at restart).
+
+
+def _is_real_session(name: "str | None") -> bool:
+    """True iff `name` is a session that actually exists (has an env file).
+    Used to skip creator-notify when the creator field is empty, is 'Jeremy',
+    or otherwise doesn't map to a session with a tmux pane. Jeremy explicitly
+    chose (2026-08-17) NOT to Pushover-fallback on creator=Jeremy — the
+    completion-notify is agent-to-agent only."""
+    if not name:
+        return False
+    try:
+        return (CC_SESSIONS / f"{name}.env").is_file()
+    except Exception:
+        return False
+
+
+def _notify_creator_of_completion(creator_session: str, item_id: str, title: str,
+                                  new_status: str, closer_session: str,
+                                  closer_note: str):
+    """Push a completion notice into the item CREATOR's tmux pane after the
+    ASSIGNEE (or anyone) closes the item. Mirror image of
+    _notify_session_of_task: atomic idempotent via a `creator_notified` DB
+    flag (0→1 CAS closes the TOCTOU window under concurrent PATCHes), best
+    effort background thread. Runs on first terminal-status transition only.
+
+    Trigger (Jeremy 2026-08-17): when agent-A creates a task assigned to
+    agent-B, and agent-B completes it, agent-A used to get nothing. This
+    closes that loop without requiring polling.
+    """
+    def _run():
+        try:
+            db = get_db()
+            cur = db.execute(
+                "UPDATE issues SET creator_notified=1 "
+                "WHERE id=? AND creator_notified=0",
+                (item_id,),
+            )
+            db.commit()
+            if cur.rowcount == 0:
+                return  # someone else already notified (or already 1)
+            note_frag = f" Note: {closer_note[:100]}" if closer_note else ""
+            text = (
+                f"Completed: {item_id} — {(title or '')[:80]} → {new_status} "
+                f"by {closer_session}.{note_frag} "
+                f"See `amux board show {item_id}` for detail."
+            )
+            ok, _msg = send_text(creator_session, text)
+            if not ok:
+                # Session not running — clear the flag so a future restart picks it up
+                db.execute("UPDATE issues SET creator_notified=0 WHERE id=?", (item_id,))
+                db.commit()
+        except Exception:
+            pass
+    threading.Thread(target=_run, daemon=True).start()
 
 
 def _notify_session_of_retake(session_name: str, item_id: str, title: str,
@@ -42915,6 +42976,29 @@ class CCHandler(BaseHTTPRequestHandler):
                             and updated_item.get("owner_type") == "agent"
                             and updated_item.get("status") in ("todo", "backlog")):
                         _notify_session_of_task(new_session, bid, updated_item.get("title", ""))
+                    # Creator-notify on completion (Jeremy 2026-08-17). When
+                    # the item transitions INTO a terminal status (done /
+                    # verified / discarded) for the FIRST time, push a
+                    # completion nudge to the item's creator — unless the
+                    # closer IS the creator (self-close = noise) or the
+                    # creator isn't a real session (e.g. Jeremy / empty /
+                    # unknown — Jeremy explicitly chose skip, no Pushover
+                    # fallback). Idempotent via creator_notified DB flag.
+                    _TERMINAL = ("done", "verified", "discarded")
+                    _prior_status = prior["status"] if prior else None
+                    _new_status_final = updated_item.get("status") or ""
+                    _creator = updated_item.get("creator") or ""
+                    _closer = (body.get("session") if "session" in body else None) or new_session
+                    if (_new_status_final in _TERMINAL
+                            and _prior_status not in _TERMINAL
+                            and _creator
+                            and _creator != _closer
+                            and _is_real_session(_creator)):
+                        _closer_note = (body.get("desc") or "").strip()
+                        _notify_creator_of_completion(
+                            _creator, bid, updated_item.get("title", ""),
+                            _new_status_final, _closer or "unknown", _closer_note,
+                        )
                     # C3: auto-apply adjudication verdicts on *-Research items.
                     # C4: auto-verify targets when an audit pair closes.
                     # Audit-mint: when a worker item PATCHes INTO review (was

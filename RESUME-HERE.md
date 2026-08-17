@@ -4,6 +4,47 @@
 
 Last updated: 2026-08-15
 
+## Plan for change: creator-notify on completion (Jeremy 2026-08-17) — IN PROGRESS
+
+**Trigger:** Jeremy. When agent-A creates a task assigned to agent-B, and agent-B completes it, agent-A currently gets nothing. Requested a completion-push analogous to the existing assignee-notify.
+
+**What already works (surveyed L6520-L6600, L42918):**
+- Fields `creator` + `session` + `owner_type` all present on issues.
+- Helper `_notify_session_of_task` (L6520) — tmux inject via `send_text`, atomic idempotent via a `notified` DB flag, best-effort background thread.
+- Siblings `_notify_session_of_retake` (L6560) + `_notify_session_of_verified` (L6586) — for C3/C4 cascades.
+- PATCH handler at L42918 already has the exact hook site: after auto-assignee-notify block, before C3/C4 cascade.
+- Migration pattern for new DB columns: append ALTER to the loop at L5821 (try/except per stmt, ignore "column exists").
+
+**Fix (four small pieces):**
+
+1. **Schema migration**: `ALTER TABLE issues ADD COLUMN creator_notified INTEGER NOT NULL DEFAULT 0`. Wrapped in the existing try/except loop.
+
+2. **Helper `_is_real_session(name)`**: returns `bool(name and (CC_SESSIONS / f"{name}.env").is_file())`. Prevents notify attempts against `""` / `"Jeremy"` / any non-session creator value (Jeremy chose NOT to Pushover on creator=Jeremy; just skip).
+
+3. **Helper `_notify_creator_of_completion(creator, item_id, title, new_status, closer, note_first_100)`**: mirrors `_notify_session_of_task`. Message shape:
+   `"Completed: {item_id} — {title[:80]} → {new_status} by {closer}. Note: {note[:100]}. See `amux board show {item_id}` for detail."`
+   Atomic idempotent via `creator_notified` DB flag (0→1 CAS). Best-effort background thread. Clears the flag on send-failure so a session restart still gets the ping.
+
+4. **Wire into PATCH handler** at L42918, right after the auto-assignee-notify block. Conditions (per Jeremy 2026-08-17):
+   - `new_status ∈ {done, verified, discarded}` AND `prior_status ∉ {done, verified, discarded}` (only fire on the FIRST transition into terminal state)
+   - `creator != closer` (skip self-close — noise; Jeremy chose this)
+   - `_is_real_session(creator)` (skip empty / Jeremy / unknown)
+   - Note payload extracted from PATCH body's `desc` field (Jeremy chose to include the closer's note in the ping)
+
+**Explicitly NOT doing:**
+- No Pushover-to-Jeremy fallback when creator is Jeremy (Jeremy explicitly chose skip).
+- No new notify for status transitions between non-terminal states (todo→doing etc.) — completion only.
+- No re-notify on subsequent state churn — first transition to terminal wins; `creator_notified` flag ensures at-most-once.
+- No dashboard UI change — this is agent-facing infrastructure.
+
+**Verification:**
+1. `python3 -c "import ast; ast.parse(open('amux-server.py').read())"`
+2. `touch amux-server.py` → hot-reload (auto-migrates the new column on startup).
+3. Sanity: post a test board item from amux-helper session to another running session; peek that session; PATCH to done from the assignee side; peek amux-helper's session for the completion nudge.
+4. Confirm no double-fire on subsequent PATCHes.
+
+---
+
 ## Plan for change: reject empty command on POST /api/schedules (AH-60, 2026-08-16) — IN PROGRESS
 
 **Trigger:** AH-60 from RTG-Research. SCHED-225 (once, kind=tmux, session=RTG-Research) fired at 20:22:18 on 2026-08-15 with status=ok and run_count=1 — but no wakeup visibly arrived, and RTG-Research's in-flight watch stayed orphaned for hours.
