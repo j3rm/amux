@@ -8484,6 +8484,17 @@ def _try_route_rd(rd_id: str, rd_title: str, rd_desc: str, rd_org: str | None, d
     if child_status == "todo":
         _notify_session_of_task(target_session, child_id, child_title)
 
+    # Ember-Research 2026-08-17 (late): the RD → done flip above is a
+    # direct db.execute UPDATE, so the unblock sweep in the PATCH handler
+    # never sees it. Rare that anything BLOCKED_BY's an RD (RDs are
+    # routing directives, not work items), but consistent semantics is
+    # cheaper than a subtle miss.
+    unblocked_rd = []
+    try:
+        unblocked_rd = _promote_backlog_when_dep_completes(rd_id, "done", db)
+    except Exception as _ue:
+        slog(f"[unblock] {rd_id}: RD sweep failed: {_ue}")
+
     return {
         "action": "routed",
         "rd": rd_id,
@@ -8491,6 +8502,7 @@ def _try_route_rd(rd_id: str, rd_title: str, rd_desc: str, rd_org: str | None, d
         "target": target_session,
         "child_status": child_status,
         "unmet_deps": unmet_deps,
+        **({"unblocked": unblocked_rd} if unblocked_rd else {}),
     }
 
 
@@ -9128,8 +9140,22 @@ def _auto_apply_adjudication(rr_item: dict, db) -> dict | None:
     elif new_status == "verified" and target["session"]:
         _notify_session_of_verified(target["session"], target_id,
                                     target["title"] or "", verdict, rid, "C3")
-    return {"action": "auto-applied", "rr": rid, "target": target_id,
-            "verdict": verdict, "new_status": new_status}
+    # Ember-Research 2026-08-17 (late): unblock sweep must fire here too.
+    # C3 does a direct db.execute UPDATE (L9110), bypassing the PATCH
+    # handler where the sweep normally lives. Without this call, any
+    # backlog item BLOCKED_BY the target sits stuck when C3 verifies the
+    # target — first-real-test miss on EA-39→EO-12.
+    unblocked_c3 = []
+    if new_status == "verified":
+        try:
+            unblocked_c3 = _promote_backlog_when_dep_completes(target_id, new_status, db)
+        except Exception as _ue:
+            slog(f"[unblock] {target_id}: C3 sweep failed: {_ue}")
+    result = {"action": "auto-applied", "rr": rid, "target": target_id,
+              "verdict": verdict, "new_status": new_status}
+    if unblocked_c3:
+        result["unblocked"] = unblocked_c3
+    return result
 
 
 def _auto_verify_from_audit_pair(audit_item: dict, db) -> dict | None:
@@ -9239,9 +9265,23 @@ def _auto_verify_from_audit_pair(audit_item: dict, db) -> dict | None:
         _notify_session_of_verified(target["session"], target_id,
                                     target["title"] or "", pair_verdict,
                                     pair_source, "C4")
-    return {"action": "auto-applied", "audits": [aid, other["id"]],
-            "verdicts": [my_verdict, their_verdict],
-            "target": target_id, "new_status": new_status}
+    # Ember-Research 2026-08-17 (late): C4 does a direct db.execute UPDATE
+    # (L9218), bypassing the PATCH handler where the unblock sweep normally
+    # lives. This is where the first-real-test miss happened: EA-39 flipped
+    # verified via this path at ~19:4x, EO-12 (BLOCKED_BY: EA-39) stayed
+    # backlog. Fire the sweep here too.
+    unblocked_c4 = []
+    if new_status == "verified":
+        try:
+            unblocked_c4 = _promote_backlog_when_dep_completes(target_id, new_status, db)
+        except Exception as _ue:
+            slog(f"[unblock] {target_id}: C4 sweep failed: {_ue}")
+    result = {"action": "auto-applied", "audits": [aid, other["id"]],
+              "verdicts": [my_verdict, their_verdict],
+              "target": target_id, "new_status": new_status}
+    if unblocked_c4:
+        result["unblocked"] = unblocked_c4
+    return result
 
 
 def _session_dirty_files(name: str, work_dir: str) -> list:

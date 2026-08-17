@@ -90,6 +90,39 @@ Completion-notify message: prefer `last_patch_by` (or `posted_by_session` for a 
 
 ---
 
+## Plan for change: unblock hook — miss on C3/C4 direct-DB paths (Ember-Research 2026-08-17 late) — IN PROGRESS
+
+**Trigger:** First real-world test of this morning's `_promote_backlog_when_dep_completes` missed. EA-39 flipped verified via C4 auto-apply ~19:4x; EO-12 (backlog, `BLOCKED_BY: EA-39`) was NOT promoted. Manual promotion at ~20:00.
+
+Ember-Research submitted two hypotheses. Verified:
+- **H1 (correct):** the unblock hook is called from the PATCH `/api/board/<id>` handler's cascade block only. C4's `_auto_verify_from_audit_pair` (L9217) does a DIRECT `db.execute("UPDATE issues SET status=...")` + `db.commit()` — bypasses the PATCH handler entirely. Same shape in C3's `_auto_apply_adjudication` (L9109) and `_try_route_rd` (L8437, RD→done). Any status flip that reaches verified/done via those paths never fires my unblock sweep.
+- **H2 (wrong):** the "BLOCKED_BY unmet:" annotation line. Regex-tested: `_BLOCKED_BY_RE` (`^[ \t]*BLOCKED_BY:\s*...$`) requires `BLOCKED_BY:` (colon immediately after), so it correctly skips `BLOCKED_BY unmet:` and matches the actual `BLOCKED_BY: EA-39` line. Ember-Research's guess there was incorrect. Confirmed via Python REPL — will note in the reply so they update their mental model.
+
+**Fix (three sites, one call each):**
+
+Add a `_promote_backlog_when_dep_completes(target_id, new_status, db)` call after each direct-DB status write in:
+
+1. `_auto_apply_adjudication` (C3, ~L9114) — right after `_board_changed()`, when `new_status in ("verified","done")` (verified is the only new_status this function produces; the FAIL path writes "doing"). So just guard on `if new_status == "verified"`.
+2. `_auto_verify_from_audit_pair` (C4, ~L9222) — same shape; guard on `if new_status == "verified"` (the FAIL/FAIL path writes "doing").
+3. `_try_route_rd` (~L8440) — the RD flip is always to `done`. Fire the sweep unconditionally after the commit. Rare that anything BLOCKED_BY's an RD, but consistent semantics is worth the two lines.
+
+The PATCH-handler call I added this morning stays as-is — it covers manual PATCHes, `POST /api/board/<id>/mint-audit-pair`, and any other direct-PATCH path.
+
+Wrap each call in try/except so a sweep failure never blocks the hook it's attached to. Log unblocked ids the same way (`[unblock] promoted X ...`).
+
+**Explicitly NOT doing:**
+- Not refactoring the three direct writes to route through the PATCH handler (larger change, risk of behavior drift).
+- Not extracting a "commit status change + fire all downstream hooks" helper (nice long-term but out of scope; this fix is 3 x 5 lines).
+- Not touching the regex — verified correct.
+
+**Verification:**
+1. `python3 -c "import ast; ast.parse(open('amux-server.py').read())"`
+2. `touch amux-server.py` → hot-reload.
+3. Live test: create A + B where B is `BLOCKED_BY: A`, then flip A → verified via a mechanism that goes through C4 (audit pair PASS/PASS). Confirm B promotes to `todo`.
+4. Reply to Ember-Research with (a) H1 confirmed and fix shipped, (b) H2 disproved with regex evidence, (c) how they can grep the server log if they get filesystem access later.
+
+---
+
 ## Plan for change: auto-unblock backlog on dep-verified (Ember-Research 2026-08-17) — IN PROGRESS
 
 **Trigger:** Ember-Research reports this recurred for EO-11 today (BLOCKED_BY: EA-35, EA-35 verified ~17:5x, EO-11 stayed backlog until manual promotion ~30 min later). Same shape as ECI-31 on 2026-08-12. Two occurrences = pattern.
