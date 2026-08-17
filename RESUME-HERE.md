@@ -4,6 +4,60 @@
 
 Last updated: 2026-08-15
 
+## Plan for change: board list respects limit/status/session + immutable poster audit (AH-69, 2026-08-17) — IN PROGRESS
+
+**Trigger:** Cypra-PAA filed AH-69 with two board-API bugs found during CS-224/CS-225 investigation:
+
+1. **`session=` on a board item is not proof of actor.** POST /api/board accepts session+creator verbatim from body — any process can claim any session. My own self-test of the creator-notify hook (CS-224) exercised exactly this: amux-helper POSTed with `session=CD-SurfPrep, creator=Cypra-PAA` and the completion nudge read "done by CD-SurfPrep" when CD-SurfPrep never touched the item. Board history can attribute actions to sessions that took none.
+2. **`GET /api/board` silently omits an existing item AND ignores query params.** CS-225 returns 200 on direct GET but is absent from the list (`_load_board` L6711 caps done/discarded at the most-recent 100 by `updated DESC` — CS-225 is `done` but older than the top-100). Meanwhile `?limit=5000`, `?status=done`, `?session=X` are all ignored — only `done_limit` and `org` are read.
+
+**Fix — two changes, minimal surface:**
+
+### Change A — GET /api/board query-param support (fixes bug #2)
+
+Extend the handler (L42677) to accept:
+- `limit=N` (alias for done_limit; wins if both provided). Caps at 10000. `limit=0` = unlimited.
+- `status=X` → filter to that status. Skips the UNION math — one WHERE clause. Works with any status including custom columns.
+- `session=X` → filter to that session's items. `session=none` = unassigned.
+- Existing `done_limit` + `org` unchanged.
+
+_load_board grows a `status_filter` and `session_filter` param. When either is set the UNION branch is skipped in favor of a single filtered SELECT (respecting the current org_clause).
+
+### Change B — immutable poster audit columns (fixes bug #1)
+
+Add two DB columns:
+- `posted_by_session TEXT` — from `X-Amux-Session` request header on write, empty when absent (e.g. dashboard host writes).
+- `posted_by_ip TEXT` — from `self.client_address[0]` (loopback = 127.0.0.1 for local, gateway IP for cloud).
+
+Both are set at row-CREATE time and NEVER updated by PATCH. If a PATCH mutates the item, we still capture `patched_by_*` — third column `last_patch_by TEXT` populated from the same header on every PATCH, overwritten each time.
+
+Wire:
+- POST /api/board: set posted_by_session + posted_by_ip on INSERT.
+- PATCH /api/board/<id>: set last_patch_by on UPDATE.
+- Include all three in _load_board SELECT + single-item GET response.
+- Migration: existing rows get NULL — that's fine, audit only works forward.
+
+Completion-notify message: prefer `last_patch_by` (or `posted_by_session` for a create-based close, though these are rare) over body's `session` field. Fall back to body's `session` with a "(claimed session — actor identity not verified)" hint if header was absent.
+
+**Explicitly NOT doing:**
+- Not adding auth on POST/PATCH — orchestration legitimately needs to write on behalf of other sessions.
+- Not rejecting body's `session=X` when it doesn't match header — that's the orchestration use case (me writing as amux-helper with session=CD-SurfPrep is legitimate).
+- Not migrating existing rows' posted_by — no way to reconstruct.
+- Not making the audit columns dashboard-visible in this change (just API-visible). Dashboard column can come later.
+- Not touching CP-508 — Cypra verified it already used direct GET as authoritative and stands. Her note about "session= isn't authoritative" is what the new audit columns give her.
+
+**Verification:**
+1. `python3 -c "import ast; ast.parse(open('amux-server.py').read())"`
+2. `touch amux-server.py` → hot-reload.
+3. GET /api/board?status=done → should include CS-225 (all done items, no cutoff).
+4. GET /api/board?session=CD-SurfPrep → only CD-SurfPrep items.
+5. GET /api/board?limit=5000 → up to 5000 items.
+6. POST /api/board with X-Amux-Session:foo header → GET back shows posted_by_session=foo.
+7. PATCH from a different session → last_patch_by reflects that session.
+8. Reply to AH-69 with the fixes.
+
+---
+
 ## Plan for change: auto-unblock backlog on dep-verified (Ember-Research 2026-08-17) — IN PROGRESS
 
 **Trigger:** Ember-Research reports this recurred for EO-11 today (BLOCKED_BY: EA-35, EA-35 verified ~17:5x, EO-11 stayed backlog until manual promotion ~30 min later). Same shape as ECI-31 on 2026-08-12. Two occurrences = pattern.

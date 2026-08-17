@@ -5852,6 +5852,17 @@ def _init_db():
         # 0→1 CAS in _notify_creator_of_completion ensures at-most-once
         # regardless of subsequent PATCH churn.
         "ALTER TABLE issues ADD COLUMN creator_notified INTEGER NOT NULL DEFAULT 0",
+        # AH-69 (Cypra-PAA 2026-08-17): body's `session` and `creator`
+        # fields are set by the client and cannot be trusted as proof of
+        # actor — I self-tested the creator-notify hook by POSTing as
+        # amux-helper claiming session=CD-SurfPrep, and the completion
+        # message wrongly read "done by CD-SurfPrep". These three columns
+        # record the REAL actor from the X-Amux-Session header and
+        # source IP, immutable on write. posted_by_* set on INSERT and
+        # never updated; last_patch_by overwritten on every PATCH.
+        "ALTER TABLE issues ADD COLUMN posted_by_session TEXT",
+        "ALTER TABLE issues ADD COLUMN posted_by_ip TEXT",
+        "ALTER TABLE issues ADD COLUMN last_patch_by TEXT",
         "ALTER TABLE schedules ADD COLUMN kind TEXT NOT NULL DEFAULT 'tmux'",
         "ALTER TABLE saved_messages ADD COLUMN session TEXT NOT NULL DEFAULT ''",
         "ALTER TABLE statuses ADD COLUMN gate TEXT",
@@ -6708,7 +6719,9 @@ def _session_org(session_name: str | None) -> str | None:
         return None
 
 
-def _load_board(done_limit: int = 100, org: str | None = None) -> list:
+def _load_board(done_limit: int = 100, org: str | None = None,
+                status_filter: str | None = None,
+                session_filter: str | None = None) -> list:
     """Load non-deleted issues from SQLite, with tags joined.
 
     To keep payloads manageable, only the most recent `done_limit` items in
@@ -6717,7 +6730,16 @@ def _load_board(done_limit: int = 100, org: str | None = None) -> list:
 
     org filters to one fleet's items: org='RTG' returns items whose org is
     exactly RTG; org='none' returns unpartitioned items (org IS NULL).
-    No org param = everything (dashboard view)."""
+    No org param = everything (dashboard view).
+
+    status_filter (AH-69, 2026-08-17) narrows to a single status. When set,
+    the terminal-status UNION math is skipped in favor of one WHERE clause
+    — done_limit is IGNORED (caller asked for that status, they get all of
+    it). Combines with org_clause.
+
+    session_filter (AH-69) narrows to one session's items. session='none'
+    means unassigned rows (i.session IS NULL). Combines with everything else.
+    """
     db = get_db()
     org_clause, org_params = "", []
     if org == "none":
@@ -6725,12 +6747,28 @@ def _load_board(done_limit: int = 100, org: str | None = None) -> list:
     elif org:
         org_clause = " AND i.org = ?"
         org_params = [org]
+    session_clause, session_params = "", []
+    if session_filter == "none":
+        session_clause = " AND i.session IS NULL"
+    elif session_filter:
+        session_clause = " AND i.session = ?"
+        session_params = [session_filter]
     _COLS = """i.id, i.title, i.desc, i.status, i.session, i.creator,
                i.due, i.due_time, i.created, i.updated, i.owner_type, i.org,
                COALESCE(i.pinned, 0) AS pinned,
                COALESCE(i.pos, 0) AS pos,
+               i.posted_by_session, i.posted_by_ip, i.last_patch_by,
                GROUP_CONCAT(t.tag) AS tags_csv"""
-    if done_limit > 0:
+    # Explicit status filter short-circuits the terminal-status UNION math.
+    if status_filter:
+        rows = db.execute(
+            f"""SELECT {_COLS}
+                FROM issues i LEFT JOIN issue_tags t ON t.issue_id = i.id
+                WHERE i.deleted IS NULL AND i.status = ?{org_clause}{session_clause}
+                GROUP BY i.id""",
+            (status_filter, *org_params, *session_params),
+        ).fetchall()
+    elif done_limit > 0:
         # Active items (unlimited), plus the most recent terminal items. `verified`
         # gets its OWN quota separate from done/discarded — otherwise the flood of
         # `done` items (thousands) crowds verified out of a shared limit entirely,
@@ -6740,13 +6778,13 @@ def _load_board(done_limit: int = 100, org: str | None = None) -> list:
         rows = db.execute(
             f"""SELECT {_COLS}
                 FROM issues i LEFT JOIN issue_tags t ON t.issue_id = i.id
-                WHERE i.deleted IS NULL AND i.status NOT IN ('done','verified','discarded'){org_clause}
+                WHERE i.deleted IS NULL AND i.status NOT IN ('done','verified','discarded'){org_clause}{session_clause}
                 GROUP BY i.id
               UNION ALL
               SELECT * FROM (
                 SELECT {_COLS}
                 FROM issues i LEFT JOIN issue_tags t ON t.issue_id = i.id
-                WHERE i.deleted IS NULL AND i.status = 'verified'{org_clause}
+                WHERE i.deleted IS NULL AND i.status = 'verified'{org_clause}{session_clause}
                 GROUP BY i.id
                 ORDER BY i.updated DESC
                 LIMIT ?
@@ -6755,20 +6793,22 @@ def _load_board(done_limit: int = 100, org: str | None = None) -> list:
               SELECT * FROM (
                 SELECT {_COLS}
                 FROM issues i LEFT JOIN issue_tags t ON t.issue_id = i.id
-                WHERE i.deleted IS NULL AND i.status IN ('done','discarded'){org_clause}
+                WHERE i.deleted IS NULL AND i.status IN ('done','discarded'){org_clause}{session_clause}
                 GROUP BY i.id
                 ORDER BY i.updated DESC
                 LIMIT ?
               )""",
-            (*org_params, *org_params, verified_limit, *org_params, done_limit),
+            (*org_params, *session_params,
+             *org_params, *session_params, verified_limit,
+             *org_params, *session_params, done_limit),
         ).fetchall()
     else:
         rows = db.execute(
             f"""SELECT {_COLS}
                 FROM issues i LEFT JOIN issue_tags t ON t.issue_id = i.id
-                WHERE i.deleted IS NULL{org_clause}
+                WHERE i.deleted IS NULL{org_clause}{session_clause}
                 GROUP BY i.id""",
-            org_params,
+            (*org_params, *session_params),
         ).fetchall()
     # Sort in Python: pinned first, then by pos, then by updated
     result = []
@@ -6861,6 +6901,7 @@ def _item_by_id(bid: str) -> dict | None:
                   i.org,
                   COALESCE(i.pinned, 0) AS pinned,
                   COALESCE(i.pos, 0) AS pos,
+                  i.posted_by_session, i.posted_by_ip, i.last_patch_by,
                   GROUP_CONCAT(t.tag) AS tags_csv
            FROM issues i
            LEFT JOIN issue_tags t ON t.issue_id = i.id
@@ -42675,9 +42716,29 @@ class CCHandler(BaseHTTPRequestHandler):
             # ?done_limit=N  limits returned done/discarded items (default 100, 0=all)
             # ?org=X  only items of one fleet (org='none' for unpartitioned items)
             if method == "GET" and path == "/api/board":
+                # AH-69 (Cypra-PAA 2026-08-17): pre-existing behavior only
+                # read done_limit + org from qs. Any caller passing limit /
+                # status / session got the full default list silently — and
+                # older `done` items past the top-100 were invisible even
+                # to direct listers. Now honored explicitly:
+                #  - limit=N  → alias for done_limit; wins if both provided.
+                #    Cap 10000. limit=0 = unlimited.
+                #  - status=X → single-status filter (skips the UNION math).
+                #  - session=X → session filter. "none" = unassigned.
                 done_limit = int(qs.get("done_limit", ["100"])[0])
+                if "limit" in qs:
+                    try:
+                        done_limit = min(int(qs["limit"][0]), 10000)
+                    except (ValueError, IndexError):
+                        pass
                 org = qs.get("org", [None])[0]
-                return self._json(_load_board(done_limit=done_limit, org=org))
+                status_filter = qs.get("status", [None])[0]
+                session_filter = qs.get("session", [None])[0]
+                return self._json(_load_board(
+                    done_limit=done_limit, org=org,
+                    status_filter=status_filter,
+                    session_filter=session_filter,
+                ))
 
             # POST /api/board — create issue
             if method == "POST" and path == "/api/board":
@@ -42804,10 +42865,21 @@ class CCHandler(BaseHTTPRequestHandler):
                     (status,),
                 ).fetchone()
                 new_pos = (min_pos_row["m"] if min_pos_row else 0) - 1024.0
+                # AH-69: capture real actor from header + IP for the audit
+                # trail. `session=` in body is the ASSIGNEE, not the actor.
+                posted_by = (self.headers.get("X-Amux-Session") or "").strip() or None
+                try:
+                    posted_ip = self.client_address[0]
+                except Exception:
+                    posted_ip = None
                 db.execute(
-                    """INSERT INTO issues (id, title, desc, status, session, creator, due, due_time, created, updated, owner_type, pos, org)
-                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-                    (item_id, title, desc, status, session or None, creator, due, due_time, now, now, owner_type, new_pos, org),
+                    """INSERT INTO issues (id, title, desc, status, session, creator, due, due_time,
+                                            created, updated, owner_type, pos, org,
+                                            posted_by_session, posted_by_ip)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    (item_id, title, desc, status, session or None, creator, due, due_time,
+                     now, now, owner_type, new_pos, org,
+                     posted_by, posted_ip),
                 )
                 for tag in tags:
                     db.execute(
@@ -43119,6 +43191,12 @@ class CCHandler(BaseHTTPRequestHandler):
                         set_clauses.append("notified = 0")
                     set_clauses.append("updated = ?")
                     params.append(now)
+                    # AH-69: record the ACTUAL patcher's session on every PATCH.
+                    # Empty when the caller didn't send X-Amux-Session (dashboard
+                    # + direct-curl callers). Overwritten on subsequent PATCHes.
+                    _pby = (self.headers.get("X-Amux-Session") or "").strip() or None
+                    set_clauses.append("last_patch_by = ?")
+                    params.append(_pby)
                     params.append(bid)
                     if set_clauses:
                         db.execute(
@@ -43167,9 +43245,22 @@ class CCHandler(BaseHTTPRequestHandler):
                             and _creator != _closer
                             and _is_real_session(_creator)):
                         _closer_note = (body.get("desc") or "").strip()
+                        # AH-69 (Cypra-PAA 2026-08-17): prefer the AUDIT
+                        # actor (X-Amux-Session header of the PATCHer) over
+                        # body's `session` field, which the caller can set
+                        # to anything. Fall back to body when the header
+                        # was absent (e.g. dashboard PATCH); annotate so
+                        # the recipient knows the source of the attribution.
+                        _real_patcher = updated_item.get("last_patch_by")
+                        if _real_patcher and _real_patcher != _closer:
+                            _closer_display = f"{_real_patcher} (patched item; assignee={_closer})"
+                        elif _real_patcher:
+                            _closer_display = _real_patcher
+                        else:
+                            _closer_display = f"{_closer or 'unknown'} (unverified — no X-Amux-Session header)"
                         _notify_creator_of_completion(
                             _creator, bid, updated_item.get("title", ""),
-                            _new_status_final, _closer or "unknown", _closer_note,
+                            _new_status_final, _closer_display, _closer_note,
                         )
                     # C3: auto-apply adjudication verdicts on *-Research items.
                     # C4: auto-verify targets when an audit pair closes.
