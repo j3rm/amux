@@ -8604,6 +8604,11 @@ _CONTROL_PLANE_PREFIXES = frozenset({
     "RD", "ED",          # *-Dispatch routing directives (Dispatch retired but ids persist)
     "RAC", "RAO",        # RTG-Audit-Codex / RTG-Audit-Opus48 audit items
     "AH", "AW",          # amux-helper / AMUX-Watchdog items
+    # AH-77 (RTG-Research 2026-08-18): build-verify + connectivity/ping
+    # coordination items. Auditors can only VOID them, so audit-pair
+    # mint on review-enter is pure noise on the audit queue.
+    "RV",                # RTG-VS2017 BUILD-VERIFY items (and future PreBuild PREBUILD if we keep RV shape)
+    "RP",                # RTG-* connectivity/ping coordination items
 })
 # Note: EAC-/EAO- aren't blanket excluded — Ember-Audit-Codex AND
 # EmberCRM_API_Core both produce 'EAC' from _prefix_from_session, so the
@@ -11158,6 +11163,19 @@ def start_session(name: str, extra_flags: str = "", _skip_conv_id: bool = False)
         cfg = parse_env_file(f)
         if cfg.get("CC_ARCHIVED") == "1":
             return False, "session is archived; wake it first"
+        # AH-77 (RTG-Research 2026-08-18): CC_REMOTE=1 sessions run on
+        # another machine that polls the amux board. Starting them
+        # locally creates a fake pane that answers for the remote
+        # identity — RTG-PreBuild hit this today, a Linux impostor
+        # replied for what should have been the Windows box. Refuse
+        # here at the same layer as CC_ARCHIVED; auto-restart / wake
+        # loops already handle (False, msg) refusals cleanly.
+        if cfg.get("CC_REMOTE") == "1":
+            return False, (f"session '{name}' is remote-only (CC_REMOTE=1) — "
+                           f"runs on a remote box that polls the amux board. "
+                           f"Do not start it locally. If you genuinely need "
+                           f"to start locally, remove CC_REMOTE=1 from "
+                           f"~/.amux/sessions/{name}.env first.")
 
         # ── Container runtime prep (isolation Phase 2d) ──────────────────────
         # If this session is CC_RUNTIME=docker:<product>, bring up its product

@@ -90,6 +90,45 @@ Completion-notify message: prefer `last_patch_by` (or `posted_by_session` for a 
 
 ---
 
+## Plan for change: audit-mint filter + CC_REMOTE start guard (AH-77, 2026-08-18) — IN PROGRESS
+
+**Trigger:** RTG-Research filed AH-77 with two substrate findings from today's hello-world round-trip (RR-1660):
+
+(a) `_auto_mint_audit_pair` fires on RV-*/RP-* coordination items (RV-544, RV-597, RP-16 cited). Those are build-verify + connectivity items that auditors can only VOID — pure noise on the audit queue. Add the two prefixes to `_CONTROL_PLANE_PREFIXES` so the mint hook skips them (same mechanism already handles RD/RR/RAC/RAO/AH/AW).
+
+(b) RTG-PreBuild's env file has `CC_REMOTE=1` + a `do not start locally` note in `CC_DESC`, but the flags were advisory — someone (Jeremy) started it locally and got a Linux impostor answering for what should be a Windows-only session. Add a hard refusal in `start_session` mirroring the existing `CC_ARCHIVED=1` guard.
+
+**Fix (two tiny changes):**
+
+1. `_CONTROL_PLANE_PREFIXES` (L8602) — add `"RV"` and `"RP"`. Effect:
+   - `_auto_mint_audit_pair` skips them at L8928 (`if tprefix in _CONTROL_PLANE_PREFIXES: return None`).
+   - `_extract_target_id`'s `_scan` skips them at L8694 as target candidates — bonus, since RV/RP aren't legitimate targets of anything else either.
+
+2. `start_session` (L11121) — add after the `CC_ARCHIVED` check:
+   ```python
+   if cfg.get("CC_REMOTE") == "1":
+       return False, ("session is remote-only (CC_REMOTE=1) — runs on a remote box "
+                      "that polls the amux board; do not start it locally. "
+                      "See _{name}.env for details.")
+   ```
+   All existing callers already handle `(False, msg)` refusals (archived, blocked, invalid name). Auto-restart / wake / snapshot loops will now correctly refuse local restart of remote sessions — matches the intent that already exists elsewhere (e.g. `_auto_archive_idle` L47482 explicitly skips CC_REMOTE=1).
+
+**Explicitly NOT doing:**
+- No `--force` override on start_session — Jeremy can edit the env file if he genuinely needs a local start (rare; better to have the friction).
+- No host-match check (`CC_REMOTE_ALLOW_HOST=<hostname>`) yet — the simple refusal solves the observed failure. If a future incident shows we need per-host lockdown, add then.
+- Not touching the auto-archive-idle CC_REMOTE=1 skip — already correct, unrelated.
+- Not adding RV/RP to the escalation-gate regex (L42736 already lists RP; RV isn't relevant there).
+
+**Verification:**
+1. `python3 -c "import ast; ast.parse(open('amux-server.py').read())"`
+2. `touch amux-server.py` → hot-reload.
+3. `curl -X POST /api/sessions/RTG-PreBuild/start` → 200 with `{"ok":false,"error":"session is remote-only..."}`.
+4. `curl -X POST /api/sessions/CD-SurfPrep/start` → still succeeds (not CC_REMOTE).
+5. PATCH a hypothetical RV-999 to review; confirm no audit pair mints (mint would appear in cascade as `{"action":"audit-minted",...}` on the PATCH response — expect NO such block).
+6. Reply on AH-77.
+
+---
+
 ## Plan for change: unblock hook — miss on C3/C4 direct-DB paths (Ember-Research 2026-08-17 late) — IN PROGRESS
 
 **Trigger:** First real-world test of this morning's `_promote_backlog_when_dep_completes` missed. EA-39 flipped verified via C4 auto-apply ~19:4x; EO-12 (backlog, `BLOCKED_BY: EA-39`) was NOT promoted. Manual promotion at ~20:00.
