@@ -90,6 +90,51 @@ Completion-notify message: prefer `last_patch_by` (or `posted_by_session` for a 
 
 ---
 
+## Plan for change: TWO live cross-org data leaks (Jeremy 2026-08-19 via M-4528) — IN PROGRESS
+
+**Trigger:** Cypra-PAA in M-4528 flagged 2 security exposures stuck 40 days behind a routing bug. Both confirmed real, both LIVE right now.
+
+### Bug #1 — /logs mount exposes every org's session transcripts to every other org
+
+**Root cause:** amux-server.py L1660 — `cmd += ["-v", f"{CC_LOGS}:/logs:rw"]` mounts the entire `~/.amux/logs/` dir (RW) into every org container. Comment at L1658 explicitly acknowledges this was Phase 2c temporary work: "Phase 9 will restructure to ~/.amux/logs/<product>/<session>.log with a per-org subdir mount." Phase 9 never shipped.
+
+**Scope (confirmed by docker exec):**
+- 59 log files, 288MB
+- Every org container (iSchedule, EmberCRM, RTG, all CD-*, Cypra, ShareScore, Scorpio) sees the same /logs with all 59 files
+- These are FULL session transcripts — contain everything an agent typed/received, including any OAuth tokens the agent debugged, API keys, client PII in agent chatter, cross-client work details
+- **Nullifies every skill-deny-list win.** An EmberCRM agent (Zoho-denied) can `cat /logs/CD-SurfPrep.log` and read every Zoho API call SurfPrep has made.
+
+**Fix (code, no bounce):**
+Change `_ensure_org_container` to mount only THIS org's own session log files, not the whole dir. For each session in `spec["sessions"]`, bind-mount `~/.amux/logs/<session>.log` to `/logs/<session>.log` (RW). Touch the log file on host if missing so the bind-mount doesn't create a directory. Don't mount the parent `/logs/` dir at all.
+
+Applies only to NEW container spawns. **Existing running containers keep the wide mount until recreated** — Jeremy's call on when to bounce.
+
+### Bug #2 — notes API has no access control; "ACCESS RESTRICTED" is comment-only
+
+**Root cause:** amux-server.py L41692-L41702 — GET /api/notes/<name> reads the file with zero check. The `infra-credentials-structure.md` note starts with "! ACCESS RESTRICTED — This page is for Scorpio and Cypra-family agents only" as PROSE. Server never parses it.
+
+**Scope:** any agent can `curl -H "Authorization: Bearer $AMUX_TOKEN" $AMUX_URL/api/notes/infra-credentials-structure`. Cypra reported iSchedule-Data hit it accidentally, saw ShareScore/DAL infrastructure details.
+
+**Fix (code, hot-reload):**
+Introduce a machine-readable ACL marker: `<!-- amux-acl: session1, session2, ... -->` in the note content (comma list, wildcards `*` allowed). GET/POST/PATCH/DELETE handlers scan the first 2KB for the marker. If present AND caller has X-Amux-Session set AND that session doesn't match the ACL → 403. Dashboard (UI token) and localhost bypass (matches the existing `_check_auth` shape). Add the marker to `infra-credentials-structure.md` immediately.
+
+**Explicitly NOT doing in this pass:**
+- Not recreating containers (Jeremy's call — bounces every agent).
+- Not disclosing prior transcript exposure (past reads can't be undone; forward-only enforcement).
+- Not adding per-session directory hierarchy under /logs (matches the eventual Phase 9 shape but bigger change).
+- Not touching listing endpoint `/api/notes` — it returns names + sizes but not content; the ACL only gates content access.
+
+**Verification (both fixes):**
+1. `python3 -c "import ast; ast.parse(open('amux-server.py').read())"`
+2. `touch amux-server.py` → hot-reload (fixes #2 immediately).
+3. #1: create a fresh org container, exec into it, confirm `/logs/` shows only that org's session files.
+4. #2: `curl -H "X-Amux-Session:CD-SurfPrep" /api/notes/infra-credentials-structure` → 403.
+5. #2: same call with `X-Amux-Session:Cypra` → 200.
+6. #2: dashboard access (UI token) → 200 regardless.
+7. Reply to Cypra on the board with a summary of what was fixed vs what needs Jeremy's action (bounce).
+
+---
+
 ## Plan for change: thread reply-to-parent context in agent board task (Jeremy 2026-08-19) — IN PROGRESS
 
 **Trigger:** Jeremy screenshots — he was in a long CD-AirCom thread, went back to reply to an older message (M-4608, ~20 min old) about GIT setup + READYTOSHIP. His reply body was just "Yes Keep digging in to this one" — the "this one" only makes sense with M-4608 as context. The delivered board task (CA-97) shows Jeremy's reply text but does NOT include what M-4608 said. Agent has to guess or manually fetch.

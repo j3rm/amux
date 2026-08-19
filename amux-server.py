@@ -1655,9 +1655,33 @@ def ensure_org_container(org: str) -> "tuple[bool, str]":
     for session in spec["sessions"]:
         host_home = spec["session_home_dir_pattern"].format(session=session)
         cmd += ["-v", f"{host_home}:/homes/{session}:rw"]
-    # Log dir — Phase 2c uses a flat mount; Phase 9 will restructure to
-    # ~/.amux/logs/<product>/<session>.log with a per-org subdir mount.
-    cmd += ["-v", f"{CC_LOGS}:/logs:rw"]
+    # Log mounts — per-session file bind-mounts, NOT the whole /logs dir.
+    #
+    # Prior (Phase 2c, retired 2026-08-19 via Cypra-PAA M-4528 report):
+    #   cmd += ["-v", f"{CC_LOGS}:/logs:rw"]
+    # exposed EVERY session's transcript to EVERY org container — 288MB
+    # across 59 files, spanning every session in the fleet, readable by any
+    # agent in any container. Nullified every skill-deny-list win (a Zoho-
+    # denied org could `cat /logs/CD-SurfPrep.log` and read every Zoho API
+    # call). Live cross-org data leak.
+    #
+    # Fix: bind-mount ONLY this org's own session log files into /logs/
+    # individually. Missing files are touched on the host first so the
+    # bind doesn't try to create a directory. The parent /logs dir is
+    # NEVER mounted — only individual files land in it, so a directory
+    # scan (`ls /logs/`) sees only this org's own sessions.
+    #
+    # NEW containers get this. Existing containers keep the wide mount
+    # until recreated (Jeremy's call — bounces every agent).
+    try:
+        CC_LOGS.mkdir(parents=True, exist_ok=True)
+        for session in spec["sessions"]:
+            log_file = CC_LOGS / f"{session}.log"
+            if not log_file.exists():
+                log_file.touch()
+            cmd += ["-v", f"{log_file}:/logs/{session}.log:rw"]
+    except Exception as _le:
+        print(f"[org-spec] {org}: per-session log mount setup failed: {_le}")
 
     # Seed the org's shared home with the shared MCP config on first spawn.
     # /mnt/gitdata/amux/mcp.json is the source of truth (checked into the amux
@@ -41696,6 +41720,56 @@ class CCHandler(BaseHTTPRequestHandler):
             note_path = _safe_note_path(note_rel)
             if not note_path:
                 return self._json({"error": "invalid path"}, 400)
+            # 2026-08-19 (Cypra-PAA M-4528): notes marked "ACCESS RESTRICTED"
+            # in prose were readable by any agent — the marker was cosmetic.
+            # Enforce via a machine-readable ACL marker in the first 2KB of
+            # the note content: `<!-- amux-acl: session1, session2, wildcard*
+            # -->`. If the marker exists, GET/POST/PATCH/DELETE require the
+            # caller's X-Amux-Session header to match one of the entries
+            # (exact match OR prefix match on `X*`). Dashboard (UI token)
+            # and localhost bypass — matches the existing _check_auth
+            # shape. Absent marker = no restriction (backward-compat).
+            def _check_note_acl(_p):
+                try:
+                    if not _p.exists():
+                        return True
+                    with open(_p, "rb") as _fh:
+                        _head = _fh.read(2048).decode("utf-8", errors="replace")
+                    _m = re.search(r"<!--\s*amux-acl:\s*(.*?)\s*-->", _head)
+                    if not _m:
+                        return True  # no ACL marker = public
+                    _allowed = [s.strip() for s in _m.group(1).split(",") if s.strip()]
+                    if not _allowed:
+                        return True
+                    # Dashboard bypass (Jeremy via UI token)
+                    if _session_destructive_allowed(self.headers):
+                        return True
+                    # Localhost bypass (already an auth bypass for /api/*)
+                    _ip = self.client_address[0] if self.client_address else ""
+                    if _ip in ("127.0.0.1", "::1"):
+                        return True
+                    _caller = (self.headers.get("X-Amux-Session") or "").strip()
+                    if not _caller:
+                        return False  # ACL present but caller unidentified → deny
+                    for _entry in _allowed:
+                        if _entry.endswith("*"):
+                            if _caller.startswith(_entry[:-1]):
+                                return True
+                        elif _caller == _entry:
+                            return True
+                    return False
+                except Exception:
+                    return True  # never DoS on parser failure — fail open
+            if not _check_note_acl(note_path):
+                _caller_dbg = (self.headers.get("X-Amux-Session") or "").strip() or "<no-header>"
+                slog(f"[notes-acl] {method} {note_rel} DENIED for {_caller_dbg!r}")
+                return self._json({
+                    "error": "access denied",
+                    "hint": ("This note has a `<!-- amux-acl: ... -->` marker "
+                             "restricting access. Your X-Amux-Session is not in "
+                             "the allowlist. If you need access, POST to Jeremy "
+                             "via threads to request being added to the marker."),
+                }, 403)
             if method == "GET":
                 if note_path.exists():
                     return self._json({"content": note_path.read_text(errors="replace"), "path": note_rel})
