@@ -6589,6 +6589,22 @@ def _is_real_session(name: "str | None") -> bool:
         return False
 
 
+def _suggest_close_sessions(name: str, k: int = 3) -> "list[str]":
+    """Return up to k session names close to `name` — for the 400 hint on
+    an unknown-session write. AH-79 (Cypra-PAA 2026-08-19): typos like
+    session='PAA' vs 'Cypra-PAA' created a silent dead-letter queue for
+    36 days. Suggesting real matches at write time turns the failure
+    fixable in one retry."""
+    if not name:
+        return []
+    try:
+        import difflib
+        roster = [f.stem for f in CC_SESSIONS.glob("*.env")]
+        return difflib.get_close_matches(name, roster, n=k, cutoff=0.5)
+    except Exception:
+        return []
+
+
 def _notify_creator_of_completion(creator_session: str, item_id: str, title: str,
                                   new_status: str, closer_session: str,
                                   closer_note: str):
@@ -42805,6 +42821,33 @@ class CCHandler(BaseHTTPRequestHandler):
                 if not title:
                     return self._json({"error": "missing title"}, 400)
                 session = body.get("session", "").strip()
+                # AH-79 (Cypra-PAA 2026-08-19): validate session against
+                # the real roster. A typo (session="PAA" vs "Cypra-PAA")
+                # created a silent dead-letter queue for 36 days because
+                # no real session's board query ever matched. Only
+                # validate for agent-owned items — human-owned tasks
+                # legitimately use `session` as a label (client name,
+                # "Jeremy", etc.) that has no env file. Escape hatch:
+                # `allow_unknown_session:true` for pre-provisioning.
+                _effective_owner = body.get("owner_type", "agent" if session else "human")
+                if (session
+                        and _effective_owner == "agent"
+                        and not body.get("allow_unknown_session")
+                        and not _is_real_session(session)):
+                    return self._json({
+                        "error": "unknown session",
+                        "session": session,
+                        "did_you_mean": _suggest_close_sessions(session),
+                        "hint": (
+                            f"'{session}' has no env file in ~/.amux/sessions/. "
+                            "For agent tasks, session must be a real session to "
+                            "avoid a silent dead-letter (AH-79). If you really "
+                            "want to pre-create a task for a session that doesn't "
+                            "exist yet, pass `allow_unknown_session:true`. For "
+                            "human tasks (owner_type=human), session is a label "
+                            "and this check is skipped."
+                        ),
+                    }, 400)
                 prefix = _prefix_from_session(session)
                 item_id = _next_issue_id(prefix)
                 now = int(time.time())
@@ -43213,6 +43256,32 @@ class CCHandler(BaseHTTPRequestHandler):
                         "SELECT session, status, owner_type FROM issues WHERE id = ?", (bid,)
                     ).fetchone()
                     prior_session = prior["session"] if prior else None
+                    # AH-79 (Cypra-PAA 2026-08-19): same session-validity
+                    # check as POST — reassigning to a typo has the same
+                    # dead-letter shape as creating with a typo. Only run
+                    # when the PATCH actually changes session and the
+                    # (post-PATCH) owner_type is 'agent'. Escape hatch:
+                    # `allow_unknown_session:true`.
+                    if ("session" in body
+                            and (body.get("session") or "").strip()
+                            and (body.get("session") or "").strip() != (prior_session or "")):
+                        _new_sess = body["session"].strip()
+                        _eff_owner = body.get("owner_type") or (prior["owner_type"] if prior else "agent")
+                        if (_eff_owner == "agent"
+                                and not body.get("allow_unknown_session")
+                                and not _is_real_session(_new_sess)):
+                            return self._json({
+                                "error": "unknown session",
+                                "session": _new_sess,
+                                "did_you_mean": _suggest_close_sessions(_new_sess),
+                                "hint": (
+                                    f"'{_new_sess}' has no env file in "
+                                    "~/.amux/sessions/. Reassigning an agent "
+                                    "item to a nonexistent session would silently "
+                                    "dead-letter it (AH-79). Fix the name or pass "
+                                    "`allow_unknown_session:true`."
+                                ),
+                            }, 400)
                     # Verify-gate: 'verified' means the work is committed & deployed, so block
                     # the transition while the owning session's tree is dirty. The orchestrator
                     # (or anyone) can override with {"force": true} if the dirt is unrelated to

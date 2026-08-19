@@ -90,6 +90,46 @@ Completion-notify message: prefer `last_patch_by` (or `posted_by_session` for a 
 
 ---
 
+## Plan for change: validate session field on board POST/PATCH (AH-79, 2026-08-19) — IN PROGRESS
+
+**Trigger:** Cypra-PAA filed AH-79 with a real cost — 3 items (PAA-1/2/3) posted with `session="PAA"` (typo for "Cypra-PAA") sat invisible for 25-36 days because no real session's queue matched. One of them (PAA-3, filed under CP-568) is a client deliverable now 36 days overdue.
+
+Any typo in `session=` creates a silent dead-letter queue.
+
+**Fix (three narrow changes):**
+
+1. **New helper** `_suggest_close_sessions(name, k=3)` — uses stdlib `difflib.get_close_matches` against the current `~/.amux/sessions/*.env` roster. Returns up to 3 close-match suggestions.
+
+2. **POST /api/board** (~L42682): after parsing `session`, if `session` is non-empty AND the effective `owner_type` is `"agent"` (default when session is set), require `_is_real_session(session)` OR an explicit escape hatch. Otherwise 400 with:
+   ```json
+   {
+     "error": "unknown session",
+     "session": "PAA",
+     "did_you_mean": ["Cypra-PAA", "Cypra"],
+     "hint": "The session '<name>' has no env file in ~/.amux/sessions/. If you really want to pre-create a task for a session that doesn't exist yet, pass allow_unknown_session:true."
+   }
+   ```
+   Human-owned items (`owner_type=human`) skip validation — `session` there is a label (e.g. Jeremy, a client name), not a routing target.
+
+3. **PATCH /api/board/<id>** (~L42863): if the PATCH body contains `session` AND the new value is non-empty AND the effective `owner_type` will be `"agent"`, apply the same validation. Reassigning to a typo is the same failure shape.
+
+**Explicitly NOT doing:**
+- Not validating `creator` — that field is often a human name ("Jeremy") or an external tool ("nightly-billable-notes.py") that isn't a session.
+- Not building a full "unrouted items" view/alert — the rejection at write time prevents the class from recurring. If historical dead-letters need discovery, that's a separate one-off script (Cypra can widen her search or I can dump `SELECT * FROM issues WHERE session NOT IN (...)`).
+- Not auto-fixing existing PAA-1/2/3 or Cypra's CP-568 — she owns those; my fix prevents future ones.
+- Not blocking session="" (that's legit "unassigned").
+
+**Verification:**
+1. `python3 -c "import ast; ast.parse(open('amux-server.py').read())"`
+2. `touch amux-server.py` → hot-reload.
+3. `curl POST /api/board -d '{"title":"test","session":"PAA","owner_type":"agent"}'` → 400 with `did_you_mean: ["Cypra-PAA", ...]`.
+4. `curl POST /api/board -d '{"title":"test","session":"Cypra-PAA","owner_type":"agent"}'` → 201.
+5. `curl POST /api/board -d '{"title":"test","session":"PAA","owner_type":"agent","allow_unknown_session":true}'` → 201 (escape hatch works).
+6. PATCH an existing agent item's session to a typo → 400.
+7. Reply on AH-79 with the fix + note that CP-568 is Cypra's routing job.
+
+---
+
 ## Plan for change: audit-mint filter + CC_REMOTE start guard (AH-77, 2026-08-18) — IN PROGRESS
 
 **Trigger:** RTG-Research filed AH-77 with two substrate findings from today's hello-world round-trip (RR-1660):
