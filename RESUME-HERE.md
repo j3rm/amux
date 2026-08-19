@@ -90,6 +90,48 @@ Completion-notify message: prefer `last_patch_by` (or `posted_by_session` for a 
 
 ---
 
+## Plan for change: stale-todo creator alert (Jeremy 2026-08-19 04:14) — IN PROGRESS
+
+**Trigger:** Jeremy — "if a board task is not grabbed in 15 mins, the board needs to tell the agent that created it it's stale so the creator can investigate what's going on with the assignee (might be remote agent, might be missing pushes, etc)."
+
+Fits cleanly alongside this morning's `_notify_creator_of_completion` (creator notified on task done) — this is the SYMMETRIC "creator notified on task stuck". Fills the gap where an assignee that never picks up sits invisible to the creator.
+
+**Fix (small, follows established patterns):**
+
+1. **Schema:** new column `stale_notified INTEGER NOT NULL DEFAULT 0` on issues. Append to existing migration loop at L5847 area (same pattern as `notified` and this morning's `creator_notified`).
+
+2. **Helper `_notify_creator_of_stale(creator, item_id, title, assignee, age_min, assignee_hint)`:**
+   - Same shape as `_notify_creator_of_completion`.
+   - Atomic 0→1 CAS on `stale_notified` to prevent double-fire under races.
+   - Best-effort `send_text` background thread.
+   - Message: `"Stale task: {id} — {title[:80]} assigned to {assignee} is still 'todo' after {age_min}m. Assignee may be stuck / offline / missing push. Hint: {assignee_hint}. Check `amux board show {id}`."`
+   - Include assignee's session state as hint: `not-running`, `running-CC_REMOTE`, `running-idle`, `not-a-session` (per `_is_real_session`).
+
+3. **Sweep `_sweep_stale_todos()`:**
+   - Query: agent-owned items in `todo` older than 15 min, not self-assigned, creator is real session, `stale_notified=0`.
+   - For each, gather assignee state via `is_running()` and env-file CC_REMOTE check.
+   - Call `_notify_creator_of_stale`.
+   - Wrap in try/except so a single row failure doesn't stop the sweep.
+
+4. **Register:** `schedule_job(_sweep_stale_todos, interval=300, name="stale_todo_sweep", initial_delay=60)`. Every 5 min → alerts fire within 15-20 min of task creation. Matches Jeremy's threshold.
+
+**Explicitly NOT doing:**
+- Not firing for creator = Jeremy / creator empty / creator = 'threads' (the Jeremy-thread-delivery creator string) — those go to Jeremy via existing Pushover paths.
+- Not firing for creator == assignee (self-assigned housekeeping — noise).
+- Not re-alerting if item cycles todo → doing → todo. The retake helpers (`_notify_session_of_retake`) handle cycles; the stale flag stays 1 once fired.
+- Not touching the sweep for stale doing/review (out of scope — Jeremy specifically said "not grabbed in 15 mins", i.e. still todo).
+- Not adding Pushover — creator gets in-terminal notification via `send_text`, matching the completion-notify pattern. Jeremy's phone doesn't get pinged for every stale task.
+
+**Verification:**
+1. `python3 -c "import ast; ast.parse(open('amux-server.py').read())"`
+2. `touch amux-server.py` → hot-reload (schema migration runs on startup).
+3. Manually POST a test task from amux-helper to a session that ignores it. Wait 15 min. Confirm amux-helper's pane gets the stale alert.
+4. Verify `stale_notified` flips to 1 in DB (SELECT after alert).
+5. Verify no re-alert on subsequent sweeps (flag stays 1).
+6. Cleanup test items.
+
+---
+
 ## Plan for change: TWO live cross-org data leaks (Jeremy 2026-08-19 via M-4528) — IN PROGRESS
 
 **Trigger:** Cypra-PAA in M-4528 flagged 2 security exposures stuck 40 days behind a routing bug. Both confirmed real, both LIVE right now.

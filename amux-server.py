@@ -5887,6 +5887,13 @@ def _init_db():
         "ALTER TABLE issues ADD COLUMN posted_by_session TEXT",
         "ALTER TABLE issues ADD COLUMN posted_by_ip TEXT",
         "ALTER TABLE issues ADD COLUMN last_patch_by TEXT",
+        # stale_notified: 2026-08-19 stale-todo creator alert (Jeremy).
+        # Mirror of notified/creator_notified — 1 once the CREATOR has been
+        # nudged that their assigned task has sat in `todo` past the
+        # staleness threshold (default 15 min) and the assignee hasn't
+        # picked it up. Atomic 0→1 CAS in _notify_creator_of_stale ensures
+        # at-most-once regardless of sweep re-runs.
+        "ALTER TABLE issues ADD COLUMN stale_notified INTEGER NOT NULL DEFAULT 0",
         "ALTER TABLE schedules ADD COLUMN kind TEXT NOT NULL DEFAULT 'tmux'",
         "ALTER TABLE saved_messages ADD COLUMN session TEXT NOT NULL DEFAULT ''",
         "ALTER TABLE statuses ADD COLUMN gate TEXT",
@@ -6667,6 +6674,121 @@ def _notify_creator_of_completion(creator_session: str, item_id: str, title: str
         except Exception:
             pass
     threading.Thread(target=_run, daemon=True).start()
+
+
+def _notify_creator_of_stale(creator_session: str, item_id: str, title: str,
+                             assignee_session: str, age_min: int,
+                             assignee_hint: str):
+    """Push a stale-task notice into the item CREATOR's tmux pane when
+    their assigned task has sat in `todo` past the staleness threshold
+    (default 15 min) without pickup. Symmetric to
+    _notify_creator_of_completion — same atomic-flag pattern.
+
+    Trigger (Jeremy 2026-08-19): agents (especially remote ones) can miss
+    pushes or go offline. Without a stale alert, the creator only finds
+    out by polling. This closes the loop the same way completion-notify
+    did — cheap and best-effort.
+    """
+    def _run():
+        try:
+            db = get_db()
+            cur = db.execute(
+                "UPDATE issues SET stale_notified=1 "
+                "WHERE id=? AND stale_notified=0",
+                (item_id,),
+            )
+            db.commit()
+            if cur.rowcount == 0:
+                return  # someone else already notified (or already 1)
+            text = (
+                f"Stale task: {item_id} — {(title or '')[:80]} assigned to "
+                f"{assignee_session} is still 'todo' after {age_min}m. "
+                f"Assignee may be stuck / offline / missing push. "
+                f"Hint: {assignee_hint}. "
+                f"Check `amux board show {item_id}`."
+            )
+            ok, _msg = send_text(creator_session, text)
+            if not ok:
+                # Session not running — clear the flag so a future restart picks it up
+                db.execute("UPDATE issues SET stale_notified=0 WHERE id=?", (item_id,))
+                db.commit()
+        except Exception:
+            pass
+    threading.Thread(target=_run, daemon=True).start()
+
+
+def _sweep_stale_todos():
+    """Periodic sweep — find agent-owned tasks that have sat in `todo`
+    past the staleness threshold and ping the creator. Registered via
+    schedule_job at startup; runs every 5 min. Threshold 15 min; can be
+    tuned via AMUX_STALE_TODO_MIN env var (min 5, max 120).
+
+    Filters:
+      - status = 'todo' (Jeremy explicitly said "not grabbed in 15 min")
+      - owner_type = 'agent' (human tasks self-manage)
+      - creator is a real session (skip Jeremy / empty / 'threads' / etc.)
+      - creator != session (self-assigned = noise)
+      - stale_notified = 0 (at-most-once — cycled tasks handled by retake path)
+    """
+    try:
+        _threshold_min = 15
+        try:
+            _threshold_min = max(5, min(120, int(os.environ.get("AMUX_STALE_TODO_MIN", "15"))))
+        except (ValueError, TypeError):
+            pass
+        _now = int(time.time())
+        _cutoff = _now - (_threshold_min * 60)
+        db = get_db()
+        rows = db.execute(
+            "SELECT id, title, session, creator, created "
+            "FROM issues "
+            "WHERE status = 'todo' AND owner_type = 'agent' AND deleted IS NULL "
+            "  AND stale_notified = 0 "
+            "  AND created < ? "
+            "  AND session IS NOT NULL AND session != '' "
+            "  AND creator IS NOT NULL AND creator != '' "
+            "  AND creator != session",
+            (_cutoff,),
+        ).fetchall()
+        for row in rows:
+            try:
+                _creator = row["creator"]
+                _assignee = row["session"]
+                # Skip non-session creators (Jeremy / threads / external tools)
+                if not _is_real_session(_creator):
+                    # Suppress future sweeps for this row — creator can't be pinged
+                    db.execute(
+                        "UPDATE issues SET stale_notified = 1 WHERE id = ?",
+                        (row["id"],),
+                    )
+                    db.commit()
+                    continue
+                # Build the assignee-state hint
+                _hint = "unknown"
+                try:
+                    if not _is_real_session(_assignee):
+                        _hint = "assignee not a real session (env file missing)"
+                    else:
+                        _env = parse_env_file(CC_SESSIONS / f"{_assignee}.env")
+                        if _env.get("CC_ARCHIVED") == "1":
+                            _hint = "assignee archived"
+                        elif _env.get("CC_REMOTE") == "1":
+                            _hint = "assignee is CC_REMOTE — check the remote box's poller/agent"
+                        elif not is_running(_assignee):
+                            _hint = "assignee session not running locally"
+                        else:
+                            _hint = "assignee running — may be stuck or missing push"
+                except Exception:
+                    pass
+                _age_min = int((_now - int(row["created"])) / 60)
+                _notify_creator_of_stale(
+                    _creator, row["id"], row["title"] or "",
+                    _assignee, _age_min, _hint,
+                )
+            except Exception as _re:
+                slog(f"[stale-sweep] row {row['id']}: {_re}")
+    except Exception as _e:
+        slog(f"[stale-sweep] failed: {_e}")
 
 
 def _notify_session_of_retake(session_name: str, item_id: str, title: str,
@@ -48633,6 +48755,10 @@ def main():
     schedule_job(_email_sync_job,        interval=_EMAIL_SYNC_INTERVAL, name="email_sync",  initial_delay=20)
     schedule_job(_repos_scan,            interval=60,                   name="repos_scan",    initial_delay=5)
     schedule_job(_board_watcher,         interval=30,                   name="board_watcher", initial_delay=30)
+    # Stale-todo creator alert (Jeremy 2026-08-19): every 5 min, sweep
+    # agent-owned todos past the staleness threshold and nudge their
+    # creator. Threshold configurable via AMUX_STALE_TODO_MIN (default 15).
+    schedule_job(_sweep_stale_todos,     interval=300,                  name="stale_todo_sweep", initial_delay=60)
     schedule_job(_board_watcher_clear_nudged, interval=60,             name="board_watcher_gc", initial_delay=60)
     schedule_job(_evict_stale_caches,    interval=300,                  name="cache_evict", initial_delay=60)
     schedule_job(_cleanup_tmp,           interval=1800,                 name="tmp_cleanup", initial_delay=60)
