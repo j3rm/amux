@@ -40867,7 +40867,40 @@ class CCHandler(BaseHTTPRequestHandler):
                         priority=1 if blocking else 0,
                     )
                     return
+                # 2026-08-19 (Jeremy): when the incoming message replies to a
+                # specific earlier message (parent_id set — the UI's Reply
+                # button on a specific message sets this, distinct from a
+                # top-level reply-to-thread), fetch and prepend that parent as
+                # context. Otherwise pronouns like "Yes keep digging in to this
+                # one" have no antecedent for the agent — screenshot case was
+                # Jeremy replying to M-4608 (~20min old) after the thread had
+                # moved on. Parent-only, not full history (deep threads would
+                # blow context); same thread only (defensive).
+                _parent_ctx = ""
+                try:
+                    _pid = (msg_row["parent_id"] or "").strip()
+                    if _pid and _pid != mid:
+                        _prow = db.execute(
+                            "SELECT id, from_session, body, created FROM messages "
+                            "WHERE id = ? AND thread_id = ?",
+                            (_pid, tid),
+                        ).fetchone()
+                        if _prow:
+                            _p_sender = _prow["from_session"] or "Jeremy"
+                            _p_body = (_prow["body"] or "").strip()
+                            if len(_p_body) > 1200:
+                                _p_body = _p_body[:1200] + "\n…[truncated — see `amux threads show " + tid + "` for full]"
+                            _p_time = time.strftime("%m-%d %H:%M", time.localtime(int(_prow["created"])))
+                            _p_quoted = "\n".join("> " + line for line in _p_body.splitlines())
+                            _parent_ctx = (
+                                f"**Context — {sender} is replying to {_pid}** "
+                                f"(from {_p_sender} at {_p_time}):\n\n"
+                                f"{_p_quoted}\n\n---\n\n"
+                            )
+                except Exception as _pe:
+                    slog(f"[threads] {mid}: parent-context lookup failed: {_pe}")
                 preamble = (
+                    _parent_ctx +
                     f"Message from **{sender}** in thread **{tid}** — _{title}_\n\n"
                     f"> {mbody}\n\n"
                     f"Reply with the `amux` CLI:\n\n"
@@ -40879,8 +40912,12 @@ class CCHandler(BaseHTTPRequestHandler):
                 )
                 if blocking:
                     try:
+                        # Blocking inject is size-sensitive (goes into the pane
+                        # as pending prompt text). Include a short parent-hint
+                        # only, not the quoted body — the agent can look it up.
+                        _bhint = f" (in reply to {_pid})" if _parent_ctx else ""
                         send_text(recipient,
-                                  f"[{tid}/{mid}] {sender}: {title}\n\n{mbody}\n\n"
+                                  f"[{tid}/{mid}]{_bhint} {sender}: {title}\n\n{mbody}\n\n"
                                   f"Reply: amux threads reply {mid} \"...\"")
                     except Exception as _e:
                         slog(f"[threads] {mid}: send_text failed: {_e}")

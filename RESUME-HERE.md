@@ -90,6 +90,33 @@ Completion-notify message: prefer `last_patch_by` (or `posted_by_session` for a 
 
 ---
 
+## Plan for change: thread reply-to-parent context in agent board task (Jeremy 2026-08-19) — IN PROGRESS
+
+**Trigger:** Jeremy screenshots — he was in a long CD-AirCom thread, went back to reply to an older message (M-4608, ~20 min old) about GIT setup + READYTOSHIP. His reply body was just "Yes Keep digging in to this one" — the "this one" only makes sense with M-4608 as context. The delivered board task (CA-97) shows Jeremy's reply text but does NOT include what M-4608 said. Agent has to guess or manually fetch.
+
+Root cause: `_deliver` (L40851) builds the preamble from the incoming message alone. Its `parent_id` (the message being replied to) is in the DB but never referenced in the delivered text.
+
+**Fix (one added block, ~15 lines):**
+
+Inside `_deliver`, before building `preamble`, look up `msg_row["parent_id"]`. If non-empty and points at a real message in the same thread, fetch and prepend as a "Context — replying to <M-id> (<sender>, <time>):" block quoting the parent body. Truncate if very long (>1200 chars).
+
+Fires for BOTH the board-task path (`preamble` variable) AND the blocking-inject path (the shorter `send_text` message).
+
+**Explicitly NOT doing:**
+- Not fetching the WHOLE conversation history — parent-only. Deep threads would blow context.
+- Not adding this when parent_id is empty (root reply). No parent = no need.
+- Not truncating parent body aggressively — 1200 chars covers most agent replies; longer gets `…[truncated]` with a hint to `amux threads show <T-N>`.
+- Not showing parent context when parent_id happens to equal the just-delivered mid (shouldn't happen but defensive).
+- Not touching the reply-CLI hint — `amux threads reply <mid> "…"` still targets the just-delivered message (Jeremy's), which is correct — the agent's reply is to what Jeremy said, not to the parent.
+
+**Verification:**
+1. `python3 -c "import ast; ast.parse(open('amux-server.py').read())"`
+2. `touch amux-server.py` → hot-reload.
+3. Live-test: create a small test thread with 3 messages (A, B, C). Reply to A. Confirm the delivered board task shows A's body as "Context — replying to <A-id>" before Jeremy's reply.
+4. Reply to Jeremy noting the fix + when he'll see it (next thread message he sends).
+
+---
+
 ## Plan for change: batch-BV audit-mint sweep (AH-83, 2026-08-19) — IN PROGRESS
 
 **Trigger:** Third audit-mint starvation in three days (AH-70 → AH-78 → AH-83). RTG-Research demanded a permanent fix. Same failure shape each time:
