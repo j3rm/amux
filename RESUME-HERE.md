@@ -90,6 +90,40 @@ Completion-notify message: prefer `last_patch_by` (or `posted_by_session` for a 
 
 ---
 
+## Plan for change: case-insensitive session filter on board list (AH-82, 2026-08-19) — IN PROGRESS
+
+**Trigger:** RTG-Research filed AH-82 from RR-1730. Items were filed with `session=RTG-PreBuild` (correct env name) but an agent polled `?session=RTG-Prebuild` (lowercase 'b'). SQL match is `session = ?` = case-sensitive, so the query returned empty → 2 false stall alarms + 2 emergency bypasses + one false Pushover to Jeremy.
+
+Yesterday's AH-79 (write-side validation) already prevents future typo POSTs — `POST /api/board -d '{"session":"RTG-Prebuild"}'` for an agent item would now 400 with `did_you_mean:["RTG-PreBuild"]`. But the READ side (`?session=X` filter) is still case-sensitive, which is exactly what tripped this: the item was written with the correct name, the poll used the wrong case.
+
+**Fix (one line, three call sites in `_load_board`):**
+
+Change SQL from `i.session = ?` to `LOWER(i.session) = LOWER(?)` at all three occurrences of `session_clause` in `_load_board` (L6746 status-filter branch, plus L6772 + L6796 UNION-branch queries — I added them all yesterday under AH-69). SQLite LOWER() is ASCII-only which is exactly what we want here (session names are ASCII kebab-case, no unicode risk).
+
+The `session=none` branch stays `IS NULL` — unchanged.
+
+Not changing:
+- Single-item GET `/api/board/<id>` — lookup by id, session doesn't matter for retrieval.
+- Notify/send paths — those use the item's stored session verbatim (which is now guaranteed canonical case by AH-79 for new agent items).
+- POST/PATCH validation — already enforces canonical case via AH-79's roster check.
+
+Combined effect: **writes require canonical case** (AH-79), **reads accept any case** (AH-82). Symmetric-enough to make the RR-1730 shape impossible going forward.
+
+**Explicitly NOT doing:**
+- Not making ALL filters case-insensitive (org, status). Those have well-defined canonical values (`RTG`, `todo`, `verified`) and case-insensitive matching there would mask real typos rather than help.
+- Not normalizing session-case in the DB on read — the stored value stays as-written. Match at query time only.
+- Not auto-fixing old items with weird casing — write-side validation is now enforcing forward.
+
+**Verification:**
+1. `python3 -c "import ast; ast.parse(open('amux-server.py').read())"`
+2. `touch amux-server.py` → hot-reload.
+3. Create test item with `session="RTG-PreBuild"` (real). Query `?session=RTG-prebuild` (any case). Should return the item.
+4. Query `?session=RTG-PreBuild` (correct case) — should still return the item (backward compat).
+5. `?session=Cypra-PAA` and `?session=cypra-paa` should return the same set.
+6. Reply on AH-82.
+
+---
+
 ## Plan for change: validate session field on board POST/PATCH (AH-79, 2026-08-19) — IN PROGRESS
 
 **Trigger:** Cypra-PAA filed AH-79 with a real cost — 3 items (PAA-1/2/3) posted with `session="PAA"` (typo for "Cypra-PAA") sat invisible for 25-36 days because no real session's queue matched. One of them (PAA-3, filed under CP-568) is a client deliverable now 36 days overdue.

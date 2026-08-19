@@ -6767,7 +6767,16 @@ def _load_board(done_limit: int = 100, org: str | None = None,
     if session_filter == "none":
         session_clause = " AND i.session IS NULL"
     elif session_filter:
-        session_clause = " AND i.session = ?"
+        # AH-82 (RTG-Research 2026-08-19): case-insensitive match. Items were
+        # written session=RTG-PreBuild (correct canonical case), an agent
+        # polled ?session=RTG-Prebuild (lowercase 'b'), and the case-sensitive
+        # `=` returned empty → false stall alarms + emergency bypasses +
+        # false Pushover. Yesterday's AH-79 already enforces canonical case
+        # on writes (POST/PATCH reject unknown-session), so the pair is
+        # symmetric: writes MUST be canonical, reads accept any case. SQLite
+        # LOWER() is ASCII-only, which is exactly right for kebab-case
+        # session names.
+        session_clause = " AND LOWER(i.session) = LOWER(?)"
         session_params = [session_filter]
     _COLS = """i.id, i.title, i.desc, i.status, i.session, i.creator,
                i.due, i.due_time, i.created, i.updated, i.owner_type, i.org,
