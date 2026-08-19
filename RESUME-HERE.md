@@ -90,6 +90,50 @@ Completion-notify message: prefer `last_patch_by` (or `posted_by_session` for a 
 
 ---
 
+## Plan for change: batch-BV audit-mint sweep (AH-83, 2026-08-19) — IN PROGRESS
+
+**Trigger:** Third audit-mint starvation in three days (AH-70 → AH-78 → AH-83). RTG-Research demanded a permanent fix. Same failure shape each time:
+
+- Worker item enters `review`
+- `_auto_mint_audit_pair` sees no BV yet → mints a fresh BV (holds audits)
+- That BV closes with FAIL / gets superseded / emergency-bypassed
+- Eventually a DIFFERENT BV (batch build, or fresh emergency-bypass BV) closes with PASS
+- `_auto_on_build_verify_close` only cascades to the TITLED target of THAT BV
+- Other review items whose commits are covered by the same batch build sit orphaned
+
+I've been manually re-firing via the AH-70 endpoint. That doesn't scale — 3 incidents in 3 days.
+
+**Permanent fix (one added sweep in `_auto_on_build_verify_close`):**
+
+When a BV closes with PASS/PASS-WITH-WARNINGS, extract commit hashes from its desc (`\b[0-9a-f]{7,40}\b`), then sweep for other `review`-status items in the SAME org whose title or desc contains any of those hashes, and mint their audit pairs.
+
+Guardrails:
+- Only fire on PASS/PASS-WITH-WARNINGS (existing gate stays).
+- Only sweep items in same org as the BV.
+- Only sweep items in `review` status.
+- Only sweep items whose session is a worker (skip *-Audit-*, *-Research, *-Remote per existing `_auto_mint_audit_pair` rules).
+- Skip control-plane prefixes (already covered by `_CONTROL_PLANE_PREFIXES` when `_mint_audit_pair_unguarded` is called).
+- `_mint_audit_pair_unguarded` already has a fresh-pair short-circuit, so re-fires against items already covered are safe no-ops.
+- Cap the sweep at N items per BV close (say 20) so a malformed desc listing 100 hashes can't runaway-mint.
+
+Regex is `\b[0-9a-f]{7,40}\b` — matches git short hash (7+) through long hash (40). False-positive risk: any 7+ hex string in a desc could match (ETag values, IDs). Filtering by both org and review-status contains the blast radius, but I'll also add a common-word blacklist (`abcdef1`, `1234567` etc.) if it becomes an issue.
+
+**Explicitly NOT doing:**
+- Not touching `_auto_mint_audit_pair` (the review-entry path). Its logic is correct for the first-time BV lookup; the gap is the LATE cascade.
+- Not adding a commit-covered-by-BV lookup table. That's the cleaner architecture per RTG's ideal, but requires schema + backfill. Regex-match on desc is 90% of the win at 5% of the cost.
+- Not sweeping on FAIL closes. FAIL bounces the titled target back to `doing`; other targets should keep waiting for their own build.
+- Not sweeping across orgs. A BV closing in RTG doesn't cascade to Ember review items.
+
+**Verification:**
+1. `python3 -c "import ast; ast.parse(open('amux-server.py').read())"`
+2. `touch amux-server.py` → hot-reload.
+3. Set up: create two review items with the same commit hash in their titles. Mint a BV for one, close BV with PASS. Confirm BOTH get audit pairs (the titled target via existing path, the sibling via new sweep).
+4. Confirm sweep skips items already having fresh audit pairs.
+5. Confirm sweep skips FAIL closes.
+6. Reply on AH-83 with fix + note that RA-1131 was already re-fired via endpoint.
+
+---
+
 ## Plan for change: case-insensitive session filter on board list (AH-82, 2026-08-19) — IN PROGRESS
 
 **Trigger:** RTG-Research filed AH-82 from RR-1730. Items were filed with `session=RTG-PreBuild` (correct env name) but an agent polled `?session=RTG-Prebuild` (lowercase 'b'). SQL match is `session = ?` = case-sensitive, so the query returned empty → 2 false stall alarms + 2 emergency bypasses + one false Pushover to Jeremy.

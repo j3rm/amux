@@ -8890,10 +8890,87 @@ def _auto_on_build_verify_close(item: dict, db) -> dict | None:
         return {"action": "build-verify-failed", "target": target_id,
                 "build_verify": item["id"], "verdict": verdict}
     if verdict in ("PASS", "PASS-WITH-WARNINGS"):
-        # Build passed — mint the audit pair now (skip the build-gate)
+        # Build passed — mint the audit pair for the TITLED target (existing
+        # behavior).
         target_dict = {k: target[k] for k in target.keys()}
-        return _mint_audit_pair_unguarded(target_dict, db)
+        primary = _mint_audit_pair_unguarded(target_dict, db)
+        # AH-83 (RTG-Research 2026-08-19, third occurrence): batch-BV sweep.
+        # A BV titled `BUILD-VERIFY RA-X:` only cascades to RA-X, but the
+        # underlying build often covers many commits (batch build on master,
+        # emergency-bypass BV, etc.). Other review items whose commits are
+        # covered by the same build sit orphaned until manual re-fire.
+        # Third occurrence in three days (AH-70 → AH-78 → AH-83) — extend
+        # the cascade to sweep review items in the same org whose title or
+        # desc references any commit hash in this BV's PASS desc.
+        _swept = _sweep_review_items_for_bv_pass(
+            item, target_dict.get("org") or "", db,
+            exclude_target_id=target_id,
+        )
+        if _swept:
+            if primary is None:
+                primary = {"action": "sweep-only"}
+            primary["swept"] = _swept
+        return primary
     return None
+
+
+def _sweep_review_items_for_bv_pass(bv_item: dict, org: str, db,
+                                    exclude_target_id: str = "",
+                                    max_sweep: int = 20) -> "list[str]":
+    """AH-83 (RTG-Research 2026-08-19): when a BUILD-VERIFY closes with
+    PASS/PASS-WITH-WARNINGS, sweep review-status items in the same org whose
+    title/desc references any commit hash in the BV's PASS desc, and mint
+    their audit pairs. Solves the batch-BV / emergency-bypass class where
+    one build covers multiple in-flight targets but only the titled target
+    got the cascade.
+
+    Returns list of target ids for which a fresh audit pair was minted.
+    Caps at max_sweep items so a malformed desc can't runaway-mint.
+    """
+    if not org:
+        return []
+    bv_desc = bv_item.get("desc", "") or ""
+    if not bv_desc.strip():
+        return []
+    # Extract candidate commit hashes: 7-40 hex chars, bounded on both sides
+    # by non-hex to avoid gluing e.g. "0123456789abcdef01" that continues.
+    hashes = set(re.findall(r"(?<![0-9a-f])[0-9a-f]{7,40}(?![0-9a-f])", bv_desc.lower()))
+    if not hashes:
+        return []
+    # Find review-status items in the same org.
+    rows = db.execute(
+        "SELECT id, title, desc, status, session, creator, org, updated "
+        "FROM issues WHERE status = 'review' AND deleted IS NULL AND org = ?",
+        (org,),
+    ).fetchall()
+    minted_targets: list[str] = []
+    for row in rows:
+        if len(minted_targets) >= max_sweep:
+            break
+        rid = row["id"] or ""
+        if rid == exclude_target_id:
+            continue  # already handled by the caller's primary mint
+        # Skip control-plane prefixes (RV/RP/RD/etc.) — they don't get audits
+        rprefix = rid.split("-", 1)[0] if "-" in rid else ""
+        if rprefix in _CONTROL_PLANE_PREFIXES:
+            continue
+        # Skip audit/research sessions (they don't get their own audit pairs)
+        rsess = row["session"] or ""
+        if _is_audit_session(rsess) or _is_research_session(rsess):
+            continue
+        # Match: any commit hash from the BV appears in this item's title or desc
+        haystack = ((row["title"] or "") + " " + (row["desc"] or "")).lower()
+        if not any(h in haystack for h in hashes):
+            continue
+        # Delegate to the standard mint. It has its own fresh-pair short-circuit,
+        # so re-fires against items already covered are safe no-ops (returns None).
+        target_dict = {k: row[k] for k in row.keys()}
+        result = _mint_audit_pair_unguarded(target_dict, db)
+        if result and result.get("action") == "audit-minted":
+            minted_targets.append(rid)
+            slog(f"[audit-sweep] bv={bv_item['id']} pass → minted audits for {rid} "
+                 f"(commit-hash match)")
+    return minted_targets
 
 
 def _maybe_auto_mint_writeup_handoff(item: dict, db) -> dict | None:
