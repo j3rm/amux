@@ -8879,11 +8879,41 @@ def _extract_target_id(text: str, exclude_id: str = "", title_text: str = "") ->
     return _scan(text)
 
 
+# AH-86 (RTG-Research 2026-08-20): title-prefix filter for coordination
+# artifacts. Same class as AH-77's id-prefix filter but the trigger is
+# TITLE — RA-1133 was a legit RA-prefix item whose title marked it as
+# a coordination directive. Auto-mint fired 4x on review re-entries
+# (RAO-7794/7800/7807/7809, all voided). Case-insensitive prefix match.
+# Case-inflected here (Python-side upper-compare), so the list stores
+# the human form for readability.
+_COORDINATION_TITLE_PREFIXES = (
+    "BYPASS AUTHORIZED",
+    "PROCESS:",
+    "ROUTING:",
+    "TRACK:",
+    "HELLO WORLD",
+)
+
+
 def _mint_audit_pair_unguarded(target_item: dict, db) -> dict | None:
     """Internal: actually mint the RAC + RAO audit pair, with no build-verify
     gate. Called both by _auto_mint_audit_pair (after the gate passes) and by
-    _auto_on_build_verify_close (after a build-verify PASSes)."""
+    _auto_on_build_verify_close (after a build-verify PASSes).
+
+    Filter chain (short-circuit on any):
+      - control-plane id prefix (RV/RP/RD/RR/RAC/RAO/AH/AW/ED/ER — AH-77)
+      - coordination-artifact title prefix (BYPASS AUTHORIZED, PROCESS:,
+        ROUTING:, TRACK:, HELLO WORLD — AH-86)
+      - target session is an auditor / researcher (would loop / no audit
+        needed for meta-items)
+      - fresh audit pair already exists (no double-mint)
+    """
     tid = target_item.get("id", "")
+    # AH-86 title-prefix filter — check before the org derivation so a
+    # coordination artifact assigned to any org gets skipped uniformly.
+    _ttitle = (target_item.get("title") or "").strip().upper()
+    if any(_ttitle.startswith(p.upper()) for p in _COORDINATION_TITLE_PREFIXES):
+        return None
     org = (target_item.get("org") or "").strip()
     if not org:
         s = target_item.get("session") or ""

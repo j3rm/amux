@@ -90,6 +90,49 @@ Completion-notify message: prefer `last_patch_by` (or `posted_by_session` for a 
 
 ---
 
+## Plan for change: coordination-artifact filter on audit-mint (AH-86, 2026-08-20) — IN PROGRESS
+
+**Trigger:** RTG-Research filed AH-86 as follow-up to AH-77 (id-prefix filter). RA-1133 was a `BYPASS AUTHORIZED` process directive that auto-minted FOUR audit pairs on review re-entries (RAO-7794/7800/7807/7809, all voided — wasted auditor cycles). Same class as AH-77's RV-*/RP- filter but the trigger is TITLE-prefix (RA prefix is legit workspace, only the title marks it as coordination).
+
+**Fix (small, mirrors AH-77 shape):**
+
+Add a title-prefix guard alongside the existing `_CONTROL_PLANE_PREFIXES` id-prefix guard. Place it inside `_mint_audit_pair_unguarded` (not just `_auto_mint_audit_pair`) so ALL mint paths benefit — review-entry hook, BV-pass sweep (AH-83), and manual re-fire endpoint (AH-70).
+
+New constant:
+```python
+_COORDINATION_TITLE_PREFIXES = (
+    "BYPASS AUTHORIZED",
+    "PROCESS:",
+    "ROUTING:",
+    "TRACK:",
+    "HELLO WORLD",
+)
+```
+
+New check in `_mint_audit_pair_unguarded` before the auditor-session existence check:
+```python
+_ttitle = (target_item.get("title") or "").strip().upper()
+if any(_ttitle.startswith(p.upper()) for p in _COORDINATION_TITLE_PREFIXES):
+    return None
+```
+
+Case-insensitive title-prefix match (upper on both sides). List can grow — one-line addition per new prefix. Any real work item legitimately starting with one of those tokens can be re-titled or use an explicit escape hatch (out of scope; not needed for the observed noise).
+
+**Explicitly NOT doing:**
+- Not adding a `no_audit` body field. Title convention is what RTG-Research already uses; adding a flag doubles the surface area and doesn't help retroactively.
+- Not filtering `_extract_target_id` — that's fine; it's about "can this be a target?" (RA-1133 legitimately IS a target for cross-reference purposes), not "should it get an audit pair?".
+- Not touching the manual re-fire endpoint's own guardrails — if a human EXPLICITLY POSTs `/mint-audit-pair` for a coordination artifact, they get 409-no-mint via the existing fresh-pair check or the new title-prefix filter, whichever hits first.
+
+**Verification:**
+1. `python3 -c "import ast; ast.parse(open('amux-server.py').read())"`
+2. `touch amux-server.py` → hot-reload.
+3. POST a test review-status item titled `BYPASS AUTHORIZED: test` with session=RTG-ActAS org=RTG. Call `/mint-audit-pair` — expect no-mint with hint.
+4. Same for `PROCESS:`, `ROUTING:`, `TRACK:`, `HELLO WORLD` prefixes.
+5. POST a normal titled item ("Fix X"), confirm audit pair still mints.
+6. Cleanup + reply on AH-86.
+
+---
+
 ## Plan for change: stale-todo creator alert (Jeremy 2026-08-19 04:14) — IN PROGRESS
 
 **Trigger:** Jeremy — "if a board task is not grabbed in 15 mins, the board needs to tell the agent that created it it's stale so the creator can investigate what's going on with the assignee (might be remote agent, might be missing pushes, etc)."
