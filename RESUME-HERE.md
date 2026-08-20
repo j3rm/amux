@@ -90,6 +90,50 @@ Completion-notify message: prefer `last_patch_by` (or `posted_by_session` for a 
 
 ---
 
+## Plan for change: stale-doing sweep — nudge stalled assignee + escalate to master (Jeremy 2026-08-20 17:49) — IN PROGRESS
+
+**Trigger:** Jeremy noticed RTG agents (ActCloudPortal + ActAS) idle. RTG-Research diagnosed: "sessions alive (heartbeat fine) but not picking up doing-status items. The board watchdog also cannot see doing items — known gap." Research had to manually restart both.
+
+Current gap: `_task_guard` at L9739 nudges idle sessions WITHOUT a doing item. If session HAS a doing item, it assumes "already tracking, will close it" and does NOTHING even after hours of no progress. Matches Research's diagnosis exactly.
+
+Symmetric to yesterday's `_sweep_stale_todos` (creator-notify when assignee never picks up a TODO). This is the DOING-side sweep: assignee-notify when a DOING item sits with no progress.
+
+**Fix (mirrors _sweep_stale_todos pattern):**
+
+1. **Schema:** new `stale_doing_nudged_at INTEGER NOT NULL DEFAULT 0` column on issues. Timestamp of last stale-doing nudge; skip re-nudge if `nudged_at >= item.updated` (nothing has changed since we already alerted).
+
+2. **Helper `_notify_stale_doing(session, item_id, title, age_min)`:**
+   - `send_text` tmux inject to the assignee's pane
+   - Message: `"Stale DOING: {id} — {title[:80]} hasn't been updated in {age}m. If you're still working: bump `updated` by PATCHing anything. If stuck: PATCH back to `todo` and post a board item to your org's Research session (or amux-helper for substrate issues). If done: PATCH to `review`."`
+   - Also `slog` for observability
+
+3. **Sweep `_sweep_stale_doing()`** — registered via `schedule_job(interval=300, name="stale_doing_sweep")`:
+   - Query: `status='doing' AND owner_type='agent' AND session non-empty AND updated < now - STALE_DOING_MIN` (default 45 min, configurable AMUX_STALE_DOING_MIN 15-240).
+   - Filter to items where `stale_doing_nudged_at < updated` (haven't already nudged for this stall).
+   - For each: check assignee status via `is_running(session)`. If NOT running → skip (session_dead alerts handle it). If running (any status): nudge.
+   - Set `stale_doing_nudged_at = now` on fire.
+
+**Also — org-master escalation for deeper stalls** (per Research's "I had to restart them" pain):
+- After 2 * STALE_DOING_MIN (default 90 min), ALSO ping the org's Research session with the same info: `"Worker session X has stalled on DOING item Y-99 for Nh. It's been auto-nudged twice with no bump."`
+- Uses a separate flag `stale_doing_escalated_at INTEGER` to fire once per stall.
+- Skip if session doesn't have a Research counterpart (`{org}-Research` env file missing).
+
+**Explicitly NOT doing:**
+- Not auto-restarting the assignee. Jeremy explicitly said Research "started restarting agents" — that's a decision the master should make, not the substrate. My sweep names the stall so Research (or Jeremy) can decide.
+- Not touching the review/verified/done side — those transitions are healthy states.
+- Not sweeping items with `session != creator` filter (like the todo sweep). A self-assigned doing item can still stall. Nudge the assignee regardless.
+- Not adding Pushover to Jeremy. In-terminal nudge to the assignee + eventual Research ping is the escalation ladder; Jeremy only gets pinged if Research escalates via thread (existing rule).
+
+**Verification:**
+1. `python3 -c "import ast; ast.parse(open('amux-server.py').read())"`
+2. `touch amux-server.py` → hot-reload (schema migration on startup).
+3. Live test: create a `doing` item, backdate `updated` 60 min. Wait for next sweep tick. Confirm assignee's pane gets the nudge, `stale_doing_nudged_at` gets stamped.
+4. Verify re-nudge doesn't fire on next tick (nudged_at ≥ updated).
+5. Bump item's `updated` (any PATCH), backdate 100 min, confirm escalation to Research fires.
+6. Reply to Jeremy with what shipped.
+
+---
+
 ## Plan for change: coordination-artifact filter on audit-mint (AH-86, 2026-08-20) — IN PROGRESS
 
 **Trigger:** RTG-Research filed AH-86 as follow-up to AH-77 (id-prefix filter). RA-1133 was a `BYPASS AUTHORIZED` process directive that auto-minted FOUR audit pairs on review re-entries (RAO-7794/7800/7807/7809, all voided — wasted auditor cycles). Same class as AH-77's RV-*/RP- filter but the trigger is TITLE-prefix (RA prefix is legit workspace, only the title marks it as coordination).

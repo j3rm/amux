@@ -5887,6 +5887,16 @@ def _init_db():
         "ALTER TABLE issues ADD COLUMN posted_by_session TEXT",
         "ALTER TABLE issues ADD COLUMN posted_by_ip TEXT",
         "ALTER TABLE issues ADD COLUMN last_patch_by TEXT",
+        # stale_doing_nudged_at / stale_doing_escalated_at: 2026-08-20
+        # stale-DOING sweep (Jeremy — RTG-Research diagnosed idle agents
+        # holding doing items with no nudge from the substrate). Skip
+        # re-nudge if nudged_at >= item.updated (nothing changed since we
+        # already alerted); the item's next PATCH bumps updated and
+        # re-arms the sweep. Timestamp instead of bit because the reset
+        # semantic (any updated bump re-arms) reads naturally as
+        # `nudged_at < updated`.
+        "ALTER TABLE issues ADD COLUMN stale_doing_nudged_at INTEGER NOT NULL DEFAULT 0",
+        "ALTER TABLE issues ADD COLUMN stale_doing_escalated_at INTEGER NOT NULL DEFAULT 0",
         # stale_notified: 2026-08-19 stale-todo creator alert (Jeremy).
         # Mirror of notified/creator_notified — 1 once the CREATOR has been
         # nudged that their assigned task has sat in `todo` past the
@@ -6789,6 +6799,194 @@ def _sweep_stale_todos():
                 slog(f"[stale-sweep] row {row['id']}: {_re}")
     except Exception as _e:
         slog(f"[stale-sweep] failed: {_e}")
+
+
+def _notify_stale_doing_assignee(assignee_session: str, item_id: str,
+                                 title: str, age_min: int):
+    """Nudge the assignee's own pane when a doing item hasn't been touched.
+    2026-08-20 (Jeremy — RTG-Research diagnosis of idle-agents-holding-
+    doing-items). Best-effort tmux inject; runs in a background thread so
+    the sweep loop returns immediately."""
+    def _run():
+        try:
+            text = (
+                f"Stale DOING: {item_id} — {(title or '')[:80]} hasn't been "
+                f"updated in {age_min}m. If still working: bump `updated` "
+                f"(any PATCH). If stuck: PATCH back to `todo` and post a "
+                f"board item to your org's Research session (or amux-helper "
+                f"for substrate issues). If done: PATCH to `review`."
+            )
+            send_text(assignee_session, text)
+        except Exception:
+            pass
+    threading.Thread(target=_run, daemon=True).start()
+
+
+def _notify_stale_doing_master(master_session: str, worker_session: str,
+                               item_id: str, title: str, age_min: int):
+    """Escalate a doing-item stall to the org's Research/master session.
+    Fires once per stall via stale_doing_escalated_at flag.
+
+    Language rewrite 2026-08-20 (Ember-Research feedback after first live
+    firing): removed "restart the worker" advice — EA-10 incident showed
+    that restarting an active session can destroy in-progress work. Master
+    should INVESTIGATE first, not restart. Options named are investigate/
+    re-route/re-scope. Worker health check is the master's judgment call."""
+    def _run():
+        try:
+            text = (
+                f"Doing-item stall: {worker_session} has DOING item "
+                f"{item_id} — {(title or '')[:80]} with no `updated` bump "
+                f"in {age_min}m. Worker was auto-nudged with no response. "
+                f"Investigate before acting: peek the worker's pane, check "
+                f"the item's transcript, or check the session's status. "
+                f"Options: re-route the item, re-scope the spec, or (if "
+                f"the worker is genuinely wedged and you've verified it) "
+                f"restart. Do NOT restart a session that's actively working."
+            )
+            send_text(master_session, text)
+        except Exception:
+            pass
+    threading.Thread(target=_run, daemon=True).start()
+
+
+def _sweep_stale_doing():
+    """Periodic sweep — find agent-owned DOING items that haven't been
+    touched past the staleness threshold. Nudge the assignee at
+    STALE_DOING_MIN (default 45m); escalate to the org's Research session
+    at 2×STALE_DOING_MIN (default 90m). Configurable via
+    AMUX_STALE_DOING_MIN env var (15-240).
+
+    Registered via schedule_job at startup; runs every 5 min.
+
+    Trigger (Jeremy 2026-08-20): RTG-Research diagnosed idle RTG agents
+    holding doing items with no substrate signal. _task_guard nudges
+    idle sessions WITHOUT a doing item; the DOING-side had no sweep at
+    all. This closes that gap symmetric to yesterday's stale-todo sweep.
+    """
+    try:
+        _threshold_min = 45
+        try:
+            _threshold_min = max(15, min(240, int(os.environ.get("AMUX_STALE_DOING_MIN", "45"))))
+        except (ValueError, TypeError):
+            pass
+        _now = int(time.time())
+        _cutoff = _now - (_threshold_min * 60)
+        _escalate_cutoff = _now - (2 * _threshold_min * 60)
+        # Zombie cutoff (Ember-Research feedback 2026-08-20 after first
+        # live firing): items >7d old aren't stalled WORKERS, they're
+        # forgotten backlog. Escalating them as if a live worker just
+        # stalled is wrong shape and noisy. Silent-suppress via flag-
+        # flip — the master (or Jeremy) can prune the doing column
+        # separately if they want. Tunable via AMUX_STALE_DOING_ZOMBIE_DAYS.
+        _zombie_days = 7
+        try:
+            _zombie_days = max(1, min(90, int(os.environ.get("AMUX_STALE_DOING_ZOMBIE_DAYS", "7"))))
+        except (ValueError, TypeError):
+            pass
+        _zombie_cutoff = _now - (_zombie_days * 24 * 60 * 60)
+        # Cap actions per sweep to prevent nudge-burst on a backlog. A
+        # 20-item stale backlog spreads across ~4 sweep ticks (20 min) at
+        # 5-per-tick — plenty fast for real-time, no spam. Configurable
+        # via AMUX_STALE_DOING_CAP_PER_TICK (1-50).
+        _cap_per_tick = 5
+        try:
+            _cap_per_tick = max(1, min(50, int(os.environ.get("AMUX_STALE_DOING_CAP_PER_TICK", "5"))))
+        except (ValueError, TypeError):
+            pass
+        _nudged_this_tick = 0
+        _escalated_this_tick = 0
+        db = get_db()
+        rows = db.execute(
+            "SELECT id, title, session, org, updated, "
+            "       stale_doing_nudged_at, stale_doing_escalated_at "
+            "FROM issues "
+            "WHERE status = 'doing' AND owner_type = 'agent' AND deleted IS NULL "
+            "  AND session IS NOT NULL AND session != '' "
+            "  AND updated < ? "
+            "ORDER BY updated ASC",  # oldest-first so most-stale get attention first
+            (_cutoff,),
+        ).fetchall()
+        for row in rows:
+            if _nudged_this_tick >= _cap_per_tick and _escalated_this_tick >= _cap_per_tick:
+                break  # cap hit for both tiers
+            try:
+                _sess = row["session"]
+                _upd = int(row["updated"] or 0)
+                _nudged = int(row["stale_doing_nudged_at"] or 0)
+                _escalated = int(row["stale_doing_escalated_at"] or 0)
+                # Skip if not a real session (would have session_dead alert instead)
+                if not _is_real_session(_sess):
+                    continue
+                # Zombie item (>7d old) — silent-suppress both tiers.
+                # Not a stalled WORKER, just forgotten backlog.
+                if _upd < _zombie_cutoff:
+                    db.execute(
+                        "UPDATE issues SET stale_doing_nudged_at = ?, "
+                        "                  stale_doing_escalated_at = ? "
+                        "WHERE id = ?",
+                        (_now, _now, row["id"]),
+                    )
+                    db.commit()
+                    continue
+                # Skip archived sessions — they're paused-by-design, no one
+                # is on the other end of the pane. Suppress via flag-flip so
+                # they don't re-appear in every sweep.
+                try:
+                    _env = parse_env_file(CC_SESSIONS / f"{_sess}.env")
+                    if _env.get("CC_ARCHIVED") == "1":
+                        db.execute(
+                            "UPDATE issues SET stale_doing_nudged_at = ?, "
+                            "                  stale_doing_escalated_at = ? "
+                            "WHERE id = ?",
+                            (_now, _now, row["id"]),
+                        )
+                        db.commit()
+                        continue
+                except Exception:
+                    pass
+                # Skip if the assignee isn't running — session_dead alerts
+                # cover the dead-process case. Sweep is for LIVE-BUT-STALLED.
+                try:
+                    if not is_running(_sess):
+                        continue
+                except Exception:
+                    continue
+                _age_min = int((_now - _upd) / 60)
+                # First-tier nudge to assignee — only if we haven't already
+                # nudged for THIS stall (nudged_at >= updated means the item
+                # hasn't been touched since our last nudge). Respect per-tick cap.
+                if _nudged < _upd and _nudged_this_tick < _cap_per_tick:
+                    _notify_stale_doing_assignee(_sess, row["id"], row["title"] or "", _age_min)
+                    db.execute(
+                        "UPDATE issues SET stale_doing_nudged_at = ? WHERE id = ?",
+                        (_now, row["id"]),
+                    )
+                    _nudged_this_tick += 1
+                    slog(f"[stale-doing] {row['id']} {_sess} idle {_age_min}m — nudged assignee")
+                # Second-tier escalation to org master — only past the 2x
+                # threshold AND not already escalated for this stall.
+                if (_upd < _escalate_cutoff and _escalated < _upd
+                        and _escalated_this_tick < _cap_per_tick):
+                    _org = (row["org"] or "").strip()
+                    if not _org and "-" in _sess:
+                        _org = _sess.split("-", 1)[0]
+                    if _org:
+                        _master = f"{_org}-Research"
+                        if _is_real_session(_master) and _master != _sess:
+                            _notify_stale_doing_master(_master, _sess, row["id"],
+                                                       row["title"] or "", _age_min)
+                            db.execute(
+                                "UPDATE issues SET stale_doing_escalated_at = ? WHERE id = ?",
+                                (_now, row["id"]),
+                            )
+                            _escalated_this_tick += 1
+                            slog(f"[stale-doing] {row['id']} {_sess} idle {_age_min}m — escalated to {_master}")
+                db.commit()
+            except Exception as _re:
+                slog(f"[stale-doing-sweep] row {row['id']}: {_re}")
+    except Exception as _e:
+        slog(f"[stale-doing-sweep] failed: {_e}")
 
 
 def _notify_session_of_retake(session_name: str, item_id: str, title: str,
@@ -48789,6 +48987,11 @@ def main():
     # agent-owned todos past the staleness threshold and nudge their
     # creator. Threshold configurable via AMUX_STALE_TODO_MIN (default 15).
     schedule_job(_sweep_stale_todos,     interval=300,                  name="stale_todo_sweep", initial_delay=60)
+    # Stale-doing sweep (Jeremy 2026-08-20 via RTG-Research): every 5
+    # min, find agent-owned doing items with no `updated` bump past the
+    # threshold. Nudge the assignee at STALE_DOING_MIN (default 45m);
+    # escalate to <org>-Research at 2×STALE_DOING_MIN (default 90m).
+    schedule_job(_sweep_stale_doing,     interval=300,                  name="stale_doing_sweep", initial_delay=90)
     schedule_job(_board_watcher_clear_nudged, interval=60,             name="board_watcher_gc", initial_delay=60)
     schedule_job(_evict_stale_caches,    interval=300,                  name="cache_evict", initial_delay=60)
     schedule_job(_cleanup_tmp,           interval=1800,                 name="tmp_cleanup", initial_delay=60)
