@@ -44007,14 +44007,20 @@ class CCHandler(BaseHTTPRequestHandler):
                             minted = _auto_mint_audit_pair(updated_item, db)
                             if minted:
                                 cascaded = cascaded or minted
-                            # Writeup handoff auto-mint: when a Nightly
-                            # billable-notes writeup source item transitions
-                            # to review, mint the Cypra-PAA CP-* handoff so
-                            # step 4 (agent-side) is deterministic. Idempotent
-                            # via existing-CP-* lookup.
-                            handoff = _maybe_auto_mint_writeup_handoff(updated_item, db)
-                            if handoff:
-                                cascaded = cascaded or handoff
+                            # Writeup handoff auto-mint: DISABLED 2026-08-20
+                            # per Cypra-PAA AH-89. Hook was replaying already-
+                            # confirmed writeups (7 in 15 min). All 3 workflow
+                            # idempotency guards (outcome-code regex,
+                            # completion-marker substring, board-lookup CP-*)
+                            # were bypassed — source items had their desc
+                            # rewritten between the original mint and the
+                            # replay, erasing the completion marker. Real
+                            # double-fire risk into Zoho. Re-enable after the
+                            # workflow's guards are hardened (see AH-89).
+                            # handoff = _maybe_auto_mint_writeup_handoff(updated_item, db)
+                            # if handoff:
+                            #     cascaded = cascaded or handoff
+                            handoff = None
                         # Ember-Research 2026-08-17: when this item just
                         # flipped to verified/done, sweep backlog items
                         # whose BLOCKED_BY listed it and promote any whose
