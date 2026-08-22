@@ -6854,17 +6854,22 @@ _ITEM_ID_RE = re.compile(r'\b([A-Z][A-Z0-9]{0,8}-\d+)\b')
 
 
 def _stale_doing_awaiting_external(desc: str, own_session: str, db):
-    """Return (True, ref_id, ref_session) if `desc` references any open
-    board item owned by a DIFFERENT session — i.e. the item is
-    legitimately blocked on another session's action (canonical shape:
-    nightly-billable-notes source item awaiting Cypra-PAA closure).
+    """Return (True, ref_id, ref_who) if `desc` references either
+    (a) an open board item owned by a DIFFERENT session, or
+    (b) a thread (T-###) whose most-recent non-discarded message was
+        sent BY own_session — meaning "we replied, waiting on Jeremy".
 
-    Wattco channel note 2026-08-21 (CD-WattcoAccMigration): "a 'waiting
-    on external input' state, or exempting items whose closure is owned
-    by another session, would solve the whole class." Filed as AH-90..95.
-    The natural handoff pattern is already universally written into desc
-    (e.g. "posted to Cypra-PAA as CP-596"), so a desc-scan captures it
-    without requiring writer adoption of a new column.
+    Wattco channel note 2026-08-21 (CD-WattcoAccMigration): first-cut
+    exemption ("closure owned by another session") solved the nightly-
+    billable-notes class but missed the "waiting on a human via thread"
+    class. 2026-08-22 followup added the thread-ref check as Wattco's
+    option 1 — uses existing thread data, needs no new convention, and
+    when Jeremy replies the last-message-from flips and the exemption
+    releases naturally (correct nudge shape: agent now owes an action).
+
+    Not adding a bare BLOCKED-EXTERNAL badge — real signal beats a
+    convention nobody maintains, and cheap-to-fake exemption markers
+    teach the wrong incentive.
 
     False-positive tolerance: over-exempt is safe (one delayed nudge on
     an unrelated reference); under-exempt is what was causing real churn
@@ -6876,21 +6881,47 @@ def _stale_doing_awaiting_external(desc: str, own_session: str, db):
     ids = set(_ITEM_ID_RE.findall(desc))
     if not ids:
         return (False, None, None)
-    placeholders = ",".join("?" for _ in ids)
-    try:
-        rows = db.execute(
-            f"SELECT id, session, status FROM issues "
-            f"WHERE id IN ({placeholders}) "
-            f"  AND status IN ('todo','doing','review') "
-            f"  AND deleted IS NULL",
-            list(ids),
-        ).fetchall()
-    except Exception:
-        return (False, None, None)
-    for r in rows:
-        rs = (r["session"] or "").strip()
-        if rs and rs != own_session:
-            return (True, r["id"], rs)
+    thread_ids = {i for i in ids if i.startswith("T-")}
+    board_ids = ids - thread_ids
+    # (a) Board-item ref → open in a different session?
+    if board_ids:
+        placeholders = ",".join("?" for _ in board_ids)
+        try:
+            rows = db.execute(
+                f"SELECT id, session, status FROM issues "
+                f"WHERE id IN ({placeholders}) "
+                f"  AND status IN ('todo','doing','review') "
+                f"  AND deleted IS NULL",
+                list(board_ids),
+            ).fetchall()
+            for r in rows:
+                rs = (r["session"] or "").strip()
+                if rs and rs != own_session:
+                    return (True, r["id"], rs)
+        except Exception:
+            pass
+    # (b) Thread ref → we sent the last non-discarded message?
+    if thread_ids:
+        placeholders = ",".join("?" for _ in thread_ids)
+        try:
+            rows = db.execute(
+                f"SELECT thread_id, from_session, created "
+                f"FROM messages "
+                f"WHERE thread_id IN ({placeholders}) "
+                f"  AND status != 'discarded' "
+                f"ORDER BY thread_id, created DESC",
+                list(thread_ids),
+            ).fetchall()
+            seen = set()
+            for r in rows:
+                tid = r["thread_id"]
+                if tid in seen:
+                    continue
+                seen.add(tid)
+                if (r["from_session"] or "").strip() == own_session:
+                    return (True, tid, "Jeremy (awaiting reply)")
+        except Exception:
+            pass
     return (False, None, None)
 
 

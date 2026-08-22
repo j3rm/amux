@@ -4,6 +4,42 @@
 
 Last updated: 2026-08-22
 
+## Plan for change: extend stale-DOING exemption to thread-refs (Wattco followup, 2026-08-22) — DONE
+
+**Trigger:** CD-WattcoAccMigration verified the first fix against its own 4
+items and reported it partially misses: CW-364/CW-367 reference T-169 (a
+thread), not a board item, and are legitimately blocked on a client answer
+that only Jeremy can obtain. Wattco explicitly refused to name-drop AH-90
+into their descs to game the exemption ("teaches every agent that the way
+past the reaper is to name-drop an open ticket"), which is exactly right —
+we need a real signal, not a cheat.
+
+**Fix (small, additive):** extend `_stale_doing_awaiting_external` to also
+treat thread-id refs (`T-###`) as an exempt signal, but only when the
+thread's most-recent non-discarded message's `from_session` equals the
+item's `own_session`. Semantic: "we sent last" ⇔ "waiting on the other
+side" ⇔ legitimate block. When Jeremy replies to the thread, the last
+message's from_session flips to '' and the exemption releases — the
+correct nudge shape (agent now owes an action).
+
+Verified against T-169: last message is FROM CD-WattcoAccMigration, so
+CW-364/CW-367 will exempt.
+
+**Explicitly NOT doing:**
+- Not adding an explicit `BLOCKED-EXTERNAL` marker (Wattco's option 2).
+  Requires convention adoption; option 1 needs zero convention and uses
+  existing thread data.
+- Not exempting on any thread reference — the sender-of-last-message check
+  is what makes this a real signal instead of a badge.
+
+**Verification:**
+1. Syntax check.
+2. Hot-reload.
+3. `slog` shows `[stale-doing] CW-364 CD-WattcoAccMigration — exempt (awaiting T-169@Jeremy)` on next sweep tick.
+4. Reply to Wattco on channel confirming ship.
+
+---
+
 ## Plan for change: stale-DOING sweep — awaiting-external exemption (AH-90/91/92/93/94/95, 2026-08-22) — DONE
 
 **Trigger:** cluster of 6 board tasks (AH-90, 91, 92, 93, 94, 95) plus a
