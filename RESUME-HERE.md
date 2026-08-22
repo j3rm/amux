@@ -4,6 +4,51 @@
 
 Last updated: 2026-08-22
 
+## Plan for change: age-cap the thread-ref exemption (Wattco followup #2, 2026-08-22) — DONE
+
+**Trigger:** Wattco measured the prior thread-ref fix board-wide: 66 of
+146 doing items exempted via thread-ref; 20 of those reference threads
+silent >14 days. "We sent last" has drifted from "waiting" to
+"abandoned" — permanent exemption becomes badge-drift in a new place.
+Wattco has skin in the game: CW-364/367 are 2 days into exactly this
+pattern and Wattco explicitly wants a nudge when the thread goes cold,
+not silence.
+
+**Fix (minimal):**
+
+1. `_stale_doing_awaiting_external` returns an `exempt_kind`:
+   - `"board"` — open item in different session (exempt)
+   - `"thread-active"` — we replied, thread within cold cap (exempt)
+   - `"thread-cold"` — we replied but thread silent >N days (NOT exempt;
+     but treat as a distinct nudge shape)
+   - `None` — no exemption applies
+2. Age-cap default: 14 days (Wattco's suggestion). Tunable via
+   `AMUX_STALE_DOING_THREAD_COLD_DAYS`.
+3. New nudge helper `_notify_stale_doing_cold_thread(session, id, title,
+   thread_id, thread_silent_days)` sends text: "Your reply on {tid} has
+   been silent {N}d — re-ping the human or close this item. Not a
+   general staleness nudge; the escalation itself has gone cold."
+   Distinct from generic stale nudge so the agent knows what to do.
+4. Reuse `stale_doing_nudged_at` flag semantics — cold-thread nudge
+   fires once per stall like the normal one.
+
+**Explicitly NOT doing:**
+- Not making the age-cap per-thread configurable — one global default is
+  fine, agents can escalate individually if 14d is wrong for a case.
+- Not distinguishing the escalation tier (2× threshold to master) for
+  cold-thread — same rule, same escalation, just different text.
+
+**Verification:**
+1. Syntax check.
+2. Hot-reload.
+3. `slog` shows `exempt (thread-active)` vs `exempt (thread-cold)` vs
+   `not exempt` on next sweep tick.
+4. On next tick, one of the 20 cold-thread items gets a
+   cold-thread-specific nudge (verify text).
+5. Reply to Wattco on channel.
+
+---
+
 ## Plan for change: extend stale-DOING exemption to thread-refs (Wattco followup, 2026-08-22) — DONE
 
 **Trigger:** CD-WattcoAccMigration verified the first fix against its own 4

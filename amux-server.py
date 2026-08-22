@@ -6853,34 +6853,37 @@ def _notify_stale_doing_master(master_session: str, worker_session: str,
 _ITEM_ID_RE = re.compile(r'\b([A-Z][A-Z0-9]{0,8}-\d+)\b')
 
 
-def _stale_doing_awaiting_external(desc: str, own_session: str, db):
-    """Return (True, ref_id, ref_who) if `desc` references either
-    (a) an open board item owned by a DIFFERENT session, or
-    (b) a thread (T-###) whose most-recent non-discarded message was
-        sent BY own_session — meaning "we replied, waiting on Jeremy".
+def _stale_doing_awaiting_external(desc: str, own_session: str, db,
+                                   now_ts: int = 0):
+    """Return (kind, ref_id, ref_who, extra) where kind is one of:
+      - "board"         : desc refs an open item in a DIFFERENT session (exempt)
+      - "thread-active" : desc refs a thread; we sent last non-discarded
+                          message AND thread age < cold cap (exempt)
+      - "thread-cold"   : same but thread silent past cold cap → NOT exempt,
+                          sweep should nudge with cold-thread text instead
+                          (extra = silent_days:int)
+      - None            : no exemption/blocked-signal applies
 
-    Wattco channel note 2026-08-21 (CD-WattcoAccMigration): first-cut
-    exemption ("closure owned by another session") solved the nightly-
-    billable-notes class but missed the "waiting on a human via thread"
-    class. 2026-08-22 followup added the thread-ref check as Wattco's
-    option 1 — uses existing thread data, needs no new convention, and
-    when Jeremy replies the last-message-from flips and the exemption
-    releases naturally (correct nudge shape: agent now owes an action).
+    Wattco channel note 2026-08-21: first-cut exemption ("closure owned by
+    another session") solved nightly-billable-notes. 2026-08-22 followup:
+    thread-ref check added. 2026-08-22 followup #2: measured board-wide,
+    20 of 66 thread-ref exemptions reference threads silent >14 days —
+    "we sent last" has drifted from "waiting" to "abandoned." Age-cap
+    releases the exemption and switches nudge text; the agent hears
+    "your escalation went cold" instead of a generic stale nudge, which
+    is actionable info (re-ping the human, or close the item).
+
+    Cold cap tunable via AMUX_STALE_DOING_THREAD_COLD_DAYS (default 14).
 
     Not adding a bare BLOCKED-EXTERNAL badge — real signal beats a
-    convention nobody maintains, and cheap-to-fake exemption markers
-    teach the wrong incentive.
-
-    False-positive tolerance: over-exempt is safe (one delayed nudge on
-    an unrelated reference); under-exempt is what was causing real churn
-    (nudge every 45m indefinitely on items that structurally cannot be
-    closed by their own assignee).
+    convention nobody maintains, and cheap-to-fake markers teach the
+    wrong incentive.
     """
     if not desc:
-        return (False, None, None)
+        return (None, None, None, None)
     ids = set(_ITEM_ID_RE.findall(desc))
     if not ids:
-        return (False, None, None)
+        return (None, None, None, None)
     thread_ids = {i for i in ids if i.startswith("T-")}
     board_ids = ids - thread_ids
     # (a) Board-item ref → open in a different session?
@@ -6897,11 +6900,19 @@ def _stale_doing_awaiting_external(desc: str, own_session: str, db):
             for r in rows:
                 rs = (r["session"] or "").strip()
                 if rs and rs != own_session:
-                    return (True, r["id"], rs)
+                    return ("board", r["id"], rs, None)
         except Exception:
             pass
     # (b) Thread ref → we sent the last non-discarded message?
     if thread_ids:
+        try:
+            _cold_days = max(1, min(365, int(
+                os.environ.get("AMUX_STALE_DOING_THREAD_COLD_DAYS", "14"))))
+        except (ValueError, TypeError):
+            _cold_days = 14
+        if not now_ts:
+            now_ts = int(time.time())
+        _cold_cutoff = now_ts - (_cold_days * 24 * 60 * 60)
         placeholders = ",".join("?" for _ in thread_ids)
         try:
             rows = db.execute(
@@ -6919,10 +6930,42 @@ def _stale_doing_awaiting_external(desc: str, own_session: str, db):
                     continue
                 seen.add(tid)
                 if (r["from_session"] or "").strip() == own_session:
-                    return (True, tid, "Jeremy (awaiting reply)")
+                    _last = int(r["created"] or 0)
+                    if _last >= _cold_cutoff:
+                        return ("thread-active", tid,
+                                "Jeremy (awaiting reply)", None)
+                    else:
+                        _silent_days = max(0, (now_ts - _last) // 86400)
+                        return ("thread-cold", tid,
+                                "Jeremy (silent past cold cap)",
+                                int(_silent_days))
         except Exception:
             pass
-    return (False, None, None)
+    return (None, None, None, None)
+
+
+def _notify_stale_doing_cold_thread(assignee_session: str, item_id: str,
+                                    title: str, thread_id: str,
+                                    silent_days: int):
+    """Nudge for the cold-thread class — different action guidance than
+    generic staleness. Wattco 2026-08-22: the agent needs to hear "your
+    escalation went cold" (re-ping the human, or close the item) rather
+    than "bump / back to todo / to review," which are all wrong for an
+    item waiting on an unresponsive human."""
+    def _run():
+        try:
+            text = (
+                f"Cold thread: {item_id} — {(title or '')[:80]} references "
+                f"{thread_id}, which has been silent {silent_days}d since "
+                f"you last replied. This is NOT a generic staleness nudge — "
+                f"the escalation itself has gone cold. Options: re-ping the "
+                f"human on {thread_id} (bump the thread, tag Jeremy), or "
+                f"close this item if the block no longer matters."
+            )
+            send_text(assignee_session, text)
+        except Exception:
+            pass
+    threading.Thread(target=_run, daemon=True).start()
 
 
 def _sweep_stale_doing():
@@ -7034,17 +7077,24 @@ def _sweep_stale_doing():
                         continue
                 except Exception:
                     continue
-                # Awaiting-external exemption (AH-90..95, 2026-08-22).
-                # Item's desc references an open board item in a different
-                # session → legitimately blocked. Skip without touching
-                # flags so next tick re-evaluates.
+                # Awaiting-external exemption (AH-90..95, 2026-08-22 +
+                # thread-ref extension + cold-cap 2026-08-22 followups).
+                # Item's desc references either an open board item in a
+                # different session, or a thread we last replied to
+                # (within cold cap). "thread-cold" falls through to nudge
+                # with different text ("your escalation went cold").
+                _cold_ref_id = None
+                _cold_silent_days = 0
                 try:
-                    _awx, _ref_id, _ref_sess = _stale_doing_awaiting_external(
-                        row["desc"] or "", _sess, db)
-                    if _awx:
+                    _kind, _ref_id, _ref_who, _extra = _stale_doing_awaiting_external(
+                        row["desc"] or "", _sess, db, now_ts=_now)
+                    if _kind in ("board", "thread-active"):
                         slog(f"[stale-doing] {row['id']} {_sess} — "
-                             f"exempt (awaiting {_ref_id}@{_ref_sess})")
+                             f"exempt ({_kind}: {_ref_id}@{_ref_who})")
                         continue
+                    if _kind == "thread-cold":
+                        _cold_ref_id = _ref_id
+                        _cold_silent_days = int(_extra or 0)
                 except Exception:
                     pass
                 _age_min = int((_now - _upd) / 60)
@@ -7052,13 +7102,21 @@ def _sweep_stale_doing():
                 # nudged for THIS stall (nudged_at >= updated means the item
                 # hasn't been touched since our last nudge). Respect per-tick cap.
                 if _nudged < _upd and _nudged_this_tick < _cap_per_tick:
-                    _notify_stale_doing_assignee(_sess, row["id"], row["title"] or "", _age_min)
+                    if _cold_ref_id:
+                        _notify_stale_doing_cold_thread(
+                            _sess, row["id"], row["title"] or "",
+                            _cold_ref_id, _cold_silent_days)
+                        slog(f"[stale-doing] {row['id']} {_sess} — "
+                             f"cold-thread nudge ({_cold_ref_id}, "
+                             f"silent {_cold_silent_days}d)")
+                    else:
+                        _notify_stale_doing_assignee(_sess, row["id"], row["title"] or "", _age_min)
+                        slog(f"[stale-doing] {row['id']} {_sess} idle {_age_min}m — nudged assignee")
                     db.execute(
                         "UPDATE issues SET stale_doing_nudged_at = ? WHERE id = ?",
                         (_now, row["id"]),
                     )
                     _nudged_this_tick += 1
-                    slog(f"[stale-doing] {row['id']} {_sess} idle {_age_min}m — nudged assignee")
                 # Second-tier escalation to org master — only past the 2x
                 # threshold AND not already escalated for this stall.
                 if (_upd < _escalate_cutoff and _escalated < _upd
