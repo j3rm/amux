@@ -4,7 +4,7 @@
 
 Last updated: 2026-08-22
 
-## Plan for change: measure cold-age from Jeremy's last message (Wattco followup #3, 2026-08-22) — IN PROGRESS
+## Plan for change: measure cold-age from Jeremy's last message (Wattco followup #3, 2026-08-22) — DONE
 
 **Trigger:** Wattco caught a re-ping degrades-signal shape: current
 cold-cap uses "we sent last message's timestamp" as the age reference.
