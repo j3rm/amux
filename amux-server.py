@@ -6850,6 +6850,50 @@ def _notify_stale_doing_master(master_session: str, worker_session: str,
     threading.Thread(target=_run, daemon=True).start()
 
 
+_ITEM_ID_RE = re.compile(r'\b([A-Z][A-Z0-9]{0,8}-\d+)\b')
+
+
+def _stale_doing_awaiting_external(desc: str, own_session: str, db):
+    """Return (True, ref_id, ref_session) if `desc` references any open
+    board item owned by a DIFFERENT session — i.e. the item is
+    legitimately blocked on another session's action (canonical shape:
+    nightly-billable-notes source item awaiting Cypra-PAA closure).
+
+    Wattco channel note 2026-08-21 (CD-WattcoAccMigration): "a 'waiting
+    on external input' state, or exempting items whose closure is owned
+    by another session, would solve the whole class." Filed as AH-90..95.
+    The natural handoff pattern is already universally written into desc
+    (e.g. "posted to Cypra-PAA as CP-596"), so a desc-scan captures it
+    without requiring writer adoption of a new column.
+
+    False-positive tolerance: over-exempt is safe (one delayed nudge on
+    an unrelated reference); under-exempt is what was causing real churn
+    (nudge every 45m indefinitely on items that structurally cannot be
+    closed by their own assignee).
+    """
+    if not desc:
+        return (False, None, None)
+    ids = set(_ITEM_ID_RE.findall(desc))
+    if not ids:
+        return (False, None, None)
+    placeholders = ",".join("?" for _ in ids)
+    try:
+        rows = db.execute(
+            f"SELECT id, session, status FROM issues "
+            f"WHERE id IN ({placeholders}) "
+            f"  AND status IN ('todo','doing','review') "
+            f"  AND deleted IS NULL",
+            list(ids),
+        ).fetchall()
+    except Exception:
+        return (False, None, None)
+    for r in rows:
+        rs = (r["session"] or "").strip()
+        if rs and rs != own_session:
+            return (True, r["id"], rs)
+    return (False, None, None)
+
+
 def _sweep_stale_doing():
     """Periodic sweep — find agent-owned DOING items that haven't been
     touched past the staleness threshold. Nudge the assignee at
@@ -6863,6 +6907,13 @@ def _sweep_stale_doing():
     holding doing items with no substrate signal. _task_guard nudges
     idle sessions WITHOUT a doing item; the DOING-side had no sweep at
     all. This closes that gap symmetric to yesterday's stale-todo sweep.
+
+    Amendment 2026-08-22 (AH-90..95): items whose desc references an
+    open board item in a different session are exempt (awaiting external
+    closure — see _stale_doing_awaiting_external). Flags are NOT bumped
+    on exemption so the sweep re-evaluates each tick; the moment the
+    referenced item closes the block is released and normal sweep
+    behavior resumes.
     """
     try:
         _threshold_min = 45
@@ -6898,7 +6949,7 @@ def _sweep_stale_doing():
         _escalated_this_tick = 0
         db = get_db()
         rows = db.execute(
-            "SELECT id, title, session, org, updated, "
+            "SELECT id, title, session, org, updated, desc, "
             "       stale_doing_nudged_at, stale_doing_escalated_at "
             "FROM issues "
             "WHERE status = 'doing' AND owner_type = 'agent' AND deleted IS NULL "
@@ -6952,6 +7003,19 @@ def _sweep_stale_doing():
                         continue
                 except Exception:
                     continue
+                # Awaiting-external exemption (AH-90..95, 2026-08-22).
+                # Item's desc references an open board item in a different
+                # session → legitimately blocked. Skip without touching
+                # flags so next tick re-evaluates.
+                try:
+                    _awx, _ref_id, _ref_sess = _stale_doing_awaiting_external(
+                        row["desc"] or "", _sess, db)
+                    if _awx:
+                        slog(f"[stale-doing] {row['id']} {_sess} — "
+                             f"exempt (awaiting {_ref_id}@{_ref_sess})")
+                        continue
+                except Exception:
+                    pass
                 _age_min = int((_now - _upd) / 60)
                 # First-tier nudge to assignee — only if we haven't already
                 # nudged for THIS stall (nudged_at >= updated means the item

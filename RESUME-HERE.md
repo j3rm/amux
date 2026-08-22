@@ -2,7 +2,66 @@
 
 **If you are Claude and you are about to edit `/mnt/gitdata/amux/amux-server.py`, this file is mandatory.** Every change must be planned here BEFORE you edit code. Completed plans stay in place as history — do NOT delete them. Read this file at the start of every session before touching amux-server.py.
 
-Last updated: 2026-08-15
+Last updated: 2026-08-22
+
+## Plan for change: stale-DOING sweep — awaiting-external exemption (AH-90/91/92/93/94/95, 2026-08-22) — DONE
+
+**Trigger:** cluster of 6 board tasks (AH-90, 91, 92, 93, 94, 95) plus a
+CD-WattcoAccMigration channel note. The stale-DOING sweep I shipped
+2026-08-20 (45m threshold + 90m escalation) over-fires on the standard
+nightly-billable-notes protocol shape: source item posts a CP-* handoff
+to Cypra-PAA and MUST stay in `doing` until Cypra closes it with an
+outcome code (CW-288 rule — never self-close). Every 45m the sweep nudges
+the assignee; every 3 remedies the sweep suggests are forbidden for this
+class (bump = pure noise, back-to-todo breaks the confirmation loop,
+to-review misrepresents unconfirmed as finished). AH-90 shows 142 of 152
+board-wide doing items trip the threshold across 12 sessions.
+
+Wattco's verbatim proposal: "a 'waiting on external input' state, or
+exempting items whose closure is owned by another session, would solve
+the whole class."
+
+**Fix (small, targeted):**
+
+Add an exemption inside `_sweep_stale_doing` (~L6853):
+
+1. SELECT now includes `desc` (currently only id/title/session/org/updated/flags).
+2. New helper `_stale_doing_awaiting_external(desc, own_session, db)`:
+   - regex `\b([A-Z][A-Z0-9]{0,8}-\d+)\b` against desc → set of referenced ids
+   - if empty → return False
+   - SELECT id, session, status FROM issues WHERE id IN (...) AND status IN ('todo','doing','review')
+   - if any row's session != own_session → return True (with the ref id + session for log)
+3. In the per-row loop, if `_awaiting_external` → `slog` and `continue`
+   WITHOUT bumping flags. Next tick re-evaluates; when the referenced
+   item closes, the sweep will fire normally (which is the correct signal —
+   the block has been released and the item is now genuinely stale).
+4. False-positive tolerance: over-exempt is OK (delayed nudge on unrelated
+   ref), under-exempt was costing real churn. This is the right side to err on.
+
+**Explicitly NOT doing:**
+- Not raising the base 45m threshold — the sweep's original purpose (catch
+  idle live agents holding doing items) still needs a tight threshold.
+  Exemption addresses the false-positive class without weakening the signal.
+- Not introducing an explicit `blocked_on` column — requires adoption across
+  all writers, larger surface. Desc-scan heuristic captures the natural
+  handoff pattern that's already universally written.
+- Not touching AH-88's Cypra-PAA outcome-patchback drop — separate follow-up.
+- Not re-enabling writeup_handoff_auto_mint (AH-89) — still disabled pending
+  the 4-step hardening.
+
+**One-shot cleanup after ship:**
+Clear `stale_doing_nudged_at` and `stale_doing_escalated_at` on all currently-
+doing items that now qualify for the exemption, so the fix takes effect
+retroactively rather than waiting for next natural transition.
+
+**Verification:**
+1. `python3 -c "import ast; ast.parse(open('amux-server.py').read())"`
+2. `touch amux-server.py` (hot-reload).
+3. Watch `slog` for `[stale-doing] ... skipped (awaiting <CP-###>@Cypra-PAA)` lines.
+4. Confirm amux-helper's own trapped CID-* / CW-* / CCP-* items get no fresh nudge next tick.
+5. Close AH-90..AH-95 with fix summary; reply on Wattco channel.
+
+---
 
 ## Plan for change: audit-pair re-fire endpoint (AH-70, 2026-08-17) — IN PROGRESS
 
