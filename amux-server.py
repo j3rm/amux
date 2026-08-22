@@ -6904,6 +6904,11 @@ def _stale_doing_awaiting_external(desc: str, own_session: str, db,
         except Exception:
             pass
     # (b) Thread ref → we sent the last non-discarded message?
+    # Cold age is measured from the LAST NON-OWN-SESSION message
+    # (Jeremy's last touch), not our latest send — otherwise an agent
+    # can stay permanently exempt by re-pinging every N-1 days into a
+    # void (Wattco 2026-08-22 followup #3). If Jeremy never replied,
+    # fall back to thread creation time.
     if thread_ids:
         try:
             _cold_days = max(1, min(365, int(
@@ -6923,22 +6928,40 @@ def _stale_doing_awaiting_external(desc: str, own_session: str, db,
                 f"ORDER BY thread_id, created DESC",
                 list(thread_ids),
             ).fetchall()
-            seen = set()
+            # Group messages by thread (rows are already desc-sorted).
+            by_thread = {}
             for r in rows:
-                tid = r["thread_id"]
-                if tid in seen:
+                by_thread.setdefault(r["thread_id"], []).append(r)
+            for tid, msgs in by_thread.items():
+                latest = msgs[0]
+                # Exemption ONLY applies when we sent the most recent
+                # message (we replied, awaiting the other side).
+                if (latest["from_session"] or "").strip() != own_session:
                     continue
-                seen.add(tid)
-                if (r["from_session"] or "").strip() == own_session:
-                    _last = int(r["created"] or 0)
-                    if _last >= _cold_cutoff:
-                        return ("thread-active", tid,
-                                "Jeremy (awaiting reply)", None)
-                    else:
-                        _silent_days = max(0, (now_ts - _last) // 86400)
-                        return ("thread-cold", tid,
-                                "Jeremy (silent past cold cap)",
-                                int(_silent_days))
+                # Find Jeremy's (or any non-own-session) last touch.
+                _jeremy_ts = None
+                for m in msgs:
+                    if (m["from_session"] or "").strip() != own_session:
+                        _jeremy_ts = int(m["created"] or 0)
+                        break
+                if _jeremy_ts is None:
+                    # No non-own reply ever → use thread creation as ref
+                    try:
+                        tr = db.execute(
+                            "SELECT created FROM threads WHERE id = ?",
+                            (tid,),
+                        ).fetchone()
+                        _jeremy_ts = int(tr["created"]) if tr else int(latest["created"] or 0)
+                    except Exception:
+                        _jeremy_ts = int(latest["created"] or 0)
+                if _jeremy_ts >= _cold_cutoff:
+                    return ("thread-active", tid,
+                            "Jeremy (awaiting reply)", None)
+                else:
+                    _silent_days = max(0, (now_ts - _jeremy_ts) // 86400)
+                    return ("thread-cold", tid,
+                            "Jeremy (silent past cold cap)",
+                            int(_silent_days))
         except Exception:
             pass
     return (None, None, None, None)

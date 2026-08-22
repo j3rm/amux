@@ -4,6 +4,40 @@
 
 Last updated: 2026-08-22
 
+## Plan for change: measure cold-age from Jeremy's last message (Wattco followup #3, 2026-08-22) — IN PROGRESS
+
+**Trigger:** Wattco caught a re-ping degrades-signal shape: current
+cold-cap uses "we sent last message's timestamp" as the age reference.
+So an agent gets the cold-thread nudge, re-pings the human, its ping
+becomes the last message (timestamp = now), and the item flips back to
+thread-active for another 14 days. Repeat forever = permanent
+exemption via ritual re-pinging into a void. Wattco: "the signal
+degrades from 'someone is waiting' to 'someone is still typing'."
+
+**Fix:** measure age from `last message with from_session != own_session`
+(Jeremy's last touch, or any non-own-session), not our last message.
+When Jeremy has been silent >N days, the thread is cold regardless of
+how recently the agent re-pinged. When Jeremy actually replies, his
+message becomes the "last message" and the exemption releases anyway
+(agent now owes an action), so the exemption boundary stays right.
+
+Fallback: if the thread has NO non-own-session messages ever, use the
+thread's `created` timestamp as the reference age.
+
+**Explicitly NOT doing:**
+- Not counting consecutive cold-cycles as a distinct escalation tier —
+  the age-from-Jeremy fix collapses that class into the existing
+  cold-thread signal without adding cycle-tracking state.
+- Not touching the 2× threshold escalation tier — same rule.
+
+**Verification:**
+1. Syntax check + hot-reload.
+2. Dry-run against current board — cold-set count should stay ~similar
+   (~19) since real Jeremy-silence hasn't changed.
+3. Reply to Wattco on channel.
+
+---
+
 ## Plan for change: age-cap the thread-ref exemption (Wattco followup #2, 2026-08-22) — DONE
 
 **Trigger:** Wattco measured the prior thread-ref fix board-wide: 66 of
