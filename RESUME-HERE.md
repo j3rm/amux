@@ -4,6 +4,51 @@
 
 Last updated: 2026-08-22
 
+## Plan for change: watchdog for dormant schedules (AH-96 ask #3, 2026-08-24) — DONE
+
+**Trigger:** AH-96 root cause was SCHED-219 sitting at run_count=0 for
+9 days with no visibility. Existing CATCH-UP log (AH-59) fires only for
+already-enabled schedules that miss a slot; it doesn't catch the
+"created enabled=0, never flipped, forgotten" class.
+
+**Fix:** small daily sweep — schedules with `run_count=0` AND
+`created` older than 3 days → Pushover alert to Jeremy once per
+schedule. Idempotent via a new column `dormant_alerted_at`.
+
+Scope of alert-target class:
+- `enabled=0 AND run_count=0 AND created < now - 3d` — the AH-96 shape.
+- Not also touching enabled=1 (already-scheduled but silently missing
+  runs) — the CATCH-UP log covers that once they DO fire. Adding a
+  parallel enabled=1 dormancy alert would double-fire during normal
+  first-fire runs of new schedules.
+
+Design:
+- ALTER TABLE schedules ADD COLUMN dormant_alerted_at INTEGER DEFAULT 0.
+- New `_sweep_dormant_schedules()` scheduled daily via `schedule_job`
+  (interval=86400, initial_delay=600 so it doesn't fire immediately
+  on server start).
+- For each matching row, `_pushover_alert()` with title
+  "amux dormant schedule: <SCHED-N> <title>" and body naming last
+  update + age. Set `dormant_alerted_at = now` to suppress re-fire.
+- Env override `AMUX_DORMANT_SCHEDULE_DAYS` (default 3, range 1-30).
+
+**Explicitly NOT doing:**
+- Not a UI badge — the alert is enough; dashboard schedule column can
+  be enhanced separately if Jeremy asks.
+- Not auto-enabling dormant schedules — that's Jeremy's judgment;
+  substrate should surface, not decide.
+- Not adding the parallel "enabled=1 but never fired" check —
+  first-fire covers itself; wait for concrete evidence of a second
+  failure class before adding surface.
+
+**Verification:**
+1. Syntax check + reload.
+2. Confirm SCHED-219 no longer qualifies (run_count now =1).
+3. No other schedules currently qualify (need to grep) — if any do,
+   Pushover fires; that's the point.
+
+---
+
 ## Plan for change: add missing Claude models to picker dropdowns (Jeremy 2026-08-24) — DONE
 
 **Trigger:** Jeremy notes amux picker doesn't list all current Claude models.

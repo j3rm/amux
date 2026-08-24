@@ -62,9 +62,28 @@ git fetch origin master 2>&1 | tee -a "$LOG" >&2
 LOCAL=$(git rev-parse HEAD)
 REMOTE=$(git rev-parse origin/master)
 if [ "$LOCAL" != "$REMOTE" ]; then
-  # Local is behind or diverged. Try fast-forward; anything else needs a human.
-  if ! git merge --ff-only origin/master 2>&1 | tee -a "$LOG" >&2; then
-    alert "$REPO diverged from origin/master (local=$LOCAL remote=$REMOTE) — cannot fast-forward. Skipping."
+  # Determine relative position via merge-base.
+  BASE=$(git merge-base "$LOCAL" "$REMOTE")
+  if [ "$BASE" = "$REMOTE" ]; then
+    # Local is ahead — backfill push (this is what happens when a
+    # curator committed via SCHED-42 or a manual promotion but this
+    # nightly job wasn't running yet, so the sync repo drifted behind
+    # GitHub. AH-96, 2026-08-24). Push the outstanding commits before
+    # doing the DB→repo pass; if the push fails, the DB pass still
+    # runs and will attempt its own push at end.
+    log "local is $(git rev-list --count "$REMOTE..$LOCAL") commit(s) ahead of origin/master — backfill push"
+    if ! git push origin master 2>&1 | tee -a "$LOG" >&2; then
+      alert "backfill push failed (local=$LOCAL ahead of remote=$REMOTE) — continuing to DB sync anyway"
+    fi
+  elif [ "$BASE" = "$LOCAL" ]; then
+    # Local is behind — fast-forward to catch up.
+    if ! git merge --ff-only origin/master 2>&1 | tee -a "$LOG" >&2; then
+      alert "$REPO cannot fast-forward from origin/master (local=$LOCAL remote=$REMOTE)."
+      exit 1
+    fi
+  else
+    # Diverged — needs a human.
+    alert "$REPO diverged from origin/master (local=$LOCAL remote=$REMOTE, base=$BASE) — needs manual reconciliation."
     exit 1
   fi
 fi

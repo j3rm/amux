@@ -5917,6 +5917,11 @@ def _init_db():
         # Backfill for existing threads runs right after the migration
         # loop below.
         "ALTER TABLE threads ADD COLUMN org TEXT NOT NULL DEFAULT ''",
+        # dormant_alerted_at — AH-96 (2026-08-24). Nightly sweep
+        # (_sweep_dormant_schedules) alerts once per schedule that was
+        # created enabled=0 and never fired. SCHED-219 sat for 9 days
+        # before amux-helper caught it manually; this makes it visible.
+        "ALTER TABLE schedules ADD COLUMN dormant_alerted_at INTEGER NOT NULL DEFAULT 0",
     ]:
         try:
             db.execute(migration)
@@ -6989,6 +6994,66 @@ def _notify_stale_doing_cold_thread(assignee_session: str, item_id: str,
         except Exception:
             pass
     threading.Thread(target=_run, daemon=True).start()
+
+
+def _sweep_dormant_schedules():
+    """Alert once (batched) for schedules created enabled=0 and never
+    fired past a grace period. Introduced 2026-08-24 (AH-96): SCHED-219
+    sat with run_count=0 for 9 days because it was created disabled and
+    never flipped on — the existing CATCH-UP log only covers enabled=1
+    that misses slots, so silent dormancy was invisible. Tunable grace
+    via AMUX_DORMANT_SCHEDULE_DAYS (default 7, range 1-30). Batches all
+    newly-dormant schedules into a single Pushover so a Follow-up
+    thundering-herd (7 dormant on first run in this codebase) can't
+    generate a Pushover storm. Idempotent via schedules.dormant_alerted_at.
+    """
+    try:
+        try:
+            _days = max(1, min(30, int(os.environ.get("AMUX_DORMANT_SCHEDULE_DAYS", "7"))))
+        except (ValueError, TypeError):
+            _days = 7
+        _now = int(time.time())
+        _cutoff = _now - (_days * 24 * 60 * 60)
+        db = get_db()
+        rows = db.execute(
+            "SELECT id, title, created FROM schedules "
+            "WHERE deleted IS NULL "
+            "  AND enabled = 0 "
+            "  AND run_count = 0 "
+            "  AND created < ? "
+            "  AND (dormant_alerted_at IS NULL OR dormant_alerted_at = 0) "
+            "ORDER BY created ASC",
+            (_cutoff,),
+        ).fetchall()
+        if not rows:
+            return
+        # Batch one Pushover for all newly-dormant schedules.
+        lines = []
+        for row in rows:
+            _age_days = max(0, (_now - int(row["created"] or 0)) // 86400)
+            lines.append(f"SCHED-{row['id']} ({_age_days}d): {row['title'][:80]}")
+        body = (
+            f"{len(rows)} schedule(s) created enabled=0 and never fired "
+            f"(older than {_days}d):\n\n" + "\n".join(lines) +
+            "\n\nEnable and run, or delete."
+        )
+        _send_pushover(
+            f"amux dormant schedules ({len(rows)})",
+            body,
+            priority=0,
+        )
+        # Mark them all as alerted.
+        ids = [r["id"] for r in rows]
+        placeholders = ",".join("?" for _ in ids)
+        db.execute(
+            f"UPDATE schedules SET dormant_alerted_at = ? WHERE id IN ({placeholders})",
+            [_now] + ids,
+        )
+        db.commit()
+        slog(f"[dormant-sched] alerted for {len(rows)} dormant schedule(s): "
+             f"{', '.join('SCHED-'+i for i in ids)}")
+    except Exception as e:
+        slog(f"[dormant-sched-sweep] failed: {e}")
 
 
 def _sweep_stale_doing():
@@ -49281,6 +49346,10 @@ def main():
     # threshold. Nudge the assignee at STALE_DOING_MIN (default 45m);
     # escalate to <org>-Research at 2×STALE_DOING_MIN (default 90m).
     schedule_job(_sweep_stale_doing,     interval=300,                  name="stale_doing_sweep", initial_delay=90)
+    # Dormant-schedule sweep (AH-96, 2026-08-24): daily, alerts once for
+    # any schedule created enabled=0 that never fired past the grace
+    # period (default 3d, tunable via AMUX_DORMANT_SCHEDULE_DAYS).
+    schedule_job(_sweep_dormant_schedules, interval=86400,               name="dormant_schedule_sweep", initial_delay=600)
     schedule_job(_board_watcher_clear_nudged, interval=60,             name="board_watcher_gc", initial_delay=60)
     schedule_job(_evict_stale_caches,    interval=300,                  name="cache_evict", initial_delay=60)
     schedule_job(_cleanup_tmp,           interval=1800,                 name="tmp_cleanup", initial_delay=60)
