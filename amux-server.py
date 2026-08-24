@@ -17734,6 +17734,9 @@ setTimeout(function(){var f=document.getElementById('js-fallback');if(f&&f.style
             <option value="opus">opus</option>
             <option value="haiku">haiku</option>
             <option value="claude-fable-5">claude-fable-5</option>
+            <option value="claude-fable-5[1m]">claude-fable-5 [1M]</option>
+            <option value="claude-opus-5">claude-opus-5</option>
+            <option value="claude-opus-5[1m]">claude-opus-5 [1M]</option>
             <option value="claude-opus-4-8">claude-opus-4-8</option>
             <option value="claude-opus-4-8[1m]">claude-opus-4-8 [1M]</option>
             <option value="claude-opus-4-7">claude-opus-4-7</option>
@@ -17741,8 +17744,10 @@ setTimeout(function(){var f=document.getElementById('js-fallback');if(f&&f.style
             <option value="claude-opus-4-6">claude-opus-4-6</option>
             <option value="claude-opus-4-6[1m]">claude-opus-4-6 [1M]</option>
             <option value="claude-sonnet-5">claude-sonnet-5</option>
+            <option value="claude-sonnet-5[1m]">claude-sonnet-5 [1M]</option>
             <option value="claude-sonnet-4-6">claude-sonnet-4-6</option>
             <option value="claude-sonnet-4-6[1m]">claude-sonnet-4-6 [1M]</option>
+            <option value="claude-haiku-4-5">claude-haiku-4-5</option>
             <option value="claude-haiku-4-5-20251001">claude-haiku-4-5-20251001</option>
             </optgroup>
             <optgroup label="Codex (OpenAI)">
@@ -19340,6 +19345,9 @@ setTimeout(function(){var f=document.getElementById('js-fallback');if(f&&f.style
       <option value="sonnet">sonnet</option>
       <option value="haiku">haiku</option>
       <option value="claude-fable-5">claude-fable-5</option>
+      <option value="claude-fable-5[1m]">claude-fable-5 [1M]</option>
+      <option value="claude-opus-5">claude-opus-5</option>
+      <option value="claude-opus-5[1m]">claude-opus-5 [1M]</option>
       <option value="claude-opus-4-8">claude-opus-4-8</option>
       <option value="claude-opus-4-8[1m]">claude-opus-4-8 [1M]</option>
       <option value="claude-opus-4-7">claude-opus-4-7</option>
@@ -19347,8 +19355,10 @@ setTimeout(function(){var f=document.getElementById('js-fallback');if(f&&f.style
       <option value="claude-opus-4-6">claude-opus-4-6</option>
       <option value="claude-opus-4-6[1m]">claude-opus-4-6 [1M]</option>
       <option value="claude-sonnet-5">claude-sonnet-5</option>
+      <option value="claude-sonnet-5[1m]">claude-sonnet-5 [1M]</option>
       <option value="claude-sonnet-4-6">claude-sonnet-4-6</option>
       <option value="claude-sonnet-4-6[1m]">claude-sonnet-4-6 [1M]</option>
+      <option value="claude-haiku-4-5">claude-haiku-4-5</option>
       <option value="claude-haiku-4-5-20251001">claude-haiku-4-5-20251001</option>
     </select>
     <div class="edit-actions">
@@ -21923,11 +21933,14 @@ function editField(session, field, current, provider) {
   } else if (field === 'model') {
     const claudeModels = [
       {v:'',l:'Default'},{v:'opus',l:'opus'},{v:'sonnet',l:'sonnet'},{v:'haiku',l:'haiku'},
-      {v:'claude-fable-5',l:'claude-fable-5'},
+      {v:'claude-fable-5',l:'claude-fable-5'},{v:'claude-fable-5[1m]',l:'claude-fable-5 [1M]'},
+      {v:'claude-opus-5',l:'claude-opus-5'},{v:'claude-opus-5[1m]',l:'claude-opus-5 [1M]'},
       {v:'claude-opus-4-8',l:'claude-opus-4-8'},{v:'claude-opus-4-8[1m]',l:'claude-opus-4-8 [1M]'},
       {v:'claude-opus-4-7',l:'claude-opus-4-7'},{v:'claude-opus-4-7[1m]',l:'claude-opus-4-7 [1M]'},
       {v:'claude-opus-4-6',l:'claude-opus-4-6'},{v:'claude-opus-4-6[1m]',l:'claude-opus-4-6 [1M]'},
+      {v:'claude-sonnet-5',l:'claude-sonnet-5'},{v:'claude-sonnet-5[1m]',l:'claude-sonnet-5 [1M]'},
       {v:'claude-sonnet-4-6',l:'claude-sonnet-4-6'},{v:'claude-sonnet-4-6[1m]',l:'claude-sonnet-4-6 [1M]'},
+      {v:'claude-haiku-4-5',l:'claude-haiku-4-5'},
       {v:'claude-haiku-4-5-20251001',l:'claude-haiku-4-5-20251001'}
     ];
     const codexModels = [

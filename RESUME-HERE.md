@@ -4,6 +4,32 @@
 
 Last updated: 2026-08-22
 
+## Plan for change: add missing Claude models to picker dropdowns (Jeremy 2026-08-24) — DONE
+
+**Trigger:** Jeremy notes amux picker doesn't list all current Claude models.
+
+**Current gap** vs live Anthropic lineup:
+- Missing entirely: `claude-opus-5` (+ `[1m]`) — the current top-tier Opus.
+- Missing 1M variants for Fable 5 and Sonnet 5 (existing entries have plain
+  `claude-fable-5` and `claude-sonnet-5` but no `[1m]` — inconsistent with
+  the Opus 4.6/4.7/4.8 pattern which lists both).
+- Haiku entry uses only the dated form `claude-haiku-4-5-20251001`; add the
+  short form `claude-haiku-4-5` too (matches how other tiers are listed).
+
+**Three call sites to update in lockstep:**
+1. L17733 settings default-model dropdown (HTML `<option>` list).
+2. L19342 per-session model picker (HTML `<option>` list).
+3. L21924 JS `claudeModels` array (dynamic dropdown used elsewhere).
+
+Also NOT adding: `claude-mythos-5` (Project Glasswing only, not general).
+
+**Verification:**
+1. Syntax check.
+2. Hot-reload; open the settings dropdown, verify Opus 5 + new [1m] entries render.
+3. Commit.
+
+---
+
 ## Plan for change: move _global.md out of MEMORY.md into topic file (RTG-Research bug report, 2026-08-23) — DONE
 
 **Trigger:** RTG-Research reports the composed portion of MEMORY.md
