@@ -4,6 +4,60 @@
 
 Last updated: 2026-08-22
 
+## Plan for change: C4 discard-tolerant single-audit completion (Ember-Research, 2026-08-26) — DONE
+
+**Trigger:** Ember-Research reported C4 wedges targets in `review`
+forever when ONE auditor discards its item (Ember-Audit-Opus48 standing
+policy: discard ED/coordinator items as VOID-not-auditable — same as
+RTG-Audit-Codex per AGENTS.md) while the OTHER closes with a verdict.
+5 ECM items wedged ~1h tonight (ECM-9/13/14/15/16); Ember-Research had
+to hand-adjudicate each. Recurs on every future coordinator umbrella
+item.
+
+Root cause in `_auto_verify_from_audit_pair` (~L9883):
+- Discarded audit's own PATCH event → returns None at status check
+  (`if audit_item.get("status") not in ("done","verified","review")`).
+- Verdict-holder's PATCH event → finds nothing at the `WHERE status
+  != 'discarded'` clause when looking up the sibling → returns None.
+
+**Fix (Ember-Research's proposal — cleanest of the two considered):**
+
+Extend `_auto_verify_from_audit_pair` to handle discarded state on
+either side:
+
+1. Allow discarded status on the trigger audit (self).
+2. Include discarded in the sibling lookup (drop the WHERE filter).
+3. Branch on the (my_state, other_state) matrix:
+   - Both have verdicts → existing pair logic (unchanged).
+   - One discarded + one verdict → apply the verdict alone, tag
+     `[single-audit]` in cascade note (surviving_id=... discarded_id=VOID).
+   - Both discarded → leave in `review`, `send_text` to master session
+     (`<org>-Research`) explaining both auditors voided — needs
+     human/master call. Idempotent via existing target status check.
+
+Alternative Ember-Research considered and rejected: stop minting audit
+pairs for ED-wrapper items server-side. Wrapper-ness detection is
+fuzzy (title prefix ED: isn't universal). Discard-tolerant C4 is
+cleaner and doesn't require server-side wrapper heuristics.
+
+**Explicitly NOT doing:**
+- Not changing what an auditor discards (that's the auditor's policy
+  and it's correct).
+- Not making single-audit paths silent — cascade note includes the
+  `[single-audit]` tag and both audit ids so provenance is visible.
+- Not shortcutting the both-discarded case to any auto-status — a
+  target where BOTH auditors voided likely means the target is itself
+  a wrapper and probably should be discarded, not verified. Kick to
+  master.
+
+**Verification:**
+1. Syntax check + reload.
+2. Confirm 5 wedged ECM items would now clear if their audit pair
+   were re-evaluated (retroactive check via dry-run).
+3. Post reply board item to Ember-Research with fix summary.
+
+---
+
 ## Plan for change: desc_append mode on board PATCH (AH-97, 2026-08-26) — DONE
 
 **Trigger:** EmberCoreMigration filed AH-97 with 2 real data-loss

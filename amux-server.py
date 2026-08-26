@@ -9884,7 +9884,11 @@ def _auto_verify_from_audit_pair(audit_item: dict, db) -> dict | None:
     """C4. Called after an audit item (assigned to a *-Audit-* session) is
     PATCHed. If both audit items targeting the same target have closed with
     verdicts, apply: both ACCEPT → verified, both FAIL → doing. Mixed
-    verdicts → leave for escalation.
+    verdicts → escalation. Amendment 2026-08-26 (Ember-Research):
+    discarded audits are tolerated — a single verdict + a VOIDED sibling
+    applies as single-audit (tagged in cascade note). Both discarded →
+    leave in review and notify master session, since a target both
+    auditors voided likely IS a wrapper that shouldn't verify.
 
     Session-based detection (not prefix-based) so this works for any audit
     session across orgs (RTG-Audit-*, Ember-Audit-*). The cross-org prefix
@@ -9894,12 +9898,19 @@ def _auto_verify_from_audit_pair(audit_item: dict, db) -> dict | None:
     my_session = audit_item.get("session", "")
     if not _is_audit_session(my_session):
         return None
-    # Audit must be in a closed-ish state to count.
-    if audit_item.get("status") not in ("done", "verified", "review"):
+    # Audit must be in a closed-ish state to count. Discarded is now
+    # tolerated — it's the auditor's standing VOID-not-auditable ruling
+    # on coordination/ED wrapper items, and the pair should still
+    # complete on the OTHER auditor's verdict.
+    my_status = audit_item.get("status")
+    if my_status not in ("done", "verified", "review", "discarded"):
         return None
-    my_verdict = _extract_verdict(audit_item.get("desc", "") or "")
-    if not my_verdict:
-        return None
+    my_discarded = (my_status == "discarded")
+    my_verdict = ""
+    if not my_discarded:
+        my_verdict = _extract_verdict(audit_item.get("desc", "") or "")
+        if not my_verdict:
+            return None
     target_id = _extract_target_id(
         audit_item.get("desc", "") or "",
         exclude_id=aid,
@@ -9927,18 +9938,101 @@ def _auto_verify_from_audit_pair(audit_item: dict, db) -> dict | None:
     # producing wrong pairings (RTG-Research caught RAO-7235 paired with
     # RAC-7141 for different targets, 2026-06-25). Audit titles are
     # canonically `AUDIT <target>: <body>` — match the prefix only.
+    # 2026-08-26 (Ember-Research): stopped excluding discarded — a
+    # discarded sibling is still a valid "voted" pair-member.
     other = db.execute(
         "SELECT id, status, desc FROM issues "
-        "WHERE session = ? AND deleted IS NULL AND status != 'discarded' "
+        "WHERE session = ? AND deleted IS NULL "
         "  AND title LIKE ? "
         "ORDER BY created DESC LIMIT 1",
         (other_session, f"AUDIT {target_id}:%"),
     ).fetchone()
-    if not other or other["status"] not in ("done", "verified", "review"):
+    if not other or other["status"] not in ("done", "verified", "review", "discarded"):
         return None
-    their_verdict = _extract_verdict(other["desc"] or "")
-    if not their_verdict:
+    other_discarded = (other["status"] == "discarded")
+    their_verdict = ""
+    if not other_discarded:
+        their_verdict = _extract_verdict(other["desc"] or "")
+        if not their_verdict:
+            return None
+    now = int(time.time())
+    stamp = time.strftime("%Y-%m-%d %H:%M", time.localtime())
+    # Both discarded — target is likely itself a wrapper; leave in review
+    # and notify master. Idempotent: master hop keys off target still
+    # being in review, so a repeated C4 fire on the same pair won't spam.
+    if my_discarded and other_discarded:
+        _org = (target["org"] if "org" in target.keys() else None) or _session_org(my_session)
+        _master = f"{_org}-Research" if _org else None
+        if _master and _is_real_session(_master):
+            def _run():
+                try:
+                    send_text(_master, (
+                        f"C4 both-discarded: {target_id} — {(target['title'] or '')[:80]}. "
+                        f"Both auditors VOIDed ({aid}, {other['id']}). Target stays "
+                        f"in review; likely a wrapper that should be discarded rather "
+                        f"than verified. Your call."
+                    ))
+                except Exception:
+                    pass
+            threading.Thread(target=_run, daemon=True).start()
+            slog(f"[C4] {target_id} both-discarded ({aid}+{other['id']}) — notified {_master}")
         return None
+    # One discarded + one verdict — single-audit path. Apply the
+    # surviving verdict alone; tag cascade note so provenance is clear.
+    if my_discarded or other_discarded:
+        if my_discarded:
+            surviving_verdict = their_verdict
+            surviving_id = other["id"]
+            discarded_id = aid
+        else:
+            surviving_verdict = my_verdict
+            surviving_id = aid
+            discarded_id = other["id"]
+        accept = {"PASS", "PASS-WITH-WARNINGS"}
+        if surviving_verdict in accept:
+            new_status = "verified"
+        elif surviving_verdict == "FAIL":
+            new_status = "doing"
+        else:
+            return None  # unrecognized verdict token
+        if target["status"] == new_status:
+            return None
+        note = (f"\n\n[auto-applied {stamp} by C4: single-audit "
+                f"({surviving_id}={surviving_verdict}, {discarded_id}=VOID/discarded) "
+                f"→ {new_status}]")
+        new_desc = (target["desc"] or "") + note
+        db.execute(
+            "UPDATE issues SET status = ?, desc = ?, updated = ? WHERE id = ?",
+            (new_status, new_desc, now, target_id),
+        )
+        db.commit()
+        _board_changed()
+        if new_status == "doing" and target["session"]:
+            _notify_session_of_retake(target["session"], target_id,
+                                      target["title"] or "",
+                                      f"{surviving_verdict} (single-audit)",
+                                      f"{surviving_id}+{discarded_id}=VOID", "C4")
+        elif new_status == "verified" and target["session"]:
+            _notify_session_of_verified(target["session"], target_id,
+                                        target["title"] or "",
+                                        f"{surviving_verdict} (single-audit)",
+                                        f"{surviving_id}+{discarded_id}=VOID", "C4")
+        unblocked_c4 = []
+        if new_status == "verified":
+            try:
+                unblocked_c4 = _promote_backlog_when_dep_completes(target_id, new_status, db)
+            except Exception as _ue:
+                slog(f"[unblock] {target_id}: C4 single-audit sweep failed: {_ue}")
+        result = {"action": "auto-applied", "audits": [surviving_id, discarded_id],
+                  "verdicts": [surviving_verdict, "VOID"],
+                  "target": target_id, "new_status": new_status,
+                  "single_audit": True}
+        if unblocked_c4:
+            result["unblocked"] = unblocked_c4
+        slog(f"[C4] {target_id} single-audit ({surviving_id}={surviving_verdict}, "
+             f"{discarded_id}=VOID) → {new_status}")
+        return result
+    # ── Standard pair-complete path (both have verdicts) ──────────────
     accept = {"PASS", "PASS-WITH-WARNINGS"}
     if my_verdict in accept and their_verdict in accept:
         new_status = "verified"
@@ -9957,8 +10051,6 @@ def _auto_verify_from_audit_pair(audit_item: dict, db) -> dict | None:
         )
     if target["status"] == new_status:
         return None
-    now = int(time.time())
-    stamp = time.strftime("%Y-%m-%d %H:%M", time.localtime())
     note = (f"\n\n[auto-applied {stamp} by C4: pair complete "
             f"({aid}={my_verdict}, {other['id']}={their_verdict}) → {new_status}]")
     new_desc = (target["desc"] or "") + note
