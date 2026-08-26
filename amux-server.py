@@ -48232,6 +48232,32 @@ def _repos_scan():
         _sse_cache["repos"]["time"] = time.time()
 
 
+_GATED_TITLE_RE = re.compile(r'^\s*(PARKED|GATED|BLOCKED)\b', re.IGNORECASE)
+_GATED_DESC_LINE_RE = re.compile(
+    r'^\s*(GATED|BLOCKED-UNTIL|BLOCKED_UNTIL|BLOCKED-BY|BLOCKED_BY|PARKED|AWAITING|HOLD)\s*:',
+    re.MULTILINE | re.IGNORECASE,
+)
+
+
+def _is_gated_todo(title: str, desc: str) -> bool:
+    """True if a todo item carries an explicit gate marker indicating it
+    is deliberately not-yet-startable. AH-99 (EmberCoreMigration 2026-08-26):
+    the idle-nudge fired 10+ times on a legitimately-gated item because
+    the board has no status for 'parked'. Cheap suppression: recognize
+    the two conventions agents already use — title prefix (PARKED/GATED/
+    BLOCKED) and a machine-readable desc marker line (GATED:, BLOCKED-UNTIL:,
+    BLOCKED-BY:, PARKED:, AWAITING:, HOLD:).
+
+    Suppression is scoped to the idle-nudge only; C4/dependency logic
+    is untouched. Once the gate clears, remove the marker to resume
+    normal nudge behavior."""
+    if title and _GATED_TITLE_RE.match(title):
+        return True
+    if desc and _GATED_DESC_LINE_RE.search(desc):
+        return True
+    return False
+
+
 def _board_watcher():
     """Nudge idle sessions that have unread todo board items assigned to them.
 
@@ -48241,13 +48267,21 @@ def _board_watcher():
       - waiting / not running → skip
     Tracks which (session, item_id) pairs have already been nudged to avoid
     spamming the same task repeatedly until it is claimed or status changes.
+
+    Amendment 2026-08-26 (AH-99): items with explicit gate markers
+    (title starts with PARKED/GATED/BLOCKED, or desc has a GATED: /
+    BLOCKED-UNTIL: / etc. line) are skipped — see _is_gated_todo.
     """
     try:
         db = get_db()
         rows = db.execute(
-            "SELECT id, title, session FROM issues "
+            "SELECT id, title, session, desc FROM issues "
             "WHERE status='todo' AND session IS NOT NULL AND session != '' AND deleted IS NULL"
         ).fetchall()
+        if not rows:
+            return
+        # Filter out gated items entirely — no nudge, no tracking.
+        rows = [r for r in rows if not _is_gated_todo(r["title"] or "", r["desc"] or "")]
         if not rows:
             return
 

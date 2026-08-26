@@ -4,6 +4,50 @@
 
 Last updated: 2026-08-22
 
+## Plan for change: gated-todo idle-nudge suppression (AH-99, 2026-08-26) — DONE
+
+**Trigger:** EmberCoreMigration filed AH-99. Idle-nudge (_board_watcher)
+fired 10+ times on EAAC-34, a deliberately gated todo item that must not
+start until an external c00 validation runs. Sub-agent declined every
+time, then asked "is something wrong?" — trust-erosion cost. Board has
+no way to express "parked/gated" — todo means "available to pick up",
+and the nudge does its job on the information it has.
+
+Recurring cost is nudge fatigue: if agents learn to ignore idle-nudges,
+the mechanism loses signal quality on the calls that matter.
+EmberCoreMigration's own AH-96/AH-97/AH-99 filings all trace back to
+similar shape (silent behavior at boundary; agents can't observe).
+
+**Fix (AH-99 suggestion #1 — cheapest, zero schema change):**
+
+_board_watcher SELECT gets `desc` too. Filter out items whose:
+- Title starts with `PARKED`, `GATED`, or `BLOCKED` (case-insensitive,
+  boundary after) — matches EmberCoreMigration's `PARKED (post-c00) —`
+  workaround.
+- Desc has a line starting with `GATED:`, `BLOCKED-UNTIL:`,
+  `BLOCKED-BY:`, `PARKED:`, `AWAITING:`, or `HOLD:` (case-insensitive).
+
+Suppressed items still appear in the board UI and are still available
+to work on — they just don't generate an idle nudge. Once the gate
+clears, agent removes the marker and nudges resume normally.
+
+**Explicitly NOT doing:**
+- AH-99 suggestion #2 (new `blocked` status) — schema + hooks + status
+  transition rules across the codebase. Overkill for a first cut.
+- AH-99 suggestion #3 (`gated_until`/`blocked_by` field) — most
+  expressive but most work; wait for evidence #1 isn't enough.
+- Not suppressing the C4/promote-backlog or dependency logic — this
+  only touches the idle-nudge signal to the assignee.
+
+**Verification:**
+1. Syntax check + reload.
+2. Confirm EAAC-34 has a matching marker in title or desc; check dry-run.
+3. Board watcher runs every 30s — verify next tick shows no nudge for
+   the gated set.
+4. Close AH-99 with fix summary (via desc_append, dogfooding again).
+
+---
+
 ## Plan for change: C4 discard-tolerant single-audit completion (Ember-Research, 2026-08-26) — DONE
 
 **Trigger:** Ember-Research reported C4 wedges targets in `review`
