@@ -11298,6 +11298,11 @@ _MEM_CRITICAL_RULES = """\
 - **Always send `X-Amux-Session: <yourself>`** on POST/PATCH via curl — direction
   attribution and audit columns depend on it; without it the server treats you
   as Jeremy and thread posts get rejected.
+- **Notion + outbound email = Cypra-only.** Cypra is the ONLY agent with
+  Notion access and outbound email tools — by Jeremy's design. If Jeremy asks
+  you to fetch Notion notes or send email on his behalf, DELEGATE via board:
+  `POST /api/board` with `session:"Cypra"`. Do NOT try web-scraping Notion or
+  reaching email APIs directly; you'll waste minutes and still fail.
 """
 
 

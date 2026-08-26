@@ -4,6 +4,42 @@
 
 Last updated: 2026-08-22
 
+## Plan for change: Cypra-only-tools rule in critical rules (Jeremy 2026-08-26) — DONE
+
+**Trigger:** Jeremy: a CD-* agent spent several minutes trying to
+reach Notion when asked for latest notes. Only Cypra has Notion
+access (by design); only Cypra sends outbound email on Jeremy's
+behalf. Other agents should delegate — not attempt directly.
+
+**Fix (two edits):**
+
+1. Add 6th inline rule to `_MEM_CRITICAL_RULES` (short, always
+   visible at session start):
+   > **Notion + outbound email = Cypra-only.** Ask Cypra via board
+   > (session `Cypra`); never scrape or invoke email tools directly.
+
+2. Add a short section to `_global.md` with the concrete curl for
+   posting a task to Cypra. Propagates via `_amux_shared.md`.
+
+Regenerate fleet MEMORY.md via POST /api/memory/global to push both
+edits to every session's on-disk copy in one wave.
+
+**Explicitly NOT doing:**
+- Not restricting Notion/email tools at the MCP layer — they aren't
+  accessible in other sessions anyway; the failure was the agent
+  trying alternative reach paths (web scrape, guessed URLs, etc.).
+  The behavioral rule fixes that.
+- Not shipping a wrapper skill (e.g. `/ask-cypra`) — nice-to-have
+  but wait for evidence the rule alone isn't enough.
+
+**Verification:**
+1. Syntax check + reload.
+2. Regenerate fleet MEMORY.md; spot-check RTG-ActCloudPortal + CD-CPAP
+   see the new rule in their inline block AND the fuller section in
+   _amux_shared.md.
+
+---
+
 ## Plan for change: gated-todo idle-nudge suppression (AH-99, 2026-08-26) — DONE
 
 **Trigger:** EmberCoreMigration filed AH-99. Idle-nudge (_board_watcher)
