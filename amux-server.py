@@ -27494,9 +27494,12 @@ async function openFilePreview(path) {
       const searchTab = document.getElementById('file-tab-search');
       if (searchTab) searchTab.style.display = (data.is_markdown && _fileViewMode === 'preview') ? '' : 'none';
     }
-    // Show download button for all files
+    // Show download button for all files. Use _authUrl so the URL
+    // carries ?_token= — on iOS Safari the <a download> click can fall
+    // through to a plain URL navigation that bypasses the fetch
+    // monkeypatch, and without a token the server returns JSON 401.
     const dlBtn = document.getElementById('file-download-btn');
-    dlBtn.dataset.url = API + '/api/file/raw?path=' + encodeURIComponent(data.path);
+    dlBtn.dataset.url = _authUrl(API + '/api/file/raw?path=' + encodeURIComponent(data.path));
     dlBtn.dataset.filename = data.path.split('/').pop();
     dlBtn.style.display = '';
     _renderFileBody(data, _fileViewMode);

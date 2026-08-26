@@ -4,6 +4,41 @@
 
 Last updated: 2026-08-22
 
+## Plan for change: iOS Files download `_token` injection (Jeremy 2026-08-26) — DONE
+
+**Trigger:** Jeremy on iOS mobile PWA: Files tab → Cypra/docs/personal/
+<file>.xlsx → Download shows `{"error":"unauthorized"}` JSON. Works on
+desktop; fails on iOS.
+
+**Root cause:** `_fileDownload` builds the URL as
+`API + '/api/file/raw?path=<encoded>'` and uses `fetch(url)` then a
+blob → `<a download>` click. The fetch monkeypatch at L19828 adds
+Bearer auth for same-origin URLs, and on desktop that path works
+end-to-end. On iOS Safari, `<a download>` isn't reliably honored and
+the click can fall through to a URL navigation — which hits
+`/api/file/raw` WITHOUT the Bearer header and returns JSON 401.
+
+**Fix (1-line JS):** wrap the URL with `_authUrl()` when setting
+`dlBtn.dataset.url`, so it carries `?_token=<AUTH_TOKEN>` regardless
+of whether the browser uses fetch or direct navigation. `_authUrl`
+already exists (L19822) and the server's auth gate already accepts
+`_token=` in the query string (L41079).
+
+**Explicitly NOT doing:**
+- Not changing the fetch path (it works when the browser honors
+  `<a download>`).
+- Not changing server auth semantics (already accepts _token=).
+- Not auditing every other download button — this one is the reported
+  case; others may or may not have the same shape, follow up if
+  another instance surfaces.
+
+**Verification:**
+1. Syntax check + reload.
+2. Confirm the URL now contains `_token=`.
+3. Jeremy re-tries on iOS.
+
+---
+
 ## Plan for change: Cypra-only-tools rule in critical rules (Jeremy 2026-08-26) — DONE
 
 **Trigger:** Jeremy: a CD-* agent spent several minutes trying to
