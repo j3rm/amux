@@ -54,6 +54,31 @@ present with identical content; the paths on host are
 No env vars, no `mcp start` argument, no client-side project selector —
 the server picks the config to run based on which key authenticated.
 
+## PreToolUse / PostToolUse hooks (Jeremy 2026-08-27)
+
+To enforce the "query graph before grep" rule, each org has a pair of
+hooks under `.claude/hooks/` and a config in `.claude/settings.json`:
+
+- **`check-codegraph.sh`** (PreToolUse, matcher `Grep|Glob`) — blocks
+  with exit 2 when the query looks like a structural symbol lookup
+  (`^[A-Za-z_][A-Za-z0-9_]*$` OR contains `class `, `def `, `function `,
+  `=>`, `interface `). Plain-text searches (URLs, prose, config values)
+  pass through. Once the session has consulted codegraph, the flag
+  `/tmp/claude-codegraph-flags/<session_id>` unblocks subsequent greps.
+- **`mark-codegraph-used.sh`** (PostToolUse, matcher `mcp__codegraph__.*`)
+  — drops the per-session flag file after any codegraph MCP tool call.
+
+**Matcher gotcha:** Claude Code emits MCP tool names as
+`mcp__<server-name>__<tool-name>`. `<server-name>` is the key under
+`mcpServers` in `.mcp.json`. Our registration uses `codegraph`, so the
+matcher is `mcp__codegraph__.*`. If a future MCP registration uses a
+different server-name (e.g. `code-graph-context`), the matcher must be
+updated in each org's `.claude/settings.json` — otherwise the flag
+never lands and Grep stays blocked forever.
+
+**Requires `jq`** in each container (verified 2026-08-27: all 4 have
+jq-1.7 at `/usr/bin/jq`).
+
 ## Agent instructions
 
 Each org's project `CLAUDE.md` has a `## Codebase Navigation — MANDATORY`
