@@ -31,15 +31,28 @@ do NOT get the deploy_rsa key — they use their own per-org key.
 
 ## MCP config shape
 
-Merged into each org's `~/.mcp.json` AND `~/.claude/.mcp.json` (both
-present with identical content; the paths on host are
-`~/.amux/orgs/<ORG>/home/.mcp.json` and
-`~/.amux/orgs/<ORG>/home/.claude/.mcp.json`):
+**Location:** user-scope `~/.claude.json` inside each container's shared
+home (host path: `~/.amux/orgs/<ORG>/home/.claude.json`). Merged into
+the `mcpServers` key alongside anything already present.
+
+**Trap to avoid** (RTG-Research 2026-08-27, verified live): Claude Code
+does NOT auto-load MCP servers from `~/.mcp.json` — that path is
+invisible to `claude mcp list` and to session startup. The two paths
+that ARE loaded:
+- **User-scope:** `~/.claude.json` (this is where we put codegraph — reaches
+  every session in the container regardless of CWD).
+- **Project-scope:** `<repo-root>/.mcp.json` (found via CWD ancestor walk).
+
+Do NOT confuse the naming: `~/.claude/.mcp.json` looks like it should
+work but does not.
+
+The codegraph entry shape:
 
 ```json
 {
   "mcpServers": {
     "codegraph": {
+      "type": "stdio",
       "command": "ssh",
       "args": [
         "-i", "/home/amux/.ssh/codegraph_key",
@@ -53,6 +66,9 @@ present with identical content; the paths on host are
 
 No env vars, no `mcp start` argument, no client-side project selector —
 the server picks the config to run based on which key authenticated.
+
+**Existing sessions won't pick it up until they restart** (MCP servers
+are loaded at Claude Code startup, not hot-reloaded).
 
 ## PreToolUse / PostToolUse hooks (Jeremy 2026-08-27)
 
@@ -118,27 +134,33 @@ chmod 600 ~/.amux/orgs/$ORG_DIR/secrets/ssh/codegraph_key
 docker exec amux-org-$ORG_DIR ls -la /home/amux/.ssh/codegraph_key
 ```
 
-If MCP config is lost (a `.mcp.json` was overwritten):
+If MCP config is lost (a `~/.claude.json` was overwritten):
 
 ```bash
-# Re-merge codegraph into the org's .mcp.json using Python (never edit
-# by hand — you'll clobber other MCP servers).
+# Re-merge codegraph into the org's user-scope config.
+# NOTE: ~/.claude.json in the container = ~/.amux/orgs/<ORG>/home/.claude.json
+# on host. This file has lots of Claude Code state — merge, don't overwrite.
 python3 <<PYEOF
-import json
-for f in [
-    f"/home/jwesley/.amux/orgs/$ORG_DIR/home/.mcp.json",
-    f"/home/jwesley/.amux/orgs/$ORG_DIR/home/.claude/.mcp.json",
-]:
-    d = json.load(open(f))
-    d.setdefault("mcpServers", {})["codegraph"] = {
-        "command": "ssh",
-        "args": ["-i", "/home/amux/.ssh/codegraph_key",
-                 "-o", "StrictHostKeyChecking=no",
-                 "deploy@192.168.72.85"]
-    }
-    open(f, "w").write(json.dumps(d, indent=2) + "\n")
+import json, shutil, time
+p = f"/home/jwesley/.amux/orgs/$ORG_DIR/home/.claude.json"
+shutil.copy2(p, p + f".bak-{int(time.time())}")  # backup first
+d = json.load(open(p))
+d.setdefault("mcpServers", {})["codegraph"] = {
+    "type": "stdio",
+    "command": "ssh",
+    "args": ["-i", "/home/amux/.ssh/codegraph_key",
+             "-o", "StrictHostKeyChecking=no",
+             "deploy@192.168.72.85"]
+}
+open(p, "w").write(json.dumps(d))
 PYEOF
+# Existing sessions won't pick it up; restart them or wait for next natural start.
 ```
+
+Alternative (equivalent — writes to same file): run inside the container
+via `docker exec amux-org-<ORG> claude mcp add --scope user --transport
+stdio codegraph -- ssh -i /home/amux/.ssh/codegraph_key -o
+StrictHostKeyChecking=no deploy@192.168.72.85`.
 
 ## Smoke test (from container)
 
