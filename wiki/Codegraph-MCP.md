@@ -56,18 +56,24 @@ the server picks the config to run based on which key authenticated.
 
 ## Agent instructions
 
-Each org's project `CLAUDE.md` has a `## Codegraph — the project's code
-graph (MCP)` section documenting when to consult codegraph (before
-non-trivial edits, symbol renames, cross-file relationship queries),
-which tools it exposes (`find_code`, `analyze_code_relationships`),
-and the freshness caveat (findings may be stale if the graph wasn't
-re-indexed after recent code changes).
+Each org's project `CLAUDE.md` has a `## Codebase Navigation — MANDATORY`
+section (Jeremy 2026-08-27) directing agents to query the graph before
+Grep/Glob for any "where is X" or "what calls X" question, and to run
+`find_callers` before modifying any function or class.
 
-Section landing lines as of 2026-08-27:
-- `/mnt/gitdata/RemoteTechGroup/CLAUDE.md` — line 366
-- `/mnt/gitdata/EmberCRM/CLAUDE.md` — line 251
-- `/mnt/gitdata/iSchedule/CLAUDE.md` — line 392
-- `/mnt/gitdata/ShareScore/CLAUDE.md` — line 582
+Documented MCP tool names (from Jeremy's mandatory section):
+- `find_definition` — where is a function/class/method defined?
+- `find_callers` — who calls this?
+- `find_dependencies` — what does this depend on?
+- `trace_relationships` — how does data flow between components?
+
+If the actual MCP client exposes different tool names, the agent should
+use what the client shows and file a board item so this doc gets
+corrected. Do NOT invent tool names.
+
+Freshness: the graph is periodically re-indexed. If findings look stale,
+the agent should call it out in their response and file a board item to
+Jeremy for a re-index — do NOT try to re-index from a container.
 
 ## Redeploy from scratch (recovery playbook)
 
