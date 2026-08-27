@@ -102,19 +102,54 @@ section (Jeremy 2026-08-27) directing agents to query the graph before
 Grep/Glob for any "where is X" or "what calls X" question, and to run
 `find_callers` before modifying any function or class.
 
-Documented MCP tool names (from Jeremy's mandatory section):
-- `find_definition` — where is a function/class/method defined?
-- `find_callers` — who calls this?
-- `find_dependencies` — what does this depend on?
-- `trace_relationships` — how does data flow between components?
+**Verified tool inventory (2026-08-27, RTG-Research live-verified against
+the running server):**
 
-If the actual MCP client exposes different tool names, the agent should
-use what the client shows and file a board item so this doc gets
-corrected. Do NOT invent tool names.
+- `analyze_code_relationships(repo_path, query_type, ...)` — the
+  workhorse. Compact `file:line` output, tiny token footprint. Query
+  types: `find_callers`, `find_callees`, `find_all_callers`,
+  `find_all_callees`, `find_importers`, `who_modifies`,
+  `class_hierarchy`, `overrides`, `dead_code`, `call_chain`, `module_deps`,
+  `variable_scope`, `find_complexity`, `find_functions_by_argument`,
+  `find_functions_by_decorator`.
+- `find_code(query, repo_path)` — LOCATES a symbol; returns full source
+  (twice — in `functions_by_name` AND `content_matches`). Use it only
+  to find a path, then `Read` the file locally.
+- `execute_cypher_query(query)` — read-only Cypher. Fallback for
+  arbitrary questions and for continuing after a truncated result.
 
-Freshness: the graph is periodically re-indexed. If findings look stale,
-the agent should call it out in their response and file a board item to
-Jeremy for a re-index — do NOT try to re-index from a container.
+**THE TOKEN TRAP.** An unscoped `find_code("SomeSymbol")` can return
+~35K tokens (126K chars measured live). The same intent scoped via
+`analyze_code_relationships(repo_path=..., query_type='find_callers')`
+returns ~3K chars. The `MANDATORY` section in every org's CLAUDE.md
+tells agents to ALWAYS pass `repo_path` and default to
+`analyze_code_relationships`.
+
+**Truncation.** `find_callers` and siblings cap at 20 rows and set
+`"truncated": true` when more exist. Agents must finish enumeration
+via Cypher (`MATCH (c:Function)-[:CALLS]->(f:Function {name:'X'})
+RETURN c.name, c.path, c.line_number`).
+
+**Prior wrong names to purge if you see them.** The initial rollout
+(and Jeremy's rough draft) named `find_definition`, `find_dependencies`,
+and `trace_relationships` as top-level tools. Those are WRONG. The MANDATORY
+section explicitly retracts them.
+
+**Banned tools** (agents must NEVER call these):
+
+- `delete_repository` — irreversible; would poison the graph for the whole org.
+- `add_code_to_graph`, `watch_directory`, `switch_context`, `load_bundle`
+  — index management; belongs to Jeremy / host-side.
+
+**C# false-positive warning:** `dead_code` queries against C# projects
+false-positive on reflection, DI service registration, event wiring,
+WCF/ASP.NET entry points. Findings are leads only; no fix-RD without
+observed failure.
+
+**Freshness self-check:** after pushing a commit, spot-check one new
+symbol in the graph before trusting caller lists on that file. If
+findings look stale, call it out and file a board item to Jeremy
+for a re-index — do NOT try to re-index from a container.
 
 ## Redeploy from scratch (recovery playbook)
 
