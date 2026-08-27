@@ -4,6 +4,64 @@
 
 Last updated: 2026-08-22
 
+## Plan for change: claim-on-pickup rule + schedules once/expr fix (Jeremy 2026-08-27) — DONE
+
+**Trigger:** Jeremy asked for audit of (a) board watchdog script vs
+(b) org CLAUDE.md board instructions. RTG-Research already diagnosed
+the core gap and I confirmed it during the audit.
+
+**Findings:**
+
+- Both watchdog paths (SCHED-38 script + `_board_watcher` internal
+  at L48245) fire only on `status='todo'`. Consistent behavior; not
+  the bug.
+- Every org CLAUDE.md/AGENTS.md (RTG, Ember, iSchedule, Cypra
+  Master/PAA/EmailAgent) documents "PATCH to review on completion"
+  but NONE document "PATCH to doing on pickup." The claim step is
+  named only in the ping text itself. So agents work in `todo` for
+  minutes → nudge sees "todo + idle" → re-pings → agent ignores
+  because they know they're working it → token burn.
+- Separate schedules bug: L44649-44653 silently upgrades
+  `sched_type=once` to `recurring` when `schedule_expr` is set.
+  `{"sched_type":"once","schedule_expr":"+2h"}` becomes an
+  every-2-hours cron. Undocumented.
+
+**Ship in this commit:**
+
+1. Add rule #7 to `_MEM_CRITICAL_RULES` (inline, always-seen at
+   session start): "Claim on pickup — PATCH todo→doing the moment
+   you start. `todo` is the only re-ping-eligible state; `doing`,
+   `review`, `backlog` are quiet."
+2. Add a section to `_global.md` (fuller detail) documenting the
+   state lifecycle: `todo → doing (on pickup) → review (on
+   completion)`. Backlog for parked/not-now.
+3. Add the RTG-Research paragraph (verbatim) to each org CLAUDE.md
+   board section: RTG, Ember, iSchedule, Cypra/Master.
+4. Fix POST /api/schedules: if caller explicitly passed
+   `sched_type=once`, honor it (don't upgrade to recurring). Only
+   auto-upgrade when `sched_type` wasn't specified.
+5. Add hint on POST /api/schedules when the combination arms an
+   ambiguous shape.
+
+**Explicitly NOT doing:**
+- Not touching the watchdog scripts' ping-eligibility logic — it's
+  correct as-is (todo only). The behavior mismatch was on the agent
+  side, not the substrate side.
+- Not changing the stale-DOING sweep (fires on doing past 45m; has
+  exemptions from earlier fixes; still worth signal).
+- Not shipping a `claim` alias for `amux board doing <id>` — the
+  `amux board claim` CLI already exists; agents just need to use it.
+
+**Verification:**
+1. Syntax check + reload.
+2. Regenerate fleet MEMORY.md via POST /api/memory/global.
+3. Spot-check a regenerated MEMORY.md shows rule #7 inline.
+4. Probe POST /api/schedules with sched_type=once + schedule_expr
+   → confirm once is honored.
+5. Reply to Jeremy with a short summary.
+
+---
+
 ## Plan for change: iOS Files download `_token` injection (Jeremy 2026-08-26) — DONE
 
 **Trigger:** Jeremy on iOS mobile PWA: Files tab → Cypra/docs/personal/

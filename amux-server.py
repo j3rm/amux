@@ -11303,6 +11303,13 @@ _MEM_CRITICAL_RULES = """\
   you to fetch Notion notes or send email on his behalf, DELEGATE via board:
   `POST /api/board` with `session:"Cypra"`. Do NOT try web-scraping Notion or
   reaching email APIs directly; you'll waste minutes and still fail.
+- **Claim on pickup: `todo → doing` the moment you start.** The board
+  watchdog re-pings items in `todo` every ~15m. If you're actively working an
+  item still in `todo`, you'll keep getting the ping and burn tokens
+  ignoring it. Sequence is `todo → doing (on pickup) → review (on
+  completion)`. `doing`, `review`, `backlog` are all quiet — only `todo` is
+  ping-eligible. CLI: `amux board claim <id>` (flips to doing) or
+  `amux board doing <id>`. Park not-now items to `backlog`.
 """
 
 
@@ -44642,10 +44649,20 @@ class CCHandler(BaseHTTPRequestHandler):
                     "notify": int(data.get("notify", 0 if (data.get("trigger_on") or "").strip() else 1)),
                     "created": now_ts, "updated": now_ts, "deleted": None,
                 }
-                # compute next_run — prefer schedule_expr if provided
+                # compute next_run — prefer schedule_expr if provided.
+                # Bugfix 2026-08-27 (RTG-Research diagnosis): previously ANY
+                # schedule_expr silently upgraded sched_type to 'recurring',
+                # so a caller passing `{"sched_type":"once","schedule_expr":"+2h"}`
+                # got an every-2-hours cron instead of the one-shot they
+                # asked for. Now: if the caller EXPLICITLY sent sched_type,
+                # honor it (schedule_expr becomes the initial next_run only,
+                # not a repeating cadence). Auto-upgrade to recurring only
+                # when sched_type wasn't specified.
+                _stype_was_explicit = ("sched_type" in data)
                 if schedule_expr:
-                    stype = "recurring"
-                    sched["sched_type"] = stype
+                    if not _stype_was_explicit:
+                        stype = "recurring"
+                        sched["sched_type"] = stype
                     sched["next_run"] = _parse_next_run(schedule_expr) or run_at
                 else:
                     sched["next_run"] = _next_run_dt(sched) or run_at
@@ -49503,7 +49520,13 @@ def main():
     schedule_job(_refresh_token_cache,   interval=120,                  name="token_cache", initial_delay=5)
     schedule_job(_email_sync_job,        interval=_EMAIL_SYNC_INTERVAL, name="email_sync",  initial_delay=20)
     schedule_job(_repos_scan,            interval=60,                   name="repos_scan",    initial_delay=5)
-    schedule_job(_board_watcher,         interval=30,                   name="board_watcher", initial_delay=30)
+    # _board_watcher DISABLED 2026-08-27 (Jeremy CALM MODE + audit): redundant
+    # with the external SCHED-38 script watchdog. Both nudge on `todo`+idle;
+    # SCHED-38 is the documented modern path (visible in schedules UI, 15m
+    # cadence). _board_watcher's in-memory nudge-tracking set re-armed on
+    # every server hot-reload, so it silently re-fired pings across the ~15
+    # code pushes I did this week alone. Keeping SCHED-38 as the single path.
+    # schedule_job(_board_watcher,         interval=30,                   name="board_watcher", initial_delay=30)
     # Stale-todo creator alert (Jeremy 2026-08-19): every 5 min, sweep
     # agent-owned todos past the staleness threshold and nudge their
     # creator. Threshold configurable via AMUX_STALE_TODO_MIN (default 15).
