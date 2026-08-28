@@ -4,6 +4,75 @@
 
 Last updated: 2026-08-22
 
+## Plan for change: Round 1 lockdown — creator required + PATCH field-lock + threads edit lock (Jeremy 2026-08-28) — DONE
+
+**Trigger:** Two data-integrity incidents Jeremy hit:
+1. Completion-notify hook exists but silently skips when `creator` is
+   empty. Workers POST to PREBUILD/etc. with no `creator` body field →
+   PREBUILD closes → poster never gets pinged → 6h15m blind wait.
+2. An agent EDITED Jeremy's thread message and replaced the body with
+   their reply. Server does not check ownership on message PATCH.
+
+**Design principle (locked in):** server-set fields (X-Amux-Session
+header → `posted_by_session`, `last_patch_by`) are the source of truth
+for authorization; body-set fields (`creator`, `session`) are labels
+that must be validated. Callers can lie about body; they can't lie
+about the header the server writes.
+
+**Round 1 scope (this commit):**
+
+1. **Board POST `creator` required for agent callers.**
+   If `X-Amux-Session` header is set:
+   - If body has no `creator` → server auto-defaults it to the header.
+   - If body `creator` ≠ header → 400 with hint (no falsification).
+   - If body `creator` == header → accept.
+   If header is absent (dashboard/Jeremy) → creator can be anything.
+   Existing "server-routed" and blank creators on old items are legacy;
+   no retro-enforce.
+
+2. **Board PATCH poster-only field lock.**
+   Fields open to ANY real session (unchanged): `status`, `desc`,
+   `desc_append`, `session`, `tags`, `pinned`, `pos`, `due`, `due_time`.
+   Fields locked to the poster (`posted_by_session == X-Amux-Session`)
+   OR Jeremy (no header):
+   - `title` — renaming another agent's item is falsification.
+   - `creator` — hook-load-bearing; can't overwrite the audit trail.
+   - `owner_type` — structural.
+   - `gate` — the gate is a rule the poster set.
+   - `org` — first-set immutable per existing rule; also locked here.
+   Rejection returns 403 with `hint` naming the field + who owns it.
+   Legacy items with empty `posted_by_session`: fall through (backward
+   compat — those items pre-date AH-69). Explicit note in the hint.
+
+3. **Threads PATCH message-edit lock.**
+   On `PATCH /api/messages/<id>`: require `X-Amux-Session ==
+   from_session` of the target message. Jeremy (no header) bypasses.
+   Reject 403 with hint naming the correct message-owner.
+
+**Explicitly NOT doing (Round 2/3 deferred per Jeremy):**
+- Notes ownership marker, channel `<from>` verification, schedule owner
+  check → Round 2 after end of week.
+- Memory-global lock, skills ownership, /send attribution, DELETE
+  /board poster-check → Round 3.
+- One-shot retro-fire on the RP-* stragglers → not asked.
+- No fallback `creator = creator || posted_by_session` in the notify
+  hook — Round 1's mandatory creator makes new posts fire correctly.
+  Existing empty-creator items stay silent (not asked to retro).
+
+**Verification:**
+1. Syntax check + reload.
+2. Probe POST with header + no creator → auto-defaults, 201.
+3. Probe POST with header + mismatched creator → 400 with hint.
+4. Probe PATCH title on someone else's item → 403 with hint.
+5. Probe PATCH status on someone else's item → 200 (unchanged).
+6. Probe PATCH message body from wrong session → 403 with hint.
+7. Commit.
+
+Token budget: Jeremy at 98% today, reset 7pm CST. Doing minimum
+work + probes, no fleet broadcast, no wake-ups.
+
+---
+
 ## Plan for change: claim-on-pickup rule + schedules once/expr fix (Jeremy 2026-08-27) — DONE
 
 **Trigger:** Jeremy asked for audit of (a) board watchdog script vs

@@ -42097,6 +42097,32 @@ class CCHandler(BaseHTTPRequestHandler):
                     bj = self._read_body()
                     now = int(time.time())
                     delivered = False
+                    # Round 1 lockdown 2026-08-28 (Jeremy): agent PATCH of
+                    # message body is restricted to the message's original
+                    # sender. Trigger was an agent overwriting Jeremy's
+                    # message with their reply. `read`, `flagged`, and
+                    # `discarded` are per-recipient state so remain open.
+                    _hdr_session = (self.headers.get("X-Amux-Session") or "").strip()
+                    _content_keys = {"body", "blocking"}
+                    if _hdr_session and (_content_keys & set(bj.keys())):
+                        _msg_from = (msg_row["from_session"] or "").strip()
+                        if _msg_from != _hdr_session:
+                            _msg_from_disp = _msg_from or "Jeremy"
+                            return self._json({
+                                "error": "cannot edit message content — not the sender",
+                                "hint": (
+                                    f"You are '{_hdr_session}' but message {mid} "
+                                    f"was sent by '{_msg_from_disp}'. Only the "
+                                    f"original sender may PATCH `body` or "
+                                    f"`blocking`. You can still mark it "
+                                    f"`read`/`flagged`/`discarded` (per-recipient "
+                                    f"state). To reply, POST a NEW message "
+                                    f"(`amux threads reply {mid} \"...\"`)."
+                                ),
+                                "message_sender": _msg_from_disp,
+                                "caller": _hdr_session,
+                                "attempted_content_keys": sorted(_content_keys & set(bj.keys())),
+                            }, 403)
                     if "read" in bj:
                         db.execute("UPDATE messages SET read = ?, updated = ? WHERE id = ?",
                                    (1 if bj["read"] else 0, now, mid))
@@ -43850,16 +43876,34 @@ class CCHandler(BaseHTTPRequestHandler):
                 due = body.get("due", "").strip() or None
                 due_time = body.get("due_time", "").strip() or None
                 creator = body.get("creator", "")
-                # Do NOT default creator from any header. If the poster omits
-                # creator, we treat it as unknown — and the assignee-notify
-                # guard below (creator != session) will FIRE the ping rather
-                # than suppress it. Reasoning: an over-fire is annoying but
-                # visible; a silent miss (agent posts for another agent,
-                # forgets creator, we assume creator=self, notify never
-                # fires, task rots) is invisible and costly. Agents that
-                # want the ping suppressed MUST explicitly send
-                # `creator: <their-session>` in the body. The `amux board
-                # add` CLI does this for self-posts.
+                # Round 1 lockdown 2026-08-28 (Jeremy): if the caller is an
+                # agent (X-Amux-Session header set), REQUIRE creator to be
+                # populated AND match the header. Prevents empty-creator
+                # posts that silently skip the completion-notify hook (the
+                # exact PREBUILD gap Jeremy hit) and prevents falsification
+                # (posting under someone else's identity).
+                # - No creator in body → auto-default to header.
+                # - creator != header → 400 with hint.
+                # - creator == header → accept.
+                # No header (dashboard/Jeremy) → creator can be anything.
+                _hdr_session = (self.headers.get("X-Amux-Session") or "").strip()
+                if _hdr_session:
+                    if not creator:
+                        creator = _hdr_session
+                    elif creator != _hdr_session:
+                        return self._json({
+                            "error": "creator does not match X-Amux-Session",
+                            "hint": (
+                                f"You posted with X-Amux-Session: '{_hdr_session}' "
+                                f"but creator: '{creator}' in body. Server rejects "
+                                f"the mismatch — agents can't post under another "
+                                f"session's identity. Either omit `creator` "
+                                f"(server will set it to your session) or match "
+                                f"the header exactly."
+                            ),
+                            "header_session": _hdr_session,
+                            "body_creator": creator,
+                        }, 400)
                 desc = body.get("desc", "").strip()
                 tags = [t for t in body.get("tags", []) if t]
 
@@ -44384,6 +44428,44 @@ class CCHandler(BaseHTTPRequestHandler):
                             slog(f"[board-gate] {bid} {prior['status']}->{new_status} "
                                  f"acknowledged (force={bool(body.get('force'))}, "
                                  f"checked={len(_chk) if isinstance(_chk, list) else 0}/{len(eff_gate)})")
+                    # Round 1 lockdown 2026-08-28 (Jeremy): poster-only
+                    # field lock. Fields that are load-bearing for hooks
+                    # or structural (title, creator, owner_type, gate, org)
+                    # can only be modified by the original poster
+                    # (posted_by_session == X-Amux-Session) OR Jeremy
+                    # (no X-Amux-Session header, i.e. dashboard/CLI).
+                    # Anyone can still PATCH status, desc, session, tags,
+                    # etc. — the workhorse fields for cross-agent flow.
+                    # Legacy items with empty posted_by_session pre-date
+                    # AH-69 and fall through (backward compat).
+                    _hdr_session = (self.headers.get("X-Amux-Session") or "").strip()
+                    if _hdr_session:  # agent caller
+                        _poster = (exists["posted_by_session"] if "posted_by_session" in exists.keys() else "") or ""
+                        # Fetch posted_by_session freshly if missing from exists row
+                        if not _poster:
+                            _poster_row = db.execute(
+                                "SELECT posted_by_session FROM issues WHERE id = ?", (bid,)
+                            ).fetchone()
+                            _poster = (_poster_row["posted_by_session"] if _poster_row else "") or ""
+                        _LOCKED_FIELDS = ("title", "creator", "owner_type", "gate", "org")
+                        if _poster and _poster != _hdr_session:
+                            _attempted_locked = [f for f in _LOCKED_FIELDS if f in body]
+                            if _attempted_locked:
+                                return self._json({
+                                    "error": "field(s) locked to original poster",
+                                    "hint": (
+                                        f"Fields {_attempted_locked} are locked to "
+                                        f"the item's original poster ('{_poster}'). "
+                                        f"You are '{_hdr_session}'. You can still "
+                                        f"PATCH status, desc, desc_append, session, "
+                                        f"tags, pinned, pos, due, due_time. To "
+                                        f"change locked fields, ask the poster or "
+                                        f"escalate to Jeremy."
+                                    ),
+                                    "locked_fields": _attempted_locked,
+                                    "poster": _poster,
+                                    "caller": _hdr_session,
+                                }, 403)
                     set_clauses, params = [], []
                     for k in ("title", "desc", "status", "session", "due", "due_time", "owner_type", "pinned", "pos", "org"):
                         if k in body:
