@@ -9331,6 +9331,13 @@ _COORDINATION_TITLE_PREFIXES = (
     "ROUTING:",
     "TRACK:",
     "HELLO WORLD",
+    # 2026-08-28 (RTG-Audit-Opus48 substrate report during CALM MODE):
+    # every Thread T-N reply that transitions its board wrapper to
+    # `review` was auto-minting a fresh audit pair on both RAC + RAO.
+    # 10 spurious mints on T-195 alone → 20 audits both had to VOID.
+    # Thread wrappers are Jeremy-facing comms artifacts, not
+    # auditable code work products.
+    "THREAD ",
 )
 
 
