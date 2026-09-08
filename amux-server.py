@@ -30815,8 +30815,14 @@ async function _tLoadTargets() {
   try {
     const r = await fetch(API + '/api/sessions');
     const sessions = await r.json();
+    // 2026-09-08 (Jeremy): dropped the active|idle status filter — a
+    // running-but-waiting session (rate-limited, mid-turn, awaiting
+    // auto-continue) is a fully valid message target. Message delivery
+    // works the same regardless of the pane's current status. Only
+    // filter out truly-unreachable sessions: archived (paused by
+    // design) and not-running (would just rot).
     const optionsHtml = sessions
-      .filter(s => !s.archived && (s.status === 'active' || s.status === 'idle') && s.name !== 'amux-helper')
+      .filter(s => !s.archived && s.running && s.name !== 'amux-helper')
       .sort((a,b) => a.name.localeCompare(b.name))
       .map(s => `<option value="${_tEsc(s.name)}">${_tEsc(s.name)}${s.desc ? ' — ' + _tEsc(s.desc.slice(0,50)) : ''}</option>`)
       .join('');
