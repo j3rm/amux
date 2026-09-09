@@ -42115,27 +42115,61 @@ class CCHandler(BaseHTTPRequestHandler):
                     # sender. Trigger was an agent overwriting Jeremy's
                     # message with their reply. `read`, `flagged`, and
                     # `discarded` are per-recipient state so remain open.
+                    #
+                    # 2026-09-09 (Jeremy — post-incident): T-131/M-6388 got
+                    # edited despite the guard. Root cause: original guard
+                    # gated on `if _hdr_session and ...`, so an agent that
+                    # OMITTED X-Amux-Session (buggy CLI codepath, direct
+                    # curl without header, etc.) skipped the check entirely
+                    # and passed through as if they were Jeremy. Fixed
+                    # below: content edits require EITHER the dashboard
+                    # UI token (X-Amux-UI-Token = Jeremy) OR a header
+                    # matching from_session. A missing header from a
+                    # container-IP request is now REJECTED, not silently
+                    # accepted.
                     _hdr_session = (self.headers.get("X-Amux-Session") or "").strip()
                     _content_keys = {"body", "blocking"}
-                    if _hdr_session and (_content_keys & set(bj.keys())):
+                    _wants_content_edit = bool(_content_keys & set(bj.keys()))
+                    if _wants_content_edit:
+                        _is_jeremy = _session_destructive_allowed(self.headers)
                         _msg_from = (msg_row["from_session"] or "").strip()
-                        if _msg_from != _hdr_session:
-                            _msg_from_disp = _msg_from or "Jeremy"
-                            return self._json({
-                                "error": "cannot edit message content — not the sender",
-                                "hint": (
-                                    f"You are '{_hdr_session}' but message {mid} "
-                                    f"was sent by '{_msg_from_disp}'. Only the "
-                                    f"original sender may PATCH `body` or "
-                                    f"`blocking`. You can still mark it "
-                                    f"`read`/`flagged`/`discarded` (per-recipient "
-                                    f"state). To reply, POST a NEW message "
-                                    f"(`amux threads reply {mid} \"...\"`)."
-                                ),
-                                "message_sender": _msg_from_disp,
-                                "caller": _hdr_session,
-                                "attempted_content_keys": sorted(_content_keys & set(bj.keys())),
-                            }, 403)
+                        _msg_from_disp = _msg_from or "Jeremy"
+                        # Jeremy (dashboard UI token) can always edit.
+                        # Otherwise the header MUST be set and MUST equal
+                        # the message's from_session.
+                        if not _is_jeremy:
+                            if not _hdr_session:
+                                return self._json({
+                                    "error": "cannot edit message content — missing X-Amux-Session header",
+                                    "hint": (
+                                        f"Message {mid} content edits require "
+                                        f"X-Amux-Session identifying you as the "
+                                        f"sender ('{_msg_from_disp}'), or the "
+                                        f"dashboard UI token. Unauthenticated "
+                                        f"container requests are rejected to "
+                                        f"prevent spoofing. If you want to reply, "
+                                        f"POST a NEW message: "
+                                        f"`amux threads reply {mid} \"...\"`."
+                                    ),
+                                    "attempted_content_keys": sorted(_content_keys & set(bj.keys())),
+                                }, 403)
+                            if _msg_from != _hdr_session:
+                                return self._json({
+                                    "error": "cannot edit message content — not the sender",
+                                    "hint": (
+                                        f"You are '{_hdr_session}' but message "
+                                        f"{mid} was sent by '{_msg_from_disp}'. "
+                                        f"Only the original sender may PATCH "
+                                        f"`body` or `blocking`. You can still "
+                                        f"mark it `read`/`flagged`/`discarded` "
+                                        f"(per-recipient state). To reply, POST "
+                                        f"a NEW message "
+                                        f"(`amux threads reply {mid} \"...\"`)."
+                                    ),
+                                    "message_sender": _msg_from_disp,
+                                    "caller": _hdr_session,
+                                    "attempted_content_keys": sorted(_content_keys & set(bj.keys())),
+                                }, 403)
                     if "read" in bj:
                         db.execute("UPDATE messages SET read = ?, updated = ? WHERE id = ?",
                                    (1 if bj["read"] else 0, now, mid))
