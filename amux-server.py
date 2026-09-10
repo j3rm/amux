@@ -18361,9 +18361,20 @@ setTimeout(function(){var f=document.getElementById('js-fallback');if(f&&f.style
 <!-- Threads view (Phase 1 of successor to Inbox). Every entry is a message
      inside a thread; per-message Reply button targets a specific message. -->
 <style>
+  /* Desktop: default. Header is one flex row; title flexes/ellipsizes. */
+  #threads-list .t-header { display: flex; align-items: center; gap: 10px; }
+  #threads-list .t-header-badges { flex: 1; min-width: 0; }
+  #threads-list .t-row-title-stacked { display: none; }
   @media (max-width: 600px) {
     #threads-list .t-row-time { display: none; }
     #threads-list .t-row-title { font-size: 0.95rem; }
+    /* Mobile: header stacks. Inline title hides, stacked title shows on its
+       own row underneath the badges + meta chips at full card width so long
+       thread titles don't get ...-truncated to ~7 chars (Jeremy 2026-09-10). */
+    #threads-list .t-header { display: block; }
+    #threads-list .t-header-badges { flex: none; }
+    #threads-list .t-row-title-inline { display: none !important; }
+    #threads-list .t-row-title-stacked { display: block !important; }
   }
 </style>
 <div id="threads-view" style="display:none;flex-direction:column;overflow:auto;padding:12px 16px;">
@@ -30468,17 +30479,26 @@ function _tRenderThread(t) {
   // thin. Thread header is heavier (larger title, more padding) so the
   // thread/message hierarchy reads at a glance.
   const rowStyle = `border:1px solid ${tint.border};border-left:4px solid ${tint.pill};background:${tint.bg};border-radius:8px;margin:10px 0;`;
+  // Header layout: desktop keeps everything on ONE row (title flexes between
+  // T-id and the trailing meta chips, ellipsizes when it runs out). Mobile
+  // (≤700px) drops the title to its OWN row directly below the badges/meta
+  // chips so it can occupy the full card width instead of getting `...`
+  // truncated at ~7 chars behind NEEDS YOU + BLOCKING + T-N (Jeremy 2026-09-10).
+  // The class `t-header-mobile` toggles the wrap via CSS.
   let html = `<div class="t-thread" style="${rowStyle}">
-    <div style="display:flex;align-items:center;gap:10px;padding:12px 14px;cursor:pointer;" onclick="_tToggle('${tidEsc}')">
-      <span style="font-size:1.15rem;color:${starColor};cursor:pointer;user-select:none;" title="${t.starred ? 'Unstar' : 'Star (keep at top)'}" onclick="event.stopPropagation();_tStarToggle('${tidEsc}', ${t.starred ? 'false' : 'true'})">${star}</span>
-      <span style="width:12px;color:var(--muted);font-size:0.9rem;">${chev}</span>
-      <span style="background:${tint.pill};color:#fff;padding:2px 8px;border-radius:4px;font-size:0.65rem;font-weight:700;text-transform:uppercase;letter-spacing:0.04em;white-space:nowrap;">${tint.label}</span>
-      ${anyBlocking ? '<span style="background:#e11;color:#fff;padding:2px 8px;border-radius:4px;font-size:0.65rem;font-weight:700;">BLOCKING</span>' : ''}
-      <span style="font-weight:700;font-size:0.9rem;color:var(--fg);white-space:nowrap;letter-spacing:0.02em;">${tidEsc}</span>
-      <span class="t-row-title" style="flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:1rem;font-weight:600;color:var(--fg);">${_tEsc(t.title)}</span>
-      <button style="${_TICON_BTN_STYLE}opacity:0.55;" onclick="event.stopPropagation();_tRenameThread('${tidEsc}')" title="Rename thread">✎</button>
-      <span style="font-size:0.7rem;color:var(--muted);white-space:nowrap;">${t.messages.length} msg${t.messages.length===1?'':'s'}</span>
-      <span class="t-row-time" style="font-size:0.7rem;color:var(--muted);white-space:nowrap;">${_tFmtTime(newestUpdated)}</span>
+    <div class="t-header t-header-mobile" style="padding:12px 14px;cursor:pointer;" onclick="_tToggle('${tidEsc}')">
+      <div class="t-header-badges" style="display:flex;align-items:center;gap:10px;min-width:0;">
+        <span style="font-size:1.15rem;color:${starColor};cursor:pointer;user-select:none;flex-shrink:0;" title="${t.starred ? 'Unstar' : 'Star (keep at top)'}" onclick="event.stopPropagation();_tStarToggle('${tidEsc}', ${t.starred ? 'false' : 'true'})">${star}</span>
+        <span style="width:12px;color:var(--muted);font-size:0.9rem;flex-shrink:0;">${chev}</span>
+        <span style="background:${tint.pill};color:#fff;padding:2px 8px;border-radius:4px;font-size:0.65rem;font-weight:700;text-transform:uppercase;letter-spacing:0.04em;white-space:nowrap;flex-shrink:0;">${tint.label}</span>
+        ${anyBlocking ? '<span style="background:#e11;color:#fff;padding:2px 8px;border-radius:4px;font-size:0.65rem;font-weight:700;flex-shrink:0;">BLOCKING</span>' : ''}
+        <span style="font-weight:700;font-size:0.9rem;color:var(--fg);white-space:nowrap;letter-spacing:0.02em;flex-shrink:0;">${tidEsc}</span>
+        <span class="t-row-title t-row-title-inline" style="flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:1rem;font-weight:600;color:var(--fg);">${_tEsc(t.title)}</span>
+        <button style="${_TICON_BTN_STYLE}opacity:0.55;flex-shrink:0;" onclick="event.stopPropagation();_tRenameThread('${tidEsc}')" title="Rename thread">✎</button>
+        <span style="font-size:0.7rem;color:var(--muted);white-space:nowrap;flex-shrink:0;">${t.messages.length} msg${t.messages.length===1?'':'s'}</span>
+        <span class="t-row-time" style="font-size:0.7rem;color:var(--muted);white-space:nowrap;flex-shrink:0;">${_tFmtTime(newestUpdated)}</span>
+      </div>
+      <div class="t-row-title-stacked" style="display:none;font-size:1rem;font-weight:600;color:var(--fg);margin-top:6px;line-height:1.3;word-wrap:break-word;">${_tEsc(t.title)}</div>
     </div>`;
   if (expanded) html += _tRenderMessages(t);
   html += '</div>';
