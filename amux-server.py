@@ -6859,7 +6859,7 @@ _ITEM_ID_RE = re.compile(r'\b([A-Z][A-Z0-9]{0,8}-\d+)\b')
 
 
 def _stale_doing_awaiting_external(desc: str, own_session: str, db,
-                                   now_ts: int = 0):
+                                   now_ts: int = 0, title: str = ""):
     """Return (kind, ref_id, ref_who, extra) where kind is one of:
       - "board"         : desc refs an open item in a DIFFERENT session (exempt)
       - "thread-active" : desc refs a thread; we sent last non-discarded
@@ -6878,19 +6878,51 @@ def _stale_doing_awaiting_external(desc: str, own_session: str, db,
     "your escalation went cold" instead of a generic stale nudge, which
     is actionable info (re-ping the human, or close the item).
 
+    2026-09-10 followup (Wattco channel — near-miss on CW-440): agents
+    naturally write M-#### (the id CLI hands back on `amux threads reply`)
+    instead of T-###, so the desc-scan missed the exemption for
+    thread-generated tasks whose title IS 'Thread T-###: ...'. Two small
+    additions close it:
+      - Scan the TITLE in addition to the desc (option 2 — "Thread T-###:"
+        titles now catch automatically, nearly free).
+      - Resolve any M-#### in desc to its parent thread id via a single
+        DB lookup (option 1 — more general, catches "Replied M-6412"
+        shape without asking agents to change habits).
+
     Cold cap tunable via AMUX_STALE_DOING_THREAD_COLD_DAYS (default 14).
 
     Not adding a bare BLOCKED-EXTERNAL badge — real signal beats a
     convention nobody maintains, and cheap-to-fake markers teach the
     wrong incentive.
     """
-    if not desc:
+    if not desc and not title:
         return (None, None, None, None)
-    ids = set(_ITEM_ID_RE.findall(desc))
+    # Scan BOTH title and desc for id references (Wattco 2026-09-10).
+    scan_text = (title or "") + "\n" + (desc or "")
+    ids = set(_ITEM_ID_RE.findall(scan_text))
     if not ids:
         return (None, None, None, None)
     thread_ids = {i for i in ids if i.startswith("T-")}
-    board_ids = ids - thread_ids
+    board_ids = ids - thread_ids - {i for i in ids if i.startswith("M-")}
+    message_ids = {i for i in ids if i.startswith("M-")}
+    # Resolve M-#### → parent thread id (Wattco 2026-09-10 near-miss on
+    # CW-440). CLI hands back M-#### on `amux threads reply`, so agents
+    # naturally write the message id, not the thread id. One SELECT
+    # picks up the mapping without asking anyone to change habits.
+    if message_ids:
+        placeholders = ",".join("?" for _ in message_ids)
+        try:
+            rows = db.execute(
+                f"SELECT thread_id FROM messages "
+                f"WHERE id IN ({placeholders}) AND status != 'discarded'",
+                list(message_ids),
+            ).fetchall()
+            for r in rows:
+                tid = (r["thread_id"] or "").strip()
+                if tid:
+                    thread_ids.add(tid)
+        except Exception:
+            pass
     # (a) Board-item ref → open in a different session?
     if board_ids:
         placeholders = ",".join("?" for _ in board_ids)
@@ -7175,7 +7207,8 @@ def _sweep_stale_doing():
                 _cold_silent_days = 0
                 try:
                     _kind, _ref_id, _ref_who, _extra = _stale_doing_awaiting_external(
-                        row["desc"] or "", _sess, db, now_ts=_now)
+                        row["desc"] or "", _sess, db,
+                        now_ts=_now, title=row["title"] or "")
                     if _kind in ("board", "thread-active"):
                         slog(f"[stale-doing] {row['id']} {_sess} — "
                              f"exempt ({_kind}: {_ref_id}@{_ref_who})")
