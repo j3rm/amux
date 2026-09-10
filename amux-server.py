@@ -13051,9 +13051,14 @@ def send_text(name: str, text: str) -> tuple[bool, str]:
                     check=True, capture_output=True, timeout=10,
                 )
             # Give readline time to process all queued characters before Enter arrives.
-            # 20ms is ample for a local PTY; paste-buffer (long text) is atomic so
-            # needs even less, but we use the same value for simplicity.
-            time.sleep(0.02)
+            # Was 20ms — too aggressive for docker send paths under load. Bumped
+            # to 150ms 2026-09-10 (RTG-Research substrate report, 3rd occurrence):
+            # RA-1554 sat 12h+ unclaimed because the injector delivered text but
+            # the Enter arrived before Claude's composer had absorbed it, so the
+            # keystroke was swallowed as an in-composer newline. Local PTYs also
+            # get 150ms — the extra 130ms is imperceptible next to a Claude
+            # turn, and it removes a whole class of race.
+            time.sleep(0.15)
             subprocess.run(
                 [*_tmux_prefix(name), "send-keys", "-t", t, "Enter"],
                 check=True, capture_output=True, timeout=5,
@@ -13071,6 +13076,47 @@ def send_text(name: str, text: str) -> tuple[bool, str]:
                     [*_tmux_prefix(name), "send-keys", "-t", t, "Enter"],
                     capture_output=True, timeout=5,
                 )
+            # Submission-verify (RTG-Research 2026-09-10): after Enter, re-capture
+            # the pane and check whether the composer still shows a leading
+            # fragment of the text we just sent. If it does, Enter got swallowed
+            # — send a fresh one. Two retries with growing sleeps; on the third
+            # miss give up and log. Skips the resume picker and shell prompt
+            # states (already handled above) and the feedback modal.
+            _verify_probe = (text or "").strip()[:32]
+            if _verify_probe:
+                for _attempt, _pause in ((1, 0.35), (2, 0.6), (3, 0.9)):
+                    try:
+                        time.sleep(_pause)
+                        _cap = subprocess.run(
+                            [*_tmux_prefix(name), "capture-pane",
+                             "-t", tmux_target(name), "-p"],
+                            capture_output=True, text=True, timeout=5,
+                        )
+                        _out = _cap.stdout or ""
+                        # If the probe fragment still appears in the LAST 12
+                        # lines of the pane (i.e. still in the composer, not
+                        # already scrolled up as sent history), Enter didn't
+                        # take. Match on stripped versions to tolerate ANSI
+                        # decoration and prompt glyphs.
+                        _tail = "\n".join(_out.splitlines()[-12:])
+                        if _verify_probe not in _tail:
+                            break  # submitted
+                        # Still sitting in the composer — re-send Enter.
+                        subprocess.run(
+                            [*_tmux_prefix(name), "send-keys",
+                             "-t", t, "Enter"],
+                            capture_output=True, timeout=5,
+                        )
+                        slog(f"[send_text] {name}: text unsent after Enter — "
+                             f"retry {_attempt}")
+                    except Exception as _ve:
+                        slog(f"[send_text] {name}: verify probe failed: {_ve}")
+                        break
+                else:
+                    # All 3 retries exhausted with the fragment still visible.
+                    slog(f"[send_text] {name}: text still sitting in composer "
+                         f"after 3 Enter retries — surfacing failure to caller")
+                    return False, "text delivered but Enter swallowed 3× — manual submit needed"
             return True, "sent"
         except subprocess.CalledProcessError as e:
             return False, e.stderr.decode(errors="replace")
