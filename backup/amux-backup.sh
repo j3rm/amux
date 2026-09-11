@@ -120,6 +120,66 @@ if [ -d "${AMUX_DIR}/tls" ]; then
   rsync -a "${AMUX_DIR}/tls/" "${BACKUP_DIR}/config/tls/"
 fi
 
+# ── Step 5b: Jeremy host-side global CLAUDE.md ────────────────────────────────
+# Small file, high-signal (Jeremy's rules for his own sessions across all
+# projects). Recreating from memory is painful — cheap to snapshot.
+if [ -f "${HOME}/.claude/CLAUDE.md" ]; then
+  mkdir -p "${BACKUP_DIR}/config"
+  cp "${HOME}/.claude/CLAUDE.md" "${BACKUP_DIR}/config/host-CLAUDE.md"
+fi
+
+# ── Step 5c: Org container specs + per-org secrets ────────────────────────────
+#
+# ~/.amux/orgs/<Org>.yml         — container spec (mounts, sessions, image)
+# ~/.amux/orgs/<Org>/secrets/    — SSH keys (GitHub, codegraph), gitconfig
+#
+# Without these, restore-verify sees the sessions but ensure_org_container
+# can't rebuild any container, and even if it could, containers would boot
+# with no ability to push/pull/reach codegraph. THIS is the biggest DR gap
+# in earlier versions of this script (Jeremy 2026-09-11 audit).
+#
+# secrets/ contains PRIVATE keys — backup repo MUST be private on GitHub.
+# The rsync mirrors only the specs and secrets, not the multi-GB
+# per-container HOMEs (those get rebuilt on first login).
+
+if [ -d "${AMUX_DIR}/orgs" ]; then
+  mkdir -p "${BACKUP_DIR}/orgs"
+  # Top-level *.yml org specs
+  rsync -a --delete \
+    --include='*.yml' \
+    --exclude='*' \
+    "${AMUX_DIR}/orgs/" "${BACKUP_DIR}/orgs/"
+  # Per-org secrets/ subdirs (SSH + gitconfig, not the multi-GB home/)
+  for org_dir in "${AMUX_DIR}/orgs"/*/; do
+    [ -d "${org_dir}secrets" ] || continue
+    org_name=$(basename "${org_dir}")
+    mkdir -p "${BACKUP_DIR}/orgs/${org_name}"
+    rsync -a --delete "${org_dir}secrets/" "${BACKUP_DIR}/orgs/${org_name}/secrets/"
+  done
+  ORG_SPEC_COUNT=$(ls "${AMUX_DIR}/orgs"/*.yml 2>/dev/null | wc -l)
+  ORG_SECRET_COUNT=$(find "${BACKUP_DIR}/orgs" -type d -name 'ssh' 2>/dev/null | wc -l)
+  echo "${LOG_PREFIX} Backed up ${ORG_SPEC_COUNT} org specs + ${ORG_SECRET_COUNT} secrets dirs"
+fi
+
+# ── Step 5d: Agent-to-agent channels + shared credentials ─────────────────────
+#
+# ~/.amux/channels/       — JSONL per pair. Small, recoverable from context
+#                           but silently lost without backup — save it.
+# ~/.amux/shared-creds/   — Jeremy-personal Gmail OAuth for Personal-org
+#                           agents. Bind-mounted; needed on first wake.
+
+if [ -d "${AMUX_DIR}/channels" ]; then
+  mkdir -p "${BACKUP_DIR}/channels"
+  rsync -a --delete "${AMUX_DIR}/channels/" "${BACKUP_DIR}/channels/"
+  CHAN_COUNT=$(ls "${AMUX_DIR}/channels/" 2>/dev/null | wc -l)
+  echo "${LOG_PREFIX} Backed up ${CHAN_COUNT} channel history files"
+fi
+
+if [ -d "${AMUX_DIR}/shared-creds" ]; then
+  mkdir -p "${BACKUP_DIR}/config/shared-creds"
+  rsync -a --delete "${AMUX_DIR}/shared-creds/" "${BACKUP_DIR}/config/shared-creds/"
+fi
+
 # ── Step 6: System service files ─────────────────────────────────────────────
 
 mkdir -p "${BACKUP_DIR}/system"
@@ -147,6 +207,17 @@ cat > "${BACKUP_DIR}/README.md" << RESTORE_EOF
 This file is the authoritative guide for restoring AMUX on a new VM. Read it
 completely before starting. The backup repo contains everything needed.
 
+**Jeremy-facing quick recovery notes live in Notion.** Cypra owns that
+document. If you're Jeremy and this VM is gone: open the Notion page
+titled "AMUX — Server Loss Recovery Playbook" for the human-side
+sequence (order of ops, who to contact, credential locations). This
+README is the machine-side deep detail; the Notion page is the "what
+Jeremy actually does" version.
+
+**Any time this backup script or the restore playbook changes, Cypra
+must be asked to update the Notion doc** — see the "Doc-sync
+reminders" note at the end of this file.
+
 ---
 
 ## What this backup contains
@@ -154,14 +225,31 @@ completely before starting. The backup repo contains everything needed.
 | Directory | Contents |
 |---|---|
 | \`sessions/\` | All agent .env configs + .meta.json (conversation UUIDs) |
-| \`database/amux.sql\` | Board items, schedules, notes, history (SQLite dump) |
+| \`database/amux.sql\` | Board items, schedules, threads/messages, channels metadata, all tables (SQLite dump) |
 | \`database/board.json\` | Board items in JSON for quick review |
 | \`database/schedules.json\` | All scheduled tasks |
 | \`notes/\` | Agent shared notes |
+| \`memory/\` | Per-project MEMORY.md indexes + rule/feedback topic files |
+| \`channels/\` | Agent-to-agent channel history (JSONL per pair) |
+| \`orgs/*.yml\` | Container specs (mounts, sessions, image) for every org |
+| \`orgs/<Org>/secrets/\` | Per-org SSH keys (GitHub, codegraph) + gitconfig |
 | \`config/server.env\` | Anthropic API key, Pushover, AMUX_URL — **keep private** |
 | \`config/auth_token\` | Dashboard auth token |
 | \`config/tls/\` | TLS certificate and private key |
+| \`config/shared-creds/\` | Jeremy-personal Gmail OAuth (Personal-org agents) |
+| \`config/host-CLAUDE.md\` | Jeremy's host-side global rules for his own sessions |
 | \`system/\` | Systemd service files + startup script |
+
+## What this backup does NOT contain
+
+Deliberate exclusions (large, regenerable, or per-run):
+
+- \`~/.claude/projects/*.jsonl\` — conversation history (~1GB, changes constantly). Agents start fresh sessions after restore.
+- \`~/.amux/orgs/*/home/\` — per-container Claude Code cache, npm cache, dotfiles (~16GB). Each container re-\`/login\`s on first wake.
+- \`~/.amux/logs/\` — server + session logs (~250MB, rotate anyway).
+- \`~/.amux/uploads/\` — Pushover screenshots + thread attachments. Referenced by @-mentions but not load-bearing.
+- \`~/.amux/skills/\` — synced to \`git@github.com:j3rm/agent-skills\` separately by SCHED-219; restore fetches from there.
+- \`/mnt/gitdata/*/*\` — every repo lives on its own GitHub. Restore step 6 clones each org's repos back.
 
 ---
 
@@ -194,7 +282,8 @@ cd ~/amux-backup-restore
 ### 2. Restore ~/.amux structure
 
 \`\`\`bash
-mkdir -p ~/.amux/sessions ~/.amux/notes ~/.amux/tls
+mkdir -p ~/.amux/{sessions,notes,tls,orgs,channels,shared-creds}
+mkdir -p ~/.claude
 
 # Session configs (all agents)
 cp sessions/*.env    ~/.amux/sessions/
@@ -209,10 +298,34 @@ cp config/defaults.env ~/.amux/defaults.env 2>/dev/null || true
 cp config/tls/cert.pem ~/.amux/tls/
 cp config/tls/key.pem  ~/.amux/tls/
 
-# Notes
-rsync -a notes/ ~/.amux/notes/
+# Notes + memory
+rsync -a notes/  ~/.amux/notes/
+rsync -a memory/ ~/.claude/projects/  # per-project MEMORY.md indexes
 
+# Channels (agent-to-agent history)
+rsync -a channels/ ~/.amux/channels/
+
+# Jeremy-personal Gmail OAuth
+[ -d config/shared-creds ] && rsync -a config/shared-creds/ ~/.amux/shared-creds/
+
+# Jeremy's host global CLAUDE.md
+[ -f config/host-CLAUDE.md ] && cp config/host-CLAUDE.md ~/.claude/CLAUDE.md
+
+# Org specs + per-org secrets (CRITICAL: without secrets, no container
+# can push/pull to GitHub or reach codegraph)
+rsync -a orgs/*.yml ~/.amux/orgs/ 2>/dev/null || true
+for org_dir in orgs/*/; do
+  [ -d "\${org_dir}secrets" ] || continue
+  org_name=\$(basename "\${org_dir}")
+  mkdir -p ~/.amux/orgs/\${org_name}/secrets
+  rsync -a "\${org_dir}secrets/" ~/.amux/orgs/\${org_name}/secrets/
+done
+
+# Perms — MUST be tight or SSH refuses to use the keys
 chmod 600 ~/.amux/server.env ~/.amux/auth_token ~/.amux/tls/key.pem
+find ~/.amux/orgs -name 'ssh' -type d -exec chmod 700 {} \\;
+find ~/.amux/orgs -path '*/ssh/*' -type f ! -name '*.pub' -exec chmod 600 {} \\;
+find ~/.amux/orgs -path '*/ssh/*.pub' -type f -exec chmod 644 {} \\;
 \`\`\`
 
 ### 3. Restore the database
@@ -315,13 +428,56 @@ And these had significant unpushed commits:
 
 ---
 
+## After restore — verify with restore-verify.sh
+
+The amux repo ships a machine-readable verifier at
+\`/mnt/gitdata/amux/backup/restore-verify.sh\`. Run it after step 7 to
+get a punch list of what's missing before waking any sessions:
+
+\`\`\`bash
+bash /mnt/gitdata/amux/backup/restore-verify.sh
+\`\`\`
+
+It checks: DB tables populated, session env-files present, per-org
+SSH keys have correct perms + can reach GitHub, TLS cert not expired,
+org container specs match session list, server.env has all required
+vars. Non-zero exit + coloured punch list = fix before proceeding.
+
 ## After restore — tell the restore agent
 
 Once AMUX is up and you have a Claude session running, send it this:
 
-> "You are being restored from backup. Read README.md in the amux-backup repo.
-> Verify all sessions are configured correctly, check the board for pending items,
-> and audit which agent repos are missing or have unpushed work."
+> "You are being restored from backup. Read README.md in the amux-backup
+> repo. Run \`bash /mnt/gitdata/amux/backup/restore-verify.sh\` and
+> resolve every item it flags. Then verify all sessions are configured
+> correctly, check the board for pending items, and audit which agent
+> repos are missing or have unpushed work."
+
+---
+
+## Doc-sync reminders — READ IF ANYTHING BELOW CHANGES
+
+The Jeremy-facing recovery playbook lives in **Notion** (Cypra owns
+that document). It's the "what Jeremy does" version — human-side
+sequence, order of ops, credential locations, who to contact. The
+machine-side deep detail is above; the Notion page is the entry point.
+
+**Any change to these needs a Notion update ping to Cypra:**
+
+- What this backup includes / excludes (\`## What this backup contains\`
+  and \`## What this backup does NOT contain\` sections above).
+- Restore steps 1-8.
+- The Prerequisites section (Ubuntu version, packages, npm globals).
+- Systemd unit names or paths.
+- The known-gaps list (missing repo remotes, unpushed work).
+- Off-site backup destinations.
+
+The wiki page at \`/mnt/gitdata/amux/wiki/Server-Loss-Recovery.md\`
+holds the reference to the Notion page and a change-log of when
+substantive updates were pushed to Cypra. Agents editing this backup
+script or the restore playbook should update that wiki entry AND file
+a board item to Cypra requesting the Notion update. Do not assume the
+Notion page updates itself.
 
 RESTORE_EOF
 

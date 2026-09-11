@@ -19,6 +19,7 @@ Single-file project: everything lives in `amux-server.py` (Python server + inlin
 - **Commit after every completed task.** When you finish a piece of work (bug fix, feature, refactor), immediately `git add amux-server.py && git commit` with a concise message. Don't batch multiple tasks into one commit.
 - The server auto-restarts on file save (watches its own mtime), so changes are live immediately.
 - Always verify Python syntax after edits: `python3 -c "import ast; ast.parse(open('amux-server.py').read())"`
+- **If you edit `backup/amux-backup.sh`, `backup/restore-verify.sh`, or anything else that changes the server-loss recovery contract, you MUST file a board item to Cypra requesting a Notion update.** The Jeremy-facing recovery playbook lives in Notion (Cypra owns it) — it doesn't update itself. See `wiki/Server-Loss-Recovery.md` for the trigger list, the board-item template, and the change log to append a row to. Substantive backup-code changes without a matching Cypra ping = silent drift between what agents will restore and what Jeremy expects during a real recovery.
 
 ## Deploy
 
