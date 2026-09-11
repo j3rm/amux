@@ -70,7 +70,8 @@ can see the drift between the Notion page and the current state.
 
 | Date | Commit | What changed | Cypra board item |
 |---|---|---|---|
-| 2026-09-11 | (this commit) | Initial round-trip: backup script extended (org specs, per-org secrets, channels, shared-creds, host CLAUDE.md); restore-verify.sh added; this wiki page created; amux/CLAUDE.md contract added. First Notion page requested. | CYPRA-154 |
+| 2026-09-11 | ae2839c4 | Initial round-trip: backup script extended (org specs, per-org secrets, channels, shared-creds, host CLAUDE.md); restore-verify.sh added; this wiki page created; amux/CLAUDE.md contract added. First Notion page requested. | CYPRA-154 |
+| 2026-09-11 | fca238ac | restore-verify.sh header exit-code comment corrected — reader-reported (Cypra AH-106). Behavior unchanged; comment now accurately says exit 0 on warnings-only, exit 1 only on FAILURES. Cypra caught while building Notion page from the script directly, no separate CYPRA-* needed (she incorporates the fix live). | AH-106 (Cypra→amux-helper) |
 
 Add a row here every time you ping Cypra. Cypra can also cross-check by
 looking at the last row's date vs the last commit that touched
