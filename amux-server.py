@@ -13225,47 +13225,42 @@ def send_text(name: str, text: str) -> tuple[bool, str]:
                     [*_tmux_prefix(name), "send-keys", "-t", t, "Enter"],
                     capture_output=True, timeout=5,
                 )
-            # Submission-verify (RTG-Research 2026-09-10): after Enter, re-capture
-            # the pane and check whether the composer still shows a leading
-            # fragment of the text we just sent. If it does, Enter got swallowed
-            # — send a fresh one. Two retries with growing sleeps; on the third
-            # miss give up and log. Skips the resume picker and shell prompt
-            # states (already handled above) and the feedback modal.
-            _verify_probe = (text or "").strip()[:32]
-            if _verify_probe:
-                for _attempt, _pause in ((1, 0.35), (2, 0.6), (3, 0.9)):
-                    try:
-                        time.sleep(_pause)
-                        _cap = subprocess.run(
-                            [*_tmux_prefix(name), "capture-pane",
-                             "-t", tmux_target(name), "-p"],
-                            capture_output=True, text=True, timeout=5,
-                        )
-                        _out = _cap.stdout or ""
-                        # If the probe fragment still appears in the LAST 12
-                        # lines of the pane (i.e. still in the composer, not
-                        # already scrolled up as sent history), Enter didn't
-                        # take. Match on stripped versions to tolerate ANSI
-                        # decoration and prompt glyphs.
-                        _tail = "\n".join(_out.splitlines()[-12:])
-                        if _verify_probe not in _tail:
-                            break  # submitted
-                        # Still sitting in the composer — re-send Enter.
-                        subprocess.run(
-                            [*_tmux_prefix(name), "send-keys",
-                             "-t", t, "Enter"],
-                            capture_output=True, timeout=5,
-                        )
-                        slog(f"[send_text] {name}: text unsent after Enter — "
-                             f"retry {_attempt}")
-                    except Exception as _ve:
-                        slog(f"[send_text] {name}: verify probe failed: {_ve}")
-                        break
-                else:
-                    # All 3 retries exhausted with the fragment still visible.
-                    slog(f"[send_text] {name}: text still sitting in composer "
-                         f"after 3 Enter retries — surfacing failure to caller")
-                    return False, "text delivered but Enter swallowed 3× — manual submit needed"
+            # Submission-verify DISABLED 2026-09-11 (AH-105 Cypra report).
+            #
+            # History:
+            #   4cec44f3 (2026-09-10) — added verify-retry that scanned the
+            #     last 12 pane lines for the sent probe and retried Enter
+            #     if found. Motivation: an earlier RTG-Research substrate
+            #     report about swallowed Enter on docker containers.
+            #   ee63f9f4 (2026-09-11) — patched notify callers to not
+            #     reset their idempotency flag on "Enter swallowed"
+            #     failure (the amplifier that caused RA-1558 tight loop).
+            #
+            # False-positive discovered via AH-105 (Cypra 2026-09-11):
+            #   The verify was reporting `delivered:false` on messages
+            #   that had ACTUALLY delivered — Cypra→CD-AirCom, CD-NPP.
+            #   Two root causes stacked:
+            #   (a) Claude Code re-renders submitted messages as bubbles
+            #       in the transcript, so the probe would match on a
+            #       SUCCESSFULLY-submitted message that had scrolled into
+            #       the last 12 lines.
+            #   (b) The Claude Code composer glyph is `❯` + U+00A0 (NBSP),
+            #       NOT `❯` + regular space. My composer-line detection
+            #       missed this and fell into the "assume swallowed"
+            #       branch on every attempt.
+            #
+            # We can't reliably distinguish "in composer" vs "just-
+            # rendered bubble" from a plain pane capture without deeper
+            # Claude-Code-internal signals. The verify creates more
+            # problems (false failures propagating to callers) than it
+            # solves. Falling back to trusting the two-step send
+            # (text -> 150ms -> Enter) which the pre-verify system did
+            # for many months without measurable loss.
+            #
+            # If the original swallowed-Enter class returns as a real
+            # problem, revisit — likely wants a completely different
+            # signal (e.g. observed post-Enter Claude UI state change,
+            # or a per-recipient send-confirmation channel).
             return True, "sent"
         except subprocess.CalledProcessError as e:
             return False, e.stderr.decode(errors="replace")
