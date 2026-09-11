@@ -9317,6 +9317,33 @@ def _extract_verdict(desc: str) -> str:
     return matches[-1].upper() if matches else ""
 
 
+# Ember-Research 2026-09-11 (ER-508): auditors will emit
+# `AUDITED-SHA: <full 40-char sha>` in every verdict desc so C4 can
+# detect re-take races where two audits closed on DIFFERENT commits.
+# Missing line → back-compat, C4 falls through to prior behavior.
+_AUDITED_SHA_RE = re.compile(
+    r'^[ \t]*AUDITED[-_ ]SHA\s*:\s*([0-9a-f]{7,40})\b',
+    re.IGNORECASE | re.MULTILINE,
+)
+
+
+def _extract_audited_sha(desc: str) -> str:
+    """Return the git SHA an auditor recorded via `AUDITED-SHA: <sha>`, or ''.
+    Marker is at start-of-line to avoid paragraph-embedded false positives.
+    Last match wins (mirrors _extract_verdict's rationale).
+
+    Accepts 7-40 hex chars — Ember-Research's convention is full 40-char
+    SHAs but abbreviated forms are compared as-is; C4 compares them
+    literally, so mixing lengths only means the mismatch check might
+    miss a difference (fail-safe: no false positives, only false
+    negatives). Ember's org convention makes full SHA the default.
+    """
+    if not desc:
+        return ""
+    matches = _AUDITED_SHA_RE.findall(desc)
+    return matches[-1].lower() if matches else ""
+
+
 def _extract_target_id(text: str, exclude_id: str = "", title_text: str = "") -> str:
     """Return the first work-item id found in `text`, or ''.
 
@@ -10072,6 +10099,59 @@ def _auto_verify_from_audit_pair(audit_item: dict, db) -> dict | None:
         slog(f"[C4] {target_id} single-audit ({surviving_id}={surviving_verdict}, "
              f"{discarded_id}=VOID) → {new_status}")
         return result
+    # ── AUDITED-SHA mismatch guard (Ember-Research substrate report,
+    # 2026-09-11 — ER-508 + EAAC-45 evidence). Every EmberCRM audit desc
+    # now emits a machine-readable `AUDITED-SHA: <full sha>` line so C4
+    # can detect the race where two audits close within seconds of each
+    # other but audited DIFFERENT commits (worker pushed a fix between
+    # Opus48's read and Codex's read). Prior behavior treated "both
+    # closed" as "both audited same code" and flipped verified. Fix:
+    # when BOTH descs carry AUDITED-SHA and they differ, park the target
+    # in review, append a mismatch note naming both shas, and notify
+    # the org's Research session. Missing lines = back-compat, current
+    # behavior unchanged. Same check belongs before the single-audit
+    # apply below (trivial extension: if the surviving audit's SHA
+    # doesn't match the current git tip we can't detect from here, but
+    # if any legacy code adds another SHA source we'll catch it).
+    _sha_a, _sha_b = _extract_audited_sha(audit_item.get("desc") or ""), \
+                     _extract_audited_sha(other["desc"] or "")
+    if (_sha_a and _sha_b and _sha_a != _sha_b
+            and not my_discarded and not other_discarded):
+        _mismatch_note = (
+            f"\n\n[C4 sha-mismatch {stamp}: audit pair closed on DIFFERENT "
+            f"commits — {aid} audited {_sha_a[:12]}, {other['id']} audited "
+            f"{_sha_b[:12]}. Not flipping verified; a re-take race intervened "
+            f"between the two audits. Needs a delta re-audit against the newer "
+            f"commit before this can proceed.]"
+        )
+        new_desc = (target["desc"] or "") + _mismatch_note
+        db.execute(
+            "UPDATE issues SET desc = ?, updated = ? WHERE id = ?",
+            (new_desc, now, target_id),
+        )
+        db.commit()
+        _board_changed()
+        _org = (target["org"] if "org" in target.keys() else None) or _session_org(my_session)
+        _master = f"{_org}-Research" if _org else None
+        if _master and _is_real_session(_master):
+            def _run():
+                try:
+                    send_text(_master, (
+                        f"C4 SHA-MISMATCH: {target_id} — {(target['title'] or '')[:80]}. "
+                        f"Audit pair closed on different commits: "
+                        f"{aid}={_sha_a[:12]} vs {other['id']}={_sha_b[:12]}. "
+                        f"Target held in review; a delta re-audit against the "
+                        f"newer commit is needed before verified can flip. "
+                        f"Check `amux board show {target_id}` for both audit reports."
+                    ))
+                except Exception:
+                    pass
+            threading.Thread(target=_run, daemon=True).start()
+            slog(f"[C4] {target_id} SHA-MISMATCH ({aid}={_sha_a[:12]}, "
+                 f"{other['id']}={_sha_b[:12]}) — notified {_master}, held in review")
+        return {"action": "held", "audits": [aid, other["id"]],
+                "shas": [_sha_a, _sha_b], "target": target_id,
+                "reason": "sha-mismatch"}
     # ── Standard pair-complete path (both have verdicts) ──────────────
     accept = {"PASS", "PASS-WITH-WARNINGS"}
     if my_verdict in accept and their_verdict in accept:
