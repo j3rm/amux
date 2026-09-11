@@ -8,8 +8,9 @@
 #   bash /mnt/gitdata/amux/backup/restore-verify.sh
 #
 # Exit code:
-#   0 — every check passed, safe to wake sessions.
-#   1 — one or more items need attention (see the punch list).
+#   0 — no FAILURES. Safe to wake sessions. Warnings may still appear
+#       above and are advisory — review but non-blocking.
+#   1 — at least one FAILURE. Fix before waking sessions.
 #
 # Cypra-owned Jeremy-facing recovery playbook lives in Notion. See
 # wiki/Server-Loss-Recovery.md for the pointer + change log.
