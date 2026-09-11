@@ -6581,6 +6581,36 @@ def _pickup_next_board_task(session_name: str):
         print(f"[board] pickup failed for {session_name}: {e}", flush=True)
 
 
+def _send_failure_is_retriable(msg: str) -> bool:
+    """True iff a send_text failure returned a message shape indicating the
+    session is unreachable and a future retry could work — i.e. the text
+    was NOT delivered. False for delivered-but-not-submitted cases where the
+    nudge is visibly on the recipient's screen already.
+
+    Callers that reset an idempotency flag (`notified`, `creator_notified`,
+    `stale_notified`) on failure use this to distinguish:
+      - retry-worthy (reset the flag so next PATCH re-attempts): "not running",
+        "auto-wake failed", "session is restarting", "session is in resume picker"
+      - NOT retry-worthy (leave flag set — nudge landed visibly):
+        "text delivered but Enter swallowed 3× — manual submit needed"
+        (from commit 4cec44f3 submit-verify retry), "timeout sending text"
+
+    2026-09-11 (RTG-Research RA-1558 tight loop): commit 4cec44f3's submit-
+    verify retry started returning False on composer-stuck panes. All three
+    notify helpers reset their flags on ANY not-ok, which meant every
+    subsequent PATCH re-fired the notify — 8-second loop on RA-1558.
+    """
+    if not msg:
+        return False
+    m = msg.lower()
+    return any(k in m for k in (
+        "not running",
+        "auto-wake failed",
+        "session is restarting",
+        "resume picker",
+    ))
+
+
 def _notify_session_of_task(session_name: str, item_id: str, title: str):
     """Push a one-line task pickup notice into the target session's tmux pane.
     Idempotent per (session, item_id): we atomically flip the issue's `notified`
@@ -6608,8 +6638,12 @@ def _notify_session_of_task(session_name: str, item_id: str, title: str):
                 f"Run `amux board claim {item_id}` to take it, or check `amux board` for context."
             )
             ok, _msg = send_text(session_name, text)
-            if not ok:
-                # Session not running — clear the flag so a future restart picks it up
+            if not ok and _send_failure_is_retriable(_msg):
+                # Session unreachable — clear the flag so a future restart
+                # picks it up. Do NOT reset for "Enter swallowed" or
+                # "timeout" — the nudge was delivered visibly, resetting
+                # would double-fire on the next PATCH (RA-1558 tight loop
+                # 2026-09-11, RTG-Research report).
                 db.execute("UPDATE issues SET notified=0 WHERE id=?", (item_id,))
                 db.commit()
         except Exception:
@@ -6682,8 +6716,9 @@ def _notify_creator_of_completion(creator_session: str, item_id: str, title: str
                 f"See `amux board show {item_id}` for detail."
             )
             ok, _msg = send_text(creator_session, text)
-            if not ok:
-                # Session not running — clear the flag so a future restart picks it up
+            if not ok and _send_failure_is_retriable(_msg):
+                # See _notify_session_of_task for rationale — only reset
+                # on session-unreachable, not on Enter-swallowed.
                 db.execute("UPDATE issues SET creator_notified=0 WHERE id=?", (item_id,))
                 db.commit()
         except Exception:
@@ -6723,8 +6758,9 @@ def _notify_creator_of_stale(creator_session: str, item_id: str, title: str,
                 f"Check `amux board show {item_id}`."
             )
             ok, _msg = send_text(creator_session, text)
-            if not ok:
-                # Session not running — clear the flag so a future restart picks it up
+            if not ok and _send_failure_is_retriable(_msg):
+                # See _notify_session_of_task for rationale — only reset
+                # on session-unreachable, not on Enter-swallowed.
                 db.execute("UPDATE issues SET stale_notified=0 WHERE id=?", (item_id,))
                 db.commit()
         except Exception:
