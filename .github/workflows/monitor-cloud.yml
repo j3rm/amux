@@ -1,8 +1,14 @@
 name: Monitor cloud.amux.io
 
+# 2026-09-12 (Jeremy): schedule trigger disabled — the job has been
+# failing every hour and spamming email. Investigate WHY the auto-fix
+# is failing (SSH key rotated? cloud VM gone? nginx/gateway config
+# changed?) before uncommenting the schedule. Manual dispatch still
+# available via `workflow_dispatch` for one-off health checks or when
+# actively troubleshooting the auto-fix.
 on:
-  schedule:
-    - cron: '0 * * * *'  # every hour (was every 10 min — $223/month in Actions)
+  # schedule:
+  #   - cron: '0 * * * *'  # every hour (was every 10 min — $223/month in Actions)
   workflow_dispatch:
 
 jobs:
