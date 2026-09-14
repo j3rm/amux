@@ -11515,7 +11515,21 @@ def _compose_memory(global_content: str, session_content: str,
 # side starts with either of these it's server-composed; the OTHER side is
 # the agent-owned portion. _global.md starts with `# Shared Context`; the
 # container preamble starts with `# ─ Container context`.
-_COMPOSED_ANCHORS = ("# Shared Context", "# ─ Container context")
+_COMPOSED_ANCHORS = (
+    "# Shared Context",           # legacy: pre-2026-08-23 _global.md inline
+    "# ─ Container context",      # legacy: preamble was under the marker
+    "# amux platform essentials", # 2026-08-23 refactor: _MEM_CRITICAL_RULES prefix
+)
+# ⚠ THIS TUPLE IS LOAD-BEARING FOR CYPRA-STYLE MEMORY WIPES.
+# _capture_claude_memory_changes uses these to identify which side of the
+# marker is the composed (auto-generated) side vs the agent's own memory.
+# ANY change to _MEM_CRITICAL_RULES's leading H1 OR the container preamble's
+# leading H1 MUST add the new prefix here — otherwise the fallback (take
+# the shorter side as the agent portion) will fire for agents whose
+# personal index is longer than the shared block, and their personal
+# section gets silently replaced by the shared block on the next
+# _write_claude_memory cycle. AH-107 (Cypra 2026-09-14) — memory wiped 4x
+# escalating over 12 days because this tuple missed the 2026-08-23 refactor.
 
 
 def _capture_claude_memory_changes(name: str, work_dir: str):
