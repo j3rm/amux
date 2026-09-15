@@ -9380,6 +9380,38 @@ def _extract_audited_sha(desc: str) -> str:
     return matches[-1].lower() if matches else ""
 
 
+# Ember-Research 2026-09-15 (ER-523): after ER-508's pairwise AUDITED-SHA
+# compare, a new failure mode surfaced — BOTH auditors on the SAME STALE
+# sha. Pair looked consistent, target flipped to verified, but the audit
+# actually certified a stale commit missing its own worst finding
+# (cutover-blocker). The correct oracle is the TARGET'S TIP, not audit-vs-
+# audit. Since the server can't derive a git tip from a board item,
+# workers declare it in their completion/re-take desc via a machine-
+# readable line. C4 compares each closing audit's AUDITED-SHA against
+# the target's TIP-SHA and holds the target in review if any differ.
+_TIP_SHA_RE = re.compile(
+    r'^[ \t]*TIP[-_ ]SHA\s*:\s*([0-9a-f]{7,40})\b',
+    re.IGNORECASE | re.MULTILINE,
+)
+
+
+def _extract_tip_sha(desc: str) -> str:
+    """Return the git SHA a target item declares as its current TIP via
+    `TIP-SHA: <sha>`, or ''. Same marker discipline as _extract_audited_sha:
+    start-of-line, last-match-wins, case-insensitive, underscore variant
+    accepted.
+
+    Workers re-PATCH desc on every re-take, so the marker stays current
+    with the branch tip. A stale audit that recorded a prior sha will
+    now fail to match the target's current TIP-SHA and C4 holds the
+    pair for a delta re-audit against the newer commit.
+    """
+    if not desc:
+        return ""
+    matches = _TIP_SHA_RE.findall(desc)
+    return matches[-1].lower() if matches else ""
+
+
 def _extract_target_id(text: str, exclude_id: str = "", title_text: str = "") -> str:
     """Return the first work-item id found in `text`, or ''.
 
@@ -10135,30 +10167,80 @@ def _auto_verify_from_audit_pair(audit_item: dict, db) -> dict | None:
         slog(f"[C4] {target_id} single-audit ({surviving_id}={surviving_verdict}, "
              f"{discarded_id}=VOID) → {new_status}")
         return result
-    # ── AUDITED-SHA mismatch guard (Ember-Research substrate report,
-    # 2026-09-11 — ER-508 + EAAC-45 evidence). Every EmberCRM audit desc
-    # now emits a machine-readable `AUDITED-SHA: <full sha>` line so C4
-    # can detect the race where two audits close within seconds of each
-    # other but audited DIFFERENT commits (worker pushed a fix between
-    # Opus48's read and Codex's read). Prior behavior treated "both
-    # closed" as "both audited same code" and flipped verified. Fix:
-    # when BOTH descs carry AUDITED-SHA and they differ, park the target
-    # in review, append a mismatch note naming both shas, and notify
-    # the org's Research session. Missing lines = back-compat, current
-    # behavior unchanged. Same check belongs before the single-audit
-    # apply below (trivial extension: if the surviving audit's SHA
-    # doesn't match the current git tip we can't detect from here, but
-    # if any legacy code adds another SHA source we'll catch it).
-    _sha_a, _sha_b = _extract_audited_sha(audit_item.get("desc") or ""), \
-                     _extract_audited_sha(other["desc"] or "")
-    if (_sha_a and _sha_b and _sha_a != _sha_b
-            and not my_discarded and not other_discarded):
+    # ── AUDITED-SHA / TIP-SHA guard (Ember-Research substrate reports,
+    # 2026-09-11 ER-508 + 2026-09-15 ER-523).
+    #
+    # ER-508 evidence (EAAC-45): pair audited parent-vs-tip → pairwise
+    # AUDITED-SHA compare caught it.
+    # ER-523 evidence (EAC-387): BOTH auditors recorded the SAME STALE sha
+    # (3efd3cc; tip had moved twice to 59c0354). Pairwise compare passed
+    # perfectly → false verified certifying a report missing its own worst
+    # finding (a cutover-blocker). The correct oracle is the TARGET'S TIP,
+    # not audit-vs-audit. Server can't derive a git tip from a board item,
+    # so workers declare it in their completion/re-take desc via
+    # `TIP-SHA: <sha>`.
+    #
+    # Rules (Ember-Research 2026-09-15 upgraded design):
+    #   Target has TIP-SHA:
+    #     - Both audits' AUDITED-SHA == TIP-SHA  → proceed to verdict apply.
+    #     - Any audit's AUDITED-SHA != TIP-SHA   → HOLD in review, alert.
+    #     - Any audit missing AUDITED-SHA        → HOLD (org has adopted).
+    #   Target has NO TIP-SHA (adoption phase):
+    #     - Both audits' AUDITED-SHA agree       → proceed (warn slog).
+    #     - Both audits' AUDITED-SHA disagree    → HOLD (ER-508 back-compat).
+    #     - Any audit missing AUDITED-SHA        → warn slog + proceed.
+    # Missing AUDITED-SHA becomes strict only when the target opts in via
+    # TIP-SHA, keeping non-adopting orgs (RTG) back-compat.
+    _sha_a = _extract_audited_sha(audit_item.get("desc") or "")
+    _sha_b = _extract_audited_sha(other["desc"] or "")
+    _target_tip = _extract_tip_sha(target["desc"] or "")
+    _hold = False
+    _hold_reason = ""
+    if not my_discarded and not other_discarded:
+        if _target_tip:
+            # Target opted in — TIP is the oracle.
+            _mismatched = []
+            if not _sha_a:
+                _hold = True
+                _mismatched.append(f"{aid}=<no AUDITED-SHA>")
+            elif _sha_a != _target_tip and not _target_tip.startswith(_sha_a) \
+                                       and not _sha_a.startswith(_target_tip):
+                _hold = True
+                _mismatched.append(f"{aid}={_sha_a[:12]}")
+            if not _sha_b:
+                _hold = True
+                _mismatched.append(f"{other['id']}=<no AUDITED-SHA>")
+            elif _sha_b != _target_tip and not _target_tip.startswith(_sha_b) \
+                                       and not _sha_b.startswith(_target_tip):
+                _hold = True
+                _mismatched.append(f"{other['id']}={_sha_b[:12]}")
+            if _hold:
+                _hold_reason = (
+                    f"target TIP-SHA is {_target_tip[:12]}; " +
+                    ", ".join(_mismatched) + " does not match"
+                )
+        else:
+            # Back-compat: no TIP declaration, use pairwise compare (ER-508
+            # behavior). Only holds when both are present AND differ.
+            if _sha_a and _sha_b and _sha_a != _sha_b:
+                _hold = True
+                _hold_reason = (
+                    f"no target TIP-SHA declared; pairwise mismatch "
+                    f"{aid}={_sha_a[:12]} vs {other['id']}={_sha_b[:12]}"
+                )
+            elif (not _sha_a) or (not _sha_b):
+                # Missing AUDITED-SHA is warn-only during adoption phase for
+                # orgs without TIP-SHA convention (RTG). Log for visibility.
+                _miss = []
+                if not _sha_a: _miss.append(aid)
+                if not _sha_b: _miss.append(other["id"])
+                slog(f"[C4] {target_id} adoption-warn: no target TIP-SHA + "
+                     f"{','.join(_miss)} missing AUDITED-SHA")
+    if _hold:
         _mismatch_note = (
-            f"\n\n[C4 sha-mismatch {stamp}: audit pair closed on DIFFERENT "
-            f"commits — {aid} audited {_sha_a[:12]}, {other['id']} audited "
-            f"{_sha_b[:12]}. Not flipping verified; a re-take race intervened "
-            f"between the two audits. Needs a delta re-audit against the newer "
-            f"commit before this can proceed.]"
+            f"\n\n[C4 sha-mismatch {stamp}: {_hold_reason}. Not flipping "
+            f"verified; delta re-audit against the target's current tip "
+            f"needed before this can proceed.]"
         )
         new_desc = (target["desc"] or "") + _mismatch_note
         db.execute(
@@ -10174,20 +10256,19 @@ def _auto_verify_from_audit_pair(audit_item: dict, db) -> dict | None:
                 try:
                     send_text(_master, (
                         f"C4 SHA-MISMATCH: {target_id} — {(target['title'] or '')[:80]}. "
-                        f"Audit pair closed on different commits: "
-                        f"{aid}={_sha_a[:12]} vs {other['id']}={_sha_b[:12]}. "
-                        f"Target held in review; a delta re-audit against the "
-                        f"newer commit is needed before verified can flip. "
+                        f"{_hold_reason}. Target held in review; a delta re-audit "
+                        f"against the current tip is needed before verified can flip. "
                         f"Check `amux board show {target_id}` for both audit reports."
                     ))
                 except Exception:
                     pass
             threading.Thread(target=_run, daemon=True).start()
-            slog(f"[C4] {target_id} SHA-MISMATCH ({aid}={_sha_a[:12]}, "
-                 f"{other['id']}={_sha_b[:12]}) — notified {_master}, held in review")
+            slog(f"[C4] {target_id} SHA-MISMATCH — {_hold_reason} — "
+                 f"notified {_master}, held in review")
         return {"action": "held", "audits": [aid, other["id"]],
-                "shas": [_sha_a, _sha_b], "target": target_id,
-                "reason": "sha-mismatch"}
+                "audit_shas": [_sha_a, _sha_b],
+                "target_tip_sha": _target_tip,
+                "target": target_id, "reason": "sha-mismatch"}
     # ── Standard pair-complete path (both have verdicts) ──────────────
     accept = {"PASS", "PASS-WITH-WARNINGS"}
     if my_verdict in accept and their_verdict in accept:
