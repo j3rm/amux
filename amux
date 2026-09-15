@@ -127,7 +127,12 @@ print(d.get('id','error: '+str(d.get('error','?'))))" ;;
         if [ -z "$body" ] && [ ! -t 0 ]; then body=$(cat); fi
         payload=$(python3 -c "
 import json,sys; print(json.dumps({'body':sys.argv[1]}))" "$body")
+        # X-Amux-Session required (2026-09-09 lockdown e7c85bda) — without it
+        # the server rejects "cannot edit message content — missing X-Amux-
+        # Session header". EmberCoreMigration hit this via ER-521; the parallel
+        # `reply` branch above (L117-118) has always sent the header.
         curl -sk -X PATCH -H 'Content-Type: application/json' \
+          -H "X-Amux-Session: ${AMUX_SESSION:-}" \
           -d "$payload" "$AMUX_URL/api/messages/$mid" | python3 -c "
 import json,sys; d=json.load(sys.stdin)
 print(d.get('id','error: '+str(d.get('error','?'))),d.get('status',''))" ;;
