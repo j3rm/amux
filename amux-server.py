@@ -10198,27 +10198,48 @@ def _auto_verify_from_audit_pair(audit_item: dict, db) -> dict | None:
     _hold_reason = ""
     if not my_discarded and not other_discarded:
         if _target_tip:
-            # Target opted in — TIP is the oracle.
-            _mismatched = []
+            # Target opted in — TIP is the oracle. Track missing declarations
+            # separately from genuine mismatches so the alert can triage
+            # them differently (ER-525 UX follow-up 2026-09-15 — the old
+            # "does not match" wording sent readers hunting for a wrong
+            # commit that didn't exist when the real failure was a
+            # missing/unparseable AUDITED-SHA line).
+            _missing = []       # audits with no parseable AUDITED-SHA
+            _mismatched = []    # audits whose SHA differs from target TIP
+            def _tip_match(sha):
+                return (sha == _target_tip
+                        or _target_tip.startswith(sha)
+                        or sha.startswith(_target_tip))
             if not _sha_a:
                 _hold = True
-                _mismatched.append(f"{aid}=<no AUDITED-SHA>")
-            elif _sha_a != _target_tip and not _target_tip.startswith(_sha_a) \
-                                       and not _sha_a.startswith(_target_tip):
+                _missing.append(aid)
+            elif not _tip_match(_sha_a):
                 _hold = True
-                _mismatched.append(f"{aid}={_sha_a[:12]}")
+                _mismatched.append((aid, _sha_a))
             if not _sha_b:
                 _hold = True
-                _mismatched.append(f"{other['id']}=<no AUDITED-SHA>")
-            elif _sha_b != _target_tip and not _target_tip.startswith(_sha_b) \
-                                       and not _sha_b.startswith(_target_tip):
+                _missing.append(other["id"])
+            elif not _tip_match(_sha_b):
                 _hold = True
-                _mismatched.append(f"{other['id']}={_sha_b[:12]}")
+                _mismatched.append((other["id"], _sha_b))
             if _hold:
-                _hold_reason = (
-                    f"target TIP-SHA is {_target_tip[:12]}; " +
-                    ", ".join(_mismatched) + " does not match"
-                )
+                _parts = []
+                if _missing:
+                    _parts.append(
+                        f"no parseable AUDITED-SHA found in "
+                        f"{', '.join(_missing)} "
+                        f"(must be own line, exact prefix "
+                        f"`AUDITED-SHA:`, full 40-char sha)"
+                    )
+                if _mismatched:
+                    _parts.append(
+                        "; ".join(
+                            f"AUDITED-SHA {sha[:12]} in {audit_id} "
+                            f"!= target TIP-SHA {_target_tip[:12]}"
+                            for audit_id, sha in _mismatched
+                        )
+                    )
+                _hold_reason = " | ".join(_parts)
         else:
             # Back-compat: no TIP declaration, use pairwise compare (ER-508
             # behavior). Only holds when both are present AND differ.
