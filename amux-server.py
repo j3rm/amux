@@ -9507,6 +9507,7 @@ def _mint_audit_pair_unguarded(target_item: dict, db) -> dict | None:
     # coordination artifact assigned to any org gets skipped uniformly.
     _ttitle = (target_item.get("title") or "").strip().upper()
     if any(_ttitle.startswith(p.upper()) for p in _COORDINATION_TITLE_PREFIXES):
+        slog(f"[mint-skip] {tid}: coordination title prefix")
         return None
     org = (target_item.get("org") or "").strip()
     if not org:
@@ -9514,12 +9515,15 @@ def _mint_audit_pair_unguarded(target_item: dict, db) -> dict | None:
         if "-" in s:
             org = s.split("-", 1)[0]
     if not org or org in ("amux",):
+        slog(f"[mint-skip] {tid}: no valid org (derived={org!r})")
         return None
     codex_session = f"{org}-Audit-Codex"
     opus_session = f"{org}-Audit-Opus48"
     if not (CC_SESSIONS / f"{codex_session}.env").exists():
+        slog(f"[mint-skip] {tid}: {codex_session}.env missing")
         return None
     if not (CC_SESSIONS / f"{opus_session}.env").exists():
+        slog(f"[mint-skip] {tid}: {opus_session}.env missing")
         return None
 
     target_updated = int(target_item.get("updated") or 0)
@@ -9536,8 +9540,14 @@ def _mint_audit_pair_unguarded(target_item: dict, db) -> dict | None:
     codex_existing = _existing(codex_session)
     opus_existing = _existing(opus_session)
     if codex_existing and int(codex_existing["created"]) >= fresh_threshold:
+        slog(f"[mint-skip] {tid}: fresh codex audit already exists "
+             f"({codex_existing['id']}, created {codex_existing['created']} "
+             f">= threshold {fresh_threshold})")
         return None
     if opus_existing and int(opus_existing["created"]) >= fresh_threshold:
+        slog(f"[mint-skip] {tid}: fresh opus audit already exists "
+             f"({opus_existing['id']}, created {opus_existing['created']} "
+             f">= threshold {fresh_threshold})")
         return None
 
     title = f"AUDIT {tid}: {target_item.get('title', '')[:200]}"
@@ -9803,10 +9813,13 @@ def _auto_mint_audit_pair(target_item: dict, db) -> dict | None:
     tid = target_item.get("id", "")
     tprefix = tid.split("-", 1)[0] if "-" in tid else ""
     if tprefix in _CONTROL_PLANE_PREFIXES:
+        slog(f"[mint-skip] {tid}: control-plane prefix ({tprefix})")
         return None
     if _is_audit_session(target_item.get("session", "")):
+        slog(f"[mint-skip] {tid}: assignee is audit session ({target_item.get('session')})")
         return None
     if _is_research_session(target_item.get("session", "")):
+        slog(f"[mint-skip] {tid}: assignee is research session ({target_item.get('session')})")
         return None
 
     # Build-verify gate (per-target-session env var)
@@ -44461,8 +44474,29 @@ class CCHandler(BaseHTTPRequestHandler):
                         and status in ("todo", "backlog")
                         and creator != session):
                     _notify_session_of_task(session, item_id, title)
+                # Audit-mint on POST when status='review' at creation
+                # (ER-536, Ember-Research 2026-09-15). EAC-405/406/417 were
+                # POSTed directly at review status and never went through the
+                # PATCH-cascade transition that fires _auto_mint_audit_pair.
+                # Zero board-gate log entries + zero audit-mint log entries =
+                # silent no-op that looked like auditor neglect. Fires the
+                # same hook the PATCH path uses, so downstream logic is
+                # identical. Idempotent: subsequent PATCH from doing->review
+                # (if any) would re-fire but _mint_audit_pair_unguarded's
+                # freshness check dedups.
+                mint_cascade = None
+                if (session and owner_type == "agent"
+                        and status == "review"):
+                    try:
+                        mint_cascade = _auto_mint_audit_pair(item, db)
+                        if mint_cascade:
+                            slog(f"[hooks] {mint_cascade}")
+                    except Exception as _me:
+                        slog(f"[mint] {item_id}: POST-time hook error: {_me}")
                 if routing_cascade:
                     item["_cascaded"] = routing_cascade
+                elif mint_cascade:
+                    item["_cascaded"] = mint_cascade
                 return self._json(item, 201)
 
             # POST /api/board/clear-done — soft-delete all done issues
