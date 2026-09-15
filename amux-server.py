@@ -9405,11 +9405,31 @@ def _extract_tip_sha(desc: str) -> str:
     with the branch tip. A stale audit that recorded a prior sha will
     now fail to match the target's current TIP-SHA and C4 holds the
     pair for a delta re-audit against the newer commit.
+
+    NB: this returns only the last match for observability / single-sha
+    logging paths. The C4 guard uses `_all_tip_shas()` directly so it
+    can fail closed on ambiguity (ER-529, 2026-09-15). If you're adding
+    a new caller that decides pass/fail on the sha, call `_all_tip_shas`
+    and check the count before consuming a value.
     """
     if not desc:
         return ""
     matches = _TIP_SHA_RE.findall(desc)
     return matches[-1].lower() if matches else ""
+
+
+def _all_tip_shas(desc: str) -> list:
+    """Return every TIP-SHA declaration in desc, lowered, in document
+    order. Used by the C4 guard for ambiguity detection: descs are
+    APPENDED in practice (history-preserving, desired), so a re-take
+    can leave multiple well-formed TIP-SHA lines in one target desc.
+    Ember-Research 2026-09-15 (ER-529, EAAC-54 live): parser must fail
+    closed when >1 match — silently picking first-or-last would let a
+    stale verdict pass. Same principle as the strict AUDITED-SHA parse.
+    """
+    if not desc:
+        return []
+    return [m.lower() for m in _TIP_SHA_RE.findall(desc)]
 
 
 def _extract_target_id(text: str, exclude_id: str = "", title_text: str = "") -> str:
@@ -10193,11 +10213,26 @@ def _auto_verify_from_audit_pair(audit_item: dict, db) -> dict | None:
     # TIP-SHA, keeping non-adopting orgs (RTG) back-compat.
     _sha_a = _extract_audited_sha(audit_item.get("desc") or "")
     _sha_b = _extract_audited_sha(other["desc"] or "")
-    _target_tip = _extract_tip_sha(target["desc"] or "")
+    _target_tips = _all_tip_shas(target["desc"] or "")
+    _target_tip = _target_tips[-1] if _target_tips else ""
     _hold = False
     _hold_reason = ""
     if not my_discarded and not other_discarded:
-        if _target_tip:
+        # Fail-closed on ambiguous TIP-SHA (ER-529, 2026-09-15). Descs are
+        # appended in practice, so a re-take can leave multiple well-formed
+        # TIP-SHA lines. Silently picking first-or-last defeats the guard —
+        # first-match would flag a CORRECT verdict as stale, last-match
+        # could pass a STALE verdict. Only unambiguous declarations count.
+        if len(_target_tips) > 1:
+            _hold = True
+            _hold_reason = (
+                f"ambiguous TIP-SHA ({len(_target_tips)} found) in "
+                f"{target_id}: " +
+                ", ".join(s[:12] for s in _target_tips) +
+                ". Convention is exactly one TIP-SHA line per target — "
+                f"superseded shas belong in prose without the token"
+            )
+        elif _target_tip:
             # Target opted in — TIP is the oracle. Track missing declarations
             # separately from genuine mismatches so the alert can triage
             # them differently (ER-525 UX follow-up 2026-09-15 — the old
