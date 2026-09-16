@@ -11054,6 +11054,13 @@ def list_sessions() -> list:
             # docker:<org> tag or "host" so the card can render a chip
             # showing which container the session belongs to.
             "runtime": cfg.get("CC_RUNTIME", "host") or "host",
+            # Org tag (server-side derivation via _session_org — reads
+            # CC_ORG env or falls back to name-prefix). Added 2026-09-17
+            # so the dashboard reply-target picker can filter sessions
+            # by thread org without duplicating derivation logic client-
+            # side (T-207 UX ask: show every agent in the thread's org,
+            # not just past participants).
+            "org": _session_org(name) or "",
         })
     status_order = {"active": 0, "waiting": 0, "idle": 1, "": 1}
     sessions.sort(key=lambda s: (not s["pinned"], not s["running"], status_order.get(s["status"], 1), -s["last_activity"]))
@@ -30679,6 +30686,7 @@ function switchView(view) {
 // add indented reply chains later without a data migration.
 let _threadsTimer = null;
 let _threadsCache = [];
+let _threadsSessions = [];   // fresh /api/sessions snapshot, refreshed with each _threadsLoad — used by the reply-target picker (Jeremy 2026-09-17: show every agent in the thread's org, not just past participants)
 let _threadsLastSig = '';
 // Icons — inline SVG (matches Notes-toolbar style, no external assets).
 const _TICON_REPLY = '<svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="9 17 4 12 9 7"/><path d="M20 18v-2a4 4 0 0 0-4-4H4"/></svg>';
@@ -30787,10 +30795,21 @@ function _tMsgDir(m) {
 }
 async function _threadsLoad() {
   try {
-    const r = await fetch(API + '/api/threads');
+    // Fetch threads + sessions in parallel so the reply-target picker
+    // always has the current per-org agent list (Jeremy 2026-09-17).
+    const [r, sr] = await Promise.all([
+      fetch(API + '/api/threads'),
+      fetch(API + '/api/sessions').catch(() => null),
+    ]);
     const list = await r.json();
     if (!Array.isArray(list)) return;
     _threadsCache = list;
+    if (sr && sr.ok) {
+      try {
+        const ss = await sr.json();
+        if (Array.isArray(ss)) _threadsSessions = ss;
+      } catch(e) {}
+    }
     _updateThreadsBadge(list);
     const sig = _threadsSig(list);
     if (sig === _threadsLastSig) return;
@@ -31175,14 +31194,14 @@ function _tRenderMsg(t, m) {
     // min-height with an invisible scrollbar — content sets the height via
     // _tAutoSize on every input, so as the reply grows the whole card grows
     // and Jeremy always sees his whole message.
-    // Target picker (2026-09-16, Jeremy T-207): the parent message's sender
-    // defaults into the picker, but multi-agent threads (Jeremy + RTG-Research
-    // + RTG-Audit-Codex on T-207) let Jeremy re-target the reply to any
-    // participant. Prior to this, every Jeremy reply went to root-message's
-    // other-party — so a thread that started with Codex kept routing to
-    // Codex even when Jeremy hit reply on an RTG-Research message. The
-    // server also derives from parent_id now (see POST /api/threads/T-N/
-    // messages), but the picker gives explicit override + visibility.
+    // Target picker (2026-09-16, Jeremy T-207; expanded 2026-09-17):
+    // Options = every reachable agent in the thread's org, not just past
+    // participants — Jeremy wants to pull in a new agent mid-thread without
+    // a new thread. Falls back to participants-only when the thread has no
+    // org tag (legacy / Jeremy-only threads) or when the sessions snapshot
+    // hasn't loaded yet. Past participants always appear, even if they've
+    // since been archived. Default = the message-being-replied-to's sender
+    // (server also derives from parent_id but the picker gives override).
     const participants = new Set();
     (t.messages || []).forEach(mm => {
       const f = (mm.from_session || '').trim();
@@ -31190,16 +31209,33 @@ function _tRenderMsg(t, m) {
       if (f) participants.add(f);
       if (to) participants.add(to);
     });
-    // Default = parent message's sender (the person we're replying to).
-    // If parent was Jeremy's (from empty), default to the parent's addressee.
+    const threadOrg = (t.org || '').trim();
     const parentFrom = (m.from_session || '').trim();
     const parentTo = (m.to_session || '').trim();
     const defaultTarget = parentFrom || parentTo;
+    // Build union of {org-scoped active sessions} + {past participants}.
+    // Filter same way _tLoadTargets does: non-archived, running, not self.
+    const orgAgents = new Set();
+    if (threadOrg && Array.isArray(_threadsSessions)) {
+      _threadsSessions
+        .filter(s => !s.archived && s.running && s.name !== 'amux-helper'
+                     && (s.org || '').trim() === threadOrg)
+        .forEach(s => orgAgents.add(s.name));
+    }
+    // Union — past participants get in even if archived so history stays
+    // reply-able. Sort with current participants first (bolded via
+    // marker), then org-scoped agents alphabetically.
+    const combined = new Set([...participants, ...orgAgents]);
+    const sorted = [...combined].sort((a, b) => {
+      const ap = participants.has(a), bp = participants.has(b);
+      if (ap !== bp) return ap ? -1 : 1;  // participants first
+      return a.localeCompare(b);
+    });
     const targetSelId = 't-reply-target-' + m.id;
-    const targetOptions = [...participants].sort().map(p =>
-      `<option value="${_tEsc(p)}"${p === defaultTarget ? ' selected' : ''}>${_tEsc(p)}</option>`
+    const targetOptions = sorted.map(p =>
+      `<option value="${_tEsc(p)}"${p === defaultTarget ? ' selected' : ''}>${_tEsc(p)}${participants.has(p) ? '' : ' (new to thread)'}</option>`
     ).join('');
-    const pickerHtml = participants.size > 1
+    const pickerHtml = sorted.length > 1
       ? `<div style="display:flex;align-items:center;gap:8px;font-size:0.78rem;margin:0 0 8px 0;color:var(--muted);">
           <label for="${targetSelId}">To:</label>
           <select id="${targetSelId}" style="padding:3px 6px;border:1px solid var(--border);border-radius:4px;background:var(--bg,#050505);color:var(--fg);font-size:0.85rem;">${targetOptions}</select>
