@@ -31175,8 +31175,39 @@ function _tRenderMsg(t, m) {
     // min-height with an invisible scrollbar — content sets the height via
     // _tAutoSize on every input, so as the reply grows the whole card grows
     // and Jeremy always sees his whole message.
+    // Target picker (2026-09-16, Jeremy T-207): the parent message's sender
+    // defaults into the picker, but multi-agent threads (Jeremy + RTG-Research
+    // + RTG-Audit-Codex on T-207) let Jeremy re-target the reply to any
+    // participant. Prior to this, every Jeremy reply went to root-message's
+    // other-party — so a thread that started with Codex kept routing to
+    // Codex even when Jeremy hit reply on an RTG-Research message. The
+    // server also derives from parent_id now (see POST /api/threads/T-N/
+    // messages), but the picker gives explicit override + visibility.
+    const participants = new Set();
+    (t.messages || []).forEach(mm => {
+      const f = (mm.from_session || '').trim();
+      const to = (mm.to_session || '').trim();
+      if (f) participants.add(f);
+      if (to) participants.add(to);
+    });
+    // Default = parent message's sender (the person we're replying to).
+    // If parent was Jeremy's (from empty), default to the parent's addressee.
+    const parentFrom = (m.from_session || '').trim();
+    const parentTo = (m.to_session || '').trim();
+    const defaultTarget = parentFrom || parentTo;
+    const targetSelId = 't-reply-target-' + m.id;
+    const targetOptions = [...participants].sort().map(p =>
+      `<option value="${_tEsc(p)}"${p === defaultTarget ? ' selected' : ''}>${_tEsc(p)}</option>`
+    ).join('');
+    const pickerHtml = participants.size > 1
+      ? `<div style="display:flex;align-items:center;gap:8px;font-size:0.78rem;margin:0 0 8px 0;color:var(--muted);">
+          <label for="${targetSelId}">To:</label>
+          <select id="${targetSelId}" style="padding:3px 6px;border:1px solid var(--border);border-radius:4px;background:var(--bg,#050505);color:var(--fg);font-size:0.85rem;">${targetOptions}</select>
+        </div>`
+      : `<input type="hidden" id="${targetSelId}" value="${_tEsc(defaultTarget)}">`;
     const form = `<div style="margin:8px 0 4px 0;padding:12px 14px;border:1px solid #468;border-left:4px solid #468;border-radius:6px;background:rgba(70,136,190,0.10);box-shadow:0 2px 6px rgba(0,0,0,0.25);">
       <div style="font-size:0.72rem;color:var(--muted);margin-bottom:8px;">✎ Reply to <b>${midEsc}</b> — original message shown below</div>
+      ${pickerHtml}
       <textarea id="${replyId}" placeholder="Type your reply — the original message stays visible below." rows="4" style="width:100%;padding:8px 10px;border:1px solid var(--border);border-radius:5px;background:var(--bg,#050505);color:var(--fg);font-family:inherit;box-sizing:border-box;resize:none;font-size:0.9rem;line-height:1.45;overflow:hidden;" oninput="_tAutoSize(this)" onkeydown="if(event.key==='Escape'){event.preventDefault();_tInlineReplyCancel();}else if((event.metaKey||event.ctrlKey)&&event.key==='Enter'){event.preventDefault();_tInlineReplySubmit('${tidEsc}','${midEsc}');}" onpaste="_threadsHandlePaste(event)"></textarea>
       <div class="peek-attach-bar" id="${attachBarId}" style="margin-top:8px;"></div>
       <label style="display:flex;align-items:center;gap:6px;font-size:0.78rem;margin:10px 0 8px 0;color:var(--muted);">
@@ -31385,8 +31416,10 @@ function _tInlineReplyCancel() {
 async function _tInlineReplySubmit(tid, parentMid) {
   const el = document.getElementById('t-reply-' + parentMid);
   const blockEl = document.getElementById('t-reply-block-' + parentMid);
+  const targetEl = document.getElementById('t-reply-target-' + parentMid);
   const text = (el ? el.value : '').trim();
   const blocking = blockEl ? blockEl.checked : false;
+  const toSession = (targetEl ? targetEl.value : '').trim();
   // Wait for any in-flight uploads before sending — otherwise we'd omit the
   // path (still null) and the recipient wouldn't see the attachment.
   if (_threadsFiles.some(f => !f.path)) { alert('Wait for attachments to finish uploading.'); return; }
@@ -31398,6 +31431,11 @@ async function _tInlineReplySubmit(tid, parentMid) {
   const body = attachPaths.length
     ? (text ? text + '\n\n' : '') + attachPaths.join('\n')
     : text;
+  // 2026-09-16 (Jeremy T-207): send to_session from the picker so multi-
+  // agent threads route explicitly. Server also derives from parent_id
+  // when to_session is absent; the picker gives override + visibility.
+  const payload = {body, parent_id: parentMid, blocking};
+  if (toSession) payload.to_session = toSession;
   const r = await fetch(API + '/api/threads/' + encodeURIComponent(tid) + '/messages', {
     // X-Amux-UI-Token proves this POST is from the dashboard (a human,
     // Jeremy). Without it the server's spoof-protection treats the request
@@ -31405,7 +31443,7 @@ async function _tInlineReplySubmit(tid, parentMid) {
     // incident in the /api/threads POST handler comment. Server-injected
     // window._AMUX_UI_TOKEN is defined per session in the served HTML.
     method: 'POST', headers: {'Content-Type': 'application/json', 'X-Amux-UI-Token': (window._AMUX_UI_TOKEN || '')},
-    body: JSON.stringify({body, parent_id: parentMid, blocking}),
+    body: JSON.stringify(payload),
   });
   if (r.ok) {
     _tInlineReplyFor = null;
@@ -42612,10 +42650,47 @@ class CCHandler(BaseHTTPRequestHandler):
                                 "thread_org": _thread_org,
                                 "your_org": _sender_org or None,
                             }, 403)
-                # Default to_session = the other participant in the thread.
+                # Default to_session derivation:
+                # 1. If body explicitly names to_session, honor it (target picker
+                #    override — Jeremy 2026-09-16, T-207 UX ask).
+                # 2. Else if parent_id points at a specific message being replied
+                #    to, route to THAT message's sender. Jeremy hit reply on an
+                #    RTG-Research message in T-207 (thread started with Codex);
+                #    prior behavior routed to root-message's other-party =
+                #    RTG-Audit-Codex, so every reply went to Codex regardless of
+                #    which message Jeremy hit reply on. Reply-to-parent's-sender
+                #    is what a "Reply" button should do.
+                # 3. Else fall back to root message's other-party (top-level
+                #    thread reply with no parent_id — legacy shape).
+                #
+                # If the parent message was Jeremy's own (from_session=''),
+                # replying to it goes back to whoever THAT message was addressed
+                # to — same "reply threads its predecessor" logic, one hop up.
                 to_session = bj.get("to_session")
                 if to_session is None:
-                    to_session = _other_party(tid, from_session)
+                    _parent_id_early = (bj.get("parent_id") or "").strip()
+                    if _parent_id_early:
+                        _pmsg = db.execute(
+                            "SELECT from_session, to_session, thread_id "
+                            "FROM messages WHERE id = ?",
+                            (_parent_id_early,),
+                        ).fetchone()
+                        if _pmsg and _pmsg["thread_id"] == tid:
+                            _pfrom = (_pmsg["from_session"] or "").strip()
+                            _pto = (_pmsg["to_session"] or "").strip()
+                            # Reply routes to whichever party isn't the current
+                            # sender. Jeremy (from_session='') replying to
+                            # agent→Jeremy message → to_session = agent (parent's
+                            # from). Agent replying to Jeremy→agent message →
+                            # from_session=agent already; parent's to_session is
+                            # the agent, so we route to parent's from_session=''
+                            # (Jeremy). Symmetric.
+                            if from_session == _pfrom:
+                                to_session = _pto
+                            else:
+                                to_session = _pfrom
+                    if to_session is None:
+                        to_session = _other_party(tid, from_session)
                 to_session = (to_session or "").strip()
                 # HARD RULE (2026-08-07 Jeremy): threads are Jeremy's
                 # personal inbox. Agent-to-agent thread posts are
