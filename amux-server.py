@@ -9649,6 +9649,21 @@ def _mint_audit_pair_unguarded(target_item: dict, db) -> dict | None:
     if any(_ttitle.startswith(p.upper()) for p in _COORDINATION_TITLE_PREFIXES):
         slog(f"[mint-skip] {tid}: coordination title prefix")
         return None
+    # Notice/ruling title prefix filter (ER-559 note 2, 2026-09-16). Research
+    # process directives ("ER ruling:", "RR ruling:", "ED ruling:", "RD
+    # ruling:") get PATCHed to review by their recipient; the auto-mint
+    # otherwise creates a wrapper audit pair the auditors immediately VOID
+    # (third shape-vs-kind occurrence — EMBER-122 → EAO-406/EAC-490). These
+    # aren't code deliverables; nothing to audit. Fleet-wide pattern —
+    # matches Ember's ER/ED and RTG's RR/RD ruling conventions.
+    _NOTICE_PREFIXES = (
+        "ER RULING:", "RR RULING:", "ED RULING:", "RD RULING:",
+        "ER NOTICE:", "RR NOTICE:", "ED NOTICE:", "RD NOTICE:",
+        "ACK:", "NOTICE:",
+    )
+    if any(_ttitle.startswith(p) for p in _NOTICE_PREFIXES):
+        slog(f"[mint-skip] {tid}: notice/ruling title prefix — no code to audit")
+        return None
     org = (target_item.get("org") or "").strip()
     if not org:
         s = target_item.get("session") or ""
@@ -9667,28 +9682,70 @@ def _mint_audit_pair_unguarded(target_item: dict, db) -> dict | None:
         return None
 
     target_updated = int(target_item.get("updated") or 0)
+    target_tip = _extract_tip_sha(target_item.get("desc") or "")
 
     def _existing(auditor: str):
+        # Fetch desc too so the TIP-SHA-aware dedup below can inspect
+        # AUDITED-SHA against the target's current TIP-SHA.
         return db.execute(
-            "SELECT id, created FROM issues "
+            "SELECT id, created, desc FROM issues "
             "WHERE session = ? AND deleted IS NULL AND status != 'discarded' "
             "  AND title LIKE ? ORDER BY created DESC LIMIT 1",
             (auditor, f"AUDIT {tid}:%"),
         ).fetchone()
 
+    # Freshness / dedup — two modes:
+    #
+    #   TIP-SHA present on target: SHA-aware dedup (ER-556, 2026-09-16).
+    #     An existing audit counts as covering the target ONLY if its
+    #     AUDITED-SHA matches TIP-SHA. If TIP-SHA moved and no existing
+    #     audit names the new sha, mint a fresh pair regardless of
+    #     timestamp. This is the mechanism the "TIP-SHA change becomes a
+    #     mint trigger" pattern rides on — the trigger is any PATCH
+    #     touching a review-state item; this dedup decides whether that
+    #     PATCH actually needs a new pair.
+    #
+    #   No TIP-SHA on target: time-freshness dedup (existing behavior,
+    #     unchanged for non-adopting orgs like RTG).
     fresh_threshold = target_updated - 60
     codex_existing = _existing(codex_session)
     opus_existing = _existing(opus_session)
-    if codex_existing and int(codex_existing["created"]) >= fresh_threshold:
-        slog(f"[mint-skip] {tid}: fresh codex audit already exists "
-             f"({codex_existing['id']}, created {codex_existing['created']} "
-             f">= threshold {fresh_threshold})")
-        return None
-    if opus_existing and int(opus_existing["created"]) >= fresh_threshold:
-        slog(f"[mint-skip] {tid}: fresh opus audit already exists "
-             f"({opus_existing['id']}, created {opus_existing['created']} "
-             f">= threshold {fresh_threshold})")
-        return None
+    if target_tip:
+        def _covers(existing_row):
+            if not existing_row:
+                return False
+            audited = _extract_audited_sha(existing_row["desc"] or "")
+            if not audited:
+                # In-flight audit (mint fresh, verdict not yet recorded).
+                # Consider it covering — when the auditor closes with
+                # AUDITED-SHA, the C4 TIP-SHA guard will catch any stale-
+                # sha at THAT point. Without this branch, every PATCH to
+                # a review item while audits are open would re-mint them
+                # (runaway loop, caught 2026-09-16 during live probe).
+                return True
+            return (audited == target_tip
+                    or target_tip.startswith(audited)
+                    or audited.startswith(target_tip))
+        codex_covers = _covers(codex_existing)
+        opus_covers = _covers(opus_existing)
+        if codex_covers and opus_covers:
+            slog(f"[mint-skip] {tid}: existing pair already covers "
+                 f"TIP-SHA {target_tip[:12]} "
+                 f"({codex_existing['id']}+{opus_existing['id']})")
+            return None
+        # Otherwise mint — TIP-SHA moved past the covered sha (or one
+        # auditor never covered it).
+    else:
+        if codex_existing and int(codex_existing["created"]) >= fresh_threshold:
+            slog(f"[mint-skip] {tid}: fresh codex audit already exists "
+                 f"({codex_existing['id']}, created {codex_existing['created']} "
+                 f">= threshold {fresh_threshold})")
+            return None
+        if opus_existing and int(opus_existing["created"]) >= fresh_threshold:
+            slog(f"[mint-skip] {tid}: fresh opus audit already exists "
+                 f"({opus_existing['id']}, created {opus_existing['created']} "
+                 f">= threshold {fresh_threshold})")
+            return None
 
     title = f"AUDIT {tid}: {target_item.get('title', '')[:200]}"
     now = int(time.time())
@@ -44941,11 +44998,16 @@ class CCHandler(BaseHTTPRequestHandler):
                         # doesn't try to also set a column named
                         # "desc_append" (there is none).
                         body.pop("desc_append", None)
-                    # Snapshot the prior session+status so we can detect transitions
+                    # Snapshot the prior session+status+desc so we can detect
+                    # transitions AND desc changes (the latter drives the
+                    # ER-556 TIP-SHA-change mint trigger — a review-state
+                    # item whose desc got a new TIP-SHA line without a
+                    # status transition still needs a fresh audit pair).
                     prior = db.execute(
-                        "SELECT session, status, owner_type FROM issues WHERE id = ?", (bid,)
+                        "SELECT session, status, owner_type, desc FROM issues WHERE id = ?", (bid,)
                     ).fetchone()
                     prior_session = prior["session"] if prior else None
+                    prior_desc = prior["desc"] if prior else None
                     # AH-79 (Cypra-PAA 2026-08-19): same session-validity
                     # check as POST — reassigning to a typo has the same
                     # dead-letter shape as creating with a typo. Only run
@@ -45191,9 +45253,20 @@ class CCHandler(BaseHTTPRequestHandler):
                         cascaded = (_auto_apply_adjudication(updated_item, db)
                                     or _auto_verify_from_audit_pair(updated_item, db)
                                     or _auto_on_build_verify_close(updated_item, db))
-                        # Audit-mint fires on a fresh review transition.
+                        # Audit-mint fires on a fresh review transition OR
+                        # any PATCH to an item already in review (ER-556,
+                        # Ember-Research 2026-09-16). The second condition
+                        # catches the "TIP-SHA moved but status didn't"
+                        # class — worker re-pushes a fix to the same branch
+                        # and PATCHes the desc TIP-SHA line without a status
+                        # transition. Previously silent; now the mint hook's
+                        # TIP-SHA-aware dedup decides whether the new TIP
+                        # actually needs a fresh pair (skip if existing
+                        # audits already cover it).
                         if (updated_item.get("status") == "review"
-                                and prior and prior["status"] != "review"):
+                                and prior
+                                and (prior["status"] != "review"
+                                     or updated_item.get("desc") != prior_desc)):
                             minted = _auto_mint_audit_pair(updated_item, db)
                             if minted:
                                 cascaded = cascaded or minted
