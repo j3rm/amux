@@ -5922,6 +5922,15 @@ def _init_db():
         # created enabled=0 and never fired. SCHED-219 sat for 9 days
         # before amux-helper caught it manually; this makes it visible.
         "ALTER TABLE schedules ADD COLUMN dormant_alerted_at INTEGER NOT NULL DEFAULT 0",
+        # posted_by_session — Ember-Research 2026-09-16 (ER-547). Server-
+        # captured identity of the session that POSTed the schedule.
+        # Used by _run_schedule for kind='tmux' to prepend an
+        # [amux-delivered: from-session=... via=SCHED-... at=...] line
+        # the payload cannot forge, closing an impersonation surface
+        # (anyone who can get text into a session — commit message, doc,
+        # board desc — could otherwise style it as any trusted session).
+        # Existing schedules migrate to '' → stamp shows 'unknown'.
+        "ALTER TABLE schedules ADD COLUMN posted_by_session TEXT NOT NULL DEFAULT ''",
     ]:
         try:
             db.execute(migration)
@@ -8082,7 +8091,20 @@ def _run_schedule(sched):
             else:
                 note = (r.stdout or "")[:500] or None
         else:
-            ok, err = send_text(session, command)
+            # ER-547 (Ember-Research 2026-09-16): prepend a server-stamped
+            # provenance line the payload cannot forge. Free-text sender
+            # claims inside `command` are unverifiable; the substrate
+            # stamps who POSTed the schedule and when it fired. Agents
+            # treat sender claims WITHOUT this stamp as unauthenticated.
+            # Stamp is ALWAYS the first line so parsers can rely on line-1.
+            _from = (sched.get("posted_by_session") or "").strip() or "Jeremy"
+            _stamp = (
+                f"[amux-delivered: from-session={_from} "
+                f"via={sched['id']} "
+                f"at={time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime())}]\n"
+            )
+            payload = _stamp + command
+            ok, err = send_text(session, payload)
             if not ok:
                 status, note = "error", str(err)
                 slog(f"[sched] send failed for '{sched['title']}': {err}")
@@ -45151,6 +45173,13 @@ class CCHandler(BaseHTTPRequestHandler):
                             "kind if you want a no-op subscription."
                         ),
                     }, 400)
+                # ER-547 (Ember-Research 2026-09-16): capture the poster
+                # session from X-Amux-Session so _run_schedule can prepend
+                # a server-stamped provenance line to kind='tmux' deliveries.
+                # Free-text sender claims in the payload are unforgeable
+                # only when the substrate adds the stamp. Falls back to ''
+                # when no header (dashboard/Jeremy) → stamp shows 'Jeremy'.
+                _posted_by = (self.headers.get("X-Amux-Session") or "").strip()
                 sched = {
                     "id": sid, "title": data.get("title", ""),
                     "session": data.get("session", ""),
@@ -45172,6 +45201,7 @@ class CCHandler(BaseHTTPRequestHandler):
                     # default their run-notifications off to avoid feed spam.
                     "notify": int(data.get("notify", 0 if (data.get("trigger_on") or "").strip() else 1)),
                     "created": now_ts, "updated": now_ts, "deleted": None,
+                    "posted_by_session": _posted_by,
                 }
                 # compute next_run — prefer schedule_expr if provided.
                 # Bugfix 2026-08-27 (RTG-Research diagnosis): previously ANY
@@ -45194,8 +45224,8 @@ class CCHandler(BaseHTTPRequestHandler):
                     """INSERT INTO schedules (id,title,session,command,kind,sched_type,recurrence,
                        run_at,next_run,last_run,enabled,run_count,schedule_expr,
                        watch,watch_timeout,done_pattern,done_action,trigger_on,trigger_cooldown,trigger_sessions,
-                       notify,created,updated,deleted)
-                       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                       notify,created,updated,deleted,posted_by_session)
+                       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                     (sched["id"], sched["title"], sched["session"], sched["command"], sched["kind"],
                      sched["sched_type"], sched["recurrence"], sched["run_at"],
                      sched["next_run"], sched["last_run"], sched["enabled"],
@@ -45203,7 +45233,8 @@ class CCHandler(BaseHTTPRequestHandler):
                      sched["watch"], sched["watch_timeout"],
                      sched["done_pattern"], sched["done_action"],
                      sched["trigger_on"], sched["trigger_cooldown"], sched["trigger_sessions"],
-                     sched["notify"], sched["created"], sched["updated"], sched["deleted"])
+                     sched["notify"], sched["created"], sched["updated"], sched["deleted"],
+                     sched["posted_by_session"])
                 )
                 db.commit()
                 self._json(sched, 201)
