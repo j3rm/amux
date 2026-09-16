@@ -9440,6 +9440,124 @@ def _extract_tip_sha(desc: str) -> str:
     return matches[-1].lower() if matches else ""
 
 
+def _check_target_tip_freshness(target_id: str, target_desc: str,
+                                closing_audits: list) -> tuple:
+    """Symmetric TIP-SHA freshness check — ER-556/ER-559 (Ember-Research
+    2026-09-16). Given a target item and a list of closing audits whose
+    verdicts are about to apply, return (hold: bool, hold_reason: str,
+    target_tip: str). Callable from ANY verdict-apply path (C4
+    pair-complete PASS, C4 pair-complete FAIL, C4 single-audit, C3
+    adjudication). Same doctrine as before:
+
+      Target has >1 TIP-SHA line → HOLD (ambiguous — parser refuses
+        to guess between them; convention is exactly-one).
+      Target has 1 TIP-SHA line → oracle mode:
+        - Any audit's AUDITED-SHA != TIP-SHA → HOLD (stale audit).
+        - Any audit missing AUDITED-SHA     → HOLD (org has adopted).
+      Target has 0 TIP-SHA lines → do not gate on freshness (back-compat
+        for orgs that haven't adopted; C4-only pairwise fallback still
+        applies in the pair-complete branch, separately).
+
+    closing_audits: list of (audit_id, audited_sha) — one entry per
+    closing verdict. For C4 pair-complete this is [(aid,sha_a),
+    (other_id,sha_b)]. For C4 single-audit this is [(surviving_id,sha)].
+    For C3 adjudication this is [(*-Research item id, adjudicator's
+    AUDITED-SHA if present else '')].
+
+    Returns (False, '', tip) when the verdict is safe to apply, or
+    (True, reason, tip) when the caller should hold + alert.
+
+    Why extracted: prior to 2026-09-16 this logic lived inline in
+    _auto_verify_from_audit_pair's pair-complete branch only. The
+    single-audit branch AND C3 adjudication path had no equivalent
+    guard, so stale FAIL/adjudications could silently bounce work
+    whose current tip may already answer the findings — the ASYMMETRY
+    Ember-Research observed live on EAC-459 (ER-559). Symmetric
+    coverage closes both directions.
+    """
+    tips = _all_tip_shas(target_desc or "")
+    if len(tips) > 1:
+        return (True,
+                f"ambiguous TIP-SHA ({len(tips)} found) in {target_id}: " +
+                ", ".join(s[:12] for s in tips) +
+                ". Convention is exactly one TIP-SHA line per target — "
+                "superseded shas belong in prose without the token",
+                tips[-1])
+    tip = tips[-1] if tips else ""
+    if not tip:
+        return (False, "", "")
+    def _tip_match(sha):
+        return sha and (sha == tip or tip.startswith(sha) or sha.startswith(tip))
+    missing = []
+    mismatched = []
+    for (aid, sha) in closing_audits:
+        if not sha:
+            missing.append(aid)
+        elif not _tip_match(sha):
+            mismatched.append((aid, sha))
+    if not (missing or mismatched):
+        return (False, "", tip)
+    parts = []
+    if missing:
+        parts.append(
+            f"no parseable AUDITED-SHA found in {', '.join(missing)} "
+            f"(must be own line, exact prefix `AUDITED-SHA:`, full 40-char sha)"
+        )
+    if mismatched:
+        parts.append(
+            "; ".join(
+                f"AUDITED-SHA {sha[:12]} in {aid} != target TIP-SHA {tip[:12]}"
+                for aid, sha in mismatched
+            )
+        )
+    return (True, " | ".join(parts), tip)
+
+
+def _apply_sha_mismatch_hold(target_id: str, target: dict, hold_reason: str,
+                             source_label: str, source_ids: list,
+                             my_session: str, db, stamp: str) -> dict:
+    """Common hold-action for any verdict-apply path that fails freshness.
+    Appends the mismatch note to target desc, alerts the org's Research
+    master, returns the {'action':'held', ...} dict the caller returns.
+
+    source_label: 'C4-pair' / 'C4-single' / 'C3-adjudication' — appears
+      in the desc note + slog for traceability.
+    source_ids: audit ids or *-Research item id(s) whose verdicts were
+      about to apply.
+    """
+    now = int(time.time())
+    _mismatch_note = (
+        f"\n\n[{source_label} sha-mismatch {stamp}: {hold_reason}. "
+        f"Not applying verdict; delta re-audit against the target's "
+        f"current tip needed before this can proceed.]"
+    )
+    new_desc = (target["desc"] or "") + _mismatch_note
+    db.execute(
+        "UPDATE issues SET desc = ?, updated = ? WHERE id = ?",
+        (new_desc, now, target_id),
+    )
+    db.commit()
+    _board_changed()
+    _org = (target["org"] if "org" in target.keys() else None) or _session_org(my_session)
+    _master = f"{_org}-Research" if _org else None
+    if _master and _is_real_session(_master):
+        def _run():
+            try:
+                send_text(_master, (
+                    f"{source_label} SHA-MISMATCH: {target_id} — "
+                    f"{(target['title'] or '')[:80]}. {hold_reason}. Target "
+                    f"held; a delta re-audit against the current tip is "
+                    f"needed. Check `amux board show {target_id}` for detail."
+                ))
+            except Exception:
+                pass
+        threading.Thread(target=_run, daemon=True).start()
+        slog(f"[{source_label}] {target_id} SHA-MISMATCH — {hold_reason} — "
+             f"notified {_master}, held")
+    return {"action": "held", "target": target_id,
+            "sources": source_ids, "reason": "sha-mismatch"}
+
+
 def _all_tip_shas(desc: str) -> list:
     """Return every TIP-SHA declaration in desc, lowered, in document
     order. Used by the C4 guard for ambiguity detection: descs are
@@ -10028,6 +10146,26 @@ def _auto_apply_adjudication(rr_item: dict, db) -> dict | None:
         return None  # already there, nothing to do
     now = int(time.time())
     stamp = time.strftime("%Y-%m-%d %H:%M", time.localtime())
+    # ER-559 (2026-09-16): symmetric TIP-SHA freshness check. Previously
+    # C3 blindly applied any *-Research verdict to the target regardless
+    # of whether the adjudication was against the current tip. An
+    # adjudication written before a re-take could silently bounce/bless
+    # work at the new tip. If the *-Research item declares AUDITED-SHA
+    # in its own desc, compare to target's TIP-SHA. Target with no
+    # TIP-SHA declaration = no gate (back-compat for non-adopting orgs).
+    _rr_sha = _extract_audited_sha(desc)
+    _hold, _hold_reason, _target_tip = _check_target_tip_freshness(
+        target_id,
+        (dict(target).get("desc") or ""),
+        [(rid, _rr_sha)],
+    )
+    if _hold:
+        _target_dict = {k: target[k] for k in target.keys()}
+        return _apply_sha_mismatch_hold(
+            target_id, _target_dict, _hold_reason,
+            "C3-adjudication", [rid],
+            rr_item.get("session") or "", db, stamp,
+        )
     note = f"\n\n[auto-applied {stamp} by C3: {rid} adjudicated {verdict} → {new_status}]"
     new_desc = (target["desc"] or "") + note
     db.execute(
@@ -10173,10 +10311,12 @@ def _auto_verify_from_audit_pair(audit_item: dict, db) -> dict | None:
         if my_discarded:
             surviving_verdict = their_verdict
             surviving_id = other["id"]
+            surviving_sha = _sha_b
             discarded_id = aid
         else:
             surviving_verdict = my_verdict
             surviving_id = aid
+            surviving_sha = _sha_a
             discarded_id = other["id"]
         accept = {"PASS", "PASS-WITH-WARNINGS"}
         if surviving_verdict in accept:
@@ -10187,6 +10327,22 @@ def _auto_verify_from_audit_pair(audit_item: dict, db) -> dict | None:
             return None  # unrecognized verdict token
         if target["status"] == new_status:
             return None
+        # ER-559 (2026-09-16): symmetric TIP-SHA freshness check. Previously
+        # the single-audit path applied surviving verdict without checking
+        # AUDITED-SHA vs target TIP — so a stale FAIL (or a stale PASS after
+        # a wrapper VOID) could silently bounce/bless work whose current tip
+        # may already answer the findings. Now uses the shared helper so
+        # the same doctrine applies to every verdict-apply path.
+        _hold, _hold_reason, _target_tip = _check_target_tip_freshness(
+            target_id, target["desc"] or "",
+            [(surviving_id, surviving_sha)],
+        )
+        if _hold:
+            return _apply_sha_mismatch_hold(
+                target_id, target, _hold_reason,
+                "C4-single", [surviving_id, discarded_id],
+                my_session, db, stamp,
+            )
         note = (f"\n\n[auto-applied {stamp} by C4: single-audit "
                 f"({surviving_id}={surviving_verdict}, {discarded_id}=VOID/discarded) "
                 f"→ {new_status}]")
