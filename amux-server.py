@@ -9440,6 +9440,31 @@ def _extract_tip_sha(desc: str) -> str:
     return matches[-1].lower() if matches else ""
 
 
+# Loose fallback for _extract_audited_sha (ER-591 diagnostic hint, 2026-09-19).
+# The strict parser requires `AUDITED-SHA:` at start-of-line with a hex value.
+# Some auditors' output pipelines (Ember-Audit-Opus48 specifically, 4x on EF-6)
+# reliably emit the correct sha in their REPORT FILE header but the board-desc
+# verdict version omits the own-line format. The strict parse still gates
+# verdict application (weakening it is dangerous), but the alert can call out
+# "auditor format slip, not staleness" when a loose scan of the desc finds a
+# sha that matches target TIP-SHA. Ember-Research ask (2026-09-19):
+# report-header as a DIAGNOSTIC SOURCE, not a fallback authority.
+_AUDITED_SHA_LOOSE_RE = re.compile(
+    r'AUDITED[-_ ]SHA[^0-9a-fA-F]{0,20}([0-9a-fA-F]{7,40})',
+    re.IGNORECASE,
+)
+
+
+def _extract_audited_sha_loose(desc: str) -> str:
+    """Loose-scan for AUDITED-SHA anywhere in desc (not just start-of-line).
+    Returns the FIRST match, lowered, or ''. Diagnostic-only — never used
+    to gate verdict application. See _AUDITED_SHA_LOOSE_RE for rationale."""
+    if not desc:
+        return ""
+    m = _AUDITED_SHA_LOOSE_RE.search(desc)
+    return m.group(1).lower() if m else ""
+
+
 def _check_target_tip_freshness(target_id: str, target_desc: str,
                                 closing_audits: list) -> tuple:
     """Symmetric TIP-SHA freshness check — ER-556/ER-559 (Ember-Research
@@ -9488,21 +9513,49 @@ def _check_target_tip_freshness(target_id: str, target_desc: str,
         return (False, "", "")
     def _tip_match(sha):
         return sha and (sha == tip or tip.startswith(sha) or sha.startswith(tip))
-    missing = []
+    # Each closing_audits entry can optionally include a 3rd element (the
+    # audit's full desc) so we can loose-scan for a slipped AUDITED-SHA when
+    # the strict parser found nothing. Loose-scan is DIAGNOSTIC ONLY — never
+    # authoritative — but a loose-found sha that matches TIP-SHA tells the
+    # resolver "format slip, not staleness" (ER-591 ask 1, Ember-Research
+    # 2026-09-19; Opus48 has 4 recurrences of missing own-line but correct
+    # sha in the report body/header). Two-tuple entries stay back-compat.
+    missing = []       # [(id, loose_hint_or_none)]
     mismatched = []
-    for (aid, sha) in closing_audits:
+    for entry in closing_audits:
+        if len(entry) >= 3:
+            aid, sha, adesc = entry[0], entry[1], entry[2]
+        else:
+            aid, sha, adesc = entry[0], entry[1], ""
         if not sha:
-            missing.append(aid)
+            loose = _extract_audited_sha_loose(adesc or "")
+            if loose and _tip_match(loose):
+                missing.append((aid, loose))
+            else:
+                missing.append((aid, ""))
         elif not _tip_match(sha):
             mismatched.append((aid, sha))
     if not (missing or mismatched):
         return (False, "", tip)
     parts = []
     if missing:
-        parts.append(
-            f"no parseable AUDITED-SHA found in {', '.join(missing)} "
-            f"(must be own line, exact prefix `AUDITED-SHA:`, full 40-char sha)"
-        )
+        # Split missing into "loose-matches-tip" (auditor format slip) and
+        # "truly missing" (no sha anywhere in desc) so the resolver's next
+        # action is obvious from the alert.
+        slip_ids = [aid for aid, hint in missing if hint]
+        gone_ids = [aid for aid, hint in missing if not hint]
+        if gone_ids:
+            parts.append(
+                f"no parseable AUDITED-SHA found in {', '.join(gone_ids)} "
+                f"(must be own line, exact prefix `AUDITED-SHA:`, full 40-char sha)"
+            )
+        if slip_ids:
+            parts.append(
+                f"AUDITED-SHA line missing on own line in "
+                f"{', '.join(slip_ids)} but loose-scan of desc found matching "
+                f"sha {missing[0][1][:12]} — auditor format slip, NOT staleness; "
+                f"safe to accept once the format is corrected"
+            )
     if mismatched:
         parts.append(
             "; ".join(
@@ -10203,26 +10256,37 @@ def _auto_apply_adjudication(rr_item: dict, db) -> dict | None:
         return None  # already there, nothing to do
     now = int(time.time())
     stamp = time.strftime("%Y-%m-%d %H:%M", time.localtime())
-    # ER-559 (2026-09-16): symmetric TIP-SHA freshness check. Previously
-    # C3 blindly applied any *-Research verdict to the target regardless
-    # of whether the adjudication was against the current tip. An
-    # adjudication written before a re-take could silently bounce/bless
-    # work at the new tip. If the *-Research item declares AUDITED-SHA
-    # in its own desc, compare to target's TIP-SHA. Target with no
-    # TIP-SHA declaration = no gate (back-compat for non-adopting orgs).
+    # Sha-freshness — verdict-first gating (ER-591 ask 2, 2026-09-19):
+    # only gate PASS adjudications (verified outcome). FAIL adjudications
+    # (→ doing outcome) proceed regardless — the outcome is "back to
+    # worker" which is the right action whether or not the ruling was
+    # against a stale tip. ER-559 shipped the guard for both; ER-591
+    # narrowed to verified-only. Audit desc passed for loose-scan hint.
     _rr_sha = _extract_audited_sha(desc)
-    _hold, _hold_reason, _target_tip = _check_target_tip_freshness(
-        target_id,
-        (dict(target).get("desc") or ""),
-        [(rid, _rr_sha)],
-    )
-    if _hold:
-        _target_dict = {k: target[k] for k in target.keys()}
-        return _apply_sha_mismatch_hold(
-            target_id, _target_dict, _hold_reason,
-            "C3-adjudication", [rid],
-            rr_item.get("session") or "", db, stamp,
+    if verdict in ("PASS", "PASS-WITH-WARNINGS"):
+        _hold, _hold_reason, _target_tip = _check_target_tip_freshness(
+            target_id,
+            (dict(target).get("desc") or ""),
+            [(rid, _rr_sha, desc)],
         )
+        if _hold:
+            _target_dict = {k: target[k] for k in target.keys()}
+            return _apply_sha_mismatch_hold(
+                target_id, _target_dict, _hold_reason,
+                "C3-adjudication", [rid],
+                rr_item.get("session") or "", db, stamp,
+            )
+    else:
+        # FAIL adjudication → doing. Observability probe only.
+        _hp, _rp, _tp = _check_target_tip_freshness(
+            target_id,
+            (dict(target).get("desc") or ""),
+            [(rid, _rr_sha, desc)],
+        )
+        if _hp:
+            slog(f"[C3] {target_id} verdict-first routing: adjudication "
+                 f"{verdict}, applying doing outcome despite sha-check "
+                 f"note: {_rp}")
     note = f"\n\n[auto-applied {stamp} by C3: {rid} adjudicated {verdict} → {new_status}]"
     new_desc = (target["desc"] or "") + note
     db.execute(
@@ -10384,22 +10448,36 @@ def _auto_verify_from_audit_pair(audit_item: dict, db) -> dict | None:
             return None  # unrecognized verdict token
         if target["status"] == new_status:
             return None
-        # ER-559 (2026-09-16): symmetric TIP-SHA freshness check. Previously
-        # the single-audit path applied surviving verdict without checking
-        # AUDITED-SHA vs target TIP — so a stale FAIL (or a stale PASS after
-        # a wrapper VOID) could silently bounce/bless work whose current tip
-        # may already answer the findings. Now uses the shared helper so
-        # the same doctrine applies to every verdict-apply path.
-        _hold, _hold_reason, _target_tip = _check_target_tip_freshness(
-            target_id, target["desc"] or "",
-            [(surviving_id, surviving_sha)],
-        )
-        if _hold:
-            return _apply_sha_mismatch_hold(
-                target_id, target, _hold_reason,
-                "C4-single", [surviving_id, discarded_id],
-                my_session, db, stamp,
+        # Sha-freshness — verdict-first gating (ER-591 ask 2, 2026-09-19):
+        # only apply on surviving-PASS→verified. FAIL→doing is safe (worker
+        # sees the audit + current tip and decides). ER-559 shipped this
+        # guard for both branches; ER-591 narrowed it to just the verified
+        # branch after four occurrences on EF-6 showed the FAIL-side hold
+        # was noise (outcome would have been "back to worker" either way).
+        # audit desc passed for loose-scan hint (ER-591 ask 1).
+        if surviving_verdict in accept:
+            _hold, _hold_reason, _target_tip = _check_target_tip_freshness(
+                target_id, target["desc"] or "",
+                [(surviving_id, surviving_sha,
+                  (audit_item if surviving_id == aid else other).get("desc") or "")],
             )
+            if _hold:
+                return _apply_sha_mismatch_hold(
+                    target_id, target, _hold_reason,
+                    "C4-single", [surviving_id, discarded_id],
+                    my_session, db, stamp,
+                )
+        else:
+            # FAIL surviving → doing. Emit observability probe only.
+            _hp, _rp, _tp = _check_target_tip_freshness(
+                target_id, target["desc"] or "",
+                [(surviving_id, surviving_sha,
+                  (audit_item if surviving_id == aid else other).get("desc") or "")],
+            )
+            if _hp:
+                slog(f"[C4] {target_id} single-audit verdict-first routing: "
+                     f"surviving {surviving_verdict}, applying doing outcome "
+                     f"despite sha-check note: {_rp}")
         note = (f"\n\n[auto-applied {stamp} by C4: single-audit "
                 f"({surviving_id}={surviving_verdict}, {discarded_id}=VOID/discarded) "
                 f"→ {new_status}]")
@@ -10435,144 +10513,70 @@ def _auto_verify_from_audit_pair(audit_item: dict, db) -> dict | None:
         slog(f"[C4] {target_id} single-audit ({surviving_id}={surviving_verdict}, "
              f"{discarded_id}=VOID) → {new_status}")
         return result
-    # ── AUDITED-SHA / TIP-SHA guard (Ember-Research substrate reports,
-    # 2026-09-11 ER-508 + 2026-09-15 ER-523).
+    # ── AUDITED-SHA / TIP-SHA guard (Ember-Research substrate reports).
     #
-    # ER-508 evidence (EAAC-45): pair audited parent-vs-tip → pairwise
-    # AUDITED-SHA compare caught it.
-    # ER-523 evidence (EAC-387): BOTH auditors recorded the SAME STALE sha
-    # (3efd3cc; tip had moved twice to 59c0354). Pairwise compare passed
-    # perfectly → false verified certifying a report missing its own worst
-    # finding (a cutover-blocker). The correct oracle is the TARGET'S TIP,
-    # not audit-vs-audit. Server can't derive a git tip from a board item,
-    # so workers declare it in their completion/re-take desc via
-    # `TIP-SHA: <sha>`.
-    #
-    # Rules (Ember-Research 2026-09-15 upgraded design):
-    #   Target has TIP-SHA:
-    #     - Both audits' AUDITED-SHA == TIP-SHA  → proceed to verdict apply.
-    #     - Any audit's AUDITED-SHA != TIP-SHA   → HOLD in review, alert.
-    #     - Any audit missing AUDITED-SHA        → HOLD (org has adopted).
-    #   Target has NO TIP-SHA (adoption phase):
-    #     - Both audits' AUDITED-SHA agree       → proceed (warn slog).
-    #     - Both audits' AUDITED-SHA disagree    → HOLD (ER-508 back-compat).
-    #     - Any audit missing AUDITED-SHA        → warn slog + proceed.
-    # Missing AUDITED-SHA becomes strict only when the target opts in via
-    # TIP-SHA, keeping non-adopting orgs (RTG) back-compat.
+    # Evolution:
+    #   - 2026-09-11 ER-508: pairwise AUDITED-SHA compare.
+    #   - 2026-09-15 ER-523: target TIP-SHA as oracle, both-stale caught.
+    #   - 2026-09-19 ER-591 (this): VERDICT-FIRST routing — sha-hold only
+    #     gates the PASS/PASS→verified outcome. SPLIT and FAIL/FAIL route
+    #     to their natural outcome regardless of sha state, because:
+    #       * Split's outcome is "Research adjudicates" — Research reads
+    #         both reports directly; sha-hold pre-empting escalation
+    #         arrives as a wrong frame ("sha-mismatch" vs the real
+    #         "verdicts disagree"). Reported 4x on EF-6.
+    #       * FAIL/FAIL's outcome is "back to worker" — the worker sees
+    #         the fresh audits, checks their current tip, and re-requests
+    #         audit if the fix already landed. Same shape as sha-hold →
+    #         Research → worker, one hop shorter.
+    #     The sha-freshness gate is about avoiding a FALSE VERIFIED, which
+    #     only pass/pass can produce.
     _sha_a = _extract_audited_sha(audit_item.get("desc") or "")
     _sha_b = _extract_audited_sha(other["desc"] or "")
     _target_tips = _all_tip_shas(target["desc"] or "")
     _target_tip = _target_tips[-1] if _target_tips else ""
     _hold = False
     _hold_reason = ""
-    if not my_discarded and not other_discarded:
-        # Fail-closed on ambiguous TIP-SHA (ER-529, 2026-09-15). Descs are
-        # appended in practice, so a re-take can leave multiple well-formed
-        # TIP-SHA lines. Silently picking first-or-last defeats the guard —
-        # first-match would flag a CORRECT verdict as stale, last-match
-        # could pass a STALE verdict. Only unambiguous declarations count.
-        if len(_target_tips) > 1:
+    _accept_set = {"PASS", "PASS-WITH-WARNINGS"}
+    _both_accept = (not my_discarded and not other_discarded
+                    and my_verdict in _accept_set and their_verdict in _accept_set)
+    if not my_discarded and not other_discarded and _both_accept:
+        # Verdicts converge on PASS/PASS → verified. Now sha-freshness
+        # matters: false-verified is worse than no verdict. Delegate to
+        # the shared helper (now with per-audit desc for loose-scan
+        # diagnostic hint per ER-591 ask 1 — Opus48 recurring format slip).
+        _hold, _hold_reason, _target_tip = _check_target_tip_freshness(
+            target_id, target["desc"] or "",
+            [(aid, _sha_a, audit_item.get("desc") or ""),
+             (other["id"], _sha_b, other["desc"] or "")],
+        )
+        # ER-508 back-compat: for orgs without TIP-SHA convention, use
+        # pairwise-compare between audits as the fallback gate.
+        if not _hold and not _target_tip and _sha_a and _sha_b and _sha_a != _sha_b:
             _hold = True
             _hold_reason = (
-                f"ambiguous TIP-SHA ({len(_target_tips)} found) in "
-                f"{target_id}: " +
-                ", ".join(s[:12] for s in _target_tips) +
-                ". Convention is exactly one TIP-SHA line per target — "
-                f"superseded shas belong in prose without the token"
+                f"no target TIP-SHA declared; pairwise mismatch "
+                f"{aid}={_sha_a[:12]} vs {other['id']}={_sha_b[:12]}"
             )
-        elif _target_tip:
-            # Target opted in — TIP is the oracle. Track missing declarations
-            # separately from genuine mismatches so the alert can triage
-            # them differently (ER-525 UX follow-up 2026-09-15 — the old
-            # "does not match" wording sent readers hunting for a wrong
-            # commit that didn't exist when the real failure was a
-            # missing/unparseable AUDITED-SHA line).
-            _missing = []       # audits with no parseable AUDITED-SHA
-            _mismatched = []    # audits whose SHA differs from target TIP
-            def _tip_match(sha):
-                return (sha == _target_tip
-                        or _target_tip.startswith(sha)
-                        or sha.startswith(_target_tip))
-            if not _sha_a:
-                _hold = True
-                _missing.append(aid)
-            elif not _tip_match(_sha_a):
-                _hold = True
-                _mismatched.append((aid, _sha_a))
-            if not _sha_b:
-                _hold = True
-                _missing.append(other["id"])
-            elif not _tip_match(_sha_b):
-                _hold = True
-                _mismatched.append((other["id"], _sha_b))
-            if _hold:
-                _parts = []
-                if _missing:
-                    _parts.append(
-                        f"no parseable AUDITED-SHA found in "
-                        f"{', '.join(_missing)} "
-                        f"(must be own line, exact prefix "
-                        f"`AUDITED-SHA:`, full 40-char sha)"
-                    )
-                if _mismatched:
-                    _parts.append(
-                        "; ".join(
-                            f"AUDITED-SHA {sha[:12]} in {audit_id} "
-                            f"!= target TIP-SHA {_target_tip[:12]}"
-                            for audit_id, sha in _mismatched
-                        )
-                    )
-                _hold_reason = " | ".join(_parts)
-        else:
-            # Back-compat: no TIP declaration, use pairwise compare (ER-508
-            # behavior). Only holds when both are present AND differ.
-            if _sha_a and _sha_b and _sha_a != _sha_b:
-                _hold = True
-                _hold_reason = (
-                    f"no target TIP-SHA declared; pairwise mismatch "
-                    f"{aid}={_sha_a[:12]} vs {other['id']}={_sha_b[:12]}"
-                )
-            elif (not _sha_a) or (not _sha_b):
-                # Missing AUDITED-SHA is warn-only during adoption phase for
-                # orgs without TIP-SHA convention (RTG). Log for visibility.
-                _miss = []
-                if not _sha_a: _miss.append(aid)
-                if not _sha_b: _miss.append(other["id"])
-                slog(f"[C4] {target_id} adoption-warn: no target TIP-SHA + "
-                     f"{','.join(_miss)} missing AUDITED-SHA")
-    if _hold:
-        _mismatch_note = (
-            f"\n\n[C4 sha-mismatch {stamp}: {_hold_reason}. Not flipping "
-            f"verified; delta re-audit against the target's current tip "
-            f"needed before this can proceed.]"
+        if _hold:
+            return _apply_sha_mismatch_hold(
+                target_id, target, _hold_reason,
+                "C4-pair", [aid, other["id"]],
+                my_session, db, stamp,
+            )
+    elif not my_discarded and not other_discarded:
+        # SPLIT or FAIL/FAIL: sha-hold no longer pre-empts (ER-591 ask 2).
+        # Still emit an observability slog if sha-freshness would have
+        # complained, so the record shows the state at apply-time.
+        _hold_probe, _reason_probe, _tip_probe = _check_target_tip_freshness(
+            target_id, target["desc"] or "",
+            [(aid, _sha_a, audit_item.get("desc") or ""),
+             (other["id"], _sha_b, other["desc"] or "")],
         )
-        new_desc = (target["desc"] or "") + _mismatch_note
-        db.execute(
-            "UPDATE issues SET desc = ?, updated = ? WHERE id = ?",
-            (new_desc, now, target_id),
-        )
-        db.commit()
-        _board_changed()
-        _org = (target["org"] if "org" in target.keys() else None) or _session_org(my_session)
-        _master = f"{_org}-Research" if _org else None
-        if _master and _is_real_session(_master):
-            def _run():
-                try:
-                    send_text(_master, (
-                        f"C4 SHA-MISMATCH: {target_id} — {(target['title'] or '')[:80]}. "
-                        f"{_hold_reason}. Target held in review; a delta re-audit "
-                        f"against the current tip is needed before verified can flip. "
-                        f"Check `amux board show {target_id}` for both audit reports."
-                    ))
-                except Exception:
-                    pass
-            threading.Thread(target=_run, daemon=True).start()
-            slog(f"[C4] {target_id} SHA-MISMATCH — {_hold_reason} — "
-                 f"notified {_master}, held in review")
-        return {"action": "held", "audits": [aid, other["id"]],
-                "audit_shas": [_sha_a, _sha_b],
-                "target_tip_sha": _target_tip,
-                "target": target_id, "reason": "sha-mismatch"}
+        if _hold_probe:
+            slog(f"[C4] {target_id} verdict-first routing: pair is "
+                 f"{my_verdict}/{their_verdict} (not both-accept), applying "
+                 f"outcome despite sha-check note: {_reason_probe}")
     # ── Standard pair-complete path (both have verdicts) ──────────────
     accept = {"PASS", "PASS-WITH-WARNINGS"}
     if my_verdict in accept and their_verdict in accept:
