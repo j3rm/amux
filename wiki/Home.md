@@ -43,6 +43,7 @@ HTML/CSS/JS). This fork keeps that single-file design and adds:
 | [Deploy-New-Amux-Server](Deploy-New-Amux-Server.md) | End-to-end playbook to provision a fresh Ubuntu VM (or take an existing box) and bring an amux server online — VM clone via govc, OS bootstrap, install.sh, systemd unit, TLS, container image build, first org registration. Written for Scorpio; anyone with SSH + govc + deploy key can execute. |
 | [Codegraph-MCP](Codegraph-MCP.md) | Per-org code graph via SSH-transport MCP (RTG / Ember / iSchedule / ShareScore). Key mapping, host and container paths, redeploy recovery playbook, smoke test, adding a new org. Depends on Scorpio's server-side provisioning at `192.168.72.85`. |
 | [Server-Loss-Recovery](Server-Loss-Recovery.md) | DR pointer + doc-sync contract. Notion page (Cypra-owned) is Jeremy-facing; `amux-config` git repo README is machine-facing. Lists WHEN a backup-script change needs a Cypra Notion-update board item + change log of substantive updates. |
+| [Substrate-Doctrines](Substrate-Doctrines.md) | Cross-cutting principles the substrate should hold, captured from the incident trail. Route on ground truth (verdict-first, tip-first, state-first). A fix that lives only in mutable state is a fix on a timer. Silence is the failure mode. Multi-incident chain per doctrine. |
 
 ## Relationship to upstream
 
