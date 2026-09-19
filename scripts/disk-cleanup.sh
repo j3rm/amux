@@ -135,6 +135,36 @@ for d in /home/jwesley/.amux/orgs/*/home/.codex; do
 done
 log "per-org .codex: pruned old logs >30d"
 
+# 9. Container /tmp/claude-1000 stale session scratchpads (>7d)
+#
+# Added 2026-09-19 after ER-586 (Ember-Research) + tonight's box-fills-to-
+# failure incident. Claude Code CLI writes per-session scratchpads under
+# /tmp/claude-1000/<uuid>/ and NEVER expires them itself. Old sessions
+# accumulate indefinitely inside every running container's writable layer.
+# RTG alone had 18 GB dating back to Aug 20 when Ember-Research escalated.
+# Prune anything older than 7 days across every running container — safe
+# because active sessions bump their scratchpad's mtime on every tool call.
+#
+# Doctrine per Ember-Research ER-586 close: "the prune is the fix, the
+# watchdog is the backstop." Without this line, this class regrows on a
+# timer.
+if command -v docker >/dev/null 2>&1; then
+  reclaimed_total=0
+  for c in $(docker ps --format '{{.Names}}' 2>/dev/null | grep '^amux-org-'); do
+    before_mb=$(docker exec "$c" du -sm /tmp/claude-1000 2>/dev/null | awk '{print $1}')
+    docker exec "$c" bash -c 'find /tmp/claude-1000 -maxdepth 2 -type d -mtime +7 -exec rm -rf {} + 2>/dev/null' 2>/dev/null
+    after_mb=$(docker exec "$c" du -sm /tmp/claude-1000 2>/dev/null | awk '{print $1}')
+    if [ -n "$before_mb" ] && [ -n "$after_mb" ] && [ "$before_mb" -gt "$after_mb" ]; then
+      reclaimed=$((before_mb - after_mb))
+      reclaimed_total=$((reclaimed_total + reclaimed))
+      log "container $c: /tmp/claude-1000 pruned ${before_mb}M → ${after_mb}M (-${reclaimed}M)"
+    fi
+  done
+  if [ "$reclaimed_total" -gt 0 ]; then
+    log "container /tmp/claude-1000 total reclaimed: ~${reclaimed_total}M"
+  fi
+fi
+
 # ─── Docker (safe: only removes UNUSED images/containers/volumes) ───────
 if command -v docker >/dev/null 2>&1; then
   # -f = no confirm prompt. Only touches dangling/unreferenced items.
