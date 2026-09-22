@@ -135,6 +135,25 @@ human is a bug waiting for someone to notice it after the damage. When
 you add a new "skip this case" branch, add its `[<hook-name>-skip]` slog
 in the same commit.
 
+**Amendment — interlocking conventions (Ember-Research 2026-09-22,
+ER-613/ER-614 close):** when two independent guards both surface the
+same underlying state — one substrate-enforced, one convention-required
+— a silent regression in either becomes a VISIBLE regression in the
+combined view. Concrete example: the dotnet install in the Ember
+container lives in the writable layer (fix-on-a-timer per Doctrine 2
+above), so a `docker rm && docker run` reverts Codex to source-read-only
+— **that regression used to be silent**. But Ember-Research's parallel
+VERIFICATION-BASIS convention (audit desks state `build=RAN` or
+`build=NOT-RUN(reason)` on every code-touching verdict) turns it into a
+visible one: Codex's next verdict line flips to `build=NOT-RUN(no
+dotnet)` the moment the symlink is gone, and a reader sees it
+immediately. Neither guard alone is enough — the substrate can be
+correctly-set-and-then-lost; the convention can be forgotten. Together,
+they're a **tripwire** for each other. When shipping a substrate fix
+with a known durability caveat, ask: is there an existing (or
+proposable) convention that would make degradation of THIS fix visible?
+If yes, the caveat class shifts from silent to disclosed.
+
 ---
 
 ## Same principle at multiple layers
