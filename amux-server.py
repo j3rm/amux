@@ -9465,6 +9465,56 @@ def _extract_audited_sha_loose(desc: str) -> str:
     return m.group(1).lower() if m else ""
 
 
+def _extract_audited_sha_from_report_file(audit_id: str, audit_session: str) -> str:
+    """Report-file fallback for AUDITED-SHA (ER-613, Ember-Research
+    2026-09-22). When both strict and loose scans of the audit's board-desc
+    find no AUDITED-SHA, walk up from the audit session's CC_DIR looking
+    for a sibling `audit-reports/<AUDIT-ID>.md` and loose-scan its content.
+
+    Ember-Research verified safe on the Ember tree: exactly ONE
+    `audit-reports/` dir under `/mnt/gitdata/EmberCRM/` (at
+    `Ember_Core_Documents/audit-reports/`); walking up from an auditor's
+    CC_DIR (`.../.agents/Ember-Audit-{Codex,Opus48}`) hits the org root
+    and the sibling dir is unambiguous. All 809 existing reports
+    conform to `<EAO|EAC>-N.md` — hard invariant.
+
+    Convention-based discovery (no per-org config): walk up MAX 4 levels
+    from CC_DIR, at each level check every direct subdir for
+    `audit-reports/<AUDIT-ID>.md`. Return the sha (loose-scanned) or ''.
+
+    Silent failure: if CC_DIR unknown, walk-up yields nothing, or the
+    file doesn't exist, return '' — caller treats as regular missing-sha.
+    """
+    if not audit_id or not audit_session:
+        return ""
+    try:
+        env_file = CC_SESSIONS / f"{audit_session}.env"
+        if not env_file.is_file():
+            return ""
+        cfg = parse_env_file(env_file)
+        cc_dir = (cfg.get("CC_DIR") or "").strip()
+        if not cc_dir:
+            return ""
+        cur = Path(cc_dir).resolve()
+        for _ in range(5):  # CC_DIR itself + up to 4 parents
+            for child in cur.iterdir() if cur.is_dir() else []:
+                if not child.is_dir():
+                    continue
+                candidate = child / "audit-reports" / f"{audit_id}.md"
+                if candidate.is_file():
+                    try:
+                        content = candidate.read_text(errors="replace")
+                    except Exception:
+                        return ""
+                    return _extract_audited_sha_loose(content)
+            if cur.parent == cur:
+                break
+            cur = cur.parent
+    except Exception:
+        return ""
+    return ""
+
+
 def _check_target_tip_freshness(target_id: str, target_desc: str,
                                 closing_audits: list) -> tuple:
     """Symmetric TIP-SHA freshness check — ER-556/ER-559 (Ember-Research
@@ -9489,8 +9539,13 @@ def _check_target_tip_freshness(target_id: str, target_desc: str,
     For C3 adjudication this is [(*-Research item id, adjudicator's
     AUDITED-SHA if present else '')].
 
-    Returns (False, '', tip) when the verdict is safe to apply, or
-    (True, reason, tip) when the caller should hold + alert.
+    Returns (hold: bool, reason: str, tip: str, resolutions: list) where
+    resolutions is a list of (audit_id, sha) tuples for audits whose sha
+    was resolved via the report-file fallback (ER-613). The caller
+    attaches those to the desc-append provenance note when it applies
+    the verdict, so a reader sees "sha via report-file audit-reports/
+    <id>.md" instead of a bare auto-apply. Empty list = all shas came
+    from strict or loose desc parse (no report-file lookup was needed).
 
     Why extracted: prior to 2026-09-16 this logic lived inline in
     _auto_verify_from_audit_pair's pair-complete branch only. The
@@ -9507,36 +9562,58 @@ def _check_target_tip_freshness(target_id: str, target_desc: str,
                 ", ".join(s[:12] for s in tips) +
                 ". Convention is exactly one TIP-SHA line per target — "
                 "superseded shas belong in prose without the token",
-                tips[-1])
+                tips[-1], [])
     tip = tips[-1] if tips else ""
     if not tip:
-        return (False, "", "")
+        return (False, "", "", [])
     def _tip_match(sha):
         return sha and (sha == tip or tip.startswith(sha) or sha.startswith(tip))
     # Each closing_audits entry can optionally include a 3rd element (the
     # audit's full desc) so we can loose-scan for a slipped AUDITED-SHA when
-    # the strict parser found nothing. Loose-scan is DIAGNOSTIC ONLY — never
-    # authoritative — but a loose-found sha that matches TIP-SHA tells the
-    # resolver "format slip, not staleness" (ER-591 ask 1, Ember-Research
-    # 2026-09-19; Opus48 has 4 recurrences of missing own-line but correct
-    # sha in the report body/header). Two-tuple entries stay back-compat.
+    # the strict parser found nothing, and a 4th element (the audit's
+    # assignee session) so we can report-file-fallback when the desc is
+    # COMPLETELY bare of any sha (ER-613 Ember-Research 2026-09-22).
+    # Two/three-tuple entries stay back-compat.
+    #
+    # Resolution precedence (first match wins):
+    #   1. strict AUDITED-SHA in desc                    → silent proceed
+    #   2. loose AUDITED-SHA in desc (mid-text)          → HOLD with hint
+    #      ("format slip, not staleness" — ER-591 behavior, unchanged)
+    #   3. desc bare + audit-reports/<AUDIT-ID>.md loose-scan matches TIP
+    #      → auto-resolve, apply with provenance note (ER-613)
+    # ER-613 only promotes (3) to a resolution — the report file is the
+    # auditor's canonical output. Loose-in-desc (2) intentionally still
+    # holds because a format slip that a human should notice is
+    # differently-observable from a bare desc that the report saves.
     missing = []       # [(id, loose_hint_or_none)]
     mismatched = []
+    # Audits resolved via report-file — caller attaches provenance note.
+    resolved_via_report_file = []   # list of (aid, sha)
     for entry in closing_audits:
-        if len(entry) >= 3:
-            aid, sha, adesc = entry[0], entry[1], entry[2]
-        else:
-            aid, sha, adesc = entry[0], entry[1], ""
+        aid = entry[0]
+        sha = entry[1]
+        adesc = entry[2] if len(entry) >= 3 else ""
+        asess = entry[3] if len(entry) >= 4 else ""
         if not sha:
             loose = _extract_audited_sha_loose(adesc or "")
-            if loose and _tip_match(loose):
+            if loose:
+                # Loose sha in desc — hold with diagnostic hint (ER-591),
+                # even if it matches tip. The point of the hold is to
+                # nudge the auditor to fix their format slip.
                 missing.append((aid, loose))
-            else:
-                missing.append((aid, ""))
+                continue
+            # Desc is bare — try report-file fallback (ER-613).
+            if asess:
+                rf_sha = _extract_audited_sha_from_report_file(aid, asess)
+                if rf_sha and _tip_match(rf_sha):
+                    resolved_via_report_file.append((aid, rf_sha))
+                    continue
+            # Nothing found — regular missing.
+            missing.append((aid, ""))
         elif not _tip_match(sha):
             mismatched.append((aid, sha))
     if not (missing or mismatched):
-        return (False, "", tip)
+        return (False, "", tip, resolved_via_report_file)
     parts = []
     if missing:
         # Split missing into "loose-matches-tip" (auditor format slip) and
@@ -9563,7 +9640,7 @@ def _check_target_tip_freshness(target_id: str, target_desc: str,
                 for aid, sha in mismatched
             )
         )
-    return (True, " | ".join(parts), tip)
+    return (True, " | ".join(parts), tip, resolved_via_report_file)
 
 
 def _apply_sha_mismatch_hold(target_id: str, target: dict, hold_reason: str,
@@ -10264,7 +10341,7 @@ def _auto_apply_adjudication(rr_item: dict, db) -> dict | None:
     # narrowed to verified-only. Audit desc passed for loose-scan hint.
     _rr_sha = _extract_audited_sha(desc)
     if verdict in ("PASS", "PASS-WITH-WARNINGS"):
-        _hold, _hold_reason, _target_tip = _check_target_tip_freshness(
+        _hold, _hold_reason, _target_tip, _resolutions = _check_target_tip_freshness(
             target_id,
             (dict(target).get("desc") or ""),
             [(rid, _rr_sha, desc)],
@@ -10278,7 +10355,7 @@ def _auto_apply_adjudication(rr_item: dict, db) -> dict | None:
             )
     else:
         # FAIL adjudication → doing. Observability probe only.
-        _hp, _rp, _tp = _check_target_tip_freshness(
+        _hp, _rp, _tp, _rp_res = _check_target_tip_freshness(
             target_id,
             (dict(target).get("desc") or ""),
             [(rid, _rr_sha, desc)],
@@ -10455,11 +10532,15 @@ def _auto_verify_from_audit_pair(audit_item: dict, db) -> dict | None:
         # branch after four occurrences on EF-6 showed the FAIL-side hold
         # was noise (outcome would have been "back to worker" either way).
         # audit desc passed for loose-scan hint (ER-591 ask 1).
+        # ER-613: pass surviving audit's session so report-file fallback
+        # can fire on bare desc.
+        _surv_session = (audit_item if surviving_id == aid else other).get("session") or ""
+        _surv_desc = (audit_item if surviving_id == aid else other).get("desc") or ""
+        _single_resolutions = []
         if surviving_verdict in accept:
-            _hold, _hold_reason, _target_tip = _check_target_tip_freshness(
+            _hold, _hold_reason, _target_tip, _single_resolutions = _check_target_tip_freshness(
                 target_id, target["desc"] or "",
-                [(surviving_id, surviving_sha,
-                  (audit_item if surviving_id == aid else other).get("desc") or "")],
+                [(surviving_id, surviving_sha, _surv_desc, _surv_session)],
             )
             if _hold:
                 return _apply_sha_mismatch_hold(
@@ -10469,18 +10550,22 @@ def _auto_verify_from_audit_pair(audit_item: dict, db) -> dict | None:
                 )
         else:
             # FAIL surviving → doing. Emit observability probe only.
-            _hp, _rp, _tp = _check_target_tip_freshness(
+            _hp, _rp, _tp, _rp_res = _check_target_tip_freshness(
                 target_id, target["desc"] or "",
-                [(surviving_id, surviving_sha,
-                  (audit_item if surviving_id == aid else other).get("desc") or "")],
+                [(surviving_id, surviving_sha, _surv_desc, _surv_session)],
             )
             if _hp:
                 slog(f"[C4] {target_id} single-audit verdict-first routing: "
                      f"surviving {surviving_verdict}, applying doing outcome "
                      f"despite sha-check note: {_rp}")
+        _report_note_single = ""
+        if _single_resolutions:
+            _report_note_single = " (sha via report-file: " + ", ".join(
+                f"{rid}=audit-reports/{rid}.md@{sha[:12]}" for rid, sha in _single_resolutions
+            ) + ")"
         note = (f"\n\n[auto-applied {stamp} by C4: single-audit "
                 f"({surviving_id}={surviving_verdict}, {discarded_id}=VOID/discarded) "
-                f"→ {new_status}]")
+                f"→ {new_status}{_report_note_single}]")
         new_desc = (target["desc"] or "") + note
         db.execute(
             "UPDATE issues SET status = ?, desc = ?, updated = ? WHERE id = ?",
@@ -10543,12 +10628,15 @@ def _auto_verify_from_audit_pair(audit_item: dict, db) -> dict | None:
     if not my_discarded and not other_discarded and _both_accept:
         # Verdicts converge on PASS/PASS → verified. Now sha-freshness
         # matters: false-verified is worse than no verdict. Delegate to
-        # the shared helper (now with per-audit desc for loose-scan
-        # diagnostic hint per ER-591 ask 1 — Opus48 recurring format slip).
-        _hold, _hold_reason, _target_tip = _check_target_tip_freshness(
+        # the shared helper (per-audit desc for loose-scan diagnostic hint
+        # per ER-591 ask 1; per-audit session for report-file fallback
+        # per ER-613 ask — Opus48 recurring bare-desc case where the
+        # canonical AUDITED-SHA lives only in the audit-reports/<id>.md
+        # file).
+        _hold, _hold_reason, _target_tip, _resolutions = _check_target_tip_freshness(
             target_id, target["desc"] or "",
-            [(aid, _sha_a, audit_item.get("desc") or ""),
-             (other["id"], _sha_b, other["desc"] or "")],
+            [(aid, _sha_a, audit_item.get("desc") or "", my_session),
+             (other["id"], _sha_b, other["desc"] or "", other["session"])],
         )
         # ER-508 back-compat: for orgs without TIP-SHA convention, use
         # pairwise-compare between audits as the fallback gate.
@@ -10568,7 +10656,7 @@ def _auto_verify_from_audit_pair(audit_item: dict, db) -> dict | None:
         # SPLIT or FAIL/FAIL: sha-hold no longer pre-empts (ER-591 ask 2).
         # Still emit an observability slog if sha-freshness would have
         # complained, so the record shows the state at apply-time.
-        _hold_probe, _reason_probe, _tip_probe = _check_target_tip_freshness(
+        _hold_probe, _reason_probe, _tip_probe, _probe_res = _check_target_tip_freshness(
             target_id, target["desc"] or "",
             [(aid, _sha_a, audit_item.get("desc") or ""),
              (other["id"], _sha_b, other["desc"] or "")],
@@ -10596,8 +10684,23 @@ def _auto_verify_from_audit_pair(audit_item: dict, db) -> dict | None:
         )
     if target["status"] == new_status:
         return None
+    # ER-613 provenance: if _check_target_tip_freshness resolved any
+    # audit's sha via the report-file fallback (bare desc, sha in
+    # audit-reports/<id>.md), name it in the auto-apply note so a reader
+    # sees it wasn't desc-resolved. _resolutions is empty when this
+    # branch wasn't the both-accept path OR no report-file lookup fired.
+    _report_note = ""
+    try:
+        _res = _resolutions  # captured above in the both_accept branch
+    except NameError:
+        _res = []
+    if _res:
+        _report_note = " (sha via report-file: " + ", ".join(
+            f"{rid}=audit-reports/{rid}.md@{sha[:12]}" for rid, sha in _res
+        ) + " — desc was bare, report was compliant)"
     note = (f"\n\n[auto-applied {stamp} by C4: pair complete "
-            f"({aid}={my_verdict}, {other['id']}={their_verdict}) → {new_status}]")
+            f"({aid}={my_verdict}, {other['id']}={their_verdict}) → "
+            f"{new_status}{_report_note}]")
     new_desc = (target["desc"] or "") + note
     db.execute(
         "UPDATE issues SET status = ?, desc = ?, updated = ? WHERE id = ?",
