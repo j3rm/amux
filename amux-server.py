@@ -5897,6 +5897,14 @@ def _init_db():
         # `nudged_at < updated`.
         "ALTER TABLE issues ADD COLUMN stale_doing_nudged_at INTEGER NOT NULL DEFAULT 0",
         "ALTER TABLE issues ADD COLUMN stale_doing_escalated_at INTEGER NOT NULL DEFAULT 0",
+        # stale_todo_boost_count — ER-624 (Ember-Research 2026-09-29, EAC-572
+        # 3.6-day orphan). Counts consecutive todo-boost sweeps that
+        # bubbled this item back to top-of-queue without a status change.
+        # Reset to 0 when status leaves 'todo'. Value >= flag threshold
+        # (default 4 = ~2h of boosts) surfaces the item as broken via
+        # slog + master notify, so a genuinely-stuck todo becomes a
+        # visible signal instead of invisible churn.
+        "ALTER TABLE issues ADD COLUMN stale_todo_boost_count INTEGER NOT NULL DEFAULT 0",
         # stale_notified: 2026-08-19 stale-todo creator alert (Jeremy).
         # Mirror of notified/creator_notified — 1 once the CREATOR has been
         # nudged that their assigned task has sat in `todo` past the
@@ -7308,6 +7316,157 @@ def _sweep_stale_doing():
         slog(f"[stale-doing-sweep] failed: {_e}")
 
 
+def _sweep_stale_todos_reboost():
+    """Periodic sweep — find agent-owned TODO items that haven't been picked
+    up past the boost threshold and bubble them back to the top of their
+    session's queue + reset notified so a fresh nudge fires.
+
+    Trigger (Ember-Research ER-624, 2026-09-29): EAC-572 sat orphaned in
+    Ember-Audit-Codex's todo queue for 3.6 days. Root cause was a partial-
+    pickup event 6-9 minutes after mint that touched two fields but left
+    the item at status=todo, notified=1. Because _notify_session_of_task's
+    atomic UPDATE requires notified=0 to fire, no re-notify ever went out.
+    Newer items got fresh nudges and got picked; 572 was invisible in the
+    "what was I just told about" queue the auditor operates on.
+
+    This sweep is a GUARD, not a targeted fix — it catches ANY starvation
+    cause (pos-collision, partial-pickup, malformed field, dispatcher
+    quirk) by mechanically re-floating any todo stuck past pickup-time.
+    Doctrine (Ember-Research): 'a mechanical guard that re-floats any todo
+    stuck past pickup-time beats fixing only the one root we found.' Same
+    family as _sweep_stale_doing.
+
+    Behavior per stale todo:
+      1. Set pos = MIN(pos in that session's todo queue) - 1024
+         (bubbles it back to the top of the session's queue).
+      2. Reset notified = 0 so _notify_session_of_task can re-fire.
+      3. Fire _notify_session_of_task now to deliver a fresh nudge.
+      4. Increment stale_todo_boost_count.
+      5. Bump updated to now (guards next sweep's threshold).
+      6. After N consecutive boosts with no completion (default 4 = ~2h),
+         emit [stale-todo-flag] slog + Pushover the org's <Org>-Research
+         master. Ember-Research: 'a genuinely-broken item should become a
+         visible signal, not invisible churn.'
+
+    SCOPE: status='todo' ONLY. backlog is EXCLUDED by design — items
+    deliberately parked in backlog belong there (manual reorder), a >30min
+    todo is genuinely starved and SHOULD jump.
+
+    Threshold: 30min (normal pickup is 1-8min → 30 is a safe margin,
+    surfaces starvation within the hour). Configurable via
+    AMUX_STALE_TODO_REBOOST_MIN (min 10, max 240).
+
+    Flag threshold: 4 boosts (~2h at 30min cadence). Configurable via
+    AMUX_STALE_TODO_BOOST_FLAG_COUNT (min 2, max 20).
+    """
+    try:
+        _threshold_min = 30
+        try:
+            _threshold_min = max(10, min(240, int(os.environ.get("AMUX_STALE_TODO_REBOOST_MIN", "30"))))
+        except (ValueError, TypeError):
+            pass
+        _flag_threshold = 4
+        try:
+            _flag_threshold = max(2, min(20, int(os.environ.get("AMUX_STALE_TODO_BOOST_FLAG_COUNT", "4"))))
+        except (ValueError, TypeError):
+            pass
+        _cap_per_tick = 10
+        try:
+            _cap_per_tick = max(1, min(50, int(os.environ.get("AMUX_STALE_TODO_REBOOST_CAP_PER_TICK", "10"))))
+        except (ValueError, TypeError):
+            pass
+        # Zombie cutoff (parallel to _sweep_stale_doing's — items >7d in
+        # todo aren't slow WORKERS, they're forgotten backlog. Boosting
+        # them nudges 10 stale items to the same pane every 5 min, which
+        # is noise not signal). Configurable via AMUX_STALE_TODO_ZOMBIE_DAYS
+        # (min 1, max 90). Zombies silently skipped — the master can
+        # discard/reassign them separately if they matter.
+        _zombie_days = 7
+        try:
+            _zombie_days = max(1, min(90, int(os.environ.get("AMUX_STALE_TODO_ZOMBIE_DAYS", "7"))))
+        except (ValueError, TypeError):
+            pass
+        _now = int(time.time())
+        _cutoff = _now - (_threshold_min * 60)
+        _zombie_cutoff = _now - (_zombie_days * 24 * 60 * 60)
+        _boosted = 0
+        _flagged = 0
+        _zombies_skipped = 0
+        db = get_db()
+        rows = db.execute(
+            "SELECT id, title, session, org, updated, "
+            "       stale_todo_boost_count "
+            "FROM issues "
+            "WHERE status = 'todo' AND owner_type = 'agent' AND deleted IS NULL "
+            "  AND session IS NOT NULL AND session != '' "
+            "  AND updated < ? "
+            "ORDER BY updated ASC",   # oldest-first so most-stale gets attention first
+            (_cutoff,),
+        ).fetchall()
+        for row in rows:
+            if _boosted >= _cap_per_tick:
+                break
+            try:
+                _iid = row["id"]
+                _sess = row["session"]
+                if not _is_real_session(_sess):
+                    continue
+                # Zombie: skip silently (aged past the boost-worthy window).
+                if int(row["updated"] or 0) < _zombie_cutoff:
+                    _zombies_skipped += 1
+                    continue
+                # Compute new pos = min(pos) of session's todos - 1024.
+                _min_row = db.execute(
+                    "SELECT COALESCE(MIN(pos), 0) AS m FROM issues "
+                    "WHERE session = ? AND status = 'todo' AND deleted IS NULL",
+                    (_sess,),
+                ).fetchone()
+                _min_pos = float(_min_row["m"]) if _min_row and _min_row["m"] is not None else 0.0
+                _new_pos = _min_pos - 1024.0
+                _new_boost_count = int(row["stale_todo_boost_count"] or 0) + 1
+                db.execute(
+                    "UPDATE issues SET pos = ?, notified = 0, "
+                    "                  updated = ?, "
+                    "                  stale_todo_boost_count = ? "
+                    "WHERE id = ?",
+                    (_new_pos, _now, _new_boost_count, _iid),
+                )
+                db.commit()
+                # Fresh notify to the assignee
+                _notify_session_of_task(_sess, _iid, row["title"] or "")
+                _boosted += 1
+                slog(f"[stale-todo-reboost] {_iid} → {_sess}: boosted to pos={_new_pos} "
+                     f"(count={_new_boost_count}, was updated {(_now-row['updated'])//60}m ago)")
+                # Flag threshold — surface as broken
+                if _new_boost_count >= _flag_threshold:
+                    _flagged += 1
+                    _org = (row["org"] or "").strip() or _session_org(_sess) or ""
+                    _master = f"{_org}-Research" if _org else None
+                    slog(f"[stale-todo-flag] {_iid}: {_new_boost_count} consecutive boosts "
+                         f"with no pickup — likely a genuinely-broken item, not just slow.")
+                    if _master and _is_real_session(_master):
+                        def _run(mid=_iid, msess=_sess, mtitle=(row["title"] or "")[:80], mcount=_new_boost_count, mmaster=_master):
+                            try:
+                                send_text(mmaster, (
+                                    f"STALE-TODO-FLAG: {mid} — {mtitle}. "
+                                    f"{mcount} consecutive boost sweeps with no pickup by "
+                                    f"{msess}. Likely genuinely-broken (not just slow). Check "
+                                    f"`amux board show {mid}` — expected pickup within 30min "
+                                    f"of each boost, no pickup after {mcount}. Investigate "
+                                    f"or reassign."
+                                ))
+                            except Exception:
+                                pass
+                        threading.Thread(target=_run, daemon=True).start()
+            except Exception as _re:
+                slog(f"[stale-todo-reboost] row {row['id']}: {_re}")
+        if _boosted or _zombies_skipped:
+            slog(f"[stale-todo-reboost] tick: {_boosted} boosted, "
+                 f"{_flagged} flagged, {_zombies_skipped} zombies (>{_zombie_days}d) skipped")
+    except Exception as _e:
+        slog(f"[stale-todo-reboost] failed: {_e}")
+
+
 def _notify_session_of_retake(session_name: str, item_id: str, title: str,
                               verdict: str, source_id: str, source: str):
     """Push a re-take notice into the target session's tmux pane after C3
@@ -7505,10 +7664,18 @@ def _load_board(done_limit: int = 100, org: str | None = None,
         tags_csv = item.pop("tags_csv") or ""
         item["tags"] = [t for t in tags_csv.split(",") if t]
         result.append(item)
+    # ER-624 tiebreaker (Ember-Research 2026-09-29, EAC-572 fallout):
+    # when two items pos-collide (nearly-simultaneous mints both sampled
+    # MIN(pos) before either INSERT committed — happened on 571/572),
+    # sort ties by `created ASC` = oldest first. Consistent old-before-
+    # new is the correct default when nothing else distinguishes the
+    # items. Previously ties resolved by `updated DESC` which produced
+    # the newest-updated-first ordering that helped bury 572 under
+    # newer arrivals as they got mint-time updates.
     result.sort(key=lambda x: (-x.get("pinned", 0),
                                 0 if x.get("pos", 0) == 0 else -1,
                                 x.get("pos", 0),
-                                -(x.get("updated", 0) or 0)))
+                                x.get("created", 0) or 0))
     return result
 
 
@@ -45390,6 +45557,17 @@ class CCHandler(BaseHTTPRequestHandler):
                     # If session is being changed, reset notified so the new assignee gets pinged
                     if "session" in body and (body.get("session") or None) != prior_session:
                         set_clauses.append("notified = 0")
+                    # ER-624 (Ember-Research 2026-09-29): reset stale_todo_boost_count
+                    # when the item leaves 'todo'. Boost count is "boosts since current
+                    # entry to todo state"; a status transition out of todo (worker
+                    # claims → doing, verified, discarded, etc.) closes that state.
+                    # Reset on ANY status change AWAY from todo so a re-take
+                    # (verified → doing → todo cycle) starts fresh, not with old
+                    # accumulated boost pressure.
+                    if ("status" in body
+                            and body.get("status") != prior["status"]
+                            and prior["status"] == "todo"):
+                        set_clauses.append("stale_todo_boost_count = 0")
                     set_clauses.append("updated = ?")
                     params.append(now)
                     # AH-69: record the ACTUAL patcher's session on every PATCH.
@@ -50538,6 +50716,15 @@ def main():
     # threshold. Nudge the assignee at STALE_DOING_MIN (default 45m);
     # escalate to <org>-Research at 2×STALE_DOING_MIN (default 90m).
     schedule_job(_sweep_stale_doing,     interval=300,                  name="stale_doing_sweep", initial_delay=90)
+    # Stale-todo re-boost sweep (Ember-Research ER-624, 2026-09-29 via
+    # EAC-572 3.6-day orphan). Every 5 min, find agent-owned todos with
+    # updated < now - AMUX_STALE_TODO_REBOOST_MIN (default 30). Bubble
+    # to top of session queue, reset notified, fire fresh nudge. After N
+    # consecutive boosts (AMUX_STALE_TODO_BOOST_FLAG_COUNT, default 4)
+    # flag the item + notify <org>-Research. Guards ALL starvation
+    # causes, not just pos-inversion — mechanical re-float beats a
+    # per-root fix. Runs 60s AFTER stale_doing to stagger the load.
+    schedule_job(_sweep_stale_todos_reboost, interval=300,               name="stale_todo_reboost_sweep", initial_delay=150)
     # Dormant-schedule sweep (AH-96, 2026-08-24): daily, alerts once for
     # any schedule created enabled=0 that never fired past the grace
     # period (default 3d, tunable via AMUX_DORMANT_SCHEDULE_DAYS).
