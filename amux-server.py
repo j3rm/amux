@@ -10633,13 +10633,21 @@ def _auto_verify_from_audit_pair(audit_item: dict, db) -> dict | None:
     # canonically `AUDIT <target>: <body>` — match the prefix only.
     # 2026-08-26 (Ember-Research): stopped excluding discarded — a
     # discarded sibling is still a valid "voted" pair-member.
-    other = db.execute(
-        "SELECT id, status, desc FROM issues "
+    # NB: `session` column required — ER-613 (1b3f0e87) added report-file
+    # fallback that passes `other["session"]` into _check_target_tip_freshness.
+    # Prior SELECT was `id, status, desc` only. That KeyError silently
+    # broke every accepting pair (ER-626 Ember-Research 2026-09-29:
+    # 7+ cases of accept-apply leaving target at review, log shows
+    # "hook error: No item with that key"). Reconvert to dict so
+    # downstream .get("session") calls work too.
+    _other_row = db.execute(
+        "SELECT id, status, desc, session FROM issues "
         "WHERE session = ? AND deleted IS NULL "
         "  AND title LIKE ? "
         "ORDER BY created DESC LIMIT 1",
         (other_session, f"AUDIT {target_id}:%"),
     ).fetchone()
+    other = dict(_other_row) if _other_row else None
     if not other or other["status"] not in ("done", "verified", "review", "discarded"):
         return None
     other_discarded = (other["status"] == "discarded")
@@ -45695,7 +45703,14 @@ class CCHandler(BaseHTTPRequestHandler):
                                     cascaded = {"action": "unblocked"}
                                 cascaded.setdefault("unblocked", []).extend(_unblocked)
                     except Exception as _ce:
-                        slog(f"[hooks] {bid}: hook error: {_ce}")
+                        # ER-626 (2026-09-29): include traceback so a bug
+                        # like the ER-613 KeyError on `other["session"]`
+                        # (which broke every accepting audit pair silently
+                        # for 7+ cases) surfaces the actual failing line
+                        # instead of "No item with that key" alone.
+                        import traceback as _tb
+                        slog(f"[hooks] {bid}: hook error: {type(_ce).__name__}: {_ce} "
+                             f"| trace: {_tb.format_exc(limit=6).replace(chr(10), ' ~ ')[:800]}")
                         cascaded = None
                     if cascaded:
                         slog(f"[hooks] {cascaded}")
