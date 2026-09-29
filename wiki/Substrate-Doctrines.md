@@ -128,12 +128,42 @@ habit is the real control."*
 - **Rate-limit banner block (2026-09-19 ER-547-adjacent).** 26h banner
   block on Ember-Research produced no Pushover to Jeremy. Substrate
   knew the state; nothing surfaced it.
+- **Stale-todo assignee re-notify (ER-624, `00b0645b`, 2026-09-29).**
+  EAC-572 sat orphaned in Ember-Audit-Codex's todo queue for 3.6 days.
+  A partial-pickup event 6-9 min after mint left the item at
+  `status=todo, notified=1`. `_notify_session_of_task`'s atomic `WHERE
+  notified=0` guard prevented re-notify — the substrate KNEW the
+  assignee was assigned but never re-pinged after the initial failed
+  pickup. Fix: `_sweep_stale_todos_reboost` mechanical guard that
+  bubbles any todo stuck past pickup-time back to top + resets
+  notified. Same doctrine framing (Ember-Research): "a mechanical
+  guard that re-floats any todo stuck past pickup-time beats fixing
+  only the one root we found."
+- **Silence-by-swallow (ER-626, `e05834fa`, 2026-09-29).** ER-613
+  introduced `other["session"]` in a `_check_target_tip_freshness`
+  call but the SELECT populating `other` didn't include `session`.
+  sqlite3.Row raised IndexError → caught by outer hook try/except →
+  logged as generic "hook error: No item with that key" → verdict
+  never applied → 9 accepting audit pairs silently stuck at review
+  for 7 days. Ember-Research framing: "a hook swallowed by an outer
+  try/except is silence by another mechanism." Fix: SELECT column
+  correction PLUS traceback in the hook-error slog (Ember-Research:
+  "collapsing format_exc into the slog line is the observability
+  upgrade that makes the next instance land visibly"). Postmortem
+  generalisation: every substrate change to the pair-complete path
+  probes all three shapes (both-accept + both-fail + split) before
+  ship — the ER-613 gap was that report-file fallback was tested
+  against bare-desc but the accepting-clean-shas path was never in
+  the probe set.
 
 **How to apply:** any early return in a hook that affects fleet behavior
 gets a slog. Any state the substrate KNOWS but doesn't SURFACE to the
 human is a bug waiting for someone to notice it after the damage. When
 you add a new "skip this case" branch, add its `[<hook-name>-skip]` slog
-in the same commit.
+in the same commit. When an outer try/except swallows a hook exception,
+the slog MUST include traceback (`traceback.format_exc()` collapsed to
+one line) — a generic exception-str is silence-with-a-log-line, not
+observability.
 
 **Amendment — interlocking conventions (Ember-Research 2026-09-22,
 ER-613/ER-614 close):** when two independent guards both surface the
