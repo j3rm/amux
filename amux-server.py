@@ -17987,6 +17987,12 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
   .notes-preview pre code { background: none; padding: 0; }
   .notes-preview a { color: inherit; text-decoration: underline; text-underline-offset: 2px; }
   .notes-preview a:hover { opacity: 0.75; }
+  /* Thread message body links — same inherit-color pattern as notes/md/overlay.
+     Without this, anchors emitted by linkifyOutput fall back to the browser's
+     UA default (blue), which is unreadable on the near-black dashboard bg.
+     Jeremy, 2026-10-05. */
+  .thr-msg-body a { color: inherit; text-decoration: underline; text-underline-offset: 2px; }
+  .thr-msg-body a:hover { opacity: 0.75; }
   .notes-preview ul, .notes-preview ol { padding-left: 22px; margin: 6px 0; }
   .notes-preview li { margin: 3px 0; }
   /* Checklist items */
@@ -31456,7 +31462,7 @@ function _tRenderMsg(t, m) {
   // linkifyOutput auto-detects absolute paths and URLs — a path like
   // /home/jwesley/.amux/uploads/abc-doc.pdf becomes a click-to-preview link,
   // same behavior as session peek output. It escapes non-match text internally.
-  if (m.body) html += `<div style="white-space:pre-wrap;font-size:0.88rem;color:var(--fg);opacity:0.92;margin:4px 0 8px 0;">${linkifyOutput(_tNormalizeBody(m.body))}</div>`;
+  if (m.body) html += `<div class="thr-msg-body" style="white-space:pre-wrap;font-size:0.88rem;color:var(--fg);opacity:0.92;margin:4px 0 8px 0;">${linkifyOutput(_tNormalizeBody(m.body))}</div>`;
   html += '</div></div>';
   // Inline reply form is rendered ABOVE the message card (prepended in the
   // return) — the message being replied to sits directly below the form for

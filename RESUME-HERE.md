@@ -2954,3 +2954,35 @@ verified working post-`277855c`).
 so revert is safe.
 
 ---
+
+## Plan for change: Thread message body — link color white (2026-10-05, Jeremy) — DONE
+
+**Trigger:** Jeremy, 2026-10-05: "When agents send me links they are blue, I cant see them on the black. Can we make all the links in threads WHITE like the text."
+
+**Root cause:** The main dashboard `<style>` block has no global `a {}` rule. The only one in the file (L14877 `a{color:var(--green);...}`) lives inside the `/release-notes` page's style block and does not apply to the main dashboard. So `<a>` tags inside thread message bodies fall back to the browser's UA default (blue, visited=purple), which is unreadable against the dashboard's near-black bg.
+
+`linkifyOutput()` (L25556) emits `<a href="..." target="_blank" rel="noopener noreferrer">URL</a>` with no inline style. Its only call site is L31459 in `_tRenderMsg` — the thread message body div — so a thread-scoped CSS rule covers every anchor it emits.
+
+**Change:**
+1. Add class `thr-msg-body` to the message body div at L31459 (currently inline-styled, no class).
+2. Add scoped CSS rule after `.notes-preview a:hover` (near L17989) mirroring the existing pattern for `.notes-preview a` and `.md-content a` and `.overlay-body a`:
+   ```css
+   .thr-msg-body a { color: inherit; text-decoration: underline; text-underline-offset: 2px; }
+   .thr-msg-body a:hover { opacity: 0.75; }
+   ```
+   `color: inherit` → takes the parent div's `color:var(--fg)` → matches body text exactly, no new color constant.
+
+**Why not change `linkifyOutput` directly:** keeps styling out of the HTML-emitting function — same reason the file-link / md-link spans use `.file-link { ... }` class-scoped rules. If a future caller uses `linkifyOutput` outside threads, no inherited style surprise.
+
+**Why not change the global `a{}` rule or add one:** too broad — would recolor every anchor on the dashboard (breadcrumbs, hidden overflow menus, etc.). Scoped rule is the least-invasive fix.
+
+**Out of scope:** `.file-link` and `.md-link` spans in the same body use `color: inherit` only inside `.overlay-body`. Elsewhere they inherit from the surrounding div (which is `var(--fg)`), so they already match body text. Not touching them.
+
+**Verification steps:**
+1. `python3 -c "import ast; ast.parse(open('amux-server.py').read())"` — syntax OK.
+2. Reload dashboard, open any thread with an agent message containing a URL → link renders white (same as body text), underlined.
+3. Hover → slight opacity dim.
+4. Mobile check: 375px wide, link still readable, 44px tap target preserved (anchor doesn't shrink).
+5. `git add amux-server.py && git commit` with `fix(dashboard):` prefix.
+
+**Rollback:** `git revert <hash>` — pure CSS/class change, no data/behavior effect.
