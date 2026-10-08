@@ -5484,6 +5484,7 @@ print(d.get('id','error: '+str(d.get('error','?'))))" ;;
         payload=$(python3 -c "
 import json,sys; print(json.dumps({'body':sys.argv[1]}))" "$body")
         curl -sk -X PATCH -H 'Content-Type: application/json' \
+          -H "X-Amux-Session: $AMUX_SESSION" \
           -d "$payload" "$AMUX_URL/api/messages/$mid" | python3 -c "
 import json,sys; d=json.load(sys.stdin)
 print(d.get('id','error: '+str(d.get('error','?'))),d.get('status',''))" ;;
@@ -9265,12 +9266,16 @@ def _try_route_rd(rd_id: str, rd_title: str, rd_desc: str, rd_org: str | None, d
 
     # Don't self-route: if the RD itself is somehow assigned to the same session
     # as ROUTE_TO names, that's a config error.
+    # Also capture the RD's creator so the minted child can inherit it — otherwise
+    # _notify_creator_of_completion silently skips on the hard-coded 'server-routed'
+    # when the child hits terminal (Ember-Research 2026-10-06).
     me_row = db.execute(
-        "SELECT session FROM issues WHERE id = ? AND deleted IS NULL", (rd_id,),
+        "SELECT session, creator FROM issues WHERE id = ? AND deleted IS NULL", (rd_id,),
     ).fetchone()
     if me_row and (me_row["session"] or "") == target_session:
         slog(f"[route-rd] {rd_id}: ROUTE_TO points to same session as the RD itself — skipping")
         return None
+    rd_creator = (me_row["creator"] if me_row else "") or ""
 
     # Parse BLOCKED_BY (full desc, not just head)
     blocked_by: list[str] = []
@@ -9330,7 +9335,7 @@ def _try_route_rd(rd_id: str, rd_title: str, rd_desc: str, rd_org: str | None, d
                                created, updated, owner_type, pos, org)
            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
         (child_id, child_title, child_desc, child_status, target_session,
-         "server-routed", None, None, now, now, "agent", new_pos, child_org),
+         rd_creator or "server-routed", None, None, now, now, "agent", new_pos, child_org),
     )
 
     # PATCH the RD: append the server-routed marker + child id to desc, set done
@@ -9680,6 +9685,25 @@ def _extract_audited_sha_from_report_file(audit_id: str, audit_session: str) -> 
     except Exception:
         return ""
     return ""
+
+
+def _shas_prefix_match(a: str, b: str) -> bool:
+    """Two SHA strings match if one is a prefix of the other and both are at
+    least 7 chars. Short-vs-full of the SAME commit must not read as a
+    mismatch — git-rev-parse resolves both to the same object. Min length 7
+    is the `git rev-parse --short` default; shorter prefixes risk accidental
+    collisions on a single hex digit.
+
+    Added 2026-10-08 (Ember-Research recurrence: ECI-66 2026-10-01, then
+    three EAO false-holds in one day on RA-1684/RA-1685). Used by the C4
+    ER-508 pairwise fallback at ~L10822 which previously compared the two
+    audits' AUDITED-SHA with raw `!=`.
+    """
+    if not a or not b:
+        return False
+    if len(a) < 7 or len(b) < 7:
+        return False
+    return a == b or a.startswith(b) or b.startswith(a)
 
 
 def _check_target_tip_freshness(target_id: str, target_desc: str,
@@ -10612,7 +10636,7 @@ def _auto_verify_from_audit_pair(audit_item: dict, db) -> dict | None:
     if not target_id:
         return None
     target = db.execute(
-        "SELECT id, title, status, desc, session, org FROM issues WHERE id = ? AND deleted IS NULL",
+        "SELECT id, title, status, desc, session, org, creator FROM issues WHERE id = ? AND deleted IS NULL",
         (target_id,),
     ).fetchone()
     if not target or target["status"] != "review":
@@ -10758,6 +10782,20 @@ def _auto_verify_from_audit_pair(audit_item: dict, db) -> dict | None:
                                         target["title"] or "",
                                         f"{surviving_verdict} (single-audit)",
                                         f"{surviving_id}+{discarded_id}=VOID", "C4")
+        # Creator-notify: the target's creator (planner who routed the work)
+        # otherwise hears nothing because this raw UPDATE bypasses the PATCH
+        # handler's _notify_creator_of_completion. Fire explicitly here, same
+        # gate the PATCH handler uses. Idempotent via the atomic creator_notified
+        # CAS inside _notify_creator_of_completion. Added 2026-10-08 (Ember-R).
+        _tgt_creator = (target["creator"] or "").strip()
+        _tgt_closer = f"C4 single-audit ({surviving_id}+{discarded_id}=VOID)"
+        if (new_status == "verified" and _tgt_creator
+                and _tgt_creator != target["session"]
+                and _is_real_session(_tgt_creator)):
+            _notify_creator_of_completion(
+                _tgt_creator, target_id, target["title"] or "",
+                new_status, _tgt_closer, "",
+            )
         unblocked_c4 = []
         if new_status == "verified":
             try:
@@ -10815,7 +10853,11 @@ def _auto_verify_from_audit_pair(audit_item: dict, db) -> dict | None:
         )
         # ER-508 back-compat: for orgs without TIP-SHA convention, use
         # pairwise-compare between audits as the fallback gate.
-        if not _hold and not _target_tip and _sha_a and _sha_b and _sha_a != _sha_b:
+        # Prefix-aware since 2026-10-08 — short-vs-full of same commit is NOT
+        # a mismatch (3× EAO false-holds on RA-1684/RA-1685, same pattern as
+        # ECI-66 2026-10-01). See _shas_prefix_match for the min-7 guard.
+        if (not _hold and not _target_tip and _sha_a and _sha_b
+                and not _shas_prefix_match(_sha_a, _sha_b)):
             _hold = True
             _hold_reason = (
                 f"no target TIP-SHA declared; pairwise mismatch "
@@ -10902,6 +10944,18 @@ def _auto_verify_from_audit_pair(audit_item: dict, db) -> dict | None:
         _notify_session_of_verified(target["session"], target_id,
                                     target["title"] or "", pair_verdict,
                                     pair_source, "C4")
+    # Creator-notify on verified: same reason as the single-audit branch —
+    # raw UPDATE bypasses the PATCH handler's notify. Idempotent via
+    # creator_notified CAS. Added 2026-10-08 (Ember-R recurrence).
+    _tgt_creator_pair = (target["creator"] or "").strip()
+    _tgt_closer_pair = f"C4 pair ({aid}+{other['id']})"
+    if (new_status == "verified" and _tgt_creator_pair
+            and _tgt_creator_pair != target["session"]
+            and _is_real_session(_tgt_creator_pair)):
+        _notify_creator_of_completion(
+            _tgt_creator_pair, target_id, target["title"] or "",
+            new_status, _tgt_closer_pair, "",
+        )
     # Ember-Research 2026-08-17 (late): C4 does a direct db.execute UPDATE
     # (L9218), bypassing the PATCH handler where the unblock sweep normally
     # lives. This is where the first-real-test miss happened: EA-39 flipped

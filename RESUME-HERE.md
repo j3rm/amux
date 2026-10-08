@@ -2986,3 +2986,69 @@ so revert is safe.
 5. `git add amux-server.py && git commit` with `fix(dashboard):` prefix.
 
 **Rollback:** `git revert <hash>` — pure CSS/class change, no data/behavior effect.
+
+---
+
+## Plan for change: A+B+C+M — C3/C4 cluster bundle (2026-10-08, Jeremy GO) — DONE
+
+**Trigger:** Four separate substrate gaps collected over 2026-10-01..07, all in the C3/C4 audit-chain neighborhood of amux-server.py. Ember-Research + ECM filed each; Jeremy green-lit the bundle 2026-10-08 09:30. Ownership split: amux-helper owns the server-CODE bundle; Ember-Research owns the EmberCRM CLAUDE.md edits (L caveat + completion-rule correction).
+
+**A. `_try_route_rd` — minted child inherits RD.creator** (L9229 → L9333)
+
+Problem: child inserted with hard-coded `creator='server-routed'`, so when the child hits terminal, `_notify_creator_of_completion` fails the `_is_real_session('server-routed')` gate silently; the planner (RD author) never hears about build outcomes.
+
+Change:
+1. L9268-9270 SELECT: add `creator` → `SELECT session, creator FROM issues WHERE id = ? AND deleted IS NULL`.
+2. Capture `rd_creator = me_row['creator'] if me_row else ''` after the row-fetch.
+3. L9333 INSERT: `rd_creator or 'server-routed'` instead of the literal.
+
+Fallback preserves the legacy case where the RD itself has empty creator (header absent on the POST that created it); nothing regresses.
+
+**B. `_auto_verify_from_audit_pair` — fire `_notify_creator_of_completion` on target close** (L10576)
+
+Problem: C4 auto-verify closes the target via raw `db.execute('UPDATE issues SET status=?, desc=?, updated=? WHERE id=?', ...)` at L10746 (single-audit) and L10881 (pair-complete). This bypasses the PATCH handler at L45630 where `_notify_creator_of_completion` normally fires on terminal-transition. Result: the target's creator (the planner who routed the work) hears nothing when the C4 pair auto-closes verified. Three Ember-Research incidents.
+
+Change:
+1. L10614 SELECT: add `creator` → `SELECT id, title, status, desc, session, org, creator FROM issues WHERE id = ? AND deleted IS NULL`.
+2. After each `db.commit()` following the UPDATE (L10749 single-audit, L10884 pair-complete), fire the creator-notify under the same conditions `_notify_creator_of_completion` uses in the PATCH handler:
+   - `new_status` is a terminal (`verified` / `doing` → both of C4's outcomes; keep `verified` as terminal, `doing` is a retake and NOT terminal under existing rules → fire ONLY on `verified` to match the PATCH-handler's `_TERMINAL` set).
+   - `target['creator']` is truthy, not equal to the closer, and `_is_real_session(target['creator'])`.
+3. Closer label: `f"C4 ({aid}+{other['id']})"` for pair-complete, `f"C4 single-audit ({surviving_id}+{discarded_id}=VOID)"` for single-audit.
+4. closer_note: `""` — the auto-apply note already lands in the item's desc; no separate note.
+
+Idempotency: `_notify_creator_of_completion` already uses the atomic `creator_notified` CAS, so firing from both the PATCH handler and the C4 branch for the same transition is safe — only the first one wins.
+
+**C. `amux threads finalize` CLI header** (L5486)
+
+Problem: the CLI curl at L5486-5487 emits `-H 'Content-Type: application/json'` only. The PATCH handler at L43138-L43180 (Round 1 lockdown + 2026-09-09 hardening) rejects content-key PATCHes (`body`, `blocking`) without `X-Amux-Session` with 403. So every containerized `amux threads finalize` returns an error and the partial stays `working`; the reaper mints new ER-* / ... / M-* every ~30 minutes forever. Three dangling partials this week.
+
+Change: one line at L5486. Add `-H "X-Amux-Session: $AMUX_SESSION"` to the curl.
+
+**M. C4 pairwise SHA prefix-normalization** (L10818)
+
+Problem: L10818 does raw string equality on the two audits' AUDITED-SHA values. When one auditor records 7-char (`b4489e4`) and the other 40-char (`b4489e40d4ecdbbbe58772a7a77b91852ebd5c6c`) of the SAME commit, the pairwise ER-508 fallback false-holds. Also happened 2026-10-01 (ECI-66), 2026-10-07 (3× — EAO-595/597/601 on RA-1684/RA-1685). The existing `_tip_match` closure (L9736-9737) already does prefix matching for audit-vs-tip, so the pairwise site is the only remaining raw-eq comparison in the C4 cluster.
+
+Change:
+1. Add module-level helper near `_tip_match`:
+   ```python
+   def _shas_prefix_match(a: str, b: str) -> bool:
+       """Two SHAs match if one is a prefix of the other, both >= 7 chars.
+       Short-vs-full of the same commit should not false-mismatch.
+       Added for C4 pairwise compare (2026-10-08, Ember-Research recurrence)."""
+       if not a or not b: return False
+       if len(a) < 7 or len(b) < 7: return False
+       return a == b or a.startswith(b) or b.startswith(a)
+   ```
+2. L10818: `_sha_a != _sha_b` → `not _shas_prefix_match(_sha_a, _sha_b)`.
+
+Min-length 7 guards against the degenerate "sha starts with hex digit X" false-match; 7 chars is `git rev-parse --short` default.
+
+**Verification steps:**
+1. `python3 -c "import ast; ast.parse(open('amux-server.py').read())"` — syntax OK.
+2. Smoke: PATCH an item through `review` with a parent-ED creator set; verify minted child has `creator=<parent-creator>` not `'server-routed'`.
+3. Smoke: simulate a C4 pair close with target creator ≠ assignee; verify creator gets pinged on verified.
+4. Smoke: `amux threads finalize <mid> "test"` from inside a container; expect 200, not 403.
+5. Smoke: two audits with 7-char vs 40-char AUDITED-SHA of same commit; verify no sha-mismatch hold.
+6. Commit with `fix(server):` prefix listing A+B+C+M.
+
+**Rollback:** `git revert <hash>` if any smoke fails. All four changes are additive-or-condition-widening; nothing changes existing passing-case behavior.
