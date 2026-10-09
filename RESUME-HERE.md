@@ -2989,6 +2989,28 @@ so revert is safe.
 
 ---
 
+## Plan for change: O — tighten ESC auto-mint gate (AH-115, 2026-10-09) — DONE
+
+**Trigger:** RTG-Research filed AH-115 — RA-1689 and RA-1693 sat split-stuck in `review` ~13h because the C4 split-verdict → ESC auto-mint path refused to fire. The 24h-cooldown gate inside `_auto_mint_escalation` (L10426-10432) uses `title LIKE ?` with `f"%{target_id}%"` — so any Research followup whose title mentions the target id (RR-2404 "RA-1689 pivot: ACPSAS side done..." etc.) tripped the gate as a "prior ESC," blocking the real ESC mint.
+
+**Precedent:** The POST-handler escalation gate at L45088-45096 was ALREADY fixed for this exact pattern (T-89 incident, RR-694 mis-tagged as prior ESC for RA-785) — it uses `f"ESC-{target_id}%"`. The internal mint gate is the twin and should match.
+
+**Change:** one line in `_auto_mint_escalation`:
+   - L10431: `(now - 86400, f"%{target_id}%")` → `(now - 86400, f"ESC-{target_id}%")`
+   - Comment updated to point at the POST-handler cousin.
+
+**Why just the title pattern:** closed-status exclusion (2026-08-14) is already there and correct. Session LIKE check (`-Research` OR `-Reviewer`) is already there. Only the title-LIKE needs tightening to the canonical ESC title shape.
+
+**Verification steps:**
+1. `python3 -c "import ast; ast.parse(open('amux-server.py').read())"` — syntax OK.
+2. Confirm the fix: next time a split verdict closes on a target that has a Research followup matching `%target_id%` in title but NOT starting with `ESC-`, ESC mint fires.
+3. For RA-1689, RA-1693: already handled manually (RA-1689 force-verified, RA-1693 flipped to doing by RTG-Research). No retroactive mint needed.
+4. Commit with `fix(server): ESC auto-mint gate uses ESC-{target}% not %{target}% (AH-115)`.
+
+**Rollback:** `git revert` — single-line condition tightening.
+
+---
+
 ## Plan for change: A+B+C+M — C3/C4 cluster bundle (2026-10-08, Jeremy GO) — DONE
 
 **Trigger:** Four separate substrate gaps collected over 2026-10-01..07, all in the C3/C4 audit-chain neighborhood of amux-server.py. Ember-Research + ECM filed each; Jeremy green-lit the bundle 2026-10-08 09:30. Ownership split: amux-helper owns the server-CODE bundle; Ember-Research owns the EmberCRM CLAUDE.md edits (L caveat + completion-rule correction).

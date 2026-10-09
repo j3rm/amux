@@ -10423,12 +10423,19 @@ def _auto_mint_escalation(target_id: str, org: str, my_audit_id: str,
     # closed ESC still tripped the 24h window. The gate's original intent
     # was concurrent-mint safety (blocks a still-open ESC); closed ones are
     # by definition no longer competing.
+    # TITLE PATTERN TIGHTENED 2026-10-09 (AH-115): must match `ESC-<target>%`,
+    # not `%<target>%`. The loose substring caught any Research followup
+    # mentioning the target id in prose (RR-2404 'RA-1689 pivot: ...')
+    # and false-tripped the cooldown — RA-1689/RA-1693 split verdicts sat
+    # stuck in review ~13h with no ESC minted. The POST-handler gate at
+    # L45088 was already fixed for the same pattern (T-89 incident); this
+    # is the twin.
     prior = db.execute(
         "SELECT id FROM issues WHERE (session LIKE '%-Research' OR session LIKE '%-Reviewer') AND deleted IS NULL "
         "  AND status NOT IN ('discarded', 'done', 'verified') AND created > ? "
         "  AND title LIKE ? "
         "ORDER BY created DESC LIMIT 1",
-        (now - 86400, f"%{target_id}%"),
+        (now - 86400, f"ESC-{target_id}%"),
     ).fetchone()
     if prior:
         return {"action": "escalation-skipped-cooldown", "target": target_id,
