@@ -2989,35 +2989,6 @@ so revert is safe.
 
 ---
 
-## Plan for change: R — raise container nofile soft limit via docker run --ulimit (AH-117, 2026-10-09) — DONE
-
-**Trigger:** Scorpio routed AH-117 (SCORP-67 origin). EmberCRM Core test suite (~759 tests) throws ~23 spurious failures when run as a single full-suite process, each passing in isolation. Root cause (Ember-Research ER-1031): container soft nofile limit is 1024, suite exhausts descriptors mid-run. Core Monday 10/12 rollout 3 days out. Corrupts full-suite-green as an audit gate org-wide.
-
-**Current state verified:**
-- Inside amux-org-EmberCRM: `ulimit -n` = 1024 soft, 524288 hard.
-- No per-container `--ulimit` on docker run (`HostConfig.Ulimits = []`).
-- Soft limit CAN be raised to 65536 inside the container by any process without root (hard is already 524288).
-- `ensure_org_container` at amux-server.py L1636 builds `docker run` with no ulimit flags.
-
-**Immediate unblock (no code change):** test runner invokes with `ulimit -n 65536` wrapper. This works today, no restart needed, no infrastructure change. Communicated to Scorpio/Ember-Research directly.
-
-**Durable fix (R):**
-1. Add `--ulimit nofile=65536:524288` to the `docker run` command in `ensure_org_container` at ~L1641. Immediately after `--restart unless-stopped`.
-2. Future container creates inherit the raised soft limit; no wrapper needed.
-3. Existing running containers keep the 1024 soft until re-created (Jeremy's call per usual, no auto-recreate).
-
-**Why 65536 not 4096:** SCORP-67 asked for >=4096 but 65536 is Linux's common default and matches the test runner's natural need (one file descriptor per test fixture + bus connections + .NET host handles). Hard remains 524288 so no ceiling change.
-
-**Verification steps:**
-1. `python3 -c "import ast; ast.parse(open('amux-server.py').read())"` — syntax OK.
-2. Confirm by diffing: added --ulimit flag to docker run args list, nothing else.
-3. On next container create (any org), `docker inspect <name> --format '{{json .HostConfig.Ulimits}}'` shows the nofile ulimit.
-4. Commit `fix(server): raise container nofile soft limit via --ulimit (AH-117)`.
-
-**Rollback:** `git revert` — pure docker-run arg addition.
-
----
-
 ## Plan for change: O — tighten ESC auto-mint gate (AH-115, 2026-10-09) — DONE
 
 **Trigger:** RTG-Research filed AH-115 — RA-1689 and RA-1693 sat split-stuck in `review` ~13h because the C4 split-verdict → ESC auto-mint path refused to fire. The 24h-cooldown gate inside `_auto_mint_escalation` (L10426-10432) uses `title LIKE ?` with `f"%{target_id}%"` — so any Research followup whose title mentions the target id (RR-2404 "RA-1689 pivot: ACPSAS side done..." etc.) tripped the gate as a "prior ESC," blocking the real ESC mint.

@@ -1638,14 +1638,6 @@ def ensure_org_container(org: str) -> "tuple[bool, str]":
         "--name", container,
         "--add-host=host.docker.internal:host-gateway",
         "--restart", "unless-stopped",
-        # Raise soft nofile ceiling so full-suite test runs do not exhaust
-        # file descriptors mid-run. Container inherits 1024 soft from the
-        # Docker daemon default, which is enough for a shell but not for
-        # a 700+ test .NET suite with fixtures + bus connections + host
-        # handles. Hard stays at 524288 (plenty). Added 2026-10-09 for
-        # AH-117 after Ember-Research ER-1031 showed ~23 spurious failures
-        # on EmberCRM Core full-suite that each pass in isolation.
-        "--ulimit", "nofile=65536:524288",
     ]
     # Product-spec mounts (working repos, client data)
     for m in spec["mounts"]:
