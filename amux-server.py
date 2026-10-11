@@ -12566,7 +12566,7 @@ _PROVIDER_YOLO_FLAGS = (
 
 def _default_model_for_provider(provider: str) -> str:
     if provider == "codex":
-        return "gpt-5.5"
+        return "gpt-6.1-sol"
     if provider == "gemini":
         return "auto"
     return _get_default_model()
@@ -13104,7 +13104,7 @@ def start_session(name: str, extra_flags: str = "", _skip_conv_id: bool = False)
             if extra_flags:
                 _codex_opts += f" {_shell_quote_flags(extra_flags)}"
             if "--model" not in _codex_opts and "-m " not in _codex_opts:
-                _codex_opts += " --model gpt-5.5"
+                _codex_opts += " --model gpt-6.1-sol"
             if "--dangerously-bypass" not in _codex_opts and "-a " not in _codex_opts:
                 _codex_opts += " --dangerously-bypass-approvals-and-sandbox" if _codex_yolo else " -a never"
             if (
@@ -18874,12 +18874,13 @@ setTimeout(function(){var f=document.getElementById('js-fallback');if(f&&f.style
             <option value="claude-haiku-4-5-20251001">claude-haiku-4-5-20251001</option>
             </optgroup>
             <optgroup label="Codex (OpenAI)">
-            <option value="gpt-5.5">gpt-5.5</option>
-            <option value="o3">o3</option>
-            <option value="o4-mini">o4-mini</option>
-            <option value="gpt-4o">gpt-4o</option>
-            <option value="gpt-4.1">gpt-4.1</option>
-            <option value="gpt-4.1-mini">gpt-4.1-mini</option>
+            <option value="gpt-6.1-sol">gpt-6.1-sol (current workhorse)</option>
+            <option value="gpt-6-astra">gpt-6-astra (frontier)</option>
+            <option value="gpt-6-sol">gpt-6-sol (previous workhorse)</option>
+            <option value="gpt-6-luna">gpt-6-luna (fast)</option>
+            <option value="gpt-5.6-sol">gpt-5.6-sol (older workhorse)</option>
+            <option value="gpt-5.6-terra">gpt-5.6-terra (older balanced)</option>
+            <option value="gpt-5.6-luna">gpt-5.6-luna (older fast)</option>
             </optgroup>
           </select>
         </div>
@@ -22127,7 +22128,7 @@ function sessionProvider(s) {
 }
 
 function providerDefaultModel(provider) {
-  if (provider === 'codex') return 'gpt-5.5';
+  if (provider === 'codex') return 'gpt-6.1-sol';
   if (provider === 'gemini') return 'auto';
   return window._AMUX_DEFAULT_MODEL || 'sonnet';
 }
@@ -23078,8 +23079,14 @@ function editField(session, field, current, provider) {
       {v:'claude-haiku-4-5-20251001',l:'claude-haiku-4-5-20251001'}
     ];
     const codexModels = [
-      {v:'',l:'Default'},{v:'gpt-5.5',l:'gpt-5.5'},{v:'o3',l:'o3'},{v:'o4-mini',l:'o4-mini'},
-      {v:'gpt-4o',l:'gpt-4o'},{v:'gpt-4.1',l:'gpt-4.1'},{v:'gpt-4.1-mini',l:'gpt-4.1-mini'}
+      {v:'',l:'Default'},
+      {v:'gpt-6.1-sol',l:'gpt-6.1-sol (current workhorse)'},
+      {v:'gpt-6-astra',l:'gpt-6-astra (frontier)'},
+      {v:'gpt-6-sol',l:'gpt-6-sol (previous workhorse)'},
+      {v:'gpt-6-luna',l:'gpt-6-luna (fast)'},
+      {v:'gpt-5.6-sol',l:'gpt-5.6-sol (older workhorse)'},
+      {v:'gpt-5.6-terra',l:'gpt-5.6-terra (older balanced)'},
+      {v:'gpt-5.6-luna',l:'gpt-5.6-luna (older fast)'}
     ];
     const geminiModels = [
       {v:'',l:'Default'},{v:'auto',l:'auto'},{v:'gemini-2.5-pro',l:'gemini-2.5-pro'},

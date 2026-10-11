@@ -4,6 +4,45 @@
 
 Last updated: 2026-08-22
 
+## Plan for change: Refresh Codex model list (Jeremy 2026-10-11) — DONE
+
+**Trigger:** Jeremy pasted the current Codex model lineup. The old names
+(gpt-5.5, o3, o4-mini, gpt-4o, gpt-4.1, gpt-4.1-mini) are being retired
+and are already failing in flight. Ember-Audit-Codex's live config.toml
+on disk already runs on gpt-5.6-luna; amux still offers only the dead
+list.
+
+**New lineup (lowercase-hyphenated form, as Codex CLI expects):**
+1. gpt-6.1-sol (current workhorse) <- NEW DEFAULT
+2. gpt-6-astra (frontier)
+3. gpt-6-sol (previous gen workhorse)
+4. gpt-6-luna (fast / affordable)
+5. gpt-5.6-sol (older workhorse)
+6. gpt-5.6-terra (older balanced)
+7. gpt-5.6-luna (older fast)
+
+**Scope (5 call sites in amux-server.py):**
+1. `_default_model_for_provider` (L12567) returns the new default on `codex`.
+2. `--model gpt-5.5` injection at codex session start (L13107) uses the new default.
+3. Settings HTML `<optgroup label="Codex (OpenAI)">` (L18876) replaced with the 7 options.
+4. JS `providerDefaultModel` (L22130) returns the new default.
+5. JS `codexModels` array (L23080) replaced with the 7 options plus Default row.
+
+**Behavior change:** new sessions created without an explicit model land
+on gpt-6.1-sol instead of gpt-5.5. Existing session env files that already
+pin a model stay as-is (ini is per-session, not server-pulled). No DB or
+migration work. Any session still pinned to a retired name will fail at
+Codex-side, not amux-side; owner should pick a new value in the settings
+drawer.
+
+**Verify:**
+- `python3 -c "import ast; ast.parse(open('amux-server.py').read())"` passes.
+- Dashboard settings model picker shows the 7 new codex entries.
+- `grep -nE 'gpt-(4|5\.5|4o|4\.1|o3|o4-mini)' amux-server.py` returns no
+  codex-flavored matches (claude/gemini unaffected).
+
+
+
 ## Plan for change: Round 1 lockdown — creator required + PATCH field-lock + threads edit lock (Jeremy 2026-08-28) — DONE
 
 **Trigger:** Two data-integrity incidents Jeremy hit:
