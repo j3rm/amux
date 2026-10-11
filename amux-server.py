@@ -3813,6 +3813,41 @@ def _claude_ui_visible(clean_output: str) -> bool:
     return False
 
 
+_CODEX_STATUS_MODEL_RE = re.compile(
+    r"\b(gpt-[\w.]+(?:-[a-z]+)*|o[34](?:-mini)?)\s+(?:low|medium|high|xhigh)\s*·",
+    re.IGNORECASE,
+)
+_ANSI_STRIP_RE = re.compile(
+    r"\x1b\[[0-9;?]*[a-zA-Z]|\x1b\]8;[^\x1b]*\x1b\\|\x1b\][^\x07]*\x07"
+    r"|\x1b\][^\x1b]*\x1b\\|\x1b[()][A-Z0-9]|\x1b[\x20-\x2f]*[\x40-\x7e]"
+)
+
+
+def _detect_codex_live_model(lines):
+    """Return the model name shown in Codex's live status line, or empty string.
+
+    Codex renders a bottom status line like `gpt-6-astra xhigh · ~/path`. The
+    user's `/model` TUI command updates that line immediately but does not
+    update CC_FLAGS or ~/.codex/config.toml, so scraping the pane is the only
+    way to label the session with what Codex is actually running right now.
+
+    Scans the last ~12 non-empty lines (status line is near the bottom). If
+    the Codex status line is not visible (resume picker, scrollback shifted,
+    etc.), returns "" so callers fall back to CC_FLAGS / provider default.
+    Accepts raw (possibly ANSI-colored) lines; strips in-place.
+    """
+    if not lines:
+        return ""
+    for l in reversed(lines[-12:]):
+        s = _ANSI_STRIP_RE.sub("", l).strip()
+        if not s or "·" not in s:
+            continue
+        m = _CODEX_STATUS_MODEL_RE.search(s)
+        if m:
+            return m.group(1).lower()
+    return ""
+
+
 def _at_resume_picker(clean_output: str) -> bool:
     """Return True if Claude's --resume picker is showing (interactive session selector)."""
     return bool(clean_output and
@@ -11253,6 +11288,7 @@ def list_sessions() -> list:
         preview = ""
         preview_lines = []
         status = ""
+        lines = []
         tinfo = tmux_info.get(tmux_name(name), {})
         # last_activity = when the last command was sent from the UI (meta.last_send),
         # falling back to last_started (set when session was started).
@@ -11340,7 +11376,17 @@ def list_sessions() -> list:
         raw_dir = cfg.get("CC_DIR", "")
         resolved_dir = str(Path(raw_dir).expanduser().resolve()) if raw_dir else ""
         provider = cfg.get("CC_PROVIDER", "claude")
-        if provider in ("codex", "gemini"):
+        if provider == "codex":
+            # Codex's /model TUI command swaps the live model without updating
+            # CC_FLAGS or ~/.codex/config.toml, so neither reflects truth once
+            # the user has switched. Prefer the live status line in the pane
+            # (`gpt-X <effort> · ~/path`); fall back to CC_FLAGS, then default.
+            active_model = (
+                _detect_codex_live_model(lines)
+                or _extract_model_from_flags(cfg.get("CC_FLAGS", ""))
+                or _default_model_for_provider(provider)
+            )
+        elif provider == "gemini":
             active_model = _extract_model_from_flags(cfg.get("CC_FLAGS", "")) or _default_model_for_provider(provider)
         else:
             active_model = detect_active_model(raw_dir, meta.get("cc_conversation_id", ""), name)
