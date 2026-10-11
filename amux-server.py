@@ -6463,7 +6463,7 @@ def _summarize_task_bg(session_name: str, text: str):
             import anthropic
             client = anthropic.Anthropic()
             msg = client.messages.create(
-                model="claude-haiku-4-5-20251001",
+                model="claude-haiku-5-5",
                 max_tokens=20,
                 messages=[{"role": "user", "content":
                     f"Summarize this task in 3 words or fewer (title case, no punctuation): {text[:500]}"}],
@@ -12612,7 +12612,9 @@ _PROVIDER_YOLO_FLAGS = (
 
 def _default_model_for_provider(provider: str) -> str:
     if provider == "codex":
-        return "gpt-6.1-sol"
+        # Codex sessions in amux are auditors + planners; astra is the frontier
+        # model and the one Jeremy wants them all running on. See 2026-10-11.
+        return "gpt-6-astra"
     if provider == "gemini":
         return "auto"
     return _get_default_model()
@@ -13150,7 +13152,7 @@ def start_session(name: str, extra_flags: str = "", _skip_conv_id: bool = False)
             if extra_flags:
                 _codex_opts += f" {_shell_quote_flags(extra_flags)}"
             if "--model" not in _codex_opts and "-m " not in _codex_opts:
-                _codex_opts += " --model gpt-6.1-sol"
+                _codex_opts += " --model gpt-6-astra"
             if "--dangerously-bypass" not in _codex_opts and "-a " not in _codex_opts:
                 _codex_opts += " --dangerously-bypass-approvals-and-sandbox" if _codex_yolo else " -a never"
             if (
@@ -14390,7 +14392,7 @@ If this IS an event the recipient will attend:
 
 If NOT an event email: {{"is_event": false}}"""
         msg = client.messages.create(
-            model="claude-haiku-4-5-20251001",
+            model="claude-haiku-5-5",
             max_tokens=400,
             messages=[{"role": "user", "content": prompt}],
         )
@@ -18898,26 +18900,27 @@ setTimeout(function(){var f=document.getElementById('js-fallback');if(f&&f.style
           <div style="font-size:0.72rem;color:var(--dim);margin-bottom:6px;">Applied to new sessions without an explicit model</div>
           <select id="settings-default-model" onchange="saveDefaultModel(this.value)"
             style="width:100%;font-size:0.85rem;padding:5px 8px;border-radius:6px;border:1px solid var(--border);background:var(--card);color:var(--fg);">
-            <optgroup label="Claude">
-            <option value="sonnet">sonnet</option>
-            <option value="opus">opus</option>
-            <option value="haiku">haiku</option>
+            <optgroup label="Claude (latest tier)">
+            <option value="sonnet">sonnet (CLI alias, latest sonnet)</option>
+            <option value="opus">opus (CLI alias, latest opus)</option>
+            <option value="haiku">haiku (CLI alias, latest haiku)</option>
+            <option value="claude-fable-5-1">claude-fable-5-1</option>
+            <option value="claude-mythos-5-1">claude-mythos-5-1</option>
+            <option value="claude-opus-5-5">claude-opus-5-5</option>
+            <option value="claude-sonnet-5-5">claude-sonnet-5-5</option>
+            <option value="claude-haiku-5-5">claude-haiku-5-5</option>
+            </optgroup>
+            <optgroup label="Claude (other active)">
             <option value="claude-fable-5">claude-fable-5</option>
-            <option value="claude-fable-5[1m]">claude-fable-5 [1M]</option>
+            <option value="claude-mythos-5">claude-mythos-5</option>
             <option value="claude-opus-5">claude-opus-5</option>
-            <option value="claude-opus-5[1m]">claude-opus-5 [1M]</option>
             <option value="claude-opus-4-8">claude-opus-4-8</option>
-            <option value="claude-opus-4-8[1m]">claude-opus-4-8 [1M]</option>
             <option value="claude-opus-4-7">claude-opus-4-7</option>
-            <option value="claude-opus-4-7[1m]">claude-opus-4-7 [1M]</option>
             <option value="claude-opus-4-6">claude-opus-4-6</option>
-            <option value="claude-opus-4-6[1m]">claude-opus-4-6 [1M]</option>
+            <option value="claude-opus-4-5">claude-opus-4-5</option>
             <option value="claude-sonnet-5">claude-sonnet-5</option>
-            <option value="claude-sonnet-5[1m]">claude-sonnet-5 [1M]</option>
             <option value="claude-sonnet-4-6">claude-sonnet-4-6</option>
-            <option value="claude-sonnet-4-6[1m]">claude-sonnet-4-6 [1M]</option>
             <option value="claude-haiku-4-5">claude-haiku-4-5</option>
-            <option value="claude-haiku-4-5-20251001">claude-haiku-4-5-20251001</option>
             </optgroup>
             <optgroup label="Codex (OpenAI)">
             <option value="gpt-6.1-sol">gpt-6.1-sol (current workhorse)</option>
@@ -20522,25 +20525,24 @@ setTimeout(function(){var f=document.getElementById('js-fallback');if(f&&f.style
     </div>
     <select id="edit-select" style="display:none;" onchange="submitEdit()">
       <option value="" id="model-default-opt">Default</option>
-      <option value="opus">opus</option>
       <option value="sonnet">sonnet</option>
+      <option value="opus">opus</option>
       <option value="haiku">haiku</option>
+      <option value="claude-fable-5-1">claude-fable-5-1</option>
+      <option value="claude-mythos-5-1">claude-mythos-5-1</option>
+      <option value="claude-opus-5-5">claude-opus-5-5</option>
+      <option value="claude-sonnet-5-5">claude-sonnet-5-5</option>
+      <option value="claude-haiku-5-5">claude-haiku-5-5</option>
       <option value="claude-fable-5">claude-fable-5</option>
-      <option value="claude-fable-5[1m]">claude-fable-5 [1M]</option>
+      <option value="claude-mythos-5">claude-mythos-5</option>
       <option value="claude-opus-5">claude-opus-5</option>
-      <option value="claude-opus-5[1m]">claude-opus-5 [1M]</option>
       <option value="claude-opus-4-8">claude-opus-4-8</option>
-      <option value="claude-opus-4-8[1m]">claude-opus-4-8 [1M]</option>
       <option value="claude-opus-4-7">claude-opus-4-7</option>
-      <option value="claude-opus-4-7[1m]">claude-opus-4-7 [1M]</option>
       <option value="claude-opus-4-6">claude-opus-4-6</option>
-      <option value="claude-opus-4-6[1m]">claude-opus-4-6 [1M]</option>
+      <option value="claude-opus-4-5">claude-opus-4-5</option>
       <option value="claude-sonnet-5">claude-sonnet-5</option>
-      <option value="claude-sonnet-5[1m]">claude-sonnet-5 [1M]</option>
       <option value="claude-sonnet-4-6">claude-sonnet-4-6</option>
-      <option value="claude-sonnet-4-6[1m]">claude-sonnet-4-6 [1M]</option>
       <option value="claude-haiku-4-5">claude-haiku-4-5</option>
-      <option value="claude-haiku-4-5-20251001">claude-haiku-4-5-20251001</option>
     </select>
     <div class="edit-actions">
       <button class="btn" onclick="closeEdit()">Cancel</button>
@@ -22174,7 +22176,7 @@ function sessionProvider(s) {
 }
 
 function providerDefaultModel(provider) {
-  if (provider === 'codex') return 'gpt-6.1-sol';
+  if (provider === 'codex') return 'gpt-6-astra';
   if (provider === 'gemini') return 'auto';
   return window._AMUX_DEFAULT_MODEL || 'sonnet';
 }
@@ -23113,16 +23115,25 @@ function editField(session, field, current, provider) {
     sel.value = (current || 'claude').toLowerCase();
   } else if (field === 'model') {
     const claudeModels = [
-      {v:'',l:'Default'},{v:'opus',l:'opus'},{v:'sonnet',l:'sonnet'},{v:'haiku',l:'haiku'},
-      {v:'claude-fable-5',l:'claude-fable-5'},{v:'claude-fable-5[1m]',l:'claude-fable-5 [1M]'},
-      {v:'claude-opus-5',l:'claude-opus-5'},{v:'claude-opus-5[1m]',l:'claude-opus-5 [1M]'},
-      {v:'claude-opus-4-8',l:'claude-opus-4-8'},{v:'claude-opus-4-8[1m]',l:'claude-opus-4-8 [1M]'},
-      {v:'claude-opus-4-7',l:'claude-opus-4-7'},{v:'claude-opus-4-7[1m]',l:'claude-opus-4-7 [1M]'},
-      {v:'claude-opus-4-6',l:'claude-opus-4-6'},{v:'claude-opus-4-6[1m]',l:'claude-opus-4-6 [1M]'},
-      {v:'claude-sonnet-5',l:'claude-sonnet-5'},{v:'claude-sonnet-5[1m]',l:'claude-sonnet-5 [1M]'},
-      {v:'claude-sonnet-4-6',l:'claude-sonnet-4-6'},{v:'claude-sonnet-4-6[1m]',l:'claude-sonnet-4-6 [1M]'},
-      {v:'claude-haiku-4-5',l:'claude-haiku-4-5'},
-      {v:'claude-haiku-4-5-20251001',l:'claude-haiku-4-5-20251001'}
+      {v:'',l:'Default'},
+      {v:'sonnet',l:'sonnet (CLI alias, latest sonnet)'},
+      {v:'opus',l:'opus (CLI alias, latest opus)'},
+      {v:'haiku',l:'haiku (CLI alias, latest haiku)'},
+      {v:'claude-fable-5-1',l:'claude-fable-5-1'},
+      {v:'claude-mythos-5-1',l:'claude-mythos-5-1'},
+      {v:'claude-opus-5-5',l:'claude-opus-5-5'},
+      {v:'claude-sonnet-5-5',l:'claude-sonnet-5-5'},
+      {v:'claude-haiku-5-5',l:'claude-haiku-5-5'},
+      {v:'claude-fable-5',l:'claude-fable-5'},
+      {v:'claude-mythos-5',l:'claude-mythos-5'},
+      {v:'claude-opus-5',l:'claude-opus-5'},
+      {v:'claude-opus-4-8',l:'claude-opus-4-8'},
+      {v:'claude-opus-4-7',l:'claude-opus-4-7'},
+      {v:'claude-opus-4-6',l:'claude-opus-4-6'},
+      {v:'claude-opus-4-5',l:'claude-opus-4-5'},
+      {v:'claude-sonnet-5',l:'claude-sonnet-5'},
+      {v:'claude-sonnet-4-6',l:'claude-sonnet-4-6'},
+      {v:'claude-haiku-4-5',l:'claude-haiku-4-5'}
     ];
     const codexModels = [
       {v:'',l:'Default'},
@@ -46314,7 +46325,7 @@ class CCHandler(BaseHTTPRequestHandler):
                     import anthropic as _anthropic
                     client = _anthropic.Anthropic(api_key=api_key)
                     msg = client.messages.create(
-                        model="claude-haiku-4-5-20251001",
+                        model="claude-haiku-5-5",
                         max_tokens=400,
                         messages=[{"role": "user", "content": prompt}],
                     )
@@ -46349,7 +46360,7 @@ class CCHandler(BaseHTTPRequestHandler):
                             "no bullets, no numbers. Use kebab-case. Vary the schema: one with "
                             "'feat/', one with 'session/', one descriptive without prefix, one short.")
                 msg = client.messages.create(
-                    model="claude-haiku-4-5-20251001",
+                    model="claude-haiku-5-5",
                     max_tokens=120,
                     messages=[{"role": "user", "content": content}],
                 )
@@ -50301,7 +50312,7 @@ def _validate_api_key() -> tuple[bool, str]:
         req = urllib.request.Request(
             "https://api.anthropic.com/v1/messages/count_tokens",
             data=json.dumps({
-                "model": "claude-haiku-4-5-20251001",
+                "model": "claude-haiku-5-5",
                 "messages": [{"role": "user", "content": "x"}],
             }).encode(),
             headers={

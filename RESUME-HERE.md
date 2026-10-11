@@ -4,6 +4,64 @@
 
 Last updated: 2026-08-22
 
+## Plan for change: Codex sessions default to gpt-6-astra (Jeremy 2026-10-11) — DONE
+
+**Trigger:** Jeremy: codex sessions in amux audit code and plan, so astra
+(frontier model) is the right default across the board, not the general
+workhorse gpt-6.1-sol.
+
+**Scope:**
+1. `_default_model_for_provider` (codex branch) returns `gpt-6-astra`.
+2. `--model gpt-6-astra` injected at codex session start when CC_FLAGS
+   lacks `--model`.
+3. JS `providerDefaultModel` (codex branch) returns `gpt-6-astra`.
+4. Per-org `.codex/config.toml` persistence:
+   - EmberCRM: flipped from `gpt-5.6-luna` to `gpt-6-astra` (mcp_servers.codegraph block preserved).
+   - RTG: already `gpt-6-astra`, left alone.
+   - iSchedule: already `gpt-6-astra`, left alone.
+   - ShareScore: top-level `model` key was absent; inserted `gpt-6-astra`.
+
+**Live state (status after this change):**
+- iSchedule-Audit-Codex: already running gpt-6-astra.
+- ShareScore-audit: already labeled gpt-6-astra via server fallback.
+- Ember-Audit-Codex: ACTIVE on gpt-5.6-luna. Not touching mid-task; will
+  pick up astra on next natural restart, or Jeremy can `/model gpt-6-astra`
+  live in that pane.
+- RTG-Audit-Codex: idle on gpt-5.5. Can be live-swapped via tmux
+  send-keys or restart; deferring to Jeremy's call.
+
+**Verify:**
+- `python3 -c "import ast; ast.parse(open('amux-server.py').read())"` passes.
+- Grep for `gpt-6.1-sol` finds no codex-flavored references (post-flip).
+
+## Plan for change: Refresh Claude Code model list (Jeremy 2026-10-11) — DONE
+
+**Trigger:** Jeremy pasted the current Claude Code model lineup. The old
+dropdown names (claude-fable-5, claude-opus-5, 4-8, 4-7, 4-6, sonnet-5,
+sonnet-4-6, haiku-4-5, dated 20251001) are now a mix of "latest" and
+"older active" (new tiers landed above them). Keep all names that still
+run, add new latest-tier entries, drop the stale dated variant.
+
+**New Claude lineup (per Jeremy):**
+- Fable 5.1 / Mythos 5.1 / Opus 5.5 / Sonnet 5.5 / Haiku 5.5 = latest
+- Other active: Fable 5, Mythos 5, Opus 5/4.8/4.7/4.6/4.5, Sonnet 5/4.6,
+  Haiku 4.5
+
+**Scope (3 call sites):**
+1. Settings dropdown Claude optgroup (L18901) replaced.
+2. JS claudeModels array (L23115) replaced.
+3. Drop existing `[1m]` variants and `claude-haiku-4-5-20251001` dated
+   entry (not in Jeremy's new list). CLI aliases `sonnet`/`opus`/`haiku`
+   preserved. If 1M variants are needed later, re-add.
+
+**No default change:** `_get_default_model` returns `"sonnet"` fallback,
+a CLI alias that auto-resolves to current latest sonnet. Already right.
+
+**Verify:**
+- `python3 -c "import ast; ast.parse(open('amux-server.py').read())"` passes.
+- Dashboard Claude picker shows the new tiers.
+- No stray `claude-haiku-4-5-20251001` or `[1m]` strings in amux-server.py.
+
 ## Plan for change: Refresh Codex model list (Jeremy 2026-10-11) — DONE
 
 **Trigger:** Jeremy pasted the current Codex model lineup. The old names
