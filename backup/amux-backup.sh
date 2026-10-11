@@ -180,6 +180,57 @@ if [ -d "${AMUX_DIR}/shared-creds" ]; then
   rsync -a --delete "${AMUX_DIR}/shared-creds/" "${BACKUP_DIR}/config/shared-creds/"
 fi
 
+# ── Step 5e: Codex config.toml per-org (non-regenerable agent persona config) ─
+#
+# ~/.amux/orgs/<Org>/home/ is excluded wholesale as "regenerable cache",
+# but a session's codex config.toml holds model + reasoning_effort set
+# by the operator and is NOT regenerable (restore would land every
+# codex session back on the Codex-default model). Snapshot just the
+# config.toml file for each org.
+
+if [ -d "${AMUX_DIR}/orgs" ]; then
+  mkdir -p "${BACKUP_DIR}/orgs-home-codex"
+  CODEX_CFG_COUNT=0
+  while IFS= read -r f; do
+    [ -f "$f" ] || continue
+    org=$(basename "$(dirname "$(dirname "$(dirname "$f")")")")
+    mkdir -p "${BACKUP_DIR}/orgs-home-codex/${org}"
+    cp "$f" "${BACKUP_DIR}/orgs-home-codex/${org}/config.toml"
+    CODEX_CFG_COUNT=$((CODEX_CFG_COUNT + 1))
+  done < <(find "${AMUX_DIR}/orgs" -maxdepth 4 -path '*/home/.codex/config.toml' 2>/dev/null)
+  echo "${LOG_PREFIX} Backed up ${CODEX_CFG_COUNT} codex config.toml files"
+fi
+
+# ── Step 5f: CD agent rulebooks (CLAUDE.md + CD-Audit-Codex AGENTS.md) ───────
+#
+# These live outside ~/.amux (in /mnt/gitdata/ClientData). About half the
+# CD-* client dirs are themselves git repos (NWDDI/* on GitHub), but the
+# other half are not, so a CLAUDE.md edit in a non-git dir is unprotected
+# without this snapshot. The shared CD-Audit-Codex AGENTS.md at
+# /mnt/gitdata/ClientData/_shared/CD-Audit-Codex is also not in any git
+# repo and would be lost on restore without this.
+
+mkdir -p "${BACKUP_DIR}/cd-agent-rulebooks"
+CD_CLAUDE_COUNT=0
+while IFS= read -r f; do
+  [ -f "$f" ] || continue
+  rel=${f#/mnt/gitdata/ClientData/}
+  mkdir -p "${BACKUP_DIR}/cd-agent-rulebooks/$(dirname "$rel")"
+  cp "$f" "${BACKUP_DIR}/cd-agent-rulebooks/$rel"
+  CD_CLAUDE_COUNT=$((CD_CLAUDE_COUNT + 1))
+done < <(
+  find /mnt/gitdata/ClientData \
+    -maxdepth 4 -name 'CLAUDE.md' -not -path '*/.git/*' 2>/dev/null
+)
+if [ -d /mnt/gitdata/ClientData/_shared/CD-Audit-Codex ]; then
+  mkdir -p "${BACKUP_DIR}/cd-agent-rulebooks/_shared/CD-Audit-Codex"
+  rsync -a --delete \
+    --exclude='audit-reports/' \
+    /mnt/gitdata/ClientData/_shared/CD-Audit-Codex/ \
+    "${BACKUP_DIR}/cd-agent-rulebooks/_shared/CD-Audit-Codex/"
+fi
+echo "${LOG_PREFIX} Snapshotted ${CD_CLAUDE_COUNT} CD CLAUDE.md files + CD-Audit-Codex AGENTS.md"
+
 # ── Step 6: System service files ─────────────────────────────────────────────
 
 mkdir -p "${BACKUP_DIR}/system"
