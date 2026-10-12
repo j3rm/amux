@@ -4,6 +4,75 @@
 
 Last updated: 2026-10-12
 
+## Plan for change: Header weekly-cap chips (crude usage meter, Jeremy 2026-10-12) — DONE
+
+**Trigger:** Jeremy wants a "Weekly Usage" meter in the dashboard header
+(empty slot right of the notification bell, visible in the screenshot
+at /home/jwesley/.amux/uploads/813e0da1-Screenshot_2026-10-12_at_12.44.45_PM.png).
+Full account-level usage percent needs separate per-account polling of
+Anthropic + OpenAI (option 1); for now (option 2 of the choices I
+offered), reuse the data the rate-limit watchdog already captures to
+show whether EACH provider's weekly cap has been hit, and if so, when
+it resets. Zero new polling.
+
+**Scope (amux-server.py only — HTML+CSS+JS inside the single file):**
+
+1. **HTML** (new element, inside the header right-group, FIRST child
+   before `#org-switcher-wrap`):
+   ```
+   <div id="weekly-meter" class="weekly-meter">
+     <span class="wm-chip wm-claude" title=""><span class="wm-dot"></span>Claude <span class="wm-time" id="wm-claude-time">ok</span></span>
+     <span class="wm-chip wm-codex" title=""><span class="wm-dot"></span>Codex <span class="wm-time" id="wm-codex-time">ok</span></span>
+   </div>
+   ```
+   Two chips, one per provider. Default dim-green dot + "ok". When a
+   session with that provider has `rate_limit_weekly` and
+   `rate_limited_until > now`, chip flips to red + shows duration to
+   reset (e.g. "2d 4h"). Click target: already covered by the existing
+   `#rate-limit-pill` next to it — chips are informational, no new JS
+   click handlers.
+
+2. **CSS** (new block near the existing `.btn-rate-limit` rules):
+   `.weekly-meter`, `.weekly-meter .wm-chip`, `.wm-dot`, `.limited`
+   variants, and a `@media (max-width: 600px)` rule hiding the
+   duration text (keeping just the dot + provider name) on mobile.
+
+3. **JS** (new helpers, after `_scrollToFirstRateLimited`):
+   - `_wmFmtDur(secs)`: short duration formatter ("45m", "4h", "2d 3h").
+   - `updateWeeklyMeter()`: walks `sessions`, groups by provider
+     (claude / codex), picks the EARLIEST `rate_limited_until` for
+     each where `rate_limit_weekly` is true. Updates chip color +
+     title. If no weekly cap hit, chip reads "ok" (dim green).
+
+4. **Call site:** inside the existing `updateRateLimitPill` call-site
+   (the function that already runs every time sessions refresh —
+   line ~22351), add `updateWeeklyMeter();` right after it. One
+   extra pass over `sessions`, no new fetches.
+
+5. **No server changes.** All data (session.provider,
+   session.rate_limited_until, session.rate_limit_weekly) is already
+   in the `/api/sessions` payload.
+
+**Explicit non-goals:**
+- Does NOT show "X% weekly used" — that needs account-level usage
+  polling (option 1), deferred until Jeremy picks it up.
+- Does NOT fire pushes / notifications — purely visual.
+- Does NOT change the existing rate-limit pill behavior — chips sit
+  alongside it, redundant for the "weekly" case but useful because
+  the pill vanishes when count hits 0; chips show a steady "ok" so
+  Jeremy can see at a glance there's a live indicator (empty header
+  = either healthy OR broken).
+
+**Verify:**
+- Python syntax ok.
+- Open dashboard: chips visible in the slot the screenshot marked.
+- Simulate hit: temporarily set `rate_limit_weekly` on a session via
+  the server's internal state (or wait for an organic hit).
+- Mobile (375px width): chips truncate to dot + provider label, no
+  overflow.
+
+---
+
 ## Plan for change: Stale-todo reboost — rate-limit skip, count-aware escalation, Jeremy loop (Jeremy 2026-10-12) — DONE
 
 **Trigger:** Jeremy noticed two token-burn patterns in production:

@@ -16260,6 +16260,37 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
   }
   .btn-rate-limit.show { display: flex; }
   .btn-rate-limit:active { background: rgba(248,81,73,0.22); }
+  /* Weekly cap chips (per provider account). Steady indicator; stays
+     visible when no cap is hit (dim green dot + "ok") so the slot
+     always shows SOMETHING. Flips red + duration when a session on
+     that provider has an active weekly cap. */
+  .weekly-meter {
+    display: flex; gap: 6px; align-items: center;
+    font-variant-numeric: tabular-nums;
+  }
+  .weekly-meter .wm-chip {
+    display: inline-flex; align-items: center; gap: 5px;
+    padding: 4px 9px; border-radius: 12px;
+    font-size: 0.72rem; color: var(--dim);
+    background: rgba(255,255,255,0.03);
+    border: 1px solid var(--border);
+    white-space: nowrap;
+  }
+  .weekly-meter .wm-dot {
+    width: 7px; height: 7px; border-radius: 50%;
+    background: #22c55e; display: inline-block;
+  }
+  .weekly-meter .wm-chip.limited {
+    color: #f85149;
+    background: rgba(248,81,73,0.12);
+    border-color: rgba(248,81,73,0.45);
+  }
+  .weekly-meter .wm-chip.limited .wm-dot { background: #f85149; }
+  .weekly-meter .wm-time { color: inherit; opacity: 0.85; }
+  @media (max-width: 600px) {
+    .weekly-meter .wm-time { display: none; }
+    .weekly-meter .wm-chip { padding: 4px 7px; }
+  }
   .active-dropdown {
     display: none; position: fixed; top: auto; right: 16px;
     background: var(--card); border: 1px solid var(--border);
@@ -18974,6 +19005,10 @@ setTimeout(function(){var f=document.getElementById('js-fallback');if(f&&f.style
     </div>
   </div>
   <div style="display:flex;gap:8px;align-items:center;">
+    <div id="weekly-meter" class="weekly-meter" title="Weekly cap state per provider account. Dim green = no cap hit this week. Red = this account's weekly cap is live, duration = time to reset. Data comes from the rate-limit watchdog (no new polling).">
+      <span class="wm-chip wm-claude"><span class="wm-dot"></span>Claude <span class="wm-time" id="wm-claude-time">ok</span></span>
+      <span class="wm-chip wm-codex"><span class="wm-dot"></span>Codex <span class="wm-time" id="wm-codex-time">ok</span></span>
+    </div>
     <div id="org-switcher-wrap" style="display:none;"></div>
     <button class="btn-rate-limit" id="rate-limit-pill" title="" onclick="event.stopPropagation();_scrollToFirstRateLimited()">
       <span id="rate-limit-pill-text">0 rate-limited</span>
@@ -22349,6 +22384,7 @@ function render() {
   const focusedId = _active && _active.id ? _active.id : null;
   updateActiveCount();
   updateRateLimitPill();
+  updateWeeklyMeter();
   // Build tag filter bar
   const tagEl = document.getElementById('tag-filters');
   const allTags = [...new Set(sessions.filter(s => !s.archived).flatMap(s => s.tags || []))].sort();
@@ -23201,6 +23237,49 @@ function _scrollToFirstRateLimited() {
   const sel = '[data-session="' + target.name.replace(/"/g, '\\"') + '"]';
   const card = document.querySelector(sel);
   if (card && card.scrollIntoView) card.scrollIntoView({ behavior: 'smooth', block: 'center' });
+}
+// Weekly cap chips. Crude usage meter — reuses rate-limit watchdog
+// data (session.provider, session.rate_limited_until,
+// session.rate_limit_weekly) that /api/sessions already returns, so
+// no new polling. One chip per provider account; green dot + "ok"
+// when clear, red + duration-to-reset when the week's cap is live.
+function _wmFmtDur(secs) {
+  if (secs <= 0) return 'now';
+  if (secs < 60) return secs + 's';
+  if (secs < 3600) return Math.floor(secs/60) + 'm';
+  if (secs < 86400) return Math.floor(secs/3600) + 'h';
+  const d = Math.floor(secs/86400);
+  const h = Math.floor((secs%86400)/3600);
+  return h ? (d + 'd ' + h + 'h') : (d + 'd');
+}
+function updateWeeklyMeter() {
+  const now = Math.floor(Date.now() / 1000);
+  const byProvider = {claude: 0, codex: 0};
+  for (const s of (sessions || [])) {
+    const p = (s.provider || 'claude').toLowerCase();
+    if (!(p in byProvider)) continue;
+    const until = s.rate_limited_until || 0;
+    if (until <= now) continue;
+    // Only weekly caps roll up to a provider-wide chip. Short session
+    // caps are per-session noise and already surfaced in the pill.
+    if (!s.rate_limit_weekly) continue;
+    if (!byProvider[p] || until < byProvider[p]) byProvider[p] = until;
+  }
+  for (const [p, resetAt] of Object.entries(byProvider)) {
+    const chip = document.querySelector('.weekly-meter .wm-' + p);
+    const tEl = document.getElementById('wm-' + p + '-time');
+    if (!chip || !tEl) continue;
+    const label = p.charAt(0).toUpperCase() + p.slice(1);
+    if (resetAt && resetAt > now) {
+      chip.classList.add('limited');
+      tEl.textContent = _wmFmtDur(resetAt - now);
+      chip.title = label + ' weekly cap live - resets ' + _fmtResetTime(resetAt);
+    } else {
+      chip.classList.remove('limited');
+      tEl.textContent = 'ok';
+      chip.title = label + ' weekly cap - no hit this cycle';
+    }
+  }
 }
 
 // ── Header + dropdown ──
