@@ -5224,6 +5224,19 @@ CREATE TABLE IF NOT EXISTS steering_queue (
     queued_at   REAL NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_steering_session ON steering_queue(session);
+-- Per-account weekly-cap usage readings. Populated by accountant sessions
+-- (one per account, see _ACCOUNT_REPORTERS) running their TUI /status
+-- command every ~6h and POSTing to /api/usage. Single row per account; the
+-- POST handler UPSERTs on `account`. The dashboard header renders three
+-- stacked bars from GET /api/usage.
+CREATE TABLE IF NOT EXISTS account_usage (
+    account         TEXT PRIMARY KEY,
+    percent         REAL,
+    reset_at        INTEGER,
+    source_session  TEXT NOT NULL DEFAULT '',
+    reported_at     INTEGER NOT NULL,
+    raw_text        TEXT
+);
 """
 
 
@@ -12733,6 +12746,51 @@ def _validate_model_name(value) -> tuple[bool, str, str]:
 _SESSION_PROVIDERS = ("claude", "codex", "gemini", "iterm2")
 
 
+# Account-level usage reporters (Jeremy 2026-10-12 15:50). Jeremy has 3
+# accounts across the fleet: 1 Codex, 1 Claude (NWDDI = all CD-* sessions),
+# 1 Claude (J3 STWR = Ember / RTG / other J3Software companies). The
+# dashboard header renders 3 stacked bars from GET /api/usage. Each
+# account has ONE accountant session that owns reporting its weekly cap
+# percentage. The scheduler sends a prompt to the accountant every 6h
+# (idle-only); the agent runs its TUI /status, parses the % + reset time,
+# and POSTs to /api/usage with its account key. The POST handler gates on
+# this map: X-Amux-Session must be the reporter for the account posted.
+#
+# label: human-readable name shown next to the bar.
+# session: amux session name that owns reporting for the account.
+# provider: `claude` or `codex` (used by the agent-side prompt + the
+#           fallback chip rendering).
+_ACCOUNT_REPORTERS = {
+    "codex": {
+        "label": "Codex",
+        "session": "CD-Audit-Codex",
+        "provider": "codex",
+    },
+    "claude-nwddi": {
+        "label": "Claude (NWDDI)",
+        "session": "CD-WattcoAccMigration",
+        "provider": "claude",
+    },
+    "claude-j3stwr": {
+        "label": "Claude (J3 STWR)",
+        "session": "Ember-Research",
+        "provider": "claude",
+    },
+}
+
+# Inverse index: session -> account (keeps the POST handler to a single
+# dict lookup rather than a scan of 3 entries).
+_REPORTER_SESSION_TO_ACCOUNT = {
+    v["session"]: k for k, v in _ACCOUNT_REPORTERS.items()
+}
+
+# Age in seconds past which a reading is considered stale and the UI
+# should show "?" instead of a number. 7h chosen to be slightly larger
+# than the 6h cron so one missed slot flips the chip (fast feedback
+# that the schedule is broken), not every normal gap.
+_USAGE_STALE_AFTER_SECS = 7 * 3600
+
+
 _PROVIDER_YOLO_FLAGS = (
     "--dangerously-skip-permissions",
     "--dangerously-bypass-approvals-and-sandbox",
@@ -16260,14 +16318,48 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
   }
   .btn-rate-limit.show { display: flex; }
   .btn-rate-limit:active { background: rgba(248,81,73,0.22); }
-  /* Weekly cap chips (per provider account). Steady indicator; stays
-     visible when no cap is hit (dim green dot + "ok") so the slot
-     always shows SOMETHING. Flips red + duration when a session on
-     that provider has an active weekly cap. */
+  /* Per-account weekly-cap meter. Three stacked progress bars, one per
+     account (Codex, Claude NWDDI, Claude J3 STWR). Data sourced from
+     GET /api/usage; accountant sessions POST their TUI /status reading
+     every 6h. Chips fallback (dim green = no reading or reading says
+     ok, red = capped) renders alongside when `[data-mode="chips"]` is
+     set, i.e. no bar data available. */
   .weekly-meter {
-    display: flex; gap: 6px; align-items: center;
+    display: flex; gap: 10px; align-items: center;
     font-variant-numeric: tabular-nums;
   }
+  .weekly-meter .wm-bar {
+    display: inline-flex; flex-direction: column; gap: 2px;
+    min-width: 118px;
+  }
+  .weekly-meter .wm-bar-head {
+    display: flex; justify-content: space-between; gap: 8px;
+    font-size: 0.68rem; color: var(--dim); line-height: 1;
+  }
+  .weekly-meter .wm-bar-head .wm-pct { color: var(--text); }
+  .weekly-meter .wm-bar-track {
+    position: relative;
+    height: 6px; width: 100%;
+    background: rgba(255,255,255,0.06);
+    border-radius: 3px; overflow: hidden;
+    border: 1px solid var(--border);
+  }
+  .weekly-meter .wm-bar-fill {
+    position: absolute; top: 0; left: 0; bottom: 0;
+    width: 0%;
+    background: linear-gradient(90deg, #22c55e, #a3e635);
+    transition: width 0.3s ease, background 0.3s ease;
+  }
+  .weekly-meter .wm-bar.warn .wm-bar-fill {
+    background: linear-gradient(90deg, #eab308, #f59e0b);
+  }
+  .weekly-meter .wm-bar.danger .wm-bar-fill {
+    background: linear-gradient(90deg, #ef4444, #f85149);
+  }
+  .weekly-meter .wm-bar.stale .wm-bar-track { opacity: 0.4; }
+  .weekly-meter .wm-bar.stale .wm-pct { color: var(--dim); }
+  /* Fallback chip row (shown instead of bars when /api/usage is empty
+     for every account, e.g. before the scheduler has run once). */
   .weekly-meter .wm-chip {
     display: inline-flex; align-items: center; gap: 5px;
     padding: 4px 9px; border-radius: 12px;
@@ -16287,7 +16379,14 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
   }
   .weekly-meter .wm-chip.limited .wm-dot { background: #f85149; }
   .weekly-meter .wm-time { color: inherit; opacity: 0.85; }
+  @media (max-width: 820px) {
+    .weekly-meter .wm-bar { min-width: 86px; }
+    .weekly-meter .wm-bar-head { font-size: 0.62rem; }
+  }
   @media (max-width: 600px) {
+    .weekly-meter { gap: 6px; }
+    .weekly-meter .wm-bar { min-width: 64px; }
+    .weekly-meter .wm-bar-head .wm-label { display: none; }
     .weekly-meter .wm-time { display: none; }
     .weekly-meter .wm-chip { padding: 4px 7px; }
   }
@@ -19005,10 +19104,7 @@ setTimeout(function(){var f=document.getElementById('js-fallback');if(f&&f.style
     </div>
   </div>
   <div style="display:flex;gap:8px;align-items:center;">
-    <div id="weekly-meter" class="weekly-meter" title="Weekly cap state per provider account. Dim green = no cap hit this week. Red = this account's weekly cap is live, duration = time to reset. Data comes from the rate-limit watchdog (no new polling).">
-      <span class="wm-chip wm-claude"><span class="wm-dot"></span>Claude <span class="wm-time" id="wm-claude-time">ok</span></span>
-      <span class="wm-chip wm-codex"><span class="wm-dot"></span>Codex <span class="wm-time" id="wm-codex-time">ok</span></span>
-    </div>
+    <div id="weekly-meter" class="weekly-meter" data-mode="loading" title="Weekly cap usage per account. Each bar is one account (Codex, Claude NWDDI, Claude J3 STWR); fill = % of the weekly cap used, trailing text = days to reset. Readings come from the account's accountant session running its TUI /status every 6h. '?' means stale or no reading yet."></div>
     <div id="org-switcher-wrap" style="display:none;"></div>
     <button class="btn-rate-limit" id="rate-limit-pill" title="" onclick="event.stopPropagation();_scrollToFirstRateLimited()">
       <span id="rate-limit-pill-text">0 rate-limited</span>
@@ -23238,11 +23334,13 @@ function _scrollToFirstRateLimited() {
   const card = document.querySelector(sel);
   if (card && card.scrollIntoView) card.scrollIntoView({ behavior: 'smooth', block: 'center' });
 }
-// Weekly cap chips. Crude usage meter — reuses rate-limit watchdog
-// data (session.provider, session.rate_limited_until,
-// session.rate_limit_weekly) that /api/sessions already returns, so
-// no new polling. One chip per provider account; green dot + "ok"
-// when clear, red + duration-to-reset when the week's cap is live.
+// Weekly cap meter. 3 stacked bars, one per Jeremy account (Codex,
+// Claude NWDDI, Claude J3 STWR). Fed by GET /api/usage, which the
+// accountant sessions populate every 6h by running their TUI /status
+// and POSTing their reading. Stale (>7h) or missing readings render
+// '?' in place of the number. On total no-data (initial boot before
+// the scheduler fires), the row degrades to the per-provider rate-
+// limit chip fallback (red when the fleet has a weekly cap live).
 function _wmFmtDur(secs) {
   if (secs <= 0) return 'now';
   if (secs < 60) return secs + 's';
@@ -23252,7 +23350,58 @@ function _wmFmtDur(secs) {
   const h = Math.floor((secs%86400)/3600);
   return h ? (d + 'd ' + h + 'h') : (d + 'd');
 }
-function updateWeeklyMeter() {
+function _wmFmtDays(d) {
+  if (d === null || d === undefined) return '?';
+  if (d < 0) return 'now';
+  if (d < 1) {
+    const h = Math.round(d * 24);
+    return h <= 0 ? 'now' : (h + 'h');
+  }
+  if (d < 10) return d.toFixed(1) + 'd';
+  return Math.round(d) + 'd';
+}
+let _usageState = {accounts: null, lastFetch: 0, inflight: false};
+function _renderUsageBars(container, accounts) {
+  // Rebuild bar DOM from the authoritative /api/usage payload.
+  const parts = [];
+  for (const a of accounts) {
+    const pct = (a.percent === null || a.percent === undefined) ? null : Math.max(0, Math.min(100, a.percent));
+    const stale = a.stale;
+    const pctLabel = (pct === null || stale) ? '?' : (Math.round(pct) + '%');
+    const daysLabel = _wmFmtDays(a.days_to_reset);
+    let tone = '';
+    if (pct !== null && !stale) {
+      if (pct >= 85) tone = 'danger';
+      else if (pct >= 65) tone = 'warn';
+    }
+    const classes = ['wm-bar', tone, stale ? 'stale' : ''].filter(Boolean).join(' ');
+    const title = [
+      a.label,
+      pct === null ? 'no reading yet' : ('used: ' + (pct.toFixed ? pct.toFixed(1) : pct) + '%'),
+      a.reset_at ? ('resets ' + _fmtResetTime(a.reset_at)) : '',
+      a.source_session ? ('reporter: ' + a.source_session) : '',
+      a.reported_at ? ('last reading ' + _fmtResetTime(a.reported_at)) : '',
+      stale ? '(stale: no fresh reading in the last 7h)' : '',
+    ].filter(Boolean).join(' - ').replace(/</g, '&lt;');
+    const widthPct = (pct === null || stale) ? 0 : pct;
+    parts.push(
+      '<div class="' + classes + '" title="' + title + '">' +
+        '<div class="wm-bar-head">' +
+          '<span class="wm-label">' + a.label.replace(/</g,'&lt;') + '</span>' +
+          '<span class="wm-pct">' + pctLabel + ' / ' + daysLabel + '</span>' +
+        '</div>' +
+        '<div class="wm-bar-track">' +
+          '<div class="wm-bar-fill" style="width:' + widthPct + '%"></div>' +
+        '</div>' +
+      '</div>'
+    );
+  }
+  container.innerHTML = parts.join('');
+  container.setAttribute('data-mode', 'bars');
+}
+function _renderUsageChipFallback(container) {
+  // Legacy per-provider chip row — rendered only when /api/usage returned
+  // all-missing readings AND the rate-limit watchdog has data to show.
   const now = Math.floor(Date.now() / 1000);
   const byProvider = {claude: 0, codex: 0};
   for (const s of (sessions || [])) {
@@ -23260,25 +23409,56 @@ function updateWeeklyMeter() {
     if (!(p in byProvider)) continue;
     const until = s.rate_limited_until || 0;
     if (until <= now) continue;
-    // Only weekly caps roll up to a provider-wide chip. Short session
-    // caps are per-session noise and already surfaced in the pill.
     if (!s.rate_limit_weekly) continue;
     if (!byProvider[p] || until < byProvider[p]) byProvider[p] = until;
   }
+  const parts = [];
   for (const [p, resetAt] of Object.entries(byProvider)) {
-    const chip = document.querySelector('.weekly-meter .wm-' + p);
-    const tEl = document.getElementById('wm-' + p + '-time');
-    if (!chip || !tEl) continue;
     const label = p.charAt(0).toUpperCase() + p.slice(1);
-    if (resetAt && resetAt > now) {
-      chip.classList.add('limited');
-      tEl.textContent = _wmFmtDur(resetAt - now);
-      chip.title = label + ' weekly cap live - resets ' + _fmtResetTime(resetAt);
-    } else {
-      chip.classList.remove('limited');
-      tEl.textContent = 'ok';
-      chip.title = label + ' weekly cap - no hit this cycle';
-    }
+    const limited = resetAt && resetAt > now;
+    const t = limited ? _wmFmtDur(resetAt - now) : 'ok';
+    const tip = limited
+      ? (label + ' weekly cap live - resets ' + _fmtResetTime(resetAt))
+      : (label + ' - no cap hit this cycle, no usage reading yet');
+    parts.push(
+      '<span class="wm-chip wm-' + p + (limited ? ' limited' : '') + '" title="' + tip + '">' +
+        '<span class="wm-dot"></span>' + label +
+        ' <span class="wm-time">' + t + '</span>' +
+      '</span>'
+    );
+  }
+  container.innerHTML = parts.join('');
+  container.setAttribute('data-mode', 'chips');
+}
+function updateWeeklyMeter() {
+  const container = document.getElementById('weekly-meter');
+  if (!container) return;
+  const now = Date.now();
+  // Re-fetch at most every 20s. The accountant sessions only POST every
+  // 6h, so the number barely moves; the frequent calls here are only to
+  // keep days_to_reset ticking down near reset.
+  if (!_usageState.inflight && (now - _usageState.lastFetch > 20000 || _usageState.accounts === null)) {
+    _usageState.inflight = true;
+    fetch(API + '/api/usage').then(r => r.json()).then(d => {
+      _usageState.accounts = (d && d.accounts) || [];
+      _usageState.lastFetch = Date.now();
+      _usageState.inflight = false;
+      _paintWeeklyMeter(container);
+    }).catch(() => {
+      _usageState.inflight = false;
+      _paintWeeklyMeter(container);
+    });
+  } else {
+    _paintWeeklyMeter(container);
+  }
+}
+function _paintWeeklyMeter(container) {
+  const accts = _usageState.accounts || [];
+  const anyReading = accts.some(a => a.reported_at);
+  if (anyReading) {
+    _renderUsageBars(container, accts);
+  } else {
+    _renderUsageChipFallback(container);
   }
 }
 
@@ -46092,6 +46272,100 @@ class CCHandler(BaseHTTPRequestHandler):
             self.wfile.write(body)
             return
 
+
+        # ── Usage API ─────────────────────────────────────────────────────
+        # Per-account weekly-cap usage, populated by accountant sessions
+        # (see _ACCOUNT_REPORTERS). The dashboard header stacked bars read
+        # from GET; the accountant sessions write to POST on each 6h fire.
+        if path == "/api/usage":
+            db = get_db()
+            if method == "GET":
+                rows = db.execute(
+                    "SELECT account, percent, reset_at, source_session, "
+                    "reported_at, raw_text FROM account_usage"
+                ).fetchall()
+                now = int(time.time())
+                by_account = {dict(r)["account"]: dict(r) for r in rows}
+                out = []
+                for key, cfg in _ACCOUNT_REPORTERS.items():
+                    r = by_account.get(key)
+                    item = {
+                        "account": key,
+                        "label": cfg["label"],
+                        "provider": cfg["provider"],
+                        "source_session": cfg["session"],
+                        "percent": None,
+                        "reset_at": None,
+                        "reported_at": None,
+                        "days_to_reset": None,
+                        "stale": True,
+                        "raw": None,
+                    }
+                    if r:
+                        item["percent"] = r["percent"]
+                        item["reset_at"] = r["reset_at"]
+                        item["reported_at"] = r["reported_at"]
+                        item["raw"] = r["raw_text"]
+                        item["stale"] = (now - (r["reported_at"] or 0)) > _USAGE_STALE_AFTER_SECS
+                        if r["reset_at"]:
+                            _secs = max(0, int(r["reset_at"]) - now)
+                            item["days_to_reset"] = round(_secs / 86400.0, 2)
+                    out.append(item)
+                return self._json({"accounts": out, "now": now,
+                                    "stale_after_secs": _USAGE_STALE_AFTER_SECS})
+            if method == "POST":
+                body = self._read_body()
+                account = (body.get("account") or "").strip()
+                if account not in _ACCOUNT_REPORTERS:
+                    return self._json({"error": "unknown account",
+                                        "known": list(_ACCOUNT_REPORTERS.keys())}, 400)
+                _hdr = (self.headers.get("X-Amux-Session") or "").strip()
+                _expected = _ACCOUNT_REPORTERS[account]["session"]
+                # Jeremy / dashboard (no X-Amux-Session header) may seed for
+                # testing; reporter sessions MUST match their mapping. This
+                # mirrors the creator-vs-header gate on POST /api/board.
+                if _hdr and _hdr != _expected:
+                    return self._json({
+                        "error": "session is not the reporter for this account",
+                        "expected_session": _expected,
+                        "your_session": _hdr,
+                        "hint": (
+                            f"Account '{account}' is reported by '{_expected}'. "
+                            "If this mapping needs to change, edit "
+                            "_ACCOUNT_REPORTERS in amux-server.py."
+                        ),
+                    }, 403)
+                percent = body.get("percent")
+                try:
+                    percent = float(percent) if percent is not None else None
+                except (TypeError, ValueError):
+                    return self._json({"error": "percent must be a number 0-100"}, 400)
+                if percent is not None and (percent < 0 or percent > 100):
+                    return self._json({"error": "percent must be 0-100",
+                                        "got": percent}, 400)
+                reset_at = body.get("reset_at")
+                if reset_at is not None:
+                    try:
+                        reset_at = int(reset_at)
+                    except (TypeError, ValueError):
+                        return self._json({"error": "reset_at must be a unix timestamp (int seconds)"}, 400)
+                raw = (body.get("raw") or body.get("raw_text") or "")[:4000]
+                now = int(time.time())
+                db.execute(
+                    "INSERT INTO account_usage (account, percent, reset_at, "
+                    "source_session, reported_at, raw_text) VALUES (?,?,?,?,?,?) "
+                    "ON CONFLICT(account) DO UPDATE SET "
+                    "percent=excluded.percent, reset_at=excluded.reset_at, "
+                    "source_session=excluded.source_session, "
+                    "reported_at=excluded.reported_at, "
+                    "raw_text=excluded.raw_text",
+                    (account, percent, reset_at, _hdr or _expected, now, raw),
+                )
+                db.commit()
+                return self._json({"ok": True, "account": account,
+                                    "percent": percent, "reset_at": reset_at,
+                                    "reported_at": now})
+            return self._json({"error": "method not allowed"}, 405)
 
         # ── Schedules API ─────────────────────────────────────────────────────
         if path == "/api/schedules" or path.startswith("/api/schedules/"):

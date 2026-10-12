@@ -4,6 +4,73 @@
 
 Last updated: 2026-10-12
 
+## Plan for change: Account-level usage meter (3 stacked bars, Jeremy 2026-10-12) — IN PROGRESS
+
+**Trigger:** Jeremy ruled 12:56 PM: he wants three stacked progress bars at the top
+of the dashboard showing % of weekly cap used for each of his 3 accounts
+(1 Codex, 2 Claude: NWDDI and J3 STWR), plus days to reset. The crude
+provider-only chips (prior plan, DONE) stay as the fallback the bars
+degrade to on no-data.
+
+**Design (ruled by Jeremy 2026-10-12 15:50):**
+- One accountant session per account, agent-side parse, POSTs to amux API.
+- Mapping (ruled):
+  - `codex` -> `CD-Audit-Codex` (only live codex session with working auth)
+  - `claude-nwddi` -> `CD-WattcoAccMigration` (CD-* fleet)
+  - `claude-j3stwr` -> `Ember-Research` (Ember/RTG fleet)
+- Idle poll only. Scheduler checks session idleness before sending the prompt.
+- On no reading or stale (> 7h) data, chip shows `?` so Jeremy can tell parse
+  vs transport failure from working-nothing-to-report.
+
+**Scope (amux-server.py only):**
+
+1. **SQLite migration** (new table + register in schema):
+   ```sql
+   CREATE TABLE account_usage (
+     account         TEXT PRIMARY KEY,
+     percent         REAL,
+     reset_at        INTEGER,
+     source_session  TEXT,
+     reported_at     INTEGER NOT NULL,
+     raw_text        TEXT
+   )
+   ```
+
+2. **Endpoints:**
+   - `POST /api/usage` body `{account, percent, reset_at, raw}`.
+     `X-Amux-Session` required; must match `_ACCOUNT_REPORTERS[account]`
+     (reject 403 otherwise). UPSERT by account.
+   - `GET /api/usage` returns the three rows plus a derived
+     `days_to_reset` and `stale` flag.
+
+3. **Constant** `_ACCOUNT_REPORTERS` dict (session -> account) with the
+   3 mappings above. Used by the endpoint auth gate and the scheduler.
+
+4. **Scheduler integration** (reuse existing `schedules` table + `_run_schedule`):
+   - Create 3 cron entries (`0 */6 * * *`) after server first boots with this
+     migration applied. Each sends a specific prompt to its session
+     telling the agent: run your TUI /status, parse the weekly %
+     and reset time, POST to `/api/usage` with the account key.
+   - Idleness gate: before `send_text`, check tmux pane bottom lines for
+     a known "working" marker; if seen, log skip and leave for next window.
+
+5. **UI (replace header chips body):**
+   - Keep the `#weekly-meter` container, swap children for 3 `.wm-bar`
+     rows (account label, filled bar, "X% / Nd" suffix).
+   - On GET /api/usage, render bars. On stale rows, bar fades + suffix
+     reads `?`.
+
+6. **Call site**: add a GET /api/usage fetch to the same tick as
+   `updateRateLimitPill` + `updateWeeklyMeter`. Keep the per-provider
+   chip fallback behind `[data-mode="chips"]` for the no-data case.
+
+**Verify:**
+- `python3 -c "import ast; ast.parse(open('amux-server.py').read())"`
+- POST a synthetic reading as each reporter (curl with X-Amux-Session header)
+  and confirm GET returns it with correct days_to_reset math.
+- Confirm 403 on POST from a non-reporter session.
+- Confirm the 3 schedule rows exist after boot.
+
 ## Plan for change: Header weekly-cap chips (crude usage meter, Jeremy 2026-10-12) — DONE
 
 **Trigger:** Jeremy wants a "Weekly Usage" meter in the dashboard header
