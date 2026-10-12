@@ -5948,6 +5948,15 @@ def _init_db():
         # picked it up. Atomic 0→1 CAS in _notify_creator_of_stale ensures
         # at-most-once regardless of sweep re-runs.
         "ALTER TABLE issues ADD COLUMN stale_notified INTEGER NOT NULL DEFAULT 0",
+        # stale_escalated — Jeremy 2026-10-12. Set to 1 by
+        # _sweep_stale_todo_reboost at the flag threshold (default 4
+        # boosts, ~2h) when an item has been reboosted that many times
+        # without the assignee changing status. On escalation the sweep
+        # also auto-parks the item (status='backlog') and posts a thread
+        # to Jeremy. Flag suppresses any further reboost / escalation on
+        # the same item; a human must re-engage before the automatic
+        # loop retries.
+        "ALTER TABLE issues ADD COLUMN stale_escalated INTEGER NOT NULL DEFAULT 0",
         "ALTER TABLE schedules ADD COLUMN kind TEXT NOT NULL DEFAULT 'tmux'",
         "ALTER TABLE saved_messages ADD COLUMN session TEXT NOT NULL DEFAULT ''",
         "ALTER TABLE statuses ADD COLUMN gate TEXT",
@@ -7352,6 +7361,99 @@ def _sweep_stale_doing():
         slog(f"[stale-doing-sweep] failed: {_e}")
 
 
+def _notify_session_of_stale_todo(session_name: str, item_id: str, title: str,
+                                  boost_count: int, flag_threshold: int):
+    """Push a count-aware stale-todo nudge into the assignee's pane. Called
+    by _sweep_stale_todos_reboost in place of the generic
+    _notify_session_of_task on each successive reboost.
+
+    Trigger (Jeremy 2026-10-12): the previous generic 'new task' line gave
+    agents no steer on what to do when they could read the push but
+    couldn't do the work. They tended to reply 'yeah I know, can't do
+    that' in-pane while the sweep kept re-pushing, burning tokens on
+    both sides. This helper spells out the escape hatch (change status
+    to backlog/discarded with a one-line reason) and ramps firmness as
+    the count climbs, so by boost 3 the agent knows the next reboost
+    will escalate to Jeremy. The status change — not an in-pane reply —
+    is the correct response and stops the loop immediately.
+
+    Text keyed on boost_count. flag_threshold is the escalation count
+    (default 4); the final-warning text references flag_threshold - 1.
+    """
+    def _run():
+        try:
+            _n = max(1, int(boost_count))
+            _final_warn_at = max(1, int(flag_threshold) - 1)
+            _title = (title or "")[:120]
+            if _n == 1:
+                _text = (
+                    f"Board nudge (1st reboost): {item_id} - {_title}. "
+                    f"Has sat in your todo for ~30m. If you can't start it, "
+                    f"change its status (backlog with a one-line reason, or "
+                    f"discarded with VOID: <reason>). Ignoring the ping = "
+                    f"continued reboosts = token burn. Status change stops "
+                    f"the loop. Check `amux board show {item_id}`."
+                )
+            elif _n < _final_warn_at:
+                _text = (
+                    f"Board nudge ({_n}nd/rd reboost): {item_id} - {_title}. "
+                    f"Still 'todo' after ~{_n*30}m. You MUST respond: either "
+                    f"claim (status=doing) or park (status=backlog + reason). "
+                    f"If you cannot do the work, the correct answer is a "
+                    f"status change, not silence. "
+                    f"{max(0, flag_threshold - _n)} more reboost(s) and this "
+                    f"escalates to Jeremy. "
+                    f"Check `amux board show {item_id}`."
+                )
+            else:
+                _text = (
+                    f"Board nudge ({_n}th reboost, FINAL warning): "
+                    f"{item_id} - {_title}. Still 'todo'. Next reboost "
+                    f"escalates to Jeremy and auto-parks this to backlog. "
+                    f"Change status now (doing / backlog / discarded) with "
+                    f"a one-line reason. Check `amux board show {item_id}`."
+                )
+            send_text(session_name, _text)
+        except Exception:
+            pass
+    threading.Thread(target=_run, daemon=True).start()
+
+
+def _escalate_stale_todo_to_jeremy(item_id: str, title: str, assignee: str,
+                                   boost_count: int):
+    """Fire the Jeremy-visible escalation when a stale todo has been
+    reboosted `boost_count` times without the assignee changing its
+    status. Called by _sweep_stale_todos_reboost at the flag threshold.
+
+    Trigger (Jeremy 2026-10-12): the previous flag path only pinged
+    `<Org>-Research`, leaving Jeremy out of the loop entirely. Jeremy's
+    rule is that an agent ignoring repeated board nudges is not a quiet
+    org problem — it is a Jeremy-visible failure. On escalation, this
+    helper fires Pushover and the sweep ALSO auto-parks the item to
+    backlog + flips stale_escalated=1 (both done by the caller) so the
+    reboost loop stops cold on this item until Jeremy re-engages.
+
+    One-shot per item: suppression is via the caller's stale_escalated
+    flag (CAS to 1 before firing).
+    """
+    def _run():
+        try:
+            _title = (title or "")[:200]
+            _msg = (
+                f"Stale-todo escalation: {item_id} - {_title}. "
+                f"Assigned to {assignee}; {boost_count} reboosts (~"
+                f"{boost_count*30}m) without a status change or pickup. "
+                f"Auto-parked to backlog. Agent either cannot do it or "
+                f"is ignoring the ping. Investigate or reassign."
+            )
+            _send_pushover("amux - stale-todo escalation", _msg, priority=0)
+            slog(f"[stale-todo-escalate] {item_id} - {assignee}: pushed to Jeremy "
+                 f"after {boost_count} ignored reboosts; parked to backlog.")
+        except Exception as _e:
+            slog(f"[stale-todo-escalate] {item_id}: pushover failed: {_e}")
+    threading.Thread(target=_run, daemon=True).start()
+
+
 def _sweep_stale_todos_reboost():
     """Periodic sweep — find agent-owned TODO items that haven't been picked
     up past the boost threshold and bubble them back to the top of their
@@ -7430,15 +7532,18 @@ def _sweep_stale_todos_reboost():
         _zombies_skipped = 0
         db = get_db()
         rows = db.execute(
-            "SELECT id, title, session, org, updated, "
+            "SELECT id, title, desc, session, org, updated, "
             "       stale_todo_boost_count "
             "FROM issues "
             "WHERE status = 'todo' AND owner_type = 'agent' AND deleted IS NULL "
+            "  AND stale_escalated = 0 "
             "  AND session IS NOT NULL AND session != '' "
             "  AND updated < ? "
             "ORDER BY updated ASC",   # oldest-first so most-stale gets attention first
             (_cutoff,),
         ).fetchall()
+        _rl_skipped = 0
+        _escalated = 0
         for row in rows:
             if _boosted >= _cap_per_tick:
                 break
@@ -7451,7 +7556,48 @@ def _sweep_stale_todos_reboost():
                 if int(row["updated"] or 0) < _zombie_cutoff:
                     _zombies_skipped += 1
                     continue
-                # Compute new pos = min(pos) of session's todos - 1024.
+                # Rate-limit / credit-limit skip (Jeremy 2026-10-12).
+                # If the assignee is parked waiting for a cap reset or a
+                # credit top-up, re-pushing wakes the pane but can't
+                # produce work. Count this against the next boost
+                # instead; the item stays visible when the limit clears.
+                _auto = _session_auto_actions.get(_sess, {}) or {}
+                _rl_until = int(_auto.get("rate_limit_reset_at", 0) or 0)
+                _credit_limited = bool(_auto.get("rate_limit_credits"))
+                if (_rl_until and _rl_until > _now) or _credit_limited:
+                    _rl_skipped += 1
+                    _why = "rate_limited" if _rl_until > _now else "credit_limited"
+                    slog(f"[stale-todo-reboost] skip {_iid}: assignee {_sess} {_why}")
+                    continue
+                _new_boost_count = int(row["stale_todo_boost_count"] or 0) + 1
+                # Flag threshold reached — escalate to Jeremy, auto-park,
+                # mark stale_escalated so this item is permanently out of
+                # the reboost loop until a human re-engages.
+                if _new_boost_count >= _flag_threshold:
+                    _cur_desc = row["desc"] or ""
+                    _append = (
+                        f"\n\nAUTO-PARKED (stale-todo escalation): "
+                        f"{_new_boost_count} reboosts to {_sess} without a "
+                        f"status change or pickup. Parked to backlog and "
+                        f"escalated to Jeremy."
+                    )
+                    _new_desc = _cur_desc + _append
+                    db.execute(
+                        "UPDATE issues SET status = 'backlog', "
+                        "                  stale_escalated = 1, "
+                        "                  stale_todo_boost_count = ?, "
+                        "                  desc = ?, "
+                        "                  updated = ? "
+                        "WHERE id = ? AND stale_escalated = 0",
+                        (_new_boost_count, _new_desc, _now, _iid),
+                    )
+                    db.commit()
+                    _escalate_stale_todo_to_jeremy(_iid, row["title"] or "",
+                                                  _sess, _new_boost_count)
+                    _escalated += 1
+                    _flagged += 1
+                    continue
+                # Normal boost path: bubble back to top of session's todo queue.
                 _min_row = db.execute(
                     "SELECT COALESCE(MIN(pos), 0) AS m FROM issues "
                     "WHERE session = ? AND status = 'todo' AND deleted IS NULL",
@@ -7459,7 +7605,6 @@ def _sweep_stale_todos_reboost():
                 ).fetchone()
                 _min_pos = float(_min_row["m"]) if _min_row and _min_row["m"] is not None else 0.0
                 _new_pos = _min_pos - 1024.0
-                _new_boost_count = int(row["stale_todo_boost_count"] or 0) + 1
                 db.execute(
                     "UPDATE issues SET pos = ?, notified = 0, "
                     "                  updated = ?, "
@@ -7468,37 +7613,22 @@ def _sweep_stale_todos_reboost():
                     (_new_pos, _now, _new_boost_count, _iid),
                 )
                 db.commit()
-                # Fresh notify to the assignee
-                _notify_session_of_task(_sess, _iid, row["title"] or "")
+                # Count-aware nudge (Jeremy 2026-10-12). Replaces the
+                # prior generic _notify_session_of_task so agents see
+                # the exact escape hatch (status change) and that
+                # ignoring the ping has a cost.
+                _notify_session_of_stale_todo(_sess, _iid, row["title"] or "",
+                                              _new_boost_count, _flag_threshold)
                 _boosted += 1
-                slog(f"[stale-todo-reboost] {_iid} → {_sess}: boosted to pos={_new_pos} "
+                slog(f"[stale-todo-reboost] {_iid} -> {_sess}: boosted to pos={_new_pos} "
                      f"(count={_new_boost_count}, was updated {(_now-row['updated'])//60}m ago)")
-                # Flag threshold — surface as broken
-                if _new_boost_count >= _flag_threshold:
-                    _flagged += 1
-                    _org = (row["org"] or "").strip() or _session_org(_sess) or ""
-                    _master = f"{_org}-Research" if _org else None
-                    slog(f"[stale-todo-flag] {_iid}: {_new_boost_count} consecutive boosts "
-                         f"with no pickup — likely a genuinely-broken item, not just slow.")
-                    if _master and _is_real_session(_master):
-                        def _run(mid=_iid, msess=_sess, mtitle=(row["title"] or "")[:80], mcount=_new_boost_count, mmaster=_master):
-                            try:
-                                send_text(mmaster, (
-                                    f"STALE-TODO-FLAG: {mid} — {mtitle}. "
-                                    f"{mcount} consecutive boost sweeps with no pickup by "
-                                    f"{msess}. Likely genuinely-broken (not just slow). Check "
-                                    f"`amux board show {mid}` — expected pickup within 30min "
-                                    f"of each boost, no pickup after {mcount}. Investigate "
-                                    f"or reassign."
-                                ))
-                            except Exception:
-                                pass
-                        threading.Thread(target=_run, daemon=True).start()
             except Exception as _re:
                 slog(f"[stale-todo-reboost] row {row['id']}: {_re}")
-        if _boosted or _zombies_skipped:
+        if _boosted or _zombies_skipped or _rl_skipped or _escalated:
             slog(f"[stale-todo-reboost] tick: {_boosted} boosted, "
-                 f"{_flagged} flagged, {_zombies_skipped} zombies (>{_zombie_days}d) skipped")
+                 f"{_flagged} flagged, {_escalated} escalated, "
+                 f"{_rl_skipped} rate-limit-skipped, "
+                 f"{_zombies_skipped} zombies (>{_zombie_days}d) skipped")
     except Exception as _e:
         slog(f"[stale-todo-reboost] failed: {_e}")
 

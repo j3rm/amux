@@ -2,7 +2,138 @@
 
 **If you are Claude and you are about to edit `/mnt/gitdata/amux/amux-server.py`, this file is mandatory.** Every change must be planned here BEFORE you edit code. Completed plans stay in place as history — do NOT delete them. Read this file at the start of every session before touching amux-server.py.
 
-Last updated: 2026-08-22
+Last updated: 2026-10-12
+
+## Plan for change: Stale-todo reboost — rate-limit skip, count-aware escalation, Jeremy loop (Jeremy 2026-10-12) — DONE
+
+**Trigger:** Jeremy noticed two token-burn patterns in production:
+1. The stale-todo reboost re-pushes items to agents that are
+   rate-limited or credit-limited. They can't act, but the pane still
+   wakes and the LLM reads the push.
+2. When an agent CAN read but can't do the task, it tends to answer
+   "yeah I know, can't do that" instead of changing the item's status.
+   Reboost keeps pinging; tokens keep burning.
+
+Jeremy's rule: ignoring a board nudge is not an option. The nudge
+itself must spell out the escape hatch (change status, state why),
+and after N nudges without a status change, we stop pinging the
+agent and surface the item to Jeremy via a thread so he can
+intervene.
+
+**Scope (amux-server.py only):**
+
+1. **Schema.** Add column `stale_escalated INTEGER NOT NULL DEFAULT 0`
+   on `issues`. Set to 1 when the item has been escalated to Jeremy by
+   the sweep — guarantees at-most-once escalation and suppresses
+   further reboosts.
+
+2. **`_sweep_stale_todos_reboost` — skip condition.** Before boosting
+   a row, read the assignee's session state (rate_limited_until,
+   credit_limited). If either is active, SKIP the reboost (do not
+   touch pos, do not re-notify, do not increment boost count), and
+   slog `[stale-todo-reboost] skip <id>: assignee rate_limited|credit_limited`.
+   Rationale: rate-limited pushes are wasted — they wake the pane but
+   can't be acted on, and they count as token noise for Jeremy's
+   budget.
+
+3. **Count-aware nudge text.** The current reboost always calls
+   `_notify_session_of_task(sess, iid, title)` which emits the same
+   generic "new task" line. Replace that call (inside the reboost
+   loop ONLY — unchanged on first-mint) with a new helper
+   `_notify_session_of_stale_todo(sess, iid, title, boost_count,
+   flag_threshold)` that emits text keyed on count:
+
+   - **boost 1 (first reboost at ~30min stale):**
+     `"Board nudge (1st reboost): <id> has sat in your todo for ~30m.
+     If you can't start it, change its status (backlog with a
+     one-line reason, or discarded with VOID: <reason>). Ignoring the
+     ping = continued reboosts = token burn. Status change stops the
+     loop."`
+
+   - **boost 2 (~1h):**
+     `"Board nudge (2nd reboost): <id> still 'todo' after ~1h. You
+     MUST respond — either claim (status=doing) or park (status=
+     backlog + reason). If you cannot do the work, the correct
+     answer is a status change, not silence. 2 more reboosts and
+     this escalates to Jeremy."`
+
+   - **boost 3 (~1.5h):**
+     `"Board nudge (3rd reboost, FINAL warning): <id> still 'todo'.
+     Next reboost escalates to Jeremy and parks this item to
+     backlog. Change status now (doing / backlog / discarded) with
+     a one-line reason."`
+
+   - **boost N (= `_flag_threshold`, default 4, ~2h): escalation path
+     — see item 4.**
+
+4. **Escalation at `_flag_threshold`.** On the 4th consecutive boost
+   (configurable via `AMUX_STALE_TODO_BOOST_FLAG_COUNT`), DO NOT
+   boost or ping the assignee. Instead:
+   - Set `stale_escalated = 1` on the row (sweep skips it forever).
+   - Set `status = 'backlog'` (auto-park, out of the todo stream so
+     reboost sweeps stop seeing it).
+   - Append to desc: `AUTO-PARKED (stale-todo escalation): <N>
+     reboosts to <assignee> without status change. Parked to backlog
+     and escalated to Jeremy.`
+   - Send a THREAD to Jeremy via the stale-escalation thread helper
+     (new helper `_escalate_stale_todo_to_jeremy(item, assignee,
+     boost_count)` — posts to the thread store with `from_session`
+     unset so it hits Jeremy's inbox, body addressed to Jeremy, text:
+     `"Stale-todo escalation: <id> — <title[:80]>. Assigned to
+     <assignee>; <N> reboosts over ~<N*30>m without status change
+     or pickup. Auto-parked to backlog. Investigate or reassign."`
+
+5. **Behavior guarantees:**
+   - `stale_escalated = 1` AND/OR `status != 'todo'` → the sweep's
+     SELECT already excludes it (status filter), plus we add
+     `AND stale_escalated = 0` to the SELECT as belt-and-suspenders.
+   - A worker that FINALLY changes status (e.g. an hour after
+     escalation) still clears the item from the sweep's view
+     naturally.
+   - If the human re-opens an escalated item (status back to todo),
+     `stale_escalated` stays 1 — Jeremy should either reassign or
+     reset the flag manually. The point of escalation is that the
+     automatic loop gave up; a human must re-engage before the
+     automatic loop retries.
+
+6. **No changes to:**
+   - First-mint nudge (`_notify_session_of_task` from POST /api/board).
+   - Creator-of-stale notice (`_sweep_stale_todos` /
+     `_notify_creator_of_stale`) — separate code path, pings the
+     CREATOR not the assignee, Jeremy didn't flag it.
+   - `_sweep_stale_doing` — separate, operates on `doing` not `todo`.
+
+**Expected behavior after change:**
+- Agent that cannot do a task will see progressively firmer language
+  on each reboost telling it exactly what to do (status=backlog with
+  reason). If it changes status, the loop stops immediately.
+- Rate-limited / credit-limited agents stop getting pinged entirely
+  (no wake, no token spend) until their limit clears.
+- Items that go 4 reboosts without a status change get auto-parked
+  and surfaced to Jeremy via thread, exactly once per item.
+
+**Verify:**
+- Python syntax ok (`python3 -c "import ast; ast.parse(open('amux-server.py').read())"`).
+- Grep the server for `_sweep_stale_todo_reboost` and read the diff
+  end-to-end — the only behavior change inside the loop is the
+  skip-condition at the top and the branch replacing the
+  `_notify_session_of_task` call near the bottom.
+- Watch logs for `[stale-todo-reboost] skip` lines on the next tick
+  if a rate-limited agent has stale todos.
+- Confirm the escalation thread arrives when a test item sits past
+  the flag threshold (can simulate by setting
+  `AMUX_STALE_TODO_BOOST_FLAG_COUNT=1` for a session and letting a
+  single ignored item escalate on the next sweep).
+
+**Follow-up (NOT in this change):**
+- Add agent-side convention doc in `_amux_shared.md`:
+  "If a reboost arrives on an item you can't do, change status to
+  backlog or discarded with a one-line reason — do NOT reply in-pane
+  'can't do it'; the status change is the correct response."
+  This is a shared-memory update, not a server change; Jeremy may
+  want to add it himself.
+
+---
 
 ## Plan for change: Codex sessions default to gpt-6-astra (Jeremy 2026-10-11) — DONE
 
