@@ -16715,12 +16715,29 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
     .weekly-meter .wm-bar { min-width: 86px; }
     .weekly-meter .wm-bar-head { font-size: 0.62rem; }
   }
+  /* Mobile: the notification bell + 99+ badge sits immediately to the
+     left of the meter and was overlapping bar #1 (Jeremy screenshot
+     2026-10-13 10:35). On <600px drop the %/d text, shrink each bar
+     to a 32px color-only chunk, and ensure a small left margin so the
+     meter sits clear of the bell badge. Tap to reveal full stats
+     (tooltip on long-press or dedicated panel if we build one). */
   @media (max-width: 600px) {
-    .weekly-meter { gap: 6px; }
-    .weekly-meter .wm-bar { min-width: 64px; }
-    .weekly-meter .wm-bar-head .wm-label { display: none; }
-    .weekly-meter .wm-time { display: none; }
+    .weekly-meter {
+      gap: 4px;
+      margin-left: 10px;
+    }
+    .weekly-meter .wm-bar {
+      min-width: 32px;
+      max-width: 32px;
+    }
+    .weekly-meter .wm-bar-head { display: none; }
+    .weekly-meter .wm-bar-track { height: 8px; border-radius: 4px; }
     .weekly-meter .wm-chip { padding: 4px 7px; }
+    .weekly-meter .wm-time { display: none; }
+  }
+  @media (max-width: 420px) {
+    .weekly-meter { gap: 3px; margin-left: 6px; }
+    .weekly-meter .wm-bar { min-width: 26px; max-width: 26px; }
   }
   .active-dropdown {
     display: none; position: fixed; top: auto; right: 16px;
