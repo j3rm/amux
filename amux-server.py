@@ -3613,6 +3613,318 @@ def _rate_limit_loop():
         pass
 
 
+# ─── Account-level weekly-cap probe (port of upstream mixpeek/amux) ──────────
+# Server-side pull of each account's current weekly-cap utilization. Ported
+# from upstream's Rust implementation (crates/amux-server/src/provider/
+# claude.rs on origin/main), which itself cites a prior Python version in
+# this file at ~L3160 that drifted out during the Rust-cutover sync. The
+# function pair is restored here. Zero-agent path: no slash commands, no
+# jsonl parsing on the Claude side (Anthropic serves the percentage
+# directly), no tokens burned on the fleet. Reads this file's running
+# container state via `docker exec` so a container token rotation picks
+# up on the next cycle without server work.
+#
+# Mapping lives in _ACCOUNT_PROBES below. Readings land in the
+# account_usage table and the dashboard header reads them via GET /api/usage.
+
+# Which org container holds the live OAuth token for each account.
+# Multiple orgs share one Claude account (they all point at the same
+# credentials.json); any one of them probes the shared token fine.
+#   codex          -> CD-Audit-Codex (sole live codex container)
+#   claude-nwddi   -> any CD-* org (CD-Wattco picked for traffic volume)
+#   claude-j3stwr  -> any J3 STWR org (EmberCRM picked, same token as
+#                     RTG / Cypra / Personal / Scorpio)
+_ACCOUNT_PROBES = {
+    "codex":          {"provider": "codex",  "probe_org": "CD-Audit-Codex"},
+    "claude-nwddi":   {"provider": "claude", "probe_org": "CD-Wattco"},
+    # J3 STWR: Cypra container runs 4 chatty sessions (HomeAssistant,
+    # EmailAgent, PAA, SmarterTrack) that refresh the OAuth token
+    # organically. EmberCRM/RTG share the same account but their
+    # containers host longer-running sessions that go hours between
+    # API calls, so the token in their credentials.json goes stale
+    # between refreshes (seen 2026-10-13: EmberCRM token "expired 66s
+    # ago" while Cypra's was fresh +25946s). Any J3 STWR container
+    # would do once the probe can refresh its own token; for now, pick
+    # the one that stays fresh organically.
+    "claude-j3stwr":  {"provider": "claude", "probe_org": "Cypra"},
+}
+
+# ChatGPT-side has no OAuth usage endpoint, so the Codex bar is a local
+# roll-up of session rollout jsonl against a fixed cap (upstream does
+# the same in crates/amux-server/src/runtime_jobs/codex_ledger.rs).
+# Pro-200 tier is the current Codex account; cap is user-tunable via
+# ~/.amux/server.env (AMUX_CODEX_WEEKLY_CAP_TOKENS). Default is a
+# placeholder; Jeremy will tune after watching a few real weeks.
+_CODEX_WEEKLY_CAP_TOKENS = int(os.environ.get("AMUX_CODEX_WEEKLY_CAP_TOKENS") or 7_000_000_000)
+
+# 60s probe cache keyed on sha256(access_token) so a token rotation
+# doesn't serve stale readings and so repeated cycles with the same
+# token don't hammer Anthropic. Upstream has an on-disk cache that
+# also preserves backoff state across restarts; we defer that until
+# the first 429 shows up (none seen on their deployment in months).
+_usage_probe_cache: dict = {}  # token_sha -> (expires_at, result_dict)
+_usage_backoff_until: dict = {}  # account -> unix ts to retry after
+_usage_backoff_step: dict = {}   # account -> current backoff seconds
+
+
+def _claude_oauth_token(org: str) -> str | None:
+    """Pull the current OAuth access token from inside an org container.
+
+    Live token refreshes happen inside the Docker container at
+    /home/amux/.claude/.credentials.json; the host-mount at
+    ~/.amux/orgs/<Org>/home/.claude/.credentials.json carries the
+    bootstrap stub with empty accessToken (verified 2026-10-13).
+    `docker exec cat` is the authoritative read.
+    """
+    try:
+        r = subprocess.run(
+            ["docker", "exec", f"amux-org-{org}",
+             "cat", "/home/amux/.claude/.credentials.json"],
+            capture_output=True, text=True, timeout=5,
+        )
+        if r.returncode != 0:
+            return None
+        d = json.loads(r.stdout)
+        tok = (d.get("claudeAiOauth") or {}).get("accessToken") or ""
+        return tok or None
+    except Exception as e:
+        slog(f"[usage-probe] _claude_oauth_token({org}) failed: {e}")
+        return None
+
+
+def _parse_resets_at(v) -> int | None:
+    """Normalize the API's resets_at to a unix seconds int. The endpoint
+    sometimes returns an ISO-8601 string ("2026-10-14T15:00:00Z") and
+    sometimes already a number. Accept both."""
+    if v is None:
+        return None
+    if isinstance(v, (int, float)):
+        return int(v)
+    s = str(v).strip()
+    if not s:
+        return None
+    if s.isdigit():
+        return int(s)
+    try:
+        from datetime import datetime as _dt
+        if s.endswith("Z"):
+            s = s[:-1] + "+00:00"
+        return int(_dt.fromisoformat(s).timestamp())
+    except Exception:
+        return None
+
+
+def _extract_claude_percent_and_reset(d: dict) -> tuple[float | None, int | None]:
+    """Pull the 7-day utilization + reset from either response shape
+    the OAuth usage endpoint has returned over time:
+
+      shape A (current): {five_hour, seven_day, seven_day_opus} each
+                         {utilization: 0..1, resets_at: iso|unix}
+      shape B (fallback): {limits: [{kind, percent: 0..100, resets_at}, ...]}
+                          where kind starting with "weekly" is the 7-day.
+
+    Returns (percent_0_to_100, resets_at_unix_or_None). Unknown shape -> (None, None).
+    """
+    sd = d.get("seven_day")
+    if isinstance(sd, dict):
+        util = sd.get("utilization")
+        if util is None:
+            util = sd.get("percent")
+        try:
+            util = float(util)
+        except (TypeError, ValueError):
+            util = None
+        if util is not None and util <= 1.0:
+            util = util * 100.0
+        return util, _parse_resets_at(sd.get("resets_at"))
+    limits = d.get("limits")
+    if isinstance(limits, list):
+        for lim in limits:
+            kind = (lim.get("kind") or "").lower()
+            if kind.startswith("weekly") or kind == "seven_day":
+                try:
+                    pct = float(lim.get("percent"))
+                except (TypeError, ValueError):
+                    pct = None
+                return pct, _parse_resets_at(lim.get("resets_at"))
+    return None, None
+
+
+def _fetch_claude_usage(org: str) -> dict | None:
+    """HTTP probe to Anthropic's OAuth usage endpoint.
+
+    Returns {percent, reset_at, raw_text} on success, None on failure.
+    429 responses record a backoff in _usage_backoff_until[account];
+    caller is expected to pass the account key.
+    """
+    import urllib.request, urllib.error
+    tok = _claude_oauth_token(org)
+    if not tok:
+        return None
+    tok_sha = _hashlib.sha256(tok.encode()).hexdigest()
+    cached = _usage_probe_cache.get(tok_sha)
+    if cached and cached[0] > time.time():
+        return cached[1]
+    req = urllib.request.Request(
+        "https://api.anthropic.com/api/oauth/usage",
+        headers={
+            "Authorization": f"Bearer {tok}",
+            "anthropic-beta": "oauth-2025-04-20",
+            "anthropic-version": "2023-06-01",
+            "User-Agent": "amux-usage-probe/1.0",
+        },
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            body = resp.read().decode("utf-8", errors="replace")
+        d = json.loads(body)
+        pct, reset_at = _extract_claude_percent_and_reset(d)
+        out = {"percent": pct, "reset_at": reset_at, "raw_text": body[:4000]}
+        _usage_probe_cache[tok_sha] = (time.time() + 60, out)
+        return out
+    except urllib.error.HTTPError as e:
+        if e.code == 429:
+            return {"__429__": True}
+        slog(f"[usage-probe] claude HTTP {e.code} for org={org}: {e.read()[:200]!r}")
+        return None
+    except Exception as e:
+        slog(f"[usage-probe] claude fetch({org}) failed: {e}")
+        return None
+
+
+def _fetch_codex_usage(org: str) -> dict | None:
+    """Local roll-up of Codex rollout jsonl. Each rollout line that
+    represents a model response carries a token-count delta that upstream
+    sums (`event_msg.token_count`); we match that shape and sum anything
+    whose jsonl line has a {"token_count": N} or {"usage": {"total_tokens": N}}
+    field within the current week-to-date window.
+
+    Weekly window boundary: the Codex Pro tier's weekly reset point isn't
+    publicly documented; use Monday 00:00 UTC as a stable, user-friendly
+    boundary (every bar reset-day lines up). Jeremy can refine later.
+
+    Returns {percent, reset_at, raw_text} with raw_text summarizing the
+    file count + token sum."""
+    try:
+        from datetime import datetime, timezone, timedelta
+        now = datetime.now(timezone.utc)
+        # Monday 00:00 UTC of the current week.
+        start = (now - timedelta(days=now.weekday())).replace(
+            hour=0, minute=0, second=0, microsecond=0
+        )
+        reset_at = int((start + timedelta(days=7)).timestamp())
+        # List rollout files inside the container for this week's day dirs.
+        day_paths = []
+        d = start
+        while d <= now:
+            day_paths.append(d.strftime("/home/amux/.codex/sessions/%Y/%m/%d"))
+            d = d + timedelta(days=1)
+        # One docker exec that cats every rollout file concatenated; -q to
+        # survive missing day dirs quietly.
+        cmd = ["docker", "exec", f"amux-org-{org}", "sh", "-c",
+               "for p in " + " ".join(day_paths) + "; do "
+               "  [ -d \"$p\" ] && cat \"$p\"/rollout-*.jsonl 2>/dev/null; "
+               "done"]
+        r = subprocess.run(cmd, capture_output=True, text=True, timeout=15)
+        total_tokens = 0
+        files_scanned = 0
+        current_file_had_tokens = False
+        for line in r.stdout.splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                obj = json.loads(line)
+            except Exception:
+                continue
+            # Several shapes seen in the wild. Try token_count first (the
+            # upstream canonical path), then usage.total_tokens.
+            tc = obj.get("token_count")
+            if tc is None:
+                em = obj.get("event_msg") or {}
+                tc = em.get("token_count")
+            if tc is None:
+                pay = obj.get("payload") or {}
+                info = pay.get("info") or {}
+                ltu = info.get("last_token_usage") or {}
+                tc = ltu.get("total_tokens") or ltu.get("input_tokens")
+            if tc is None:
+                usage = obj.get("usage") or {}
+                tc = usage.get("total_tokens")
+            if isinstance(tc, (int, float)):
+                total_tokens += int(tc)
+                if not current_file_had_tokens:
+                    files_scanned += 1
+                    current_file_had_tokens = True
+        cap = _CODEX_WEEKLY_CAP_TOKENS or 1
+        pct = min(100.0, (total_tokens / cap) * 100.0)
+        raw = (f"codex rollout roll-up org={org} tokens={total_tokens:,} "
+               f"cap={cap:,} files_contributing={files_scanned}")
+        return {"percent": pct, "reset_at": reset_at, "raw_text": raw}
+    except Exception as e:
+        slog(f"[usage-probe] codex fetch({org}) failed: {e}")
+        return None
+
+
+def _usage_probe_write(account: str, provider: str, probe_org: str, result: dict) -> None:
+    """UPSERT one reading into account_usage. Called by _usage_probe_job."""
+    try:
+        db = get_db()
+        now = int(time.time())
+        db.execute(
+            "INSERT INTO account_usage (account, percent, reset_at, "
+            "source_session, reported_at, raw_text) VALUES (?,?,?,?,?,?) "
+            "ON CONFLICT(account) DO UPDATE SET "
+            "percent=excluded.percent, reset_at=excluded.reset_at, "
+            "source_session=excluded.source_session, "
+            "reported_at=excluded.reported_at, "
+            "raw_text=excluded.raw_text",
+            (account, result.get("percent"), result.get("reset_at"),
+             probe_org, now, (result.get("raw_text") or "")[:4000]),
+        )
+        db.commit()
+    except Exception as e:
+        slog(f"[usage-probe] db write({account}) failed: {e}")
+
+
+def _usage_probe_job():
+    """One tick of the usage probe. Iterates _ACCOUNT_PROBES, calls the
+    provider fetcher, honors per-account backoff on 429. Scheduled every
+    60s; one HTTP call per Claude account per tick (sha256(token) cache
+    coalesces when a container doesn't rotate)."""
+    now = time.time()
+    slog(f"[usage-probe] tick: probing {list(_ACCOUNT_PROBES.keys())}")
+    for account, cfg in _ACCOUNT_PROBES.items():
+        if _usage_backoff_until.get(account, 0) > now:
+            continue
+        provider = cfg["provider"]
+        org = cfg["probe_org"]
+        try:
+            if provider == "claude":
+                result = _fetch_claude_usage(org)
+            elif provider == "codex":
+                result = _fetch_codex_usage(org)
+            else:
+                continue
+            if result is None:
+                continue
+            if result.get("__429__"):
+                # Exponential backoff: 120, 240, 480, 960, 1800 (upstream's
+                # schedule). Caps at 30 min to match their default.
+                step = _usage_backoff_step.get(account, 60)
+                step = min(1800, max(120, step * 2))
+                _usage_backoff_step[account] = step
+                _usage_backoff_until[account] = now + step
+                slog(f"[usage-probe] {account} 429, backing off {step}s")
+                continue
+            # Success -> reset backoff state and write.
+            _usage_backoff_step.pop(account, None)
+            _usage_backoff_until.pop(account, None)
+            _usage_probe_write(account, provider, org, result)
+        except Exception as e:
+            slog(f"[usage-probe] {account} tick failed: {e}")
+
+
 def _push_alert(alert_type: str, session: str, message: str):
     """Enqueue an alert to be streamed to all SSE clients.
 
@@ -46306,6 +46618,13 @@ class CCHandler(BaseHTTPRequestHandler):
                         item["reset_at"] = r["reset_at"]
                         item["reported_at"] = r["reported_at"]
                         item["raw"] = r["raw_text"]
+                        # Row's source_session wins over the reporter-map
+                        # fallback. The server-side probe writes
+                        # source_session=<probe_org container name>, which
+                        # is more informative in the tooltip than the
+                        # (now vestigial) reporter mapping.
+                        if r["source_session"]:
+                            item["source_session"] = r["source_session"]
                         item["stale"] = (now - (r["reported_at"] or 0)) > _USAGE_STALE_AFTER_SECS
                         if r["reset_at"]:
                             _secs = max(0, int(r["reset_at"]) - now)
@@ -51327,6 +51646,13 @@ def main():
     schedule_job(_reap_stale_browsers,  interval=120,                  name="browser_reap", initial_delay=60)
     schedule_job(_kill_stale_ray,        interval=600,                  name="ray_reap",     initial_delay=120)
     schedule_job(_refresh_token_cache,   interval=120,                  name="token_cache", initial_delay=5)
+    # Account-level weekly-cap probe. Server-side pull of Anthropic's own
+    # OAuth usage endpoint for each Claude account, plus a local jsonl
+    # roll-up for Codex. Writes to account_usage; dashboard header reads
+    # it. 60s interval matches upstream's cache TTL. initial_delay=25 so
+    # the first probe lands after the DB-schema migration and the orgs
+    # have had a tick to come up on cold boot.
+    schedule_job(_usage_probe_job,       interval=60,                   name="usage_probe", initial_delay=25)
     schedule_job(_email_sync_job,        interval=_EMAIL_SYNC_INTERVAL, name="email_sync",  initial_delay=20)
     schedule_job(_repos_scan,            interval=60,                   name="repos_scan",    initial_delay=5)
     # _board_watcher DISABLED 2026-08-27 (Jeremy CALM MODE + audit): redundant

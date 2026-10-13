@@ -4,7 +4,90 @@
 
 Last updated: 2026-10-12
 
-## Plan for change: Account-level usage meter (3 stacked bars, Jeremy 2026-10-12) — IN PROGRESS
+## Plan for change: Account-level usage meter — port upstream probe (Jeremy 2026-10-13 08:51) — IN PROGRESS
+
+**Trigger:** The agent-side scheduler path (prior design) fell over because
+agents can't execute slash commands. Research of upstream mixpeek/amux
+(Rust) showed they do it server-side with a direct HTTP call to
+Anthropic's own OAuth usage endpoint. Jeremy picked that approach
+("option D") 08:51 2026-10-13. The port note in upstream's Rust file
+reads: `"port of Python's _fetch_claude_usage / _claude_oauth_token in
+amux-server.py ~line 3160"` — this once lived in this file and was lost
+in the Rust cutover drift. We are restoring it, not inventing.
+
+**Mechanism:**
+
+Claude accounts (NWDDI, J3 STWR):
+- `GET https://api.anthropic.com/api/oauth/usage` with headers
+  `Authorization: Bearer <access_token>`, `anthropic-beta: oauth-2025-04-20`,
+  `anthropic-version: 2023-06-01`.
+- Response shape (verified by upstream):
+  ```
+  {"five_hour": {"utilization": 0.23, "resets_at": "..."},
+   "seven_day": {"utilization": 0.41, "resets_at": "..."},
+   "seven_day_opus": {...}}
+  ```
+  Fallback shape: `{"limits": [{"kind": "weekly_...", "percent": 41, "resets_at": "..."}]}`.
+  seven_day is the bar we care about.
+- OAuth token lives INSIDE the Docker container at
+  `/home/amux/.claude/.credentials.json` (verified: host-mounted file
+  has empty token; container has the live refreshing token). Pull it
+  via `docker exec amux-org-<Org> cat ...` each probe cycle.
+
+Codex account (Pro 200 tier):
+- No OAuth usage endpoint from OpenAI. Upstream parses
+  `~/.codex/sessions/YYYY/MM/DD/rollout-*.jsonl` locally and sums
+  `event_msg.token_count` fields. Returns tokens-used; the %
+  computation needs a user-configured weekly cap.
+- Config: new `server.env` var `AMUX_CODEX_WEEKLY_CAP_TOKENS` (default
+  7_000_000_000 = 7B as a Pro-tier placeholder; Jeremy can tune once
+  he's seen a few weeks' real numbers).
+- Reset: Codex pro-tier weekly reset is Sunday 00:00 UTC (ballpark; UI
+  shows the reader's extrapolation, source_session=container name).
+
+**Account to probe-org mapping (CODE constant `_ACCOUNT_PROBES`):**
+- `codex` -> probe_org=`CD-Audit-Codex`
+- `claude-nwddi` -> probe_org=`CD-Wattco` (shares token with every CD-* org)
+- `claude-j3stwr` -> probe_org=`EmberCRM` (shares token with Ember/RTG/Cypra/Personal)
+
+**Changes to amux-server.py:**
+
+1. New functions near the existing provider helpers:
+   - `_claude_oauth_token(org: str) -> str | None` — docker exec +
+     JSON parse. Logs an slog warning on missing/empty.
+   - `_fetch_claude_usage(org: str) -> dict | None` — HTTP GET, parse
+     both response shapes, return `{percent, resets_at_unix,
+     raw_text}`.
+   - `_fetch_codex_usage(org: str) -> dict | None` — docker exec ls +
+     tail of today's rollout, sum tokens for the current week window,
+     divide by cap. Returns same shape.
+   - `_usage_probe_job()` — iterates `_ACCOUNT_PROBES`, calls the right
+     fetcher, UPSERTs the row directly in sqlite with
+     source_session=probe_org. 60s cache in a module-level dict with
+     sha256(token) key so a token rotation refreshes cleanly.
+   - Register in `_JOB_REGISTRY` with 60s interval.
+
+2. Keep `_ACCOUNT_REPORTERS` and `POST /api/usage` for manual testing
+   / overrides, but it is no longer the primary path.
+
+3. UI: no changes. The GET /api/usage endpoint and the 3-bar renderer
+   already consume whatever lands in the table.
+
+**Verify:**
+- `python3 -c "import ast; ast.parse(open('amux-server.py').read())"`
+- Wait one 60s cycle; `curl -sk $AMUX_URL/api/usage | jq` shows real
+  readings for all three accounts.
+- Confirm the Pushover rate-limit watchdog is not firing on the probe
+  (we are the one who calls it, so 429 handling must back off per
+  upstream: 120 -> 240 -> ... -> 1800s).
+- Confirm bar fill moves at :01 after a probe cycle completes.
+
+**Explicit non-goals (this patch):**
+- No per-provider cap source lookup (Jeremy tunes the Codex cap by hand).
+- No disk persistence of the cache yet (restart = one more probe burst).
+  Upstream has `~/.amux/cache/claude-usage.json`; add later if 429s show up.
+
+## Plan for change: Account-level usage meter (3 stacked bars, Jeremy 2026-10-12) — SUPERSEDED
 
 **Trigger:** Jeremy ruled 12:56 PM: he wants three stacked progress bars at the top
 of the dashboard showing % of weekly cap used for each of his 3 accounts
