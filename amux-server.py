@@ -3634,19 +3634,24 @@ def _rate_limit_loop():
 #   claude-nwddi   -> any CD-* org (CD-Wattco picked for traffic volume)
 #   claude-j3stwr  -> any J3 STWR org (EmberCRM picked, same token as
 #                     RTG / Cypra / Personal / Scorpio)
+#
+# `probe_orgs` is a FALLBACK list, not a redundant group. The probe tries
+# them in order and keeps the first 200 (`_fetch_claude_usage` iterates;
+# single-org list for Codex since there's only one container). This
+# matters because the OAuth access token inside each container only
+# refreshes when a Claude Code session in that container makes an API
+# call. A container whose sessions are idle for hours shows a stale
+# token in credentials.json and returns 401, but a sibling container on
+# the same account that's actively chatty has a fresh token.
+#
+# Jeremy 2026-10-13: Cypra was reassigned to the NWDDI account "a few
+# weeks ago"; J3 STWR = Ember / RTG only. Keep NWDDI's Cypra as a late
+# fallback for when every CD-* container is idle; J3 STWR has no such
+# always-chatty fallback, we live with occasional stale ticks.
 _ACCOUNT_PROBES = {
-    "codex":          {"provider": "codex",  "probe_org": "CD-Audit-Codex"},
-    "claude-nwddi":   {"provider": "claude", "probe_org": "CD-Wattco"},
-    # J3 STWR: Cypra container runs 4 chatty sessions (HomeAssistant,
-    # EmailAgent, PAA, SmarterTrack) that refresh the OAuth token
-    # organically. EmberCRM/RTG share the same account but their
-    # containers host longer-running sessions that go hours between
-    # API calls, so the token in their credentials.json goes stale
-    # between refreshes (seen 2026-10-13: EmberCRM token "expired 66s
-    # ago" while Cypra's was fresh +25946s). Any J3 STWR container
-    # would do once the probe can refresh its own token; for now, pick
-    # the one that stays fresh organically.
-    "claude-j3stwr":  {"provider": "claude", "probe_org": "Cypra"},
+    "codex":          {"provider": "codex",  "probe_orgs": ["CD-Audit-Codex"]},
+    "claude-nwddi":   {"provider": "claude", "probe_orgs": ["CD-Wattco", "CD-NPP", "CD-Shurloc", "Cypra"]},
+    "claude-j3stwr":  {"provider": "claude", "probe_orgs": ["EmberCRM", "RTG"]},
 }
 
 # ChatGPT-side has no OAuth usage endpoint, so the Codex bar is a local
@@ -3889,40 +3894,55 @@ def _usage_probe_write(account: str, provider: str, probe_org: str, result: dict
 
 def _usage_probe_job():
     """One tick of the usage probe. Iterates _ACCOUNT_PROBES, calls the
-    provider fetcher, honors per-account backoff on 429. Scheduled every
-    60s; one HTTP call per Claude account per tick (sha256(token) cache
-    coalesces when a container doesn't rotate)."""
+    provider fetcher against each candidate org until one succeeds,
+    honors per-account backoff on 429. Scheduled every 60s; one HTTP
+    call per Claude account per tick in the happy path, up to
+    len(probe_orgs) calls when early candidates have stale tokens."""
     now = time.time()
-    slog(f"[usage-probe] tick: probing {list(_ACCOUNT_PROBES.keys())}")
     for account, cfg in _ACCOUNT_PROBES.items():
         if _usage_backoff_until.get(account, 0) > now:
             continue
         provider = cfg["provider"]
-        org = cfg["probe_org"]
-        try:
-            if provider == "claude":
-                result = _fetch_claude_usage(org)
-            elif provider == "codex":
-                result = _fetch_codex_usage(org)
-            else:
-                continue
-            if result is None:
-                continue
-            if result.get("__429__"):
+        orgs = cfg.get("probe_orgs") or []
+        result = None
+        tried = []
+        for org in orgs:
+            tried.append(org)
+            try:
+                if provider == "claude":
+                    r = _fetch_claude_usage(org)
+                elif provider == "codex":
+                    r = _fetch_codex_usage(org)
+                else:
+                    r = None
+            except Exception as e:
+                slog(f"[usage-probe] {account} org={org} raised: {e}")
+                r = None
+            if r is None:
+                continue  # transport error or stale token (401); try next org
+            if r.get("__429__"):
                 # Exponential backoff: 120, 240, 480, 960, 1800 (upstream's
                 # schedule). Caps at 30 min to match their default.
                 step = _usage_backoff_step.get(account, 60)
                 step = min(1800, max(120, step * 2))
                 _usage_backoff_step[account] = step
                 _usage_backoff_until[account] = now + step
-                slog(f"[usage-probe] {account} 429, backing off {step}s")
-                continue
-            # Success -> reset backoff state and write.
-            _usage_backoff_step.pop(account, None)
-            _usage_backoff_until.pop(account, None)
-            _usage_probe_write(account, provider, org, result)
-        except Exception as e:
-            slog(f"[usage-probe] {account} tick failed: {e}")
+                slog(f"[usage-probe] {account} 429 on org={org}, backing off {step}s")
+                result = r
+                break
+            # Real reading. Success + tag the winning org as source_session.
+            result = r
+            result.setdefault("_probe_org", org)
+            break
+        if result is None:
+            slog(f"[usage-probe] {account}: all candidates failed (tried {tried})")
+            continue
+        if result.get("__429__"):
+            continue
+        # Success -> reset backoff state and write.
+        _usage_backoff_step.pop(account, None)
+        _usage_backoff_until.pop(account, None)
+        _usage_probe_write(account, provider, result.get("_probe_org") or tried[-1], result)
 
 
 def _push_alert(alert_type: str, session: str, message: str):
@@ -23674,24 +23694,28 @@ function _wmFmtDays(d) {
 }
 let _usageState = {accounts: null, lastFetch: 0, inflight: false};
 function _renderUsageBars(container, accounts) {
-  // Rebuild bar DOM from the authoritative /api/usage payload.
+  // Rebuild bar DOM from the authoritative /api/usage payload. Tone
+  // (ok/warn/danger) is server-computed in pace terms (burn rate vs
+  // time elapsed), not absolute %. See the /api/usage GET handler for
+  // the ratio thresholds. UI just paints what the server says.
   const parts = [];
   for (const a of accounts) {
     const pct = (a.percent === null || a.percent === undefined) ? null : Math.max(0, Math.min(100, a.percent));
     const stale = a.stale;
     const pctLabel = (pct === null || stale) ? '?' : (Math.round(pct) + '%');
     const daysLabel = _wmFmtDays(a.days_to_reset);
-    let tone = '';
-    if (pct !== null && !stale) {
-      if (pct >= 85) tone = 'danger';
-      else if (pct >= 65) tone = 'warn';
-    }
+    const serverTone = a.tone || 'ok';
+    const tone = (stale || pct === null) ? '' : (serverTone === 'ok' ? '' : serverTone);
     const classes = ['wm-bar', tone, stale ? 'stale' : ''].filter(Boolean).join(' ');
+    const paceLine = (!stale && a.pace_ratio !== null && a.expected_pct !== null)
+      ? ('pace: ' + a.pace_ratio.toFixed(2) + 'x (expected ' + a.expected_pct + '% by now)')
+      : '';
     const title = [
       a.label,
       pct === null ? 'no reading yet' : ('used: ' + (pct.toFixed ? pct.toFixed(1) : pct) + '%'),
+      paceLine,
       a.reset_at ? ('resets ' + _fmtResetTime(a.reset_at)) : '',
-      a.source_session ? ('reporter: ' + a.source_session) : '',
+      a.source_session ? ('source: ' + a.source_session) : '',
       a.reported_at ? ('last reading ' + _fmtResetTime(a.reported_at)) : '',
       stale ? '(stale: no fresh reading in the last 7h)' : '',
     ].filter(Boolean).join(' - ').replace(/</g, '&lt;');
@@ -46610,6 +46634,9 @@ class CCHandler(BaseHTTPRequestHandler):
                         "reset_at": None,
                         "reported_at": None,
                         "days_to_reset": None,
+                        "pace_ratio": None,
+                        "expected_pct": None,
+                        "tone": "ok",
                         "stale": True,
                         "raw": None,
                     }
@@ -46629,6 +46656,34 @@ class CCHandler(BaseHTTPRequestHandler):
                         if r["reset_at"]:
                             _secs = max(0, int(r["reset_at"]) - now)
                             item["days_to_reset"] = round(_secs / 86400.0, 2)
+                            # Pace tone (Jeremy 2026-10-13 09:16): tone
+                            # tracks burn rate against time elapsed, NOT
+                            # absolute %. A bar at 90% on the last day
+                            # is green (under pace); a bar at 40% on day
+                            # 1 is red (projecting a 280% blowout). This
+                            # lets Jeremy intuitively see "am I spending
+                            # faster than the week allows?" rather than
+                            # "am I close to the cap?" (which triggers
+                            # too early when consumption is well-paced).
+                            #
+                            # expected_pct = fraction of the week elapsed * 100
+                            # ratio = actual / expected (floor expected at 2
+                            #         so day-zero doesn't go to infinity)
+                            # ratio > 1.4  -> danger (burning >40% over pace)
+                            # ratio > 1.0  -> warn   (slightly over pace)
+                            # ratio <= 1.0 -> ok     (at or under pace)
+                            if item["percent"] is not None:
+                                _days_elapsed = 7.0 - item["days_to_reset"]
+                                _expected = max((_days_elapsed / 7.0) * 100.0, 2.0)
+                                _ratio = item["percent"] / _expected
+                                item["pace_ratio"] = round(_ratio, 2)
+                                item["expected_pct"] = round(_expected, 1)
+                                if _ratio > 1.4:
+                                    item["tone"] = "danger"
+                                elif _ratio > 1.0:
+                                    item["tone"] = "warn"
+                                else:
+                                    item["tone"] = "ok"
                     out.append(item)
                 return self._json({"accounts": out, "now": now,
                                     "stale_after_secs": _USAGE_STALE_AFTER_SECS})
