@@ -195,6 +195,100 @@ def _session_destructive_allowed(headers) -> bool:
         return False
 
 
+# ── Per-session auth tokens (2026-10-16, Jeremy, "trust-same-org" v1) ────────
+# Each session gets a fresh 32-byte token minted at start_session, injected
+# as AMUX_SESSION_TOKEN into tmux env. We store only the sha256. A second
+# secret (fingerprint) is kept server-side only; rotate-token requires both,
+# so a stolen token alone cannot be rotated.
+#
+# Trust boundary: cross-org is defended (different Docker containers, Linux
+# UID isolation). Intra-org is NOT defended (same container, same UID, same
+# /proc readable). Documented in wiki/Agent-Authentication.md.
+import secrets as _secrets
+
+def _mint_session_token(session_name: str) -> str:
+    """Generate a fresh token+fingerprint for `session_name`, upsert hashes
+    into session_tokens, return the plaintext token. Call once per
+    start_session that actually (re)starts a pane; the previous token is
+    overwritten (hash-only storage means we literally cannot revoke-only)."""
+    tok = _secrets.token_hex(32)
+    fp = _secrets.token_hex(32)
+    th = _hashlib.sha256(tok.encode()).hexdigest()
+    fh = _hashlib.sha256(fp.encode()).hexdigest()
+    now = int(time.time())
+    try:
+        db = get_db()
+        db.execute(
+            "INSERT INTO session_tokens (session, token_hash, fingerprint_hash, issued, revoked) "
+            "VALUES (?, ?, ?, ?, NULL) "
+            "ON CONFLICT(session) DO UPDATE SET token_hash=excluded.token_hash, "
+            "fingerprint_hash=excluded.fingerprint_hash, issued=excluded.issued, revoked=NULL",
+            (session_name, th, fh, now),
+        )
+        db.commit()
+    except Exception as _e:
+        try: slog(f"[auth] mint failed for {session_name}: {_e}")
+        except Exception: pass
+    # The fingerprint plaintext never leaves the server. It is used by
+    # rotate-token to prove the caller has state the thief cannot grab from
+    # /proc or env. We stash it in a module-level dict keyed by session so
+    # the live process can present it on rotate; it is also recoverable from
+    # the DB only as a hash, so a process restart drops the in-memory copy
+    # and rotate-token stops working until the next start_session.
+    _session_fingerprints[session_name] = fp
+    return tok
+
+_session_fingerprints: dict = {}
+
+
+def _verify_session_token(session_name: str, token: str) -> bool:
+    """True iff `token` matches the stored sha256 for `session_name` and is
+    not revoked. Case-sensitive; empty token always False."""
+    if not session_name or not token:
+        return False
+    try:
+        th = _hashlib.sha256(token.encode()).hexdigest()
+        row = get_db().execute(
+            "SELECT token_hash, revoked FROM session_tokens WHERE session = ?",
+            (session_name,),
+        ).fetchone()
+        if not row:
+            return False
+        if row["revoked"] is not None:
+            return False
+        return row["token_hash"] == th
+    except Exception:
+        return False
+
+
+def _authenticated_session(headers) -> str:
+    """Return the session name iff X-Amux-Session + X-Amux-Session-Token
+    verify together. Empty string on mismatch or missing. Does NOT fall back
+    to Jeremy; callers that want "Jeremy or agent" must check the dashboard
+    AUTH_TOKEN separately. Reads only; never mutates state."""
+    try:
+        sess = (headers.get("X-Amux-Session", "") or "").strip()
+        tok = (headers.get("X-Amux-Session-Token", "") or "").strip()
+        if sess and tok and _verify_session_token(sess, tok):
+            return sess
+    except Exception:
+        pass
+    return ""
+
+
+# Regex-redact anything that looks like a 64-hex token from message bodies
+# before persisting (threads/channels/board). Belt-and-suspenders for the
+# "never echo tokens into logs" contract.
+_TOKEN_REDACT_RE = re.compile(r"\b[0-9a-f]{64}\b")
+
+def _redact_tokens(body: str) -> str:
+    if not body: return body
+    try:
+        return _TOKEN_REDACT_RE.sub("[REDACTED-TOKEN]", body)
+    except Exception:
+        return body
+
+
 # ── PostHog server-side telemetry ────────────────────────────────────────────
 # Emits events for signals only the backend observes (YOLO auto-answers,
 # stale-session restarts, crashes). No-op when POSTHOG_KEY is unset.
@@ -5568,6 +5662,21 @@ CREATE TABLE IF NOT EXISTS account_usage (
     source_session  TEXT NOT NULL DEFAULT '',
     reported_at     INTEGER NOT NULL,
     raw_text        TEXT
+);
+-- Per-session auth token. Minted at `start_session`, injected as
+-- AMUX_SESSION_TOKEN into tmux env. The plaintext is given to the
+-- session's child process exactly once (via tmux env); we store only
+-- the sha256. `fingerprint_hash` is a second secret, server-side only,
+-- used by rotate-token so a stolen token can't be rotated without also
+-- knowing the fingerprint (which never leaves the server). Issued/
+-- revoked are unix seconds; a non-null revoked means the row is dead.
+-- See wiki/Agent-Authentication.md for the trust model this enforces.
+CREATE TABLE IF NOT EXISTS session_tokens (
+    session           TEXT PRIMARY KEY,
+    token_hash        TEXT NOT NULL,
+    fingerprint_hash  TEXT NOT NULL,
+    issued            INTEGER NOT NULL,
+    revoked           INTEGER
 );
 """
 
@@ -13835,7 +13944,16 @@ def start_session(name: str, extra_flags: str = "", _skip_conv_id: bool = False)
                 _eVal = os.environ.get(_ekey, "")
                 if _eVal:
                     _env_args += ["-e", f"{_ekey}={_eVal}"]
-    
+            # Mint a fresh per-session auth token and inject it into the
+            # tmux env so the child process can read it via os.environ.
+            # Overwrites any previous token for this session, so a start/
+            # restart cycle invalidates stale credentials automatically.
+            # Also prepended to shell_rc so the live bash shell exports
+            # it when we re-source profile (both tmux_exists and new paths).
+            _sess_tok = _mint_session_token(name)
+            _env_args += ["-e", f"AMUX_SESSION_TOKEN={_sess_tok}"]
+            shell_rc = f"export AMUX_SESSION_TOKEN={shlex.quote(_sess_tok)}; " + shell_rc
+
             # Check if tmux session already exists — route via _tmux_prefix so
             # docker sessions ask their own container's tmux daemon (host tmux
             # wouldn't know about them).
@@ -13844,6 +13962,19 @@ def start_session(name: str, extra_flags: str = "", _skip_conv_id: bool = False)
             tmux_exists = r_tmux.returncode == 0 and tmux_sess in r_tmux.stdout.splitlines()
     
             if tmux_exists:
+                # Push the freshly-minted token into the existing tmux
+                # server's environment so future respawn-pane children
+                # inherit it. The live shell gets a separate `export`
+                # send-keys below (needs HISTFILE=/dev/null to be set
+                # first, which both branches already do).
+                try:
+                    subprocess.run(
+                        [*_tmux_prefix(name), "set-environment", "-t", tmux_sess,
+                         "AMUX_SESSION_TOKEN", _sess_tok],
+                        capture_output=True, timeout=5,
+                    )
+                except Exception:
+                    pass
                 # Existing tmux session -- reuse it
                 output = tmux_capture(name, 10)
                 if _at_shell_prompt(output):
@@ -13981,6 +14112,34 @@ def start_session(name: str, extra_flags: str = "", _skip_conv_id: bool = False)
                      f"bg={_sess_color},fg=white"],
                     capture_output=True, timeout=5,
                 )
+
+            # Export the freshly-minted session token into the live shell
+            # so the Claude/Codex child process inherits it on launch.
+            # tmux_exists path never re-sources shell_rc, so this is the
+            # one send-keys call that works for both paths. HISTFILE was
+            # set to /dev/null earlier in both branches, so this does not
+            # leak into bash history.
+            subprocess.run(
+                [*_tmux_prefix(name), "send-keys", "-t", tmux_target(name), "-l",
+                 f"export AMUX_SESSION_TOKEN={shlex.quote(_sess_tok)}"],
+                capture_output=True, timeout=5,
+            )
+            time.sleep(0.1)
+            subprocess.run([*_tmux_prefix(name), "send-keys", "-t", tmux_target(name), "Enter"],
+                           capture_output=True, timeout=5)
+            _poll_shell_prompt(name, timeout=3.0)
+            # Also clear that export line from the pane display so the
+            # token is not visible to a human peeking the pane. The
+            # subsequent `clear` keeps scrollback intact but moves it
+            # off-screen; the real defense is HISTFILE=/dev/null above.
+            subprocess.run(
+                [*_tmux_prefix(name), "send-keys", "-t", tmux_target(name), "-l", "clear"],
+                capture_output=True, timeout=5,
+            )
+            time.sleep(0.05)
+            subprocess.run([*_tmux_prefix(name), "send-keys", "-t", tmux_target(name), "Enter"],
+                           capture_output=True, timeout=5)
+            _poll_shell_prompt(name, timeout=3.0)
 
             # Send the Claude command
             subprocess.run([*_tmux_prefix(name), "send-keys", "-t", tmux_target(name), "-l", cmd],

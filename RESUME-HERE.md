@@ -1,8 +1,50 @@
-# RESUME HERE — permanent amux-server.py worklog
+# RESUME HERE: permanent amux-server.py worklog
 
-**If you are Claude and you are about to edit `/mnt/gitdata/amux/amux-server.py`, this file is mandatory.** Every change must be planned here BEFORE you edit code. Completed plans stay in place as history — do NOT delete them. Read this file at the start of every session before touching amux-server.py.
+**If you are Claude and you are about to edit `/mnt/gitdata/amux/amux-server.py`, this file is mandatory.** Every change must be planned here BEFORE you edit code. Completed plans stay in place as history, do NOT delete them. Read this file at the start of every session before touching amux-server.py.
 
-Last updated: 2026-10-12
+Last updated: 2026-10-16
+
+## Plan for change: Agent auth groundwork + Threads UI overhaul (Jeremy 2026-10-16 11:37) IN PROGRESS
+
+**Context:** 2026-10-16 design discussion. Jeremy wants three thread features (header strip, fact-check overlay, working-flag guard) plus a stale reaper and blocking auto-clear. Fact-check requires real agent identity (today `X-Amux-Session` is a client-sent header, trivially spoofable). Agreed to ship cross-org auth (option 1, trust-same-org) now, and defer per-UID intra-org isolation to a later project. Jeremy approved shipping in this order.
+
+**Scope of this entry (6 small commits, in order):**
+
+1. **session_tokens table + token minting at session start.** New table `session_tokens(session TEXT PK, token_hash TEXT, fingerprint_hash TEXT, issued INT, revoked INT)`. On every `start_session`: mint 32-byte random token and 32-byte random fingerprint, store sha256 of each, inject `AMUX_SESSION_TOKEN=<plaintext>` into tmux env via `tmux send-environment` so the running Claude/Codex process can read it from `os.environ`. Fingerprint stays server-side only (never leaves). No enforcement yet.
+
+2. **_authenticated_session(headers) helper + log-only enforcement.** New helper verifies `X-Amux-Session-Token` matches stored hash for the claimed `X-Amux-Session`. New env var `AMUX_SESSION_AUTH_ENFORCE` (default `0`). While 0: log unauthed state-changing POST/PATCH/DELETE as warnings but let through. Dashboard auth token path (humans) still identifies as Jeremy. Missing session+missing dashboard token now rejects (closes current silent-Jeremy footgun).
+
+3. **POST /api/sessions/self/rotate-token.** Body: `{current_token, fingerprint}`. Verifies both, mints new token, writes new hash. Pushovers Jeremy on any rotation not originating from the dashboard auth token. Regex scrubber on all thread/channel/board message bodies that redacts `[0-9a-f]{64}` to prevent token echo.
+
+4. **Threads #3 working-flag guard.** On POST `/api/threads/T-N/messages`: if `from_session` has any `status='working'` message in this thread, return 409 with the open mid and the correct PATCH endpoint. Does NOT block other sessions.
+
+5. **Threads #5 auto-clear blocking.** When a new message with `parent_id` set lands and the parent has `blocking=1`, flip parent to `blocking=0`. Thread's "blocking" pill drops the moment it's answered. ~3 lines in `_deliver` or the POST handler.
+
+6. **Threads #4 stale working reaper.** New `schedule_job(_reap_stale_working, interval=300, name="working_reap", initial_delay=60)`. Flips `status='working' AND updated < now()-900` to new `status='abandoned'`. One slog line per flip with session+thread+mid.
+
+7. **Threads #6 board-thread linkage.** `ALTER TABLE issues ADD COLUMN thread_id TEXT NOT NULL DEFAULT ''`. `POST /api/board` and `PATCH /api/board/<id>` accept `thread_id`. `GET /api/threads/T-N` adds `linked_issues: [{id, status, session, title}]` for open statuses (todo/doing/review). Dashboard renders a pill strip in the thread header: one pill per DISTINCT session on open items, colored by their worst status, hover shows item list, click filters board.
+
+8. **Threads #2 fact-check sidecar.** New `message_audits(id INT PK, message_id TEXT, auditor TEXT, score INT, verdict TEXT, body TEXT, created INT)`. New `threads.audit_mode TEXT DEFAULT 'off'`. Per-org JSON config `audit_opposing_agent` (default `codex`). Server worker: on new agent message in a thread with `audit_mode='on'`, dispatch body + brief thread context to the opposing agent via a dedicated internal API, parse score/verdict, write audit row. `GET /api/message_audits/<mid>` returns 403 for any request carrying `X-Amux-Session`; only the dashboard auth token can read. Agents stay blind. One-off: `POST /api/message_audits` manual mode works regardless of `audit_mode`.
+
+9. **Wiki page: Agent-Authentication.md.** Documents the trust-same-org v1 posture, the three future-work options (per-UID users, Linux keyring, hybrid), the rotation contract, and the redaction regex.
+
+**Non-goals (explicit):**
+- Per-UID container users. Deferred, will involve rebuilding `amux-agent-base`.
+- Any cross-ORG auditor routing (every org picks its own opposing agent locally).
+- Agent visibility of their own audit score. Deliberately zero.
+
+**Verification:**
+- Mint a token for a test session, grep slog for "unauthed state-change" during 10 min of mixed activity.
+- `curl -H "X-Amux-Session: Scorpio" $AMUX_URL/api/board -d '{...}'` without the real Scorpio token should emit a warn line but still work (log-only).
+- Working guard: have two sessions, create a `working` from session A, verify A gets 409 on next POST, B is unaffected, A can PATCH.
+- Blocking clear: send a blocking message from Jeremy, reply from agent, verify `blocking=0` on the parent.
+- Reaper: insert a `working` row with updated=now-1000, wait for next tick, verify flipped to `abandoned`.
+- Board linkage: create a thread, post a board item with `thread_id`, verify it shows in `/api/threads/T-N` linked_issues.
+- Audit: enable `audit_mode='on'` on a thread, agent posts, confirm sidecar row written; verify `/api/message_audits/<mid>` with X-Amux-Session returns 403.
+
+**Previous plan superseded:** none; the account-usage meter work finished dd0a22be/21576e10.
+
+
 
 ## Plan for change: Account-level usage meter — port upstream probe (Jeremy 2026-10-13 08:51) — IN PROGRESS
 
