@@ -6411,6 +6411,11 @@ def _init_db():
         # the same item; a human must re-engage before the automatic
         # loop retries.
         "ALTER TABLE issues ADD COLUMN stale_escalated INTEGER NOT NULL DEFAULT 0",
+        # thread_id — Jeremy 2026-10-16. Links a board item to the thread
+        # that spawned it. Used by GET /api/threads/T-N to surface a
+        # "linked work" strip in the header (one pill per distinct owning
+        # session). Empty string = unlinked (legacy / human-filed items).
+        "ALTER TABLE issues ADD COLUMN thread_id TEXT NOT NULL DEFAULT ''",
         "ALTER TABLE schedules ADD COLUMN kind TEXT NOT NULL DEFAULT 'tmux'",
         "ALTER TABLE saved_messages ADD COLUMN session TEXT NOT NULL DEFAULT ''",
         "ALTER TABLE statuses ADD COLUMN gate TEXT",
@@ -8373,7 +8378,7 @@ def _item_by_id(bid: str) -> dict | None:
     row = db.execute(
         """SELECT i.id, i.title, i.desc, i.status, i.session, i.creator,
                   i.due, i.due_time, i.created, i.updated, i.owner_type,
-                  i.org,
+                  i.org, i.thread_id,
                   COALESCE(i.pinned, 0) AS pinned,
                   COALESCE(i.pos, 0) AS pos,
                   i.posted_by_session, i.posted_by_ip, i.last_patch_by,
@@ -32340,6 +32345,53 @@ function _tJumpToFlagged(tid, mid) {
     }
   }, 60);
 }
+// Jeremy 2026-10-16: given t.linked_issues (open board items whose
+// thread_id == this thread), group by owning session and derive one
+// pill per distinct owner, colored by worst status seen. Hover
+// tooltip lists every item for that session; click filters the
+// board. Empty when no linked work.
+function _tWorkStripHtml(t) {
+  const items = (t && t.linked_issues) || [];
+  if (!items.length) return '';
+  // Status severity order (lowest to highest urgency).
+  const SEV = {'todo':1, 'doing':2, 'needs-approval':3, 'review':4};
+  const bySession = new Map();
+  for (const it of items) {
+    const s = (it.session || '').trim() || '(unassigned)';
+    const prev = bySession.get(s) || {items: [], worst: 0, status: 'todo'};
+    prev.items.push(it);
+    const sv = SEV[it.status] || 0;
+    if (sv > prev.worst) { prev.worst = sv; prev.status = it.status; }
+    bySession.set(s, prev);
+  }
+  const PILL_COLORS = {
+    'todo': {bg:'#5a5f6a', fg:'#fff'},
+    'doing': {bg:'#c99a2e', fg:'#1a1a1a'},
+    'needs-approval': {bg:'#d47a2a', fg:'#1a1a1a'},
+    'review': {bg:'#4e9fbf', fg:'#fff'},
+  };
+  const parts = [];
+  for (const [sess, info] of bySession.entries()) {
+    const c = PILL_COLORS[info.status] || PILL_COLORS['todo'];
+    const tipLines = info.items.map(i => `${i.id} (${i.status}): ${i.title}`).join('\n');
+    const tip = _tEsc(tipLines);
+    const sessEsc = _tEsc(sess);
+    parts.push(`<span class="t-work-pill" title="${tip}" style="background:${c.bg};color:${c.fg};padding:2px 8px;border-radius:10px;font-size:0.7rem;font-weight:600;white-space:nowrap;cursor:pointer;" onclick="event.stopPropagation();_tWorkPillClick('${_tEsc(t.id)}','${sessEsc}')">${sessEsc} · ${info.items.length}</span>`);
+  }
+  return `<div class="t-work-strip" style="display:flex;flex-wrap:wrap;gap:6px;align-items:center;margin-top:6px;padding-left:28px;">
+    <span style="font-size:0.65rem;color:var(--muted);text-transform:uppercase;letter-spacing:0.04em;">Linked work:</span>
+    ${parts.join('')}
+  </div>`;
+}
+function _tWorkPillClick(tid, session) {
+  // Scroll to board, filter by session. Best-effort; fallback no-op.
+  try {
+    if (typeof scrollToBoard === 'function') scrollToBoard();
+    if (typeof setBoardSessionFilter === 'function') setBoardSessionFilter(session);
+    else window.location.hash = '#board';
+  } catch (_e) {}
+}
+
 function _tRenderThread(t) {
   const state = _tThreadState(t);
   const tint = _tStateTint(state);
@@ -32350,6 +32402,7 @@ function _tRenderThread(t) {
   const anyBlocking = t.messages.some(m => m.blocking === 1 && m.status !== 'discarded');
   const newestUpdated = t.messages.reduce((mx, m) => Math.max(mx, m.updated || 0), t.updated || 0);
   const tidEsc = _tEsc(t.id);
+  const workStrip = _tWorkStripHtml(t);
   // Thread cards get a chunkier border-left (4px accent bar) to visually
   // separate them from the message cards inside; the rest of the border stays
   // thin. Thread header is heavier (larger title, more padding) so the
@@ -32375,6 +32428,7 @@ function _tRenderThread(t) {
         <span class="t-row-time" style="font-size:0.7rem;color:var(--muted);white-space:nowrap;flex-shrink:0;">${_tFmtTime(newestUpdated)}</span>
       </div>
       <div class="t-row-title-stacked" style="display:none;font-size:1rem;font-weight:600;color:var(--fg);margin-top:6px;line-height:1.3;word-wrap:break-word;">${_tEsc(t.title)}</div>
+      ${workStrip}
     </div>`;
   if (expanded) html += _tRenderMessages(t);
   html += '</div>';
@@ -43645,6 +43699,23 @@ class CCHandler(BaseHTTPRequestHandler):
                         "ORDER BY position, created", (d["id"],)
                     ).fetchall()
                 d["messages"] = [dict(m) for m in msgs]
+                # Jeremy 2026-10-16: surface the open board items that were
+                # spawned FROM this thread so the UI can render a "work in
+                # progress" pill strip. Open = status in ('todo','doing',
+                # 'review','needs-approval'). Compact shape — the full
+                # issue is still fetchable via /api/board/<id>.
+                try:
+                    _li = db.execute(
+                        "SELECT id, title, status, session, owner_type "
+                        "  FROM issues "
+                        " WHERE thread_id = ? "
+                        "   AND status IN ('todo','doing','review','needs-approval') "
+                        " ORDER BY session, pos",
+                        (d["id"],),
+                    ).fetchall()
+                    d["linked_issues"] = [dict(r) for r in _li]
+                except Exception:
+                    d["linked_issues"] = []
                 return d
 
             def _other_party(tid, sender):
@@ -46139,14 +46210,27 @@ class CCHandler(BaseHTTPRequestHandler):
                     posted_ip = self.client_address[0]
                 except Exception:
                     posted_ip = None
+                # Jeremy 2026-10-16: optional thread_id links this item to
+                # the thread that spawned it. GET /api/threads/T-N surfaces
+                # the back-link so the UI can render a work-in-progress strip.
+                _thread_id = (body.get("thread_id") or "").strip()
+                if _thread_id:
+                    _trow = db.execute(
+                        "SELECT id FROM threads WHERE id = ?", (_thread_id,)
+                    ).fetchone()
+                    if not _trow:
+                        return self._json({
+                            "error": f"thread_id {_thread_id} not found",
+                            "hint": "Omit thread_id to create an unlinked item.",
+                        }, 400)
                 db.execute(
                     """INSERT INTO issues (id, title, desc, status, session, creator, due, due_time,
                                             created, updated, owner_type, pos, org,
-                                            posted_by_session, posted_by_ip)
-                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                                            posted_by_session, posted_by_ip, thread_id)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                     (item_id, title, desc, status, session or None, creator, due, due_time,
                      now, now, owner_type, new_pos, org,
-                     posted_by, posted_ip),
+                     posted_by, posted_ip, _thread_id),
                 )
                 for tag in tags:
                     db.execute(
@@ -46620,8 +46704,24 @@ class CCHandler(BaseHTTPRequestHandler):
                                     "caller": _hdr_session,
                                 }, 403)
                     set_clauses, params = [], []
-                    for k in ("title", "desc", "status", "session", "due", "due_time", "owner_type", "pinned", "pos", "org"):
+                    for k in ("title", "desc", "status", "session", "due", "due_time", "owner_type", "pinned", "pos", "org", "thread_id"):
                         if k in body:
+                            # thread_id: validate existence when non-empty.
+                            # Empty string explicitly clears the link.
+                            if k == "thread_id":
+                                _tid_val = (body.get("thread_id") or "").strip()
+                                if _tid_val:
+                                    _trow = db.execute(
+                                        "SELECT id FROM threads WHERE id = ?", (_tid_val,)
+                                    ).fetchone()
+                                    if not _trow:
+                                        return self._json({
+                                            "error": f"thread_id {_tid_val} not found",
+                                            "hint": "PATCH with thread_id='' to clear the link.",
+                                        }, 400)
+                                set_clauses.append("thread_id = ?")
+                                params.append(_tid_val)
+                                continue
                             set_clauses.append(f"{k} = ?")
                             v = body[k]
                             params.append(None if v == "" and k in ("session", "due", "due_time", "org") else v)
