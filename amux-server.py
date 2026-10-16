@@ -32068,39 +32068,73 @@ function _tAuditDrawerToggle(mid) {
   _threadsRender();
 }
 async function _tAuditNow(mid) {
-  if (!confirm('Request a fresh audit of this message? The opposing agent will be queued.')) return;
+  // iOS confirm() can be flaky inside complex event-chain contexts;
+  // use a lightweight toast-style confirmation instead so Jeremy
+  // always sees SOMETHING when he taps.
+  const toast = document.createElement('div');
+  toast.style.cssText = 'position:fixed;bottom:60px;left:50%;transform:translateX(-50%);background:#222;color:#fff;padding:10px 14px;border-radius:6px;z-index:9999;font-size:0.85rem;box-shadow:0 2px 8px rgba(0,0,0,0.4);';
+  toast.textContent = 'Requesting audit of ' + mid + '...';
+  document.body.appendChild(toast);
   try {
     const r = await fetch(API + '/api/message_audits', {
       method: 'POST',
-      headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({message_id: mid, trigger: 'manual', verdict: 'unknown', score: 0, body: '(manual audit requested; dispatcher will replace with real verdict)'}),
+      headers: _authHeaders({
+        'Content-Type': 'application/json',
+        'X-Amux-UI-Token': (window._AMUX_UI_TOKEN || ''),
+      }),
+      body: JSON.stringify({message_id: mid, trigger: 'manual', verdict: 'unknown', score: 0, body: '(manual audit requested from dashboard; dispatcher will route to the opposing agent)'}),
     });
     if (!r.ok) {
       const err = await r.json().catch(() => ({error: r.statusText}));
-      alert('Audit request failed: ' + (err.error || r.status));
+      toast.textContent = 'Audit request failed: ' + (err.error || r.status);
+      toast.style.background = '#c0392b';
+      setTimeout(() => toast.remove(), 3500);
       return;
     }
+    toast.textContent = 'Audit queued for ' + mid;
+    toast.style.background = '#2b8a3e';
+    setTimeout(() => toast.remove(), 2000);
     _tAuditDrawerOpen.add(mid);
     _threadsRender();
   } catch (e) {
-    alert('Audit request error: ' + e);
+    toast.textContent = 'Audit request error: ' + e;
+    toast.style.background = '#c0392b';
+    setTimeout(() => toast.remove(), 3500);
   }
 }
 async function _tAuditModeToggle(tid, newMode) {
   try {
     const r = await fetch(API + '/api/threads/' + encodeURIComponent(tid), {
       method: 'PATCH',
-      headers: {'Content-Type': 'application/json'},
+      headers: _authHeaders({
+        'Content-Type': 'application/json',
+        'X-Amux-UI-Token': (window._AMUX_UI_TOKEN || ''),
+      }),
       body: JSON.stringify({audit_mode: newMode}),
     });
     if (!r.ok) {
       const err = await r.json().catch(() => ({error: r.statusText}));
-      alert('audit_mode update failed: ' + (err.error || r.status));
+      // Lightweight toast — alert() can be blocked on iOS in some flows.
+      const toast = document.createElement('div');
+      toast.style.cssText = 'position:fixed;bottom:60px;left:50%;transform:translateX(-50%);background:#c0392b;color:#fff;padding:10px 14px;border-radius:6px;z-index:9999;font-size:0.85rem;';
+      toast.textContent = 'audit_mode update failed: ' + (err.error || r.status);
+      document.body.appendChild(toast);
+      setTimeout(() => toast.remove(), 3500);
       return;
+    }
+    // Patch the in-memory thread row so the chip flips immediately,
+    // without waiting for the next full fetch (SSE will reconcile).
+    if (typeof _tData !== 'undefined' && _tData) {
+      const t = (_tData.threads || _tData || []).find(x => x && x.id === tid);
+      if (t) t.audit_mode = newMode;
     }
     _threadsRender();
   } catch (e) {
-    alert('audit_mode update error: ' + e);
+    const toast = document.createElement('div');
+    toast.style.cssText = 'position:fixed;bottom:60px;left:50%;transform:translateX(-50%);background:#c0392b;color:#fff;padding:10px 14px;border-radius:6px;z-index:9999;font-size:0.85rem;';
+    toast.textContent = 'audit_mode update error: ' + e;
+    document.body.appendChild(toast);
+    setTimeout(() => toast.remove(), 3500);
   }
 }
 function _tToggle(tid) {
