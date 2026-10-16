@@ -42685,7 +42685,7 @@ SERVICE_WORKER = r"""
 // changes — the activate handler below deletes every cache whose name !=
 // this constant, so bumping is what evicts stale HTML from prior SW
 // installs. Companion to the Cache-Control: no-cache header on _html().
-const CACHE = 'amux-v0.8.10-2026-08-07';
+const CACHE = 'amux-v0.8.11-2026-10-16';
 const SHELL_URLS = ['/', '/manifest.json', '/icon.svg', '/icon.png', '/icon-192.png', '/icon-512.png'];
 
 // Install: pre-cache entire app shell
