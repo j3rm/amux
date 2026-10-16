@@ -44071,6 +44071,35 @@ class CCHandler(BaseHTTPRequestHandler):
                         return self._json({"error": f"parent_id {parent_id} not found"}, 404)
                     if p["thread_id"] != tid:
                         return self._json({"error": f"parent_id {parent_id} belongs to a different thread"}, 400)
+                # Working-flag guard (2026-10-16, Jeremy): if the posting
+                # session already has an open status='working' message in
+                # this thread, reject new POSTs and point them at the open
+                # one. They must either finalize it (PATCH to status=
+                # 'complete') or keep editing it in place. Does NOT block
+                # other sessions in the same thread; only the author of
+                # the open working message is held. Dashboard (Jeremy) is
+                # never guarded here because Jeremy posts without an agent
+                # session id.
+                if from_session and not _is_dashboard:
+                    _open = db.execute(
+                        "SELECT id FROM messages WHERE thread_id = ? AND from_session = ? "
+                        "AND status = 'working' ORDER BY created DESC LIMIT 1",
+                        (tid, from_session),
+                    ).fetchone()
+                    if _open:
+                        _open_mid = _open["id"]
+                        slog(f"[threads] BLOCK working-flag stacker: {from_session} already has open working {_open_mid} in {tid}")
+                        return self._json({
+                            "error": (
+                                f"You already have an open 'working' message ({_open_mid}) in this thread. "
+                                f"Finalize or update that one before posting a new reply."
+                            ),
+                            "hint": (
+                                f"PATCH /api/messages/{_open_mid} with body/status to update it in place; "
+                                f"set status='complete' to close it, then you can POST a new reply."
+                            ),
+                            "open_message_id": _open_mid,
+                        }, 409)
                 blocking = 1 if bj.get("blocking") else 0
                 partial = bool(bj.get("partial"))
                 new_status = "working" if partial else "complete"
@@ -44121,6 +44150,23 @@ class CCHandler(BaseHTTPRequestHandler):
                      blocking, new_status, pos, now, now),
                 )
                 db.execute("UPDATE threads SET updated = ? WHERE id = ?", (now, tid))
+                # Auto-clear the parent's blocking flag when a reply lands
+                # (Jeremy 2026-10-16). The flag was always a "how this was
+                # sent" indicator, never a current-state field; the UI
+                # treated it as current-state and the pill never dropped.
+                # Flipping on the FIRST reply (regardless of status) matches
+                # Jeremy's expectation that a blocking message stops being
+                # blocking once it has been answered. Only applies to
+                # COMPLETE replies — a 'working' partial is not an answer.
+                if parent_id and new_status == "complete":
+                    try:
+                        db.execute(
+                            "UPDATE messages SET blocking = 0, updated = ? "
+                            "WHERE id = ? AND blocking = 1",
+                            (now, parent_id),
+                        )
+                    except Exception as _bc_e:
+                        slog(f"[threads] auto-clear blocking failed on {parent_id}: {_bc_e}")
                 db.commit()
                 _bump_threads_version()
                 msg_row = db.execute("SELECT * FROM messages WHERE id = ?", (mid,)).fetchone()
@@ -50754,6 +50800,10 @@ def _board_watcher_clear_nudged():
 _threads_reaper_last: dict[str, int] = {}
 _THREADS_WORKING_THRESHOLD_SECS = 15 * 60
 _THREADS_REAPER_NUDGE_GAP_SECS  = 30 * 60
+# After this, the reaper gives up nudging and flips the message to
+# status='abandoned' so the thread's "working" pill drops and the thread
+# is no longer visually hung on a dead sender. Jeremy 2026-10-16.
+_THREADS_ABANDON_THRESHOLD_SECS = 60 * 60
 
 
 def _threads_stale_working_reaper():
@@ -50770,7 +50820,34 @@ def _threads_stale_working_reaper():
             "   AND t.discarded = 0",
             (now - _THREADS_WORKING_THRESHOLD_SECS,),
         ).fetchall()
+        # Terminal flip pass: anything past the abandon threshold gets its
+        # status flipped from 'working' to 'abandoned' so the thread's
+        # pill drops and the sender is unblocked by the working-flag guard
+        # if they ever come back. This is independent of the nudge gating
+        # below; a dead agent never patches, so we don't want to re-nudge
+        # them forever. Jeremy 2026-10-16.
+        _flipped = 0
         for r in rows:
+            if now - int(r["updated"]) >= _THREADS_ABANDON_THRESHOLD_SECS:
+                try:
+                    db.execute(
+                        "UPDATE messages SET status = 'abandoned', updated = ? "
+                        "WHERE id = ? AND status = 'working'",
+                        (now, r["mid"]),
+                    )
+                    _flipped += 1
+                    slog(f"[threads-reaper] abandoned {r['mid']} from={r['from_session']} "
+                         f"tid={r['tid']} age={ (now-int(r['updated']))//60 }m")
+                except Exception as _ae:
+                    slog(f"[threads-reaper] abandon failed for {r['mid']}: {_ae}")
+        if _flipped:
+            db.commit()
+            try: _bump_threads_version()
+            except Exception: pass
+        for r in rows:
+            # Already flipped above; skip the nudge path.
+            if now - int(r["updated"]) >= _THREADS_ABANDON_THRESHOLD_SECS:
+                continue
             mid = r["mid"]
             last = _threads_reaper_last.get(mid, 0)
             if now - last < _THREADS_REAPER_NUDGE_GAP_SECS:
