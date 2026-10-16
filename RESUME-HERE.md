@@ -8,25 +8,53 @@ Last updated: 2026-10-16
 
 **Context:** 2026-10-16 design discussion. Jeremy wants three thread features (header strip, fact-check overlay, working-flag guard) plus a stale reaper and blocking auto-clear. Fact-check requires real agent identity (today `X-Amux-Session` is a client-sent header, trivially spoofable). Agreed to ship cross-org auth (option 1, trust-same-org) now, and defer per-UID intra-org isolation to a later project. Jeremy approved shipping in this order.
 
-**Scope of this entry (6 small commits, in order):**
+**Progress (as of 2026-10-16 12:00Z):**
 
-1. **session_tokens table + token minting at session start.** New table `session_tokens(session TEXT PK, token_hash TEXT, fingerprint_hash TEXT, issued INT, revoked INT)`. On every `start_session`: mint 32-byte random token and 32-byte random fingerprint, store sha256 of each, inject `AMUX_SESSION_TOKEN=<plaintext>` into tmux env via `tmux send-environment` so the running Claude/Codex process can read it from `os.environ`. Fingerprint stays server-side only (never leaves). No enforcement yet.
+1. **DONE (f6d015ec):** session_tokens table + token minting at `start_session`. Tokens stored as sha256, plaintext injected to tmux env via `-e AMUX_SESSION_TOKEN` + send-keys export so both new sessions and reused panes get it. Fingerprint sha256 stored, plaintext kept in `_session_fingerprints` module dict. `_authenticated_session(headers)`, `_verify_session_token`, `_redact_tokens` helpers are DEFINED but NOT yet called anywhere that enforces.
 
-2. **_authenticated_session(headers) helper + log-only enforcement.** New helper verifies `X-Amux-Session-Token` matches stored hash for the claimed `X-Amux-Session`. New env var `AMUX_SESSION_AUTH_ENFORCE` (default `0`). While 0: log unauthed state-changing POST/PATCH/DELETE as warnings but let through. Dashboard auth token path (humans) still identifies as Jeremy. Missing session+missing dashboard token now rejects (closes current silent-Jeremy footgun).
+2. **NOT STARTED:** log-only enforcement on state-changing endpoints. Needs `AMUX_SESSION_AUTH_ENFORCE` env var and slog warn lines on unauthed POST/PATCH/DELETE. Will not reject while 0.
 
-3. **POST /api/sessions/self/rotate-token.** Body: `{current_token, fingerprint}`. Verifies both, mints new token, writes new hash. Pushovers Jeremy on any rotation not originating from the dashboard auth token. Regex scrubber on all thread/channel/board message bodies that redacts `[0-9a-f]{64}` to prevent token echo.
+3. **NOT STARTED:** `POST /api/sessions/self/rotate-token`. Deferred until Jeremy signals a rotation is needed.
 
-4. **Threads #3 working-flag guard.** On POST `/api/threads/T-N/messages`: if `from_session` has any `status='working'` message in this thread, return 409 with the open mid and the correct PATCH endpoint. Does NOT block other sessions.
+4. **DONE (661652f8):** working-flag guard. 409 with open_message_id + PATCH hint when same from_session has an open working message in the thread.
 
-5. **Threads #5 auto-clear blocking.** When a new message with `parent_id` set lands and the parent has `blocking=1`, flip parent to `blocking=0`. Thread's "blocking" pill drops the moment it's answered. ~3 lines in `_deliver` or the POST handler.
+5. **DONE (661652f8):** auto-clear blocking on parent when a complete reply with parent_id lands.
 
-6. **Threads #4 stale working reaper.** New `schedule_job(_reap_stale_working, interval=300, name="working_reap", initial_delay=60)`. Flips `status='working' AND updated < now()-900` to new `status='abandoned'`. One slog line per flip with session+thread+mid.
+6. **DONE (661652f8):** stale working reaper flips `working` to `abandoned` past 60min threshold.
 
-7. **Threads #6 board-thread linkage.** `ALTER TABLE issues ADD COLUMN thread_id TEXT NOT NULL DEFAULT ''`. `POST /api/board` and `PATCH /api/board/<id>` accept `thread_id`. `GET /api/threads/T-N` adds `linked_issues: [{id, status, session, title}]` for open statuses (todo/doing/review). Dashboard renders a pill strip in the thread header: one pill per DISTINCT session on open items, colored by their worst status, hover shows item list, click filters board.
+7. **DONE (9464b9d9):** issues.thread_id column + POST/PATCH accept thread_id + GET /api/threads/T-N embeds linked_issues + UI pill strip under thread header.
 
-8. **Threads #2 fact-check sidecar.** New `message_audits(id INT PK, message_id TEXT, auditor TEXT, score INT, verdict TEXT, body TEXT, created INT)`. New `threads.audit_mode TEXT DEFAULT 'off'`. Per-org JSON config `audit_opposing_agent` (default `codex`). Server worker: on new agent message in a thread with `audit_mode='on'`, dispatch body + brief thread context to the opposing agent via a dedicated internal API, parse score/verdict, write audit row. `GET /api/message_audits/<mid>` returns 403 for any request carrying `X-Amux-Session`; only the dashboard auth token can read. Agents stay blind. One-off: `POST /api/message_audits` manual mode works regardless of `audit_mode`.
+8. **IN PROGRESS:** fact-check sidecar. Starts next. Scope locked:
+   - Schema: `message_audits(id INT PK AUTOINCREMENT, message_id TEXT, auditor TEXT, score INT, verdict TEXT, body TEXT, created INT)`.
+   - Schema: `threads.audit_mode TEXT NOT NULL DEFAULT 'off'` (values: off | on | manual).
+   - Per-org config `audit_opposing_agent` stored in `prefs` keyed by `org_audit_auditor:<org>` (default `codex`).
+   - Worker: `_audit_dispatcher` scheduled every 30s. Scans messages created in last 15min in threads where `audit_mode='on'`, from non-empty from_session, with no existing audit row. Dispatches the body + a prior-message context snippet to the opposing agent (board item in that agent's queue with `tags=['message_audit', <mid>]`). Agent writes its verdict via `POST /api/message_audits` with `{message_id, score, verdict, body}`. One-off manual audit: Jeremy clicks "audit this" on a message in the UI, sends `POST /api/message_audits` with `trigger='manual'`; same dispatch.
+   - Reads: `GET /api/message_audits/<mid>` returns the audit row(s). ANY request carrying `X-Amux-Session` is 403 (agents stay blind to their own and each other's scores). Only dashboard auth token (humans) can read.
+   - Writes: `POST /api/message_audits` requires `_authenticated_session()` to succeed (session+token verify) AND the posting session != message.from_session (no self-grading). Dashboard token is treated as Jeremy and may post regardless.
+   - UI: score chip on each agent message (color = score bucket, hidden when no audit); click opens a drawer showing auditor + verdict + body + "Post as a thread reply" button.
 
-9. **Wiki page: Agent-Authentication.md.** Documents the trust-same-org v1 posture, the three future-work options (per-UID users, Linux keyring, hybrid), the rotation contract, and the redaction regex.
+9. **NOT STARTED:** wiki/Agent-Authentication.md.
+
+**Agent-rollout posture (Jeremy asked 2026-10-16 11:59):** No pause needed.
+Running agents DO NOT have `AMUX_SESSION_TOKEN` in env (they started before this change). They'll pick it up on their next restart. Enforcement is log-only (and item 2 above isn't even wired yet), so unauthed POST/PATCH continues to work exactly as it did pre-change. Server auto-reload on each save causes a <3s API blip; agents already handle that as transient.
+
+## Plan for change: Block agent thread creation (Jeremy 2026-10-16 14:03) DONE
+
+**Context:** Jeremy says agents keep creating NEW threads for random questions. He only focuses on the threads he started; agent-created threads pile up with meaningless titles and he doesn't see them. He wants to be the sole creator of threads. Agents must either (a) reply to an existing thread, or (b) raise via the board (`POST /api/board` with `session:"Jeremy"`).
+
+**What changes:** `POST /api/threads` (thread create + first message). Right after we've resolved `_is_dashboard` (line ~44107), if the request is NOT the dashboard, return 403 with a hint pointing to the two legitimate alternatives. The sibling endpoint `POST /api/threads/T-N/messages` (reply to existing thread) is NOT touched — agent replies continue to work.
+
+**Why 403, not 400:** this is an authorization decision ("agents may not create threads"), not malformed input.
+
+**Expected behavior:**
+- Dashboard (Jeremy's browser, `X-Amux-UI-Token` present, no `X-Amux-Session`) → create works unchanged.
+- Agent CLI / curl with `X-Amux-Session: <self>` → 403 with hint.
+- No `X-Amux-Session` and no UI token → still 403 by the pre-existing spoof guard at line 44112.
+
+**How to verify:**
+1. `curl -sk -X POST -H 'X-Amux-Session: amux-helper' -H 'Content-Type: application/json' -d '{"title":"test","body":"x","from_session":"amux-helper"}' https://localhost:8822/api/threads` → expect 403, hint JSON.
+2. From the browser (dashboard), create a thread → expect 201 as before.
+3. `curl -sk -X POST -H 'X-Amux-Session: amux-helper' -H 'Content-Type: application/json' -d '{"body":"reply"}' https://localhost:8822/api/threads/T-<some-existing>/messages` → expect success (replies unaffected).
 
 **Non-goals (explicit):**
 - Per-UID container users. Deferred, will involve rebuilding `amux-agent-base`.

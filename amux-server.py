@@ -44106,6 +44106,21 @@ class CCHandler(BaseHTTPRequestHandler):
                 # from_session is ignored for them.
                 _is_dashboard = _session_destructive_allowed(self.headers)
                 _hdr_session = (self.headers.get("X-Amux-Session") or "").strip()
+                # 2026-10-16 (Jeremy): only the dashboard (= Jeremy) may create
+                # threads. Agents must either reply to an existing thread or
+                # raise a question via the board. Rationale: agent-created
+                # threads pile up with titles that mean nothing to Jeremy; he
+                # focuses on threads he started and never sees the agent-
+                # authored ones. Replies at POST /api/threads/T-N/messages
+                # are unaffected.
+                if not _is_dashboard:
+                    return self._json({
+                        "error": "agents may not create new threads",
+                        "hint": ("Reply to an existing thread via "
+                                 "POST /api/threads/T-N/messages, or raise a "
+                                 "new question to Jeremy on the board via "
+                                 "POST /api/board with session:\"Jeremy\"."),
+                    }, 403)
                 if _is_dashboard:
                     from_session = (bj.get("from_session") or _hdr_session or "").strip()
                 else:
