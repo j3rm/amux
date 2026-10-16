@@ -5678,6 +5678,27 @@ CREATE TABLE IF NOT EXISTS session_tokens (
     issued            INTEGER NOT NULL,
     revoked           INTEGER
 );
+-- Fact-check sidecar (Jeremy 2026-10-16). One row per audit of a
+-- thread message by an opposing agent. Agents are BLIND to this
+-- table: GET /api/message_audits/<mid> returns 403 to any request
+-- that carries X-Amux-Session, so only the dashboard (Jeremy) can
+-- see scores. Writes require _authenticated_session AND auditor !=
+-- message.from_session (no self-grading). `score` is 0-100 (higher =
+-- more accurate per the auditor's judgement). `verdict` is one of
+-- 'accurate' | 'partially_accurate' | 'inaccurate' | 'unknown'.
+-- `trigger` is 'auto' (dispatcher woke it) or 'manual' (Jeremy clicked).
+CREATE TABLE IF NOT EXISTS message_audits (
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    message_id    TEXT NOT NULL,
+    auditor       TEXT NOT NULL,
+    score         INTEGER NOT NULL DEFAULT 0,
+    verdict       TEXT NOT NULL DEFAULT 'unknown',
+    body          TEXT NOT NULL DEFAULT '',
+    trigger       TEXT NOT NULL DEFAULT 'auto',
+    created       INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_message_audits_mid ON message_audits(message_id);
+CREATE INDEX IF NOT EXISTS idx_message_audits_auditor ON message_audits(auditor);
 """
 
 
@@ -6416,6 +6437,13 @@ def _init_db():
         # "linked work" strip in the header (one pill per distinct owning
         # session). Empty string = unlinked (legacy / human-filed items).
         "ALTER TABLE issues ADD COLUMN thread_id TEXT NOT NULL DEFAULT ''",
+        # audit_mode — Jeremy 2026-10-16. Thread-level toggle for the
+        # fact-check sidecar. 'off' (default) = no auto-audits; 'on' =
+        # dispatcher fires on every new agent message; 'manual' = never
+        # auto, but Jeremy can one-off audit a specific message. Agents
+        # NEVER see this value through any API path (strip from
+        # _thread_to_dict for X-Amux-Session callers).
+        "ALTER TABLE threads ADD COLUMN audit_mode TEXT NOT NULL DEFAULT 'off'",
         "ALTER TABLE schedules ADD COLUMN kind TEXT NOT NULL DEFAULT 'tmux'",
         "ALTER TABLE saved_messages ADD COLUMN session TEXT NOT NULL DEFAULT ''",
         "ALTER TABLE statuses ADD COLUMN gate TEXT",
@@ -32026,12 +32054,54 @@ function _tExpandedSave() {
 // flips from whatever's showing now, so first click on a collapsed message
 // always expands it.
 let _tMsgExpanded = new Set();
+let _tAuditDrawerOpen = new Set();
 function _tMsgToggle(mid, wasExpanded) {
   _tMsgExpanded.delete(mid);
   _tMsgExpanded.delete('!' + mid);
   if (wasExpanded) _tMsgExpanded.add('!' + mid);
   else _tMsgExpanded.add(mid);
   _threadsRender();
+}
+function _tAuditDrawerToggle(mid) {
+  if (_tAuditDrawerOpen.has(mid)) _tAuditDrawerOpen.delete(mid);
+  else _tAuditDrawerOpen.add(mid);
+  _threadsRender();
+}
+async function _tAuditNow(mid) {
+  if (!confirm('Request a fresh audit of this message? The opposing agent will be queued.')) return;
+  try {
+    const r = await fetch(API + '/api/message_audits', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({message_id: mid, trigger: 'manual', verdict: 'unknown', score: 0, body: '(manual audit requested; dispatcher will replace with real verdict)'}),
+    });
+    if (!r.ok) {
+      const err = await r.json().catch(() => ({error: r.statusText}));
+      alert('Audit request failed: ' + (err.error || r.status));
+      return;
+    }
+    _tAuditDrawerOpen.add(mid);
+    _threadsRender();
+  } catch (e) {
+    alert('Audit request error: ' + e);
+  }
+}
+async function _tAuditModeToggle(tid, newMode) {
+  try {
+    const r = await fetch(API + '/api/threads/' + encodeURIComponent(tid), {
+      method: 'PATCH',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({audit_mode: newMode}),
+    });
+    if (!r.ok) {
+      const err = await r.json().catch(() => ({error: r.statusText}));
+      alert('audit_mode update failed: ' + (err.error || r.status));
+      return;
+    }
+    _threadsRender();
+  } catch (e) {
+    alert('audit_mode update error: ' + e);
+  }
 }
 function _tToggle(tid) {
   if (_tExpanded.has(tid)) _tExpanded.delete(tid); else _tExpanded.add(tid);
@@ -32403,6 +32473,16 @@ function _tRenderThread(t) {
   const newestUpdated = t.messages.reduce((mx, m) => Math.max(mx, m.updated || 0), t.updated || 0);
   const tidEsc = _tEsc(t.id);
   const workStrip = _tWorkStripHtml(t);
+  // Audit-mode cycle button (dashboard-only — server strips audit_mode
+  // from agent reads, so this chip simply doesn't render for them).
+  // Clicking cycles off → on → manual → off.
+  let auditModeChip = '';
+  if (Object.prototype.hasOwnProperty.call(t, 'audit_mode')) {
+    const mode = t.audit_mode || 'off';
+    const next = mode === 'off' ? 'on' : mode === 'on' ? 'manual' : 'off';
+    const bg = mode === 'on' ? '#2b8a3e' : mode === 'manual' ? '#c99a2e' : '#555b63';
+    auditModeChip = `<span class="t-audit-mode-chip" title="Audit mode: ${_tEsc(mode)}. Click to change." style="background:${bg};color:#fff;padding:2px 8px;border-radius:10px;font-size:0.65rem;font-weight:700;cursor:pointer;letter-spacing:0.03em;flex-shrink:0;" onclick="event.stopPropagation();_tAuditModeToggle('${tidEsc}', '${next}')">AUDIT: ${_tEsc(mode).toUpperCase()}</span>`;
+  }
   // Thread cards get a chunkier border-left (4px accent bar) to visually
   // separate them from the message cards inside; the rest of the border stays
   // thin. Thread header is heavier (larger title, more padding) so the
@@ -32422,6 +32502,7 @@ function _tRenderThread(t) {
         <span style="background:${tint.pill};color:#fff;padding:2px 8px;border-radius:4px;font-size:0.65rem;font-weight:700;text-transform:uppercase;letter-spacing:0.04em;white-space:nowrap;flex-shrink:0;">${tint.label}</span>
         ${anyBlocking ? '<span style="background:#e11;color:#fff;padding:2px 8px;border-radius:4px;font-size:0.65rem;font-weight:700;flex-shrink:0;">BLOCKING</span>' : ''}
         <span style="font-weight:700;font-size:0.9rem;color:var(--fg);white-space:nowrap;letter-spacing:0.02em;flex-shrink:0;">${tidEsc}</span>
+        ${auditModeChip}
         <span class="t-row-title t-row-title-inline" style="flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:1rem;font-weight:600;color:var(--fg);">${_tEsc(t.title)}</span>
         <button style="${_TICON_BTN_STYLE}opacity:0.55;flex-shrink:0;" onclick="event.stopPropagation();_tRenameThread('${tidEsc}')" title="Rename thread">✎</button>
         <span style="font-size:0.7rem;color:var(--muted);white-space:nowrap;flex-shrink:0;">${t.messages.length} msg${t.messages.length===1?'':'s'}</span>
@@ -32525,6 +32606,25 @@ function _tRenderMsg(t, m) {
   else if (!m.from_session && m.to_session) accent = '#468';
   else if (m.status === 'complete')         accent = '#556';
   const cardBg = flagged ? 'rgba(240,192,42,0.08)' : 'var(--card-bg, rgba(255,255,255,0.02))';
+  // Fact-check chip (Jeremy 2026-10-16). Server embeds m.audits for
+  // dashboard reads ONLY — agent reads strip it. If any audit exists,
+  // show the most recent one as a chip and a drawer toggle. If none and
+  // we're on the dashboard (t has `linked_issues` field = dashboard
+  // response envelope), render a tiny "Audit" button for one-off.
+  const audits = Array.isArray(m.audits) ? m.audits : [];
+  const latestAudit = audits.length ? audits[0] : null;
+  const isDashResp = (t && Object.prototype.hasOwnProperty.call(t, 'audit_mode'));
+  let auditChipHtml = '';
+  if (latestAudit) {
+    const vcolor = latestAudit.verdict === 'accurate' ? '#2b8a3e'
+                 : latestAudit.verdict === 'partially_accurate' ? '#c99a2e'
+                 : latestAudit.verdict === 'inaccurate' ? '#c0392b'
+                 : '#55606b';
+    const vLabel = (latestAudit.verdict || 'unknown').replace(/_/g, ' ');
+    auditChipHtml = `<span class="t-audit-chip" title="click to view auditor rationale" style="background:${vcolor};color:#fff;padding:1px 7px;border-radius:10px;font-size:0.65rem;font-weight:700;letter-spacing:0.02em;cursor:pointer;" onclick="event.stopPropagation();_tAuditDrawerToggle('${midEsc}')">${latestAudit.score}% · ${_tEsc(vLabel)}</span>`;
+  } else if (isDashResp && m.from_session) {
+    auditChipHtml = `<button style="${_TICON_BTN_STYLE}opacity:0.5;" title="Audit this message now" onclick="event.stopPropagation();_tAuditNow('${midEsc}')">⚖</button>`;
+  }
   let html = `<div style="margin:0 0 8px 0;border:1px solid var(--border);border-left:3px solid ${accent};background:${cardBg};border-radius:4px;">
     <div style="display:flex;align-items:center;gap:8px;padding:6px 10px;cursor:pointer;font-size:0.75rem;color:var(--muted);flex-wrap:wrap;" onclick="_tMsgToggle('${midEsc}', ${expanded})">
       <span style="width:12px;color:var(--muted);">${chev}</span>
@@ -32534,6 +32634,7 @@ function _tRenderMsg(t, m) {
       <span style="background:${st.color};color:#fff;padding:1px 6px;border-radius:3px;font-weight:600;text-transform:uppercase;letter-spacing:0.03em;">${st.text}</span>
       <span style="font-weight:600;color:var(--fg);">${midEsc}</span>
       <span>${_tEsc(dir.label)}</span>
+      ${auditChipHtml}
       <span style="flex:1;min-width:0;"></span>
       <span>${_tFmtTime(m.updated || m.created)}</span>
     </div>`;
@@ -32543,6 +32644,24 @@ function _tRenderMsg(t, m) {
   // /home/jwesley/.amux/uploads/abc-doc.pdf becomes a click-to-preview link,
   // same behavior as session peek output. It escapes non-match text internally.
   if (m.body) html += `<div class="thr-msg-body" style="white-space:pre-wrap;font-size:0.88rem;color:var(--fg);opacity:0.92;margin:4px 0 8px 0;">${linkifyOutput(_tNormalizeBody(m.body))}</div>`;
+  // Audit drawer: dashboard-only (server strips m.audits for agents).
+  // Opens when the user clicks the audit chip. Shows every audit on this
+  // message with the auditor, verdict, score, and rationale body.
+  if (audits.length && _tAuditDrawerOpen.has(m.id)) {
+    html += `<div class="t-audit-drawer" style="margin:8px 0 4px 0;padding:8px 10px;background:rgba(0,0,0,0.25);border:1px solid var(--border);border-radius:4px;font-size:0.78rem;">`;
+    html += `<div style="font-weight:600;color:var(--muted);margin-bottom:6px;text-transform:uppercase;letter-spacing:0.05em;">Fact-check (${audits.length})</div>`;
+    for (const a of audits) {
+      const vcolor = a.verdict === 'accurate' ? '#2b8a3e'
+                   : a.verdict === 'partially_accurate' ? '#c99a2e'
+                   : a.verdict === 'inaccurate' ? '#c0392b'
+                   : '#55606b';
+      html += `<div style="margin:4px 0;padding:6px 8px;border-left:3px solid ${vcolor};background:rgba(255,255,255,0.03);">`;
+      html += `<div style="color:var(--muted);font-size:0.72rem;">${_tEsc(a.auditor)} · ${a.score}% · ${_tEsc((a.verdict || 'unknown').replace(/_/g, ' '))} · ${_tFmtTime(a.created)} · ${_tEsc(a.trigger)}</div>`;
+      if (a.body) html += `<div style="white-space:pre-wrap;margin-top:4px;color:var(--fg);opacity:0.9;">${linkifyOutput(_tNormalizeBody(a.body))}</div>`;
+      html += `</div>`;
+    }
+    html += `</div>`;
+  }
   html += '</div></div>';
   // Inline reply form is rendered ABOVE the message card (prepended in the
   // return) — the message being replied to sits directly below the form for
@@ -43691,6 +43810,15 @@ class CCHandler(BaseHTTPRequestHandler):
                 global _threads_version
                 _threads_version += 1
 
+            # Determine once per request whether the caller is an agent
+            # (has X-Amux-Session and isn't the dashboard). Used to strip
+            # `audit_mode` from responses so agents can't tell when
+            # they're being fact-checked.
+            _req_is_agent = bool(
+                (self.headers.get("X-Amux-Session") or "").strip()
+                and not _session_destructive_allowed(self.headers)
+            )
+
             def _thread_to_dict(t_row, msgs=None):
                 d = dict(t_row)
                 if msgs is None:
@@ -43699,6 +43827,31 @@ class CCHandler(BaseHTTPRequestHandler):
                         "ORDER BY position, created", (d["id"],)
                     ).fetchall()
                 d["messages"] = [dict(m) for m in msgs]
+                # Dashboard reads also get audit summaries embedded per
+                # message so the chip renders in one round-trip. Agents
+                # never see audits by design — skip the join entirely
+                # for them so a crafty client can't infer "I was
+                # audited" from timing side-channels.
+                if not _req_is_agent and d["messages"]:
+                    try:
+                        _mids = tuple(m["id"] for m in d["messages"])
+                        if _mids:
+                            _placeholders = ",".join("?" for _ in _mids)
+                            _audit_rows = db.execute(
+                                f"SELECT message_id, auditor, score, verdict, "
+                                f"       body, trigger, created "
+                                f"  FROM message_audits "
+                                f" WHERE message_id IN ({_placeholders}) "
+                                f" ORDER BY created DESC",
+                                _mids,
+                            ).fetchall()
+                            _by_mid = {}
+                            for ar in _audit_rows:
+                                _by_mid.setdefault(ar["message_id"], []).append(dict(ar))
+                            for mdict in d["messages"]:
+                                mdict["audits"] = _by_mid.get(mdict["id"], [])
+                    except Exception:
+                        pass
                 # Jeremy 2026-10-16: surface the open board items that were
                 # spawned FROM this thread so the UI can render a "work in
                 # progress" pill strip. Open = status in ('todo','doing',
@@ -43716,6 +43869,11 @@ class CCHandler(BaseHTTPRequestHandler):
                     d["linked_issues"] = [dict(r) for r in _li]
                 except Exception:
                     d["linked_issues"] = []
+                # Hide audit_mode from agents (Jeremy 2026-10-16). Agents
+                # should not be able to tell whether their messages are
+                # being fact-checked; see the message_audits block.
+                if _req_is_agent and "audit_mode" in d:
+                    d.pop("audit_mode", None)
                 return d
 
             def _other_party(tid, sender):
@@ -44001,6 +44159,22 @@ class CCHandler(BaseHTTPRequestHandler):
                     if bj.get("discarded"):
                         db.execute("UPDATE threads SET discarded = 1, updated = ? WHERE id = ?",
                                    (now, tid))
+                    # audit_mode (Jeremy 2026-10-16): dashboard-only. Agents
+                    # trying to flip their own audit toggle gets a 403 so
+                    # they can't disable fact-checking of themselves.
+                    if "audit_mode" in bj:
+                        if not _is_dashboard_read:
+                            return self._json({
+                                "error": "audit_mode is dashboard-only",
+                                "hint": "Only Jeremy (dashboard) can toggle fact-checking on a thread.",
+                            }, 403)
+                        _am = (bj.get("audit_mode") or "off").strip().lower()
+                        if _am not in ("off", "on", "manual"):
+                            return self._json({
+                                "error": f"invalid audit_mode '{_am}'; must be off|on|manual",
+                            }, 400)
+                        db.execute("UPDATE threads SET audit_mode = ?, updated = ? WHERE id = ?",
+                                   (_am, now, tid))
                     db.commit()
                     _bump_threads_version()
                     thread_row = db.execute("SELECT * FROM threads WHERE id = ?", (tid,)).fetchone()
@@ -44396,6 +44570,112 @@ class CCHandler(BaseHTTPRequestHandler):
                     return self._json({"ok": True, "id": mid})
                 return self._json({"error": "method not allowed"}, 405)
 
+            return self._json({"error": "method not allowed"}, 405)
+
+        # ── /api/message_audits ─ fact-check sidecar (Jeremy 2026-10-16) ────
+        # Agents are BLIND to this surface: every GET that carries X-Amux-
+        # Session returns 403, so neither the audited agent nor its peers
+        # can read their own scores. Only the dashboard (Jeremy, no agent
+        # header) sees them. Writes require a verified session token AND
+        # auditor != message.from_session (no self-grading).
+        if path == "/api/message_audits" or path.startswith("/api/message_audits/"):
+            db = get_db()
+            _hdr_sess = (self.headers.get("X-Amux-Session") or "").strip()
+            _is_dashboard = _session_destructive_allowed(self.headers)
+            # ---- GET /api/message_audits  (recent, dashboard-only) ----
+            # ---- GET /api/message_audits/<mid> (one message's audits) ---
+            if method == "GET":
+                if _hdr_sess and not _is_dashboard:
+                    # Deliberately 403, not 404 — Jeremy wants agents to
+                    # know this surface exists but can't read it.
+                    return self._json({
+                        "error": "message_audits is dashboard-only; agents are blind by design",
+                    }, 403)
+                m = re.match(r"^/api/message_audits/([A-Za-z0-9-]+)$", path)
+                if m:
+                    mid = m.group(1)
+                    rows = db.execute(
+                        "SELECT id, message_id, auditor, score, verdict, body, trigger, created "
+                        "  FROM message_audits WHERE message_id = ? ORDER BY created DESC",
+                        (mid,),
+                    ).fetchall()
+                    return self._json({"message_id": mid, "audits": [dict(r) for r in rows]})
+                # List mode. Optional ?limit= (default 50).
+                try:
+                    _q = parse_qs(urlparse(self.path).query)
+                    _lim = int(_q.get("limit", ["50"])[0])
+                except Exception:
+                    _lim = 50
+                _lim = max(1, min(_lim, 500))
+                rows = db.execute(
+                    "SELECT id, message_id, auditor, score, verdict, body, trigger, created "
+                    "  FROM message_audits ORDER BY created DESC LIMIT ?",
+                    (_lim,),
+                ).fetchall()
+                return self._json({"audits": [dict(r) for r in rows]})
+            # ---- POST /api/message_audits (write a verdict) -----------
+            if method == "POST" and path == "/api/message_audits":
+                bj = self._read_body()
+                mid = (bj.get("message_id") or "").strip()
+                if not mid:
+                    return self._json({"error": "message_id required"}, 400)
+                msg_row = db.execute(
+                    "SELECT id, from_session, thread_id, body FROM messages WHERE id = ?",
+                    (mid,),
+                ).fetchone()
+                if not msg_row:
+                    return self._json({"error": f"message {mid} not found"}, 404)
+                # Determine auditor identity. Dashboard writes get
+                # attributed to Jeremy. Agent writes require a verified
+                # token and auditor != message author.
+                if _is_dashboard:
+                    auditor = (bj.get("auditor") or "Jeremy").strip() or "Jeremy"
+                else:
+                    verified = _authenticated_session(self.headers)
+                    if not verified:
+                        return self._json({
+                            "error": "message_audits POST requires verified X-Amux-Session-Token",
+                            "hint": ("Add header X-Amux-Session-Token=<your minted token>. "
+                                     "Token is in your tmux env as $AMUX_SESSION_TOKEN."),
+                        }, 403)
+                    auditor = verified
+                    if auditor == (msg_row["from_session"] or ""):
+                        return self._json({
+                            "error": "self-audit forbidden",
+                            "hint": "You cannot audit your own messages. The opposing agent reviews yours.",
+                        }, 403)
+                try:
+                    score = int(bj.get("score", 0))
+                except Exception:
+                    score = 0
+                score = max(0, min(100, score))
+                verdict = (bj.get("verdict") or "unknown").strip().lower()
+                if verdict not in ("accurate", "partially_accurate", "inaccurate", "unknown"):
+                    verdict = "unknown"
+                body = _redact_tokens((bj.get("body") or "").strip())
+                trigger = (bj.get("trigger") or "auto").strip().lower()
+                if trigger not in ("auto", "manual"):
+                    trigger = "auto"
+                now = int(time.time())
+                cur = db.execute(
+                    "INSERT INTO message_audits (message_id, auditor, score, verdict, body, trigger, created) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                    (mid, auditor, score, verdict, body, trigger, now),
+                )
+                db.commit()
+                # Thread SSE watermark lives on the module-level global.
+                try:
+                    global _threads_version
+                    _threads_version += 1
+                except Exception:
+                    pass
+                row = db.execute(
+                    "SELECT id, message_id, auditor, score, verdict, body, trigger, created "
+                    "  FROM message_audits WHERE id = ?",
+                    (cur.lastrowid,),
+                ).fetchone()
+                slog(f"[audit] {auditor} wrote {verdict} score={score} for {mid} (trigger={trigger})")
+                return self._json(dict(row), 201)
             return self._json({"error": "method not allowed"}, 405)
 
         # Workflows API (/api/workflows) — deterministic multi-step choreographies.
@@ -50994,6 +51274,150 @@ def _threads_stale_working_reaper():
         slog(f"[threads-reaper] error: {e}")
 
 
+# ── Fact-check dispatcher (Jeremy 2026-10-16) ──────────────────────────────
+# Threads with audit_mode='on' feed each new agent message to the opposing
+# agent for the message's org. Dispatcher work is a board item (NOT a thread
+# post) in the auditor's queue, tagged 'message_audit', with the message
+# body embedded. The auditor reads it, does its analysis, POSTs a verdict
+# via /api/message_audits, and marks the board item done. Agents never see
+# scores (reads are 403 for X-Amux-Session). See RESUME-HERE.md for the
+# full feature description.
+
+# Age window for auto-dispatch. Older messages are ignored (don't catch up
+# on history when audit_mode flips on). 15 min keeps the window tight.
+_AUDIT_DISPATCH_WINDOW_SECS = 15 * 60
+
+
+def _audit_opposing_agent_for_org(org: str) -> str:
+    """Return the configured opposing-agent session name for `org`, or the
+    default 'codex' bucket resolver. Resolution: prefs row
+    `audit_opposing_agent:<org>` wins; else env `AMUX_AUDIT_<ORG>` wins;
+    else fall back to the first session in that org whose provider is
+    'codex'. Returns '' if none found."""
+    try:
+        db = get_db()
+        row = db.execute(
+            "SELECT value FROM prefs WHERE key = ?",
+            (f"audit_opposing_agent:{org}",),
+        ).fetchone()
+        if row and (row["value"] or "").strip():
+            return row["value"].strip()
+    except Exception:
+        pass
+    env_val = os.environ.get(f"AMUX_AUDIT_{org}", "").strip()
+    if env_val:
+        return env_val
+    # Fallback: scan ~/.amux/sessions/*.env for a codex session in this org.
+    try:
+        for envf in CC_SESSIONS.glob("*.env"):
+            try:
+                cfg = parse_env_file(envf)
+                if (cfg.get("CC_ORG") or "").strip() == org:
+                    if "codex" in (cfg.get("CC_FLAGS") or "").lower() or envf.stem.lower().endswith("codex"):
+                        return envf.stem
+            except Exception:
+                continue
+    except Exception:
+        pass
+    return ""
+
+
+def _audit_dispatcher():
+    """Scan for new agent messages in threads with audit_mode='on' that
+    haven't been audited yet, and post a board item to the configured
+    opposing agent for each. Runs every 30s. Keeps the window tight
+    (_AUDIT_DISPATCH_WINDOW_SECS) so flipping audit_mode='on' doesn't
+    retroactively audit a month of history."""
+    try:
+        db = get_db()
+        now = int(time.time())
+        rows = db.execute(
+            "SELECT m.id AS mid, m.thread_id AS tid, m.from_session, "
+            "       m.body, m.created, t.title, t.org, t.audit_mode "
+            "  FROM messages m JOIN threads t ON t.id = m.thread_id "
+            " WHERE t.audit_mode = 'on' "
+            "   AND t.discarded = 0 "
+            "   AND m.status = 'complete' "
+            "   AND m.from_session IS NOT NULL AND m.from_session != '' "
+            "   AND m.created >= ? "
+            "   AND NOT EXISTS (SELECT 1 FROM message_audits a WHERE a.message_id = m.id) ",
+            (now - _AUDIT_DISPATCH_WINDOW_SECS,),
+        ).fetchall()
+        for r in rows:
+            mid = r["mid"]
+            org = (r["org"] or "").strip()
+            if not org:
+                continue
+            auditor = _audit_opposing_agent_for_org(org)
+            if not auditor:
+                slog(f"[audit-dispatch] skip {mid}: no auditor configured for org {org}")
+                continue
+            if auditor == r["from_session"]:
+                # Opposing agent IS the message author (misconfigured org,
+                # or Jeremy swapped sides). Don't ask them to grade
+                # themselves; wait for Jeremy to fix the mapping.
+                slog(f"[audit-dispatch] skip {mid}: configured auditor '{auditor}' == author")
+                continue
+            # Avoid re-dispatching the same message twice. We key off a
+            # board item with tag 'audit:<mid>' — any status counts, so a
+            # done audit's historical board item still blocks re-fire.
+            prev = db.execute(
+                "SELECT i.id FROM issues i JOIN issue_tags t ON t.issue_id = i.id "
+                " WHERE t.tag = ?",
+                (f"audit:{mid}",),
+            ).fetchone()
+            if prev:
+                continue
+            # Compose the audit prompt. Keep the body small; include just
+            # enough thread context (title + the message under review).
+            body_preview = (r["body"] or "")[:4000]
+            audit_desc = (
+                f"**Fact-check this message.** You are the opposing agent.\n\n"
+                f"**Thread:** {r['title']}\n"
+                f"**Message id:** `{mid}` (from {r['from_session']})\n\n"
+                f"**Message content:**\n\n> " + body_preview.replace("\n", "\n> ") + "\n\n"
+                f"---\n\n"
+                f"**Your job:** read the message, verify its claims against the codebase and "
+                f"any shared context you have, and POST a verdict to the AMUX API. Do NOT "
+                f"reply in the thread. The audit is sidecar; Jeremy sees your score through "
+                f"the dashboard, agents never see scores.\n\n"
+                f"**Post with:**\n\n"
+                f"```\n"
+                f"curl -sk -X POST -H 'Content-Type: application/json' \\\n"
+                f"  -H \"X-Amux-Session: $AMUX_SESSION\" \\\n"
+                f"  -H \"X-Amux-Session-Token: $AMUX_SESSION_TOKEN\" \\\n"
+                f"  -d '{{\"message_id\":\"{mid}\",\"score\":<0-100>,\"verdict\":\"<accurate|partially_accurate|inaccurate|unknown>\",\"body\":\"<rationale>\"}}' \\\n"
+                f"  $AMUX_URL/api/message_audits\n"
+                f"```\n\n"
+                f"Then mark THIS board item `done`."
+            )
+            board_id = _next_issue_id(_prefix_from_session(auditor))
+            try:
+                db.execute(
+                    "INSERT INTO issues (id, title, desc, status, session, "
+                    "  creator, created, updated, owner_type, thread_id) "
+                    "VALUES (?, ?, ?, 'todo', ?, 'audit-dispatcher', ?, ?, 'agent', ?)",
+                    (board_id, f"Fact-check {mid}", audit_desc, auditor, now, now, r["tid"]),
+                )
+                db.execute(
+                    "INSERT OR IGNORE INTO issue_tags (issue_id, tag) VALUES (?, ?)",
+                    (board_id, f"audit:{mid}"),
+                )
+                db.execute(
+                    "INSERT OR IGNORE INTO issue_tags (issue_id, tag) VALUES (?, ?)",
+                    (board_id, "message_audit"),
+                )
+                db.commit()
+                _board_changed()
+                try: _notify_session_of_task(auditor, board_id, f"Fact-check {mid}")
+                except Exception: pass
+                slog(f"[audit-dispatch] queued {board_id} for {auditor} to audit {mid}")
+            except Exception as e:
+                slog(f"[audit-dispatch] {mid}: insert failed: {e}")
+    except Exception as e:
+        slog(f"[audit-dispatch] error: {e}")
+
+
 # ── Workflow runner ────────────────────────────────────────────────────────
 #
 # Workflow modules live at /mnt/gitdata/amux/workflows/<name>.py. Each exposes
@@ -52096,6 +52520,7 @@ def main():
     schedule_job(_evict_stale_caches,    interval=300,                  name="cache_evict", initial_delay=60)
     schedule_job(_cleanup_tmp,           interval=1800,                 name="tmp_cleanup", initial_delay=60)
     schedule_job(_threads_stale_working_reaper, interval=300,           name="threads_stale_working", initial_delay=120)
+    schedule_job(_audit_dispatcher,            interval=30,              name="audit_dispatch",        initial_delay=90)
     schedule_job(_auto_archive_idle,     interval=3600,                 name="auto_archive", initial_delay=300)
     # DISABLED 2026-07-06 (upstream f088f8e) — auto-steering every idle session
     # about stale doing/review cards woke ~20 sessions at once into a churn storm
