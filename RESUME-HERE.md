@@ -40,6 +40,38 @@ Running agents DO NOT have `AMUX_SESSION_TOKEN` in env (they started before this
 
 ## Plan for change: Block agent thread creation (Jeremy 2026-10-16 14:03) DONE
 
+## Plan for change: Fix manual-audit dispatch + CD-CPAP auditor pref (Jeremy 2026-10-16 23:54) DONE
+
+**Context:** Diagnosis earlier today showed two audit-pipeline wiring bugs. Jeremy approved shipping both.
+
+1. **Manual-audit ⚖ button writes a placeholder, not a dispatch.** `_tAuditNow` in the dashboard POSTs `trigger='manual', verdict='unknown', score:0, body:'(manual audit requested from dashboard; dispatcher will route to the opposing agent)'`. The POST /api/message_audits handler takes those at face value and INSERTs a bogus `(auditor=Jeremy, verdict=unknown, score=0, body=placeholder)` row. The UI then renders an "unknown" chip and the opposing agent is never asked. Confirmed on M-8916 (T-131).
+
+2. **No opposing agent resolvable for org CD-CPAP.** Server log shows every 30s: `[audit-dispatch] skip M-xxxx: no auditor configured for org CD-CPAP`. The fallback scan looks for a codex-session INSIDE the thread's org; CD-Audit-Codex lives in its own org `CD-Audit-Codex`, not `CD-CPAP`. prefs row needed.
+
+**What changes:**
+
+- Extract the dispatcher's per-message body into `_dispatch_message_audit(mid, triggered_by)` -> dict. Both the auto loop (`_audit_dispatcher`) and the manual POST path call this one helper. Idempotent via the `audit:<mid>` tag check.
+- POST /api/message_audits: when `_is_dashboard AND trigger=='manual' AND verdict=='unknown' AND score==0`, treat as a dispatch request (NOT an audit write): call the helper, return `{queued, board_id, auditor}`. Any explicit verdict write (agent posting results, or dashboard with real score) still inserts a row as before.
+- Set the pref: `INSERT INTO prefs(key,value) VALUES ('audit_opposing_agent:CD-CPAP','CD-Audit-Codex')`. One row, no restart.
+
+**Expected behavior:**
+- Jeremy taps ⚖ on an agent message in T-131 -> immediate board item appears in CD-Audit-Codex's queue titled `Fact-check M-xxxx`. Toast confirms. No bogus unknown chip.
+- Dispatcher (every 30s) now resolves `CD-CPAP -> CD-Audit-Codex` via the pref and queues items for new agent messages in audit-mode='on' threads.
+- When CD-Audit-Codex posts a verdict back via POST /api/message_audits with a real score + verdict + body, the chip updates with the real color/score.
+
+**How to verify:**
+1. `sqlite3 ~/.amux/amux.db "SELECT * FROM prefs WHERE key='audit_opposing_agent:CD-CPAP';"` -> one row.
+2. From dashboard, tap ⚖ on M-8923 (T-131). Check `issues` for a `CAC-*` with `title='Fact-check M-8923'` and tag `audit:M-8923`. Server log shows `[audit-dispatch] queued ... (trigger=manual)`.
+3. Watch server.log for next 30s cycle; expect `queued ... (trigger=auto)` for any still-unaudited agent message in T-131.
+4. The bogus M-8916 row (auditor=Jeremy, unknown) stays — historical; the new ⚖ click should NOT create a sibling bogus row.
+
+**+ Optional (Jeremy 23:55: ship all 3): auto-derive `thread_id` on POST /api/board.**
+
+- When an agent POSTs a new board item with `thread_id` empty (or missing), look up the latest message FROM that same `X-Amux-Session` across all non-discarded threads whose `updated` is within the last 2 hours. If one exists, set `thread_id` to that message's thread id.
+- Explicit `thread_id` in the body always wins; auto-derive never overrides an explicit value.
+- Dashboard-side POSTs (Jeremy) are NOT auto-linked (Jeremy's board items aren't thread-scoped work).
+- Verify: iSchedule-Audit-Codex posts a next board item while an iSchedule thread exists with a recent message from it -> new issue carries that thread_id -> appears in `t.linked_issues` -> pill shows on the thread header.
+
 **Context:** Jeremy says agents keep creating NEW threads for random questions. He only focuses on the threads he started; agent-created threads pile up with meaningless titles and he doesn't see them. He wants to be the sole creator of threads. Agents must either (a) reply to an existing thread, or (b) raise via the board (`POST /api/board` with `session:"Jeremy"`).
 
 **What changes:** `POST /api/threads` (thread create + first message). Right after we've resolved `_is_dashboard` (line ~44107), if the request is NOT the dashboard, return 403 with a hint pointing to the two legitimate alternatives. The sibling endpoint `POST /api/threads/T-N/messages` (reply to existing thread) is NOT touched — agent replies continue to work.

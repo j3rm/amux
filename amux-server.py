@@ -44662,7 +44662,7 @@ class CCHandler(BaseHTTPRequestHandler):
                     (_lim,),
                 ).fetchall()
                 return self._json({"audits": [dict(r) for r in rows]})
-            # ---- POST /api/message_audits (write a verdict) -----------
+            # ---- POST /api/message_audits (write a verdict OR request a dispatch) -----
             if method == "POST" and path == "/api/message_audits":
                 bj = self._read_body()
                 mid = (bj.get("message_id") or "").strip()
@@ -44674,6 +44674,37 @@ class CCHandler(BaseHTTPRequestHandler):
                 ).fetchone()
                 if not msg_row:
                     return self._json({"error": f"message {mid} not found"}, 404)
+                # Manual-audit dispatch path (Jeremy 2026-10-16): the dashboard
+                # ⚖ scale icon POSTs {trigger:'manual', verdict:'unknown',
+                # score:0, body:'(…dispatcher will route…)'} to signal "please
+                # ask the opposing agent to audit this." Treat that shape as a
+                # DISPATCH REQUEST, not an audit write — route via the shared
+                # helper that the auto-dispatcher uses, return the queued
+                # board_id, and SKIP the row insert. Previously the handler
+                # took the placeholder verdict at face value and persisted a
+                # bogus auditor=Jeremy / verdict=unknown row that showed up on
+                # Jeremy's UI as an empty "unknown" chip (M-8916 was the first
+                # victim in T-131). An explicit real verdict from the dashboard
+                # (e.g., Jeremy manually scoring a message) still falls through
+                # to the insert path below because verdict != 'unknown' or
+                # score > 0.
+                _trigger_in = (bj.get("trigger") or "auto").strip().lower()
+                _verdict_in = (bj.get("verdict") or "").strip().lower()
+                try: _score_in = int(bj.get("score", 0))
+                except Exception: _score_in = 0
+                if (_is_dashboard and _trigger_in == "manual"
+                        and _verdict_in in ("", "unknown") and _score_in == 0):
+                    result = _dispatch_message_audit(mid, triggered_by="manual")
+                    if result.get("ok"):
+                        return self._json({
+                            "queued": True,
+                            "board_id": result.get("board_id"),
+                            "auditor": result.get("auditor"),
+                            "existing": result.get("existing", False),
+                            "message_id": mid,
+                        }, 202)
+                    code = 409 if "configured" in (result.get("error") or "") else 400
+                    return self._json(result, code)
                 # Determine auditor identity. Dashboard writes get
                 # attributed to Jeremy. Agent writes require a verified
                 # token and auditor != message author.
@@ -46552,6 +46583,27 @@ class CCHandler(BaseHTTPRequestHandler):
                             "error": f"thread_id {_thread_id} not found",
                             "hint": "Omit thread_id to create an unlinked item.",
                         }, 400)
+                # Auto-derive thread_id for agent posts (Jeremy 2026-10-17):
+                # explicit thread_id always wins. When an agent (identified by
+                # X-Amux-Session) posts with no thread_id, back-fill from their
+                # most recent message in any non-discarded thread within the
+                # last 2 hours — the "I just chatted on T-131 and now I'm
+                # making a work item for it" pattern. Without this, agents
+                # that don't know about the column never link their work and
+                # the thread-header pills stay empty. Jeremy's own posts (no
+                # X-Amux-Session) are NOT auto-linked.
+                if not _thread_id and _hdr_session:
+                    _recent_row = db.execute(
+                        "SELECT m.thread_id FROM messages m "
+                        "  JOIN threads t ON t.id = m.thread_id "
+                        " WHERE m.from_session = ? "
+                        "   AND t.discarded = 0 "
+                        "   AND m.updated >= ? "
+                        " ORDER BY m.updated DESC LIMIT 1",
+                        (_hdr_session, int(time.time()) - 7200),
+                    ).fetchone()
+                    if _recent_row and _recent_row["thread_id"]:
+                        _thread_id = _recent_row["thread_id"]
                 db.execute(
                     """INSERT INTO issues (id, title, desc, status, session, creator, due, due_time,
                                             created, updated, owner_type, pos, org,
@@ -51371,18 +51423,103 @@ def _audit_opposing_agent_for_org(org: str) -> str:
     return ""
 
 
+def _dispatch_message_audit(mid: str, triggered_by: str = "auto") -> dict:
+    """Queue a fact-check board item for the opposing agent of `mid`'s
+    thread. Called by both the auto dispatcher loop and the dashboard
+    ⚖ manual-audit button (POST /api/message_audits with trigger='manual').
+    Idempotent: a prior board item tagged `audit:<mid>` short-circuits.
+    Returns a dict describing the outcome; never raises."""
+    db = get_db()
+    try:
+        row = db.execute(
+            "SELECT m.id AS mid, m.thread_id AS tid, m.from_session, "
+            "       m.body, m.created, t.title, t.org "
+            "  FROM messages m JOIN threads t ON t.id = m.thread_id "
+            " WHERE m.id = ? AND t.discarded = 0",
+            (mid,),
+        ).fetchone()
+        if not row:
+            return {"ok": False, "error": f"message {mid} not found or thread discarded"}
+        org = (row["org"] or "").strip()
+        if not org:
+            return {"ok": False, "error": "thread has no org; cannot resolve auditor"}
+        auditor = _audit_opposing_agent_for_org(org)
+        if not auditor:
+            slog(f"[audit-dispatch] skip {mid}: no auditor configured for org {org}")
+            return {"ok": False, "error": f"no auditor configured for org {org}",
+                    "hint": f"set pref audit_opposing_agent:{org}=<session> or env AMUX_AUDIT_{org}"}
+        if auditor == (row["from_session"] or ""):
+            slog(f"[audit-dispatch] skip {mid}: configured auditor '{auditor}' == author")
+            return {"ok": False, "error": "configured auditor is the message author"}
+        prev = db.execute(
+            "SELECT i.id FROM issues i JOIN issue_tags t ON t.issue_id = i.id "
+            " WHERE t.tag = ?",
+            (f"audit:{mid}",),
+        ).fetchone()
+        if prev:
+            return {"ok": True, "board_id": prev["id"], "auditor": auditor,
+                    "existing": True, "message_id": mid}
+        now = int(time.time())
+        body_preview = (row["body"] or "")[:4000]
+        audit_desc = (
+            f"**Fact-check this message.** You are the opposing agent.\n\n"
+            f"**Thread:** {row['title']}\n"
+            f"**Message id:** `{mid}` (from {row['from_session']})\n\n"
+            f"**Message content:**\n\n> " + body_preview.replace("\n", "\n> ") + "\n\n"
+            f"---\n\n"
+            f"**Your job:** read the message, verify its claims against the codebase and "
+            f"any shared context you have, and POST a verdict to the AMUX API. Do NOT "
+            f"reply in the thread. The audit is sidecar; Jeremy sees your score through "
+            f"the dashboard, agents never see scores.\n\n"
+            f"**Post with:**\n\n"
+            f"```\n"
+            f"curl -sk -X POST -H 'Content-Type: application/json' \\\n"
+            f"  -H \"X-Amux-Session: $AMUX_SESSION\" \\\n"
+            f"  -H \"X-Amux-Session-Token: $AMUX_SESSION_TOKEN\" \\\n"
+            f"  -d '{{\"message_id\":\"{mid}\",\"score\":<0-100>,\"verdict\":\"<accurate|partially_accurate|inaccurate|unknown>\",\"body\":\"<rationale>\"}}' \\\n"
+            f"  $AMUX_URL/api/message_audits\n"
+            f"```\n\n"
+            f"Then mark THIS board item `done`."
+        )
+        board_id = _next_issue_id(_prefix_from_session(auditor))
+        creator = "audit-dispatcher" if triggered_by == "auto" else "audit-manual"
+        db.execute(
+            "INSERT INTO issues (id, title, desc, status, session, "
+            "  creator, created, updated, owner_type, thread_id) "
+            "VALUES (?, ?, ?, 'todo', ?, ?, ?, ?, 'agent', ?)",
+            (board_id, f"Fact-check {mid}", audit_desc, auditor, creator, now, now, row["tid"]),
+        )
+        db.execute(
+            "INSERT OR IGNORE INTO issue_tags (issue_id, tag) VALUES (?, ?)",
+            (board_id, f"audit:{mid}"),
+        )
+        db.execute(
+            "INSERT OR IGNORE INTO issue_tags (issue_id, tag) VALUES (?, ?)",
+            (board_id, "message_audit"),
+        )
+        db.commit()
+        _board_changed()
+        try: _notify_session_of_task(auditor, board_id, f"Fact-check {mid}")
+        except Exception: pass
+        slog(f"[audit-dispatch] queued {board_id} for {auditor} to audit {mid} (trigger={triggered_by})")
+        return {"ok": True, "board_id": board_id, "auditor": auditor,
+                "existing": False, "message_id": mid}
+    except Exception as e:
+        slog(f"[audit-dispatch] {mid}: dispatch error: {e}")
+        return {"ok": False, "error": str(e)}
+
+
 def _audit_dispatcher():
     """Scan for new agent messages in threads with audit_mode='on' that
-    haven't been audited yet, and post a board item to the configured
-    opposing agent for each. Runs every 30s. Keeps the window tight
-    (_AUDIT_DISPATCH_WINDOW_SECS) so flipping audit_mode='on' doesn't
-    retroactively audit a month of history."""
+    haven't been audited yet, and dispatch via _dispatch_message_audit.
+    Runs every 30s. Keeps the window tight (_AUDIT_DISPATCH_WINDOW_SECS)
+    so flipping audit_mode='on' doesn't retroactively audit a month of
+    history."""
     try:
         db = get_db()
         now = int(time.time())
         rows = db.execute(
-            "SELECT m.id AS mid, m.thread_id AS tid, m.from_session, "
-            "       m.body, m.created, t.title, t.org, t.audit_mode "
+            "SELECT m.id AS mid "
             "  FROM messages m JOIN threads t ON t.id = m.thread_id "
             " WHERE t.audit_mode = 'on' "
             "   AND t.discarded = 0 "
@@ -51393,76 +51530,7 @@ def _audit_dispatcher():
             (now - _AUDIT_DISPATCH_WINDOW_SECS,),
         ).fetchall()
         for r in rows:
-            mid = r["mid"]
-            org = (r["org"] or "").strip()
-            if not org:
-                continue
-            auditor = _audit_opposing_agent_for_org(org)
-            if not auditor:
-                slog(f"[audit-dispatch] skip {mid}: no auditor configured for org {org}")
-                continue
-            if auditor == r["from_session"]:
-                # Opposing agent IS the message author (misconfigured org,
-                # or Jeremy swapped sides). Don't ask them to grade
-                # themselves; wait for Jeremy to fix the mapping.
-                slog(f"[audit-dispatch] skip {mid}: configured auditor '{auditor}' == author")
-                continue
-            # Avoid re-dispatching the same message twice. We key off a
-            # board item with tag 'audit:<mid>' — any status counts, so a
-            # done audit's historical board item still blocks re-fire.
-            prev = db.execute(
-                "SELECT i.id FROM issues i JOIN issue_tags t ON t.issue_id = i.id "
-                " WHERE t.tag = ?",
-                (f"audit:{mid}",),
-            ).fetchone()
-            if prev:
-                continue
-            # Compose the audit prompt. Keep the body small; include just
-            # enough thread context (title + the message under review).
-            body_preview = (r["body"] or "")[:4000]
-            audit_desc = (
-                f"**Fact-check this message.** You are the opposing agent.\n\n"
-                f"**Thread:** {r['title']}\n"
-                f"**Message id:** `{mid}` (from {r['from_session']})\n\n"
-                f"**Message content:**\n\n> " + body_preview.replace("\n", "\n> ") + "\n\n"
-                f"---\n\n"
-                f"**Your job:** read the message, verify its claims against the codebase and "
-                f"any shared context you have, and POST a verdict to the AMUX API. Do NOT "
-                f"reply in the thread. The audit is sidecar; Jeremy sees your score through "
-                f"the dashboard, agents never see scores.\n\n"
-                f"**Post with:**\n\n"
-                f"```\n"
-                f"curl -sk -X POST -H 'Content-Type: application/json' \\\n"
-                f"  -H \"X-Amux-Session: $AMUX_SESSION\" \\\n"
-                f"  -H \"X-Amux-Session-Token: $AMUX_SESSION_TOKEN\" \\\n"
-                f"  -d '{{\"message_id\":\"{mid}\",\"score\":<0-100>,\"verdict\":\"<accurate|partially_accurate|inaccurate|unknown>\",\"body\":\"<rationale>\"}}' \\\n"
-                f"  $AMUX_URL/api/message_audits\n"
-                f"```\n\n"
-                f"Then mark THIS board item `done`."
-            )
-            board_id = _next_issue_id(_prefix_from_session(auditor))
-            try:
-                db.execute(
-                    "INSERT INTO issues (id, title, desc, status, session, "
-                    "  creator, created, updated, owner_type, thread_id) "
-                    "VALUES (?, ?, ?, 'todo', ?, 'audit-dispatcher', ?, ?, 'agent', ?)",
-                    (board_id, f"Fact-check {mid}", audit_desc, auditor, now, now, r["tid"]),
-                )
-                db.execute(
-                    "INSERT OR IGNORE INTO issue_tags (issue_id, tag) VALUES (?, ?)",
-                    (board_id, f"audit:{mid}"),
-                )
-                db.execute(
-                    "INSERT OR IGNORE INTO issue_tags (issue_id, tag) VALUES (?, ?)",
-                    (board_id, "message_audit"),
-                )
-                db.commit()
-                _board_changed()
-                try: _notify_session_of_task(auditor, board_id, f"Fact-check {mid}")
-                except Exception: pass
-                slog(f"[audit-dispatch] queued {board_id} for {auditor} to audit {mid}")
-            except Exception as e:
-                slog(f"[audit-dispatch] {mid}: insert failed: {e}")
+            _dispatch_message_audit(r["mid"], triggered_by="auto")
     except Exception as e:
         slog(f"[audit-dispatch] error: {e}")
 
