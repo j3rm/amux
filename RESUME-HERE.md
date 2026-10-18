@@ -4,7 +4,7 @@
 
 Last updated: 2026-10-18
 
-## Plan for change: Usage tab for mobile-friendly header-bar detail (Jeremy 2026-10-18 19:41) IN PROGRESS
+## Plan for change: Usage tab for mobile-friendly header-bar detail (Jeremy 2026-10-18 19:41) DONE
 
 **Context:** The three stacked usage bars in the dashboard header (Claude Mixpeek, Claude NWDDI, Claude J3 STWR) show label + pct + days-to-reset in a thin bar with a `title=` tooltip that reveals pace, expected %, reset time, source session, last reading, stale flag. On mobile there is no hover, so Jeremy cannot see any of that detail. He wants a dedicated top-level tab that renders the same `/api/usage` payload in full-detail cards, available on both mobile and desktop.
 
