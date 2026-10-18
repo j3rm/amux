@@ -4,6 +4,36 @@
 
 Last updated: 2026-10-18
 
+## Plan for change: Thread message audit pending/running chips (Jeremy 2026-10-18 11:02) DONE
+
+**Context:** Jeremy sees the `⚖` scale icon on thread messages, clicks it, and gets a toast "Audit queued" but after that there is no visible state on the message. The server does `_dispatch_message_audit(mid)` which creates a board item for the opposing auditor tagged `audit:<mid>`. The item flows `todo -> doing -> done` as the auditor picks it up, works it, and finally POSTs to `/api/message_audits` which creates a row and renders a verdict chip. During the gap between "queued" and "verdict posted" Jeremy sees nothing. Same gap exists for auto-dispatched audits (threads with `audit_mode='on'`).
+
+**What changes (amux-server.py only):**
+
+1. **Server: embed pending audits per message.** In `_thread_to_dict` (around line 44148), inside the existing `if not _req_is_agent and d["messages"]:` block, after the `message_audits` join, run a second query for open board items tagged `audit:<mid>` with `status IN ('todo','doing','review')`. Attach as `mdict["audit_pending"]` = list of `{board_id, auditor (session), status, created}`. Dashboard-only; strip for agents like `audit_mode` already is.
+
+2. **Client: render pending/running chip.** In `_tMsgCard` (around line 32940) after `const audits = ...`, add `const pending = Array.isArray(m.audit_pending) ? m.audit_pending : [];`. New chip-rendering order:
+   - If `latestAudit` exists -> existing verdict chip (unchanged).
+   - Else if `pending.length` -> chip reading `Audit <status> (<auditor>)` colored neutral/blue, click opens the drawer showing the pending list with board ids.
+   - Else if `isDashResp && m.from_session` -> existing `⚖` icon.
+
+3. **Client: drawer shows pending too.** When `_tAuditDrawerOpen.has(mid)`, if `pending.length`, render a "In progress" section above the completed-audit rows listing each board item.
+
+4. **Client: `_tAuditNow` optimism.** After the POST returns 202 with `board_id`+`auditor`, push a synthetic `audit_pending` entry into the in-memory message row and rerender, so the chip flips from `⚖` to `Audit todo (auditor)` immediately rather than waiting for the next SSE tick + fetch.
+
+5. **SW cache bump.** Any user-facing JS/CSS change requires `CACHE = 'amux-v<ver+1>-<today>'`.
+
+**No DB schema change.** The data already exists on `issues` and `issue_tags`.
+
+**Verification:**
+- Click the ⚖ on an agent message in a dashboard thread view. Chip immediately shows `Audit todo (<auditor>)` with a cursor and tooltip. No reload.
+- Reload the dashboard. Same chip comes back (persisted from server-side embed).
+- Click the chip -> drawer opens showing the pending board id.
+- Have the auditor claim the item (`todo -> doing`). Chip updates on next SSE tick to `Audit doing (<auditor>)`.
+- Auditor POSTs a verdict. Chip replaces with the existing colored verdict chip.
+- Agent read of same thread via `/api/threads/<id>` must NOT contain `audit_pending` (same leak class as `audit_mode`).
+- `python3 -c "import ast; ast.parse(open('amux-server.py').read())"` passes.
+
 ## Plan for change: Usage tab for mobile-friendly header-bar detail (Jeremy 2026-10-18 19:41) DONE
 
 **Context:** The three stacked usage bars in the dashboard header (Claude Mixpeek, Claude NWDDI, Claude J3 STWR) show label + pct + days-to-reset in a thin bar with a `title=` tooltip that reveals pace, expected %, reset time, source session, last reading, stale flag. On mobile there is no hover, so Jeremy cannot see any of that detail. He wants a dedicated top-level tab that renders the same `/api/usage` payload in full-detail cards, available on both mobile and desktop.

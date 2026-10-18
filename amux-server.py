@@ -32386,6 +32386,32 @@ async function _tAuditNow(mid) {
     toast.textContent = 'Audit queued for ' + mid;
     toast.style.background = '#2b8a3e';
     setTimeout(() => toast.remove(), 2000);
+    // Optimistically patch the in-memory message so the chip flips from
+    // ⚖ to "pending (<auditor>)" immediately, without waiting for the
+    // next SSE tick + full fetch. SSE will reconcile shortly.
+    try {
+      const resp = await r.json().catch(() => ({}));
+      if (resp && resp.auditor && typeof _tData !== 'undefined' && _tData) {
+        const _threads = (_tData.threads || _tData || []);
+        for (const _t of _threads) {
+          const _msgs = (_t && _t.messages) || [];
+          for (const _m of _msgs) {
+            if (_m && _m.id === mid) {
+              _m.audit_pending = Array.isArray(_m.audit_pending) ? _m.audit_pending : [];
+              const already = _m.audit_pending.some(p => p && p.board_id === resp.board_id);
+              if (!already) {
+                _m.audit_pending.unshift({
+                  board_id: resp.board_id || '',
+                  auditor: resp.auditor,
+                  status: 'todo',
+                  created: Math.floor(Date.now() / 1000),
+                });
+              }
+            }
+          }
+        }
+      }
+    } catch (_err) { /* non-fatal: SSE will catch up */ }
     _tAuditDrawerOpen.add(mid);
     _threadsRender();
   } catch (e) {
@@ -32939,6 +32965,12 @@ function _tRenderMsg(t, m) {
   // response envelope), render a tiny "Audit" button for one-off.
   const audits = Array.isArray(m.audits) ? m.audits : [];
   const latestAudit = audits.length ? audits[0] : null;
+  // Pending-audit board items (Jeremy 2026-10-18). Server embeds
+  // open items tagged audit:<mid> so Jeremy can see the audit went
+  // somewhere between "requested" and "verdict posted". Status is
+  // todo (queued), doing (auditor is working on it), or review
+  // (auditor flipped it waiting on something).
+  const pending = Array.isArray(m.audit_pending) ? m.audit_pending : [];
   const isDashResp = (t && Object.prototype.hasOwnProperty.call(t, 'audit_mode'));
   let auditChipHtml = '';
   if (latestAudit) {
@@ -32948,6 +32980,19 @@ function _tRenderMsg(t, m) {
                  : '#55606b';
     const vLabel = (latestAudit.verdict || 'unknown').replace(/_/g, ' ');
     auditChipHtml = `<span class="t-audit-chip" title="click to view auditor rationale" style="background:${vcolor};color:#fff;padding:1px 7px;border-radius:10px;font-size:0.65rem;font-weight:700;letter-spacing:0.02em;cursor:pointer;" onclick="event.stopPropagation();_tAuditDrawerToggle('${midEsc}')">${latestAudit.score}% · ${_tEsc(vLabel)}</span>`;
+  } else if (pending.length) {
+    const p0 = pending[0];
+    const pstatus = (p0.status || 'todo').toLowerCase();
+    // todo=queued (gray), doing=running (blue), review=blocked (amber)
+    const pcolor = pstatus === 'doing' ? '#3a6ea5'
+                 : pstatus === 'review' ? '#c99a2e'
+                 : '#55606b';
+    const plabel = pstatus === 'doing' ? 'running'
+                 : pstatus === 'review' ? 'needs input'
+                 : 'pending';
+    const auditorEsc = _tEsc(p0.auditor || 'auditor');
+    const titleAttr = `Audit ${_tEsc(plabel)} on ${_tEsc(p0.board_id || '')} (${auditorEsc}). Click for details.`;
+    auditChipHtml = `<span class="t-audit-chip" title="${titleAttr}" style="background:${pcolor};color:#fff;padding:1px 7px;border-radius:10px;font-size:0.65rem;font-weight:700;letter-spacing:0.02em;cursor:pointer;" onclick="event.stopPropagation();_tAuditDrawerToggle('${midEsc}')">⚖ ${_tEsc(plabel)} · ${auditorEsc}</span>`;
   } else if (isDashResp && m.from_session) {
     auditChipHtml = `<button style="${_TICON_BTN_STYLE}opacity:0.5;" title="Audit this message now" onclick="event.stopPropagation();_tAuditNow('${midEsc}')">⚖</button>`;
   }
@@ -32971,11 +33016,33 @@ function _tRenderMsg(t, m) {
   // same behavior as session peek output. It escapes non-match text internally.
   if (m.body) html += `<div class="thr-msg-body" style="white-space:pre-wrap;font-size:0.88rem;color:var(--fg);opacity:0.92;margin:4px 0 8px 0;">${linkifyOutput(_tNormalizeBody(m.body))}</div>`;
   // Audit drawer: dashboard-only (server strips m.audits for agents).
-  // Opens when the user clicks the audit chip. Shows every audit on this
-  // message with the auditor, verdict, score, and rationale body.
-  if (audits.length && _tAuditDrawerOpen.has(m.id)) {
+  // Opens when the user clicks the audit chip. Shows pending/running
+  // board items at the top (while the auditor is working), then every
+  // completed audit on this message with auditor, verdict, score, body.
+  if ((audits.length || pending.length) && _tAuditDrawerOpen.has(m.id)) {
     html += `<div class="t-audit-drawer" style="margin:8px 0 4px 0;padding:8px 10px;background:rgba(0,0,0,0.25);border:1px solid var(--border);border-radius:4px;font-size:0.78rem;">`;
-    html += `<div style="font-weight:600;color:var(--muted);margin-bottom:6px;text-transform:uppercase;letter-spacing:0.05em;">Fact-check (${audits.length})</div>`;
+    if (pending.length) {
+      html += `<div style="font-weight:600;color:var(--muted);margin-bottom:6px;text-transform:uppercase;letter-spacing:0.05em;">In progress (${pending.length})</div>`;
+      for (const p of pending) {
+        const pstatus = (p.status || 'todo').toLowerCase();
+        const pcolor = pstatus === 'doing' ? '#3a6ea5'
+                     : pstatus === 'review' ? '#c99a2e'
+                     : '#55606b';
+        const plabel = pstatus === 'doing' ? 'running'
+                     : pstatus === 'review' ? 'needs input'
+                     : 'pending';
+        const bidEsc = _tEsc(p.board_id || '');
+        html += `<div style="margin:4px 0;padding:6px 8px;border-left:3px solid ${pcolor};background:rgba(255,255,255,0.03);">`;
+        html += `<div style="color:var(--muted);font-size:0.72rem;">${_tEsc(p.auditor || 'auditor')} · ${_tEsc(plabel)} · ${_tFmtTime(p.created)} · <a href="#" onclick="event.stopPropagation();event.preventDefault();switchView('board');window._boardJumpTo && window._boardJumpTo('${bidEsc}');" style="color:var(--link, #6ac);text-decoration:none;">${bidEsc}</a></div>`;
+        html += `</div>`;
+      }
+      if (audits.length) {
+        html += `<div style="font-weight:600;color:var(--muted);margin:10px 0 6px 0;text-transform:uppercase;letter-spacing:0.05em;">Fact-check (${audits.length})</div>`;
+      }
+    }
+    if (audits.length && !pending.length) {
+      html += `<div style="font-weight:600;color:var(--muted);margin-bottom:6px;text-transform:uppercase;letter-spacing:0.05em;">Fact-check (${audits.length})</div>`;
+    }
     for (const a of audits) {
       const vcolor = a.verdict === 'accurate' ? '#2b8a3e'
                    : a.verdict === 'partially_accurate' ? '#c99a2e'
@@ -42977,7 +43044,7 @@ SERVICE_WORKER = r"""
 // changes — the activate handler below deletes every cache whose name !=
 // this constant, so bumping is what evicts stale HTML from prior SW
 // installs. Companion to the Cache-Control: no-cache header on _html().
-const CACHE = 'amux-v0.8.12-2026-10-18';
+const CACHE = 'amux-v0.8.13-2026-10-18';
 const SHELL_URLS = ['/', '/manifest.json', '/icon.svg', '/icon.png', '/icon-192.png', '/icon-512.png'];
 
 // Install: pre-cache entire app shell
@@ -44174,8 +44241,40 @@ class CCHandler(BaseHTTPRequestHandler):
                             _by_mid = {}
                             for ar in _audit_rows:
                                 _by_mid.setdefault(ar["message_id"], []).append(dict(ar))
+                            # Pending-audit board items per message (Jeremy
+                            # 2026-10-18). Dispatcher creates an issue tagged
+                            # `audit:<mid>` and the auditor flows it
+                            # todo -> doing -> done; the verdict row above
+                            # only appears AFTER the auditor POSTs. Surface
+                            # the open issue so the dashboard chip can read
+                            # "Audit todo (Codex)" / "Audit doing (Codex)"
+                            # during the gap. Dashboard-only, same leak
+                            # class as audit_mode (strip for agents).
+                            _tag_placeholders = ",".join("?" for _ in _mids)
+                            _pending_rows = db.execute(
+                                f"SELECT it.tag AS tag, i.id AS board_id, "
+                                f"       i.session AS auditor, i.status AS status, "
+                                f"       i.created AS created "
+                                f"  FROM issue_tags it "
+                                f"  JOIN issues i ON i.id = it.issue_id "
+                                f" WHERE it.tag IN ({','.join('?' for _ in _mids)}) "
+                                f"   AND i.status IN ('todo','doing','review') "
+                                f" ORDER BY i.created DESC",
+                                tuple(f"audit:{_m}" for _m in _mids),
+                            ).fetchall()
+                            _pend_by_mid = {}
+                            for pr in _pending_rows:
+                                _mid_from_tag = pr["tag"].split(":", 1)[1] if pr["tag"].startswith("audit:") else ""
+                                if _mid_from_tag:
+                                    _pend_by_mid.setdefault(_mid_from_tag, []).append({
+                                        "board_id": pr["board_id"],
+                                        "auditor": pr["auditor"],
+                                        "status": pr["status"],
+                                        "created": pr["created"],
+                                    })
                             for mdict in d["messages"]:
                                 mdict["audits"] = _by_mid.get(mdict["id"], [])
+                                mdict["audit_pending"] = _pend_by_mid.get(mdict["id"], [])
                     except Exception:
                         pass
                 # Jeremy 2026-10-16: surface the open board items that were
