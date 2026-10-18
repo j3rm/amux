@@ -16931,6 +16931,114 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
     .weekly-meter { gap: 3px; margin-left: 6px; }
     .weekly-meter .wm-bar { min-width: 26px; max-width: 26px; }
   }
+
+  /* Usage tab (full-detail version of the header weekly-meter bars).
+     Jeremy 2026-10-18: mobile has no hover, so the header bars'
+     title=tooltips are invisible there. This tab renders the same
+     /api/usage payload as cards. Tone colors mirror .wm-bar.*. */
+  .usage-cards {
+    display: grid; gap: 12px;
+    grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+    font-variant-numeric: tabular-nums;
+  }
+  .usage-card {
+    background: var(--card); border: 1px solid var(--border);
+    border-radius: 10px; padding: 14px 16px;
+    display: flex; flex-direction: column; gap: 10px;
+    min-height: 120px;
+  }
+  .usage-card .uc-label {
+    font-weight: 600; font-size: 0.98rem; color: var(--text);
+    display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+  }
+  .usage-card .uc-stale-tag {
+    font-size: 0.65rem; font-weight: 600; color: #f59e0b;
+    background: rgba(245,158,11,0.12);
+    border: 1px solid rgba(245,158,11,0.45);
+    padding: 1px 6px; border-radius: 10px;
+    text-transform: uppercase; letter-spacing: 0.5px;
+  }
+  .usage-card .uc-meta {
+    font-size: 0.74rem; color: var(--muted);
+    display: flex; gap: 8px; flex-wrap: wrap;
+  }
+  .usage-card .uc-meta .uc-meta-sep { color: var(--border); }
+  .usage-card .uc-bar-wrap { position: relative; }
+  .usage-card .uc-bar-track {
+    position: relative; height: 14px; width: 100%;
+    background: rgba(255,255,255,0.06);
+    border-radius: 7px; overflow: hidden;
+    border: 1px solid var(--border);
+  }
+  .usage-card .uc-bar-fill {
+    position: absolute; top: 0; left: 0; bottom: 0;
+    width: 0%;
+    background: linear-gradient(90deg, #22c55e, #a3e635);
+    transition: width 0.3s ease, background 0.3s ease;
+  }
+  .usage-card.warn .uc-bar-fill {
+    background: linear-gradient(90deg, #eab308, #f59e0b);
+  }
+  .usage-card.danger .uc-bar-fill {
+    background: linear-gradient(90deg, #ef4444, #f85149);
+  }
+  .usage-card.stale .uc-bar-track { opacity: 0.4; }
+  .usage-card .uc-bar-tick {
+    position: absolute; top: -3px; bottom: -3px; width: 2px;
+    background: var(--text); opacity: 0.75;
+    pointer-events: none;
+  }
+  .usage-card .uc-bar-row {
+    display: flex; justify-content: space-between; align-items: baseline;
+    gap: 8px; font-size: 0.84rem;
+  }
+  .usage-card .uc-bar-row .uc-pct {
+    font-weight: 600; color: var(--text);
+  }
+  .usage-card .uc-bar-row .uc-days { color: var(--muted); font-size: 0.78rem; }
+  .usage-card .uc-pace {
+    font-size: 0.8rem; color: var(--muted);
+    padding: 6px 8px; border-radius: 6px;
+    background: rgba(255,255,255,0.03);
+    border: 1px dashed var(--border);
+  }
+  .usage-card.warn .uc-pace {
+    color: #f59e0b;
+    background: rgba(245,158,11,0.08);
+    border-color: rgba(245,158,11,0.35);
+    border-style: solid;
+  }
+  .usage-card.danger .uc-pace {
+    color: #f85149;
+    background: rgba(248,81,73,0.1);
+    border-color: rgba(248,81,73,0.45);
+    border-style: solid;
+  }
+  .usage-card .uc-pace b { font-weight: 600; }
+  .usage-card .uc-facts {
+    display: grid; gap: 4px 10px;
+    grid-template-columns: auto 1fr;
+    font-size: 0.78rem;
+  }
+  .usage-card .uc-facts .uc-k { color: var(--muted); }
+  .usage-card .uc-facts .uc-v { color: var(--text); }
+  .usage-card .uc-raw { font-size: 0.75rem; color: var(--muted); }
+  .usage-card .uc-raw pre {
+    margin: 6px 0 0 0; padding: 8px 10px;
+    background: rgba(255,255,255,0.03);
+    border: 1px solid var(--border); border-radius: 6px;
+    font-size: 0.72rem; white-space: pre-wrap; word-break: break-word;
+    max-height: 180px; overflow: auto;
+  }
+  .usage-card .uc-empty {
+    color: var(--muted); font-size: 0.82rem; font-style: italic;
+    padding: 10px 0;
+  }
+  @media (max-width: 600px) {
+    .usage-cards { grid-template-columns: 1fr; }
+    .usage-card { padding: 12px 14px; }
+  }
+
   .active-dropdown {
     display: none; position: fixed; top: auto; right: 16px;
     background: var(--card); border: 1px solid var(--border);
@@ -19880,6 +19988,7 @@ setTimeout(function(){var f=document.getElementById('js-fallback');if(f&&f.style
   <button id="tab-crm" onclick="switchView('crm')">People</button>
   <button id="tab-map" onclick="switchView('map')">Map</button>
   <button id="tab-metrics" onclick="switchView('metrics')">Metrics</button>
+  <button id="tab-usage" onclick="switchView('usage')">Usage</button>
   <button id="tab-torrents" onclick="switchView('torrents')">Torrents</button>
   <button id="tab-terminal" onclick="switchView('terminal')">Terminal</button>
   <button id="tab-browser" onclick="switchView('browser')">Browser</button>
@@ -20420,6 +20529,19 @@ setTimeout(function(){var f=document.getElementById('js-fallback');if(f&&f.style
     <button class="metrics-expand-btn" onclick="_metricsToggleSidebar()" title="Show sessions list"><svg xmlns="http://www.w3.org/2000/svg" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect width="18" height="18" x="3" y="3" rx="2"/><path d="M9 3v18"/><path d="m14 9 3 3-3 3"/></svg></button>
     <div id="metrics-content"><div style="color:var(--dim);font-size:0.85rem;padding:40px;text-align:center;">Loading metrics&hellip;</div></div>
   </div>
+</div>
+
+<!-- Usage view: full-detail cards from GET /api/usage (same payload as header bars). -->
+<!-- Mobile has no hover so the header bars' title=tooltips are invisible there; this tab is the pay-as-you-go version. -->
+<div id="usage-view" style="display:none;flex-direction:column;padding:12px 16px;overflow-y:auto;-webkit-overflow-scrolling:touch;gap:12px;">
+  <div style="display:flex;align-items:center;justify-content:space-between;gap:8px;flex-wrap:wrap;">
+    <div>
+      <div style="font-weight:600;font-size:1rem;">Weekly usage</div>
+      <div id="usage-tab-meta" style="color:var(--muted);font-size:0.78rem;margin-top:2px;">Loading usage data...</div>
+    </div>
+    <button id="usage-tab-refresh" onclick="_usageTabRefresh()" style="padding:6px 12px;background:var(--surface);color:var(--text);border:1px solid var(--border);border-radius:6px;font-size:0.82rem;cursor:pointer;">Refresh</button>
+  </div>
+  <div id="usage-tab-cards" class="usage-cards"></div>
 </div>
 
 <!-- Torrents view -->
@@ -24005,6 +24127,175 @@ function _paintWeeklyMeter(container) {
   } else {
     _renderUsageChipFallback(container);
   }
+  // If the Usage tab is open, repaint its cards against the same snapshot.
+  // Keeps the detail view in sync with the header without a second fetch.
+  if (typeof activeView !== 'undefined' && activeView === 'usage') {
+    _usageTabRender();
+  }
+}
+
+// Usage tab (Jeremy 2026-10-18): full-detail cards from /api/usage. Same
+// payload as the header meter; mobile has no hover so we surface pace,
+// expected %, reset time, source session, last reading, stale flag, and
+// the raw TUI /status text here instead of inside a title= tooltip.
+function _usageTabFmtAbs(ts) {
+  // Short absolute time: "Oct 21, 05:00" (today), "05:00" (today), "Oct 21"
+  // when 7d+ out. Keeps the card compact.
+  if (!ts) return '';
+  const d = new Date(ts * 1000);
+  const now = new Date();
+  const sameDay = d.getFullYear() === now.getFullYear()
+    && d.getMonth() === now.getMonth()
+    && d.getDate() === now.getDate();
+  const hh = String(d.getHours()).padStart(2, '0');
+  const mm = String(d.getMinutes()).padStart(2, '0');
+  if (sameDay) return hh + ':' + mm;
+  const MONTHS = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+  return MONTHS[d.getMonth()] + ' ' + d.getDate() + ', ' + hh + ':' + mm;
+}
+function _usageTabFmtAge(ts) {
+  if (!ts) return '';
+  const secs = Math.max(0, Math.floor(Date.now() / 1000) - ts);
+  return _wmFmtDur(secs) + ' ago';
+}
+function _usageTabPaceSentence(a) {
+  // "pace: 1.42x (used 51.0%, expected 36.0% by now, projecting 99.2% at reset)"
+  // "pace: 0.74x (under pace: used 15%, expected 20% by now)"
+  if (a.pace_ratio === null || a.pace_ratio === undefined
+      || a.expected_pct === null || a.expected_pct === undefined
+      || a.percent === null || a.percent === undefined) {
+    return 'pace: unavailable (need both percent and reset_at to compute)';
+  }
+  const ratio = a.pace_ratio;
+  const used = a.percent.toFixed ? a.percent.toFixed(1) : a.percent;
+  const exp = a.expected_pct;
+  // Project full-cycle: used / fraction_of_cycle_elapsed. If days_to_reset
+  // is nearly a full week (very early in cycle), projection is noisy; skip.
+  let projLine = '';
+  if (a.days_to_reset !== null && a.days_to_reset !== undefined) {
+    const elapsedFrac = Math.max(0.03, (7.0 - a.days_to_reset) / 7.0);
+    const proj = a.percent / elapsedFrac;
+    if (elapsedFrac >= 0.1) {
+      projLine = ', projecting ' + proj.toFixed(0) + '% at reset';
+    }
+  }
+  const label = ratio > 1.4 ? 'over pace' : (ratio > 1.0 ? 'slightly over pace' : 'under pace');
+  return 'pace: <b>' + ratio.toFixed(2) + 'x</b> (' + label
+    + ': used ' + used + '%, expected ' + exp + '% by now' + projLine + ')';
+}
+function _usageTabCardHTML(a) {
+  const esc = (s) => _tEsc(s);
+  const stale = !!a.stale;
+  const pct = (a.percent === null || a.percent === undefined) ? null
+    : Math.max(0, Math.min(100, a.percent));
+  const widthPct = (pct === null) ? 0 : pct;
+  const serverTone = a.tone || 'ok';
+  const tone = (stale || pct === null) ? 'stale'
+    : (serverTone === 'ok' ? '' : serverTone);
+  const classes = ['usage-card', tone].filter(Boolean).join(' ');
+  const pctLabel = (pct === null) ? 'no reading' : (pct.toFixed(1) + '%');
+  const daysLabel = (a.days_to_reset === null || a.days_to_reset === undefined)
+    ? '' : ('reset in ' + _wmFmtDays(a.days_to_reset));
+  const expectedTick = (!stale && a.expected_pct !== null && a.expected_pct !== undefined && pct !== null)
+    ? ('<div class="uc-bar-tick" style="left:' + a.expected_pct + '%" title="expected ' + a.expected_pct + '% by now"></div>')
+    : '';
+  const metaParts = [];
+  if (a.provider) metaParts.push(esc(a.provider));
+  if (a.source_session) metaParts.push('source: ' + esc(a.source_session));
+  const metaRow = metaParts.length
+    ? ('<div class="uc-meta">' + metaParts.join('<span class="uc-meta-sep">|</span>') + '</div>')
+    : '';
+  const paceHTML = (pct === null) ? '' : ('<div class="uc-pace">' + _usageTabPaceSentence(a) + '</div>');
+  const facts = [];
+  if (a.reset_at) {
+    facts.push(['Resets', _usageTabFmtAbs(a.reset_at)
+      + (a.days_to_reset !== null && a.days_to_reset !== undefined
+        ? (' <span style="opacity:0.7">(' + _wmFmtDays(a.days_to_reset) + ')</span>')
+        : '')]);
+  }
+  if (a.reported_at) {
+    facts.push(['Last reading', _usageTabFmtAbs(a.reported_at)
+      + ' <span style="opacity:0.7">(' + _usageTabFmtAge(a.reported_at) + ')</span>']);
+  }
+  if (a.expected_pct !== null && a.expected_pct !== undefined && !stale && pct !== null) {
+    facts.push(['Expected by now', a.expected_pct + '%']);
+  }
+  const factsHTML = facts.length
+    ? ('<div class="uc-facts">' + facts.map(([k,v]) =>
+         '<div class="uc-k">' + esc(k) + '</div><div class="uc-v">' + v + '</div>'
+       ).join('') + '</div>')
+    : '';
+  const rawHTML = a.raw
+    ? ('<details class="uc-raw"><summary>Raw /status text</summary><pre>'
+       + esc(a.raw) + '</pre></details>')
+    : '';
+  const staleTag = stale ? ' <span class="uc-stale-tag">stale</span>' : '';
+  return (
+    '<div class="' + classes + '">'
+      + '<div class="uc-label">' + esc(a.label) + staleTag + '</div>'
+      + metaRow
+      + '<div class="uc-bar-wrap">'
+        + '<div class="uc-bar-row">'
+          + '<span class="uc-pct">' + pctLabel + '</span>'
+          + '<span class="uc-days">' + daysLabel + '</span>'
+        + '</div>'
+        + '<div class="uc-bar-track">'
+          + '<div class="uc-bar-fill" style="width:' + widthPct + '%"></div>'
+          + expectedTick
+        + '</div>'
+      + '</div>'
+      + paceHTML
+      + factsHTML
+      + rawHTML
+    + '</div>'
+  );
+}
+function _usageTabRender() {
+  const container = document.getElementById('usage-tab-cards');
+  const meta = document.getElementById('usage-tab-meta');
+  if (!container) return;
+  const accts = _usageState.accounts;
+  if (accts === null) {
+    container.innerHTML = '<div class="uc-empty">Loading usage data...</div>';
+    if (meta) meta.textContent = 'Loading usage data...';
+    return;
+  }
+  if (!accts.length) {
+    container.innerHTML = '<div class="uc-empty">No accounts configured. _ACCOUNT_REPORTERS in amux-server.py is empty.</div>';
+    if (meta) meta.textContent = 'No account reporters configured.';
+    return;
+  }
+  container.innerHTML = accts.map(_usageTabCardHTML).join('');
+  if (meta) {
+    const nFresh = accts.filter(a => !a.stale && a.reported_at).length;
+    const nStale = accts.filter(a => a.stale).length;
+    const parts = [accts.length + ' account' + (accts.length === 1 ? '' : 's')];
+    if (nFresh) parts.push(nFresh + ' fresh');
+    if (nStale) parts.push(nStale + ' stale');
+    if (_usageState.lastFetch) {
+      const age = Math.floor((Date.now() - _usageState.lastFetch) / 1000);
+      parts.push('cache ' + _wmFmtDur(age) + ' old');
+    }
+    meta.textContent = parts.join(' | ');
+  }
+}
+function _usageTabLoad() {
+  // Reuse the header's cached snapshot when fresh, else force a fetch.
+  // The header already fetches /api/usage on a 20s interval via
+  // updateWeeklyMeter(); when the tab is active, _paintWeeklyMeter also
+  // triggers _usageTabRender on each pass.
+  if (_usageState.accounts === null) {
+    updateWeeklyMeter();
+  }
+  _usageTabRender();
+}
+function _usageTabRefresh() {
+  // Force a fresh /api/usage pull regardless of the 20s guard.
+  _usageState.lastFetch = 0;
+  _usageState.accounts = null;
+  const container = document.getElementById('usage-tab-cards');
+  if (container) container.innerHTML = '<div class="uc-empty">Refreshing...</div>';
+  updateWeeklyMeter();
 }
 
 // ── Header + dropdown ──
@@ -31975,9 +32266,9 @@ function _chromeSave() {
 function switchView(view) {
   if (document.getElementById('grid-view').classList.contains('active')) exitGridMode();
   activeView = view;
-  const _svIds = ['session','board','threads','calendar','scheduler','files','logs','notes','crm','map','metrics','torrents','terminal','browser','graph','journal','habits','repos'];
-  const _svNames = ['sessions','board','threads','calendar','scheduler','files','logs','notes','crm','map','metrics','torrents','terminal','browser','graph','journal','habits','repos'];
-  const _svDisplay = ['','','flex','flex','','flex','flex','flex','flex','flex','flex','flex','flex','','flex','flex','flex','flex'];
+  const _svIds = ['session','board','threads','calendar','scheduler','files','logs','notes','crm','map','metrics','usage','torrents','terminal','browser','graph','journal','habits','repos'];
+  const _svNames = ['sessions','board','threads','calendar','scheduler','files','logs','notes','crm','map','metrics','usage','torrents','terminal','browser','graph','journal','habits','repos'];
+  const _svDisplay = ['','','flex','flex','','flex','flex','flex','flex','flex','flex','flex','flex','flex','','flex','flex','flex','flex'];
   for (let i = 0; i < _svIds.length; i++) {
     const ve = document.getElementById(_svIds[i] + '-view');
     if (ve) ve.style.display = view === _svNames[i] ? (_svDisplay[i] || '') : 'none';
@@ -31995,6 +32286,7 @@ function switchView(view) {
   if (view === 'journal') _journalInit();
   if (view === 'habits') _habitsLoad();
   if (view === 'repos') _reposLoad();
+  if (view === 'usage') _usageTabLoad();
   if (view === 'files') loadFiles(_filesPath);
   else {
     try { if (location.hash.startsWith('#path=')) history.replaceState({}, '', location.pathname); } catch(e) {}
@@ -42685,7 +42977,7 @@ SERVICE_WORKER = r"""
 // changes — the activate handler below deletes every cache whose name !=
 // this constant, so bumping is what evicts stale HTML from prior SW
 // installs. Companion to the Cache-Control: no-cache header on _html().
-const CACHE = 'amux-v0.8.11-2026-10-16';
+const CACHE = 'amux-v0.8.12-2026-10-18';
 const SHELL_URLS = ['/', '/manifest.json', '/icon.svg', '/icon.png', '/icon-192.png', '/icon-512.png'];
 
 // Install: pre-cache entire app shell

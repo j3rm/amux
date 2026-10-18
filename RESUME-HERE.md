@@ -2,7 +2,45 @@
 
 **If you are Claude and you are about to edit `/mnt/gitdata/amux/amux-server.py`, this file is mandatory.** Every change must be planned here BEFORE you edit code. Completed plans stay in place as history, do NOT delete them. Read this file at the start of every session before touching amux-server.py.
 
-Last updated: 2026-10-16
+Last updated: 2026-10-18
+
+## Plan for change: Usage tab for mobile-friendly header-bar detail (Jeremy 2026-10-18 19:41) IN PROGRESS
+
+**Context:** The three stacked usage bars in the dashboard header (Claude Mixpeek, Claude NWDDI, Claude J3 STWR) show label + pct + days-to-reset in a thin bar with a `title=` tooltip that reveals pace, expected %, reset time, source session, last reading, stale flag. On mobile there is no hover, so Jeremy cannot see any of that detail. He wants a dedicated top-level tab that renders the same `/api/usage` payload in full-detail cards, available on both mobile and desktop.
+
+**What changes (amux-server.py only):**
+
+1. **New tab button** labeled `Usage` added to the header tab row, next to `Metrics` (both are observability). Follows the existing `<button id="tab-usage" onclick="switchView('usage')">Usage</button>` convention.
+
+2. **New view container** `<div id="usage-view" class="view-root" style="display:none;">` added to the main view-switcher section where `metrics-view`, `logs-view`, etc. live.
+
+3. **switchView extension.** Add `'usage'` to `_svNames`/`_svIds`/`_svDisplay` arrays. On enter, call `_usageTabLoad()` which uses the existing `_usageState` cache (same source as the header bars, so no extra fetch unless stale) and renders cards.
+
+4. **_usageTabRender(container, accounts).** Per account, render a card showing:
+   - Label (big).
+   - Provider + source session on the second line.
+   - Large progress bar (wider than header's; keep same tone classes `wm-bar.warn|danger|stale`).
+   - A pace indicator: expected % tick at `expected_pct` on the bar, and a sentence `"pace: 1.42x (expected 36.0% by now, used 51.0%)"` or `"pace: 0.74x (under pace)"`.
+   - Reset at: absolute time + days_to_reset.
+   - Last reading: absolute time + relative age.
+   - Stale badge when `stale=true`.
+   - Raw text in a `<details>` block when `raw` is non-empty.
+
+5. **CSS.** New `.usage-cards` grid container + `.usage-card` block styling. Reuse `wm-bar` tone colors for consistency with header. Mobile breakpoint: single column.
+
+6. **Refresh cadence.** Reuse existing 20s polling in `updateWeeklyMeter()` (which is on a global interval). When the Usage tab is active, call `_usageTabRender` on each pass.
+
+**No API changes.** `/api/usage` already returns everything the cards need.
+
+**Verification:**
+- Load dashboard, click `Usage` tab -> see three cards with current numbers. Resize to mobile -> cards stack vertically, still readable.
+- Confirm numbers match header bars (same payload).
+- Switch to another tab + back -> re-renders without a visible flicker.
+- `python3 -c "import ast; ast.parse(open('amux-server.py').read())"` passes.
+
+**Agent-rollout posture:** None. Dashboard-only change; no agent-visible surface, no restart of any agent needed.
+
+
 
 ## Plan for change: Agent auth groundwork + Threads UI overhaul (Jeremy 2026-10-16 11:37) IN PROGRESS
 
