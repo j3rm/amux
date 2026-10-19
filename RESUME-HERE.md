@@ -4,6 +4,31 @@
 
 Last updated: 2026-10-19
 
+## Plan for change: PATCH auto-notify skips self-patch (AH-128, 2026-10-19) DONE
+
+**Context:** marketing-director (MD) reported (AH-128) that PATCHing their own items from `doing -> backlog` produces a spurious "New board task assigned: <same item>" ping sent back to MD themselves. Reproduced twice today on MD-3 and MD-1. The POST /api/board create path (line 47035-47038) correctly skips auto-notify when `creator == session` (self-created item), but the symmetric PATCH /api/board/<id> handler (line 47562-47565) has NO such guard: whenever a PATCH lands an item in `todo`/`backlog` with an agent assignee, it calls `_notify_session_of_task` regardless of who patched. Self-park ends up pinging the parker.
+
+The `notified` idempotency flag ordinarily suppresses re-fires, but MD-1/MD-3 were self-created (POST-path guard kept `notified=0`), so the first PATCH that lands the item in a notify-eligible status fires the ping. Any self-created item has the same latent bug.
+
+**What changes (amux-server.py only):**
+
+1. **PATCH auto-notify guard.** In the PATCH /api/board/<id> handler around line 47562, add a condition that skips `_notify_session_of_task` when the patcher is the same session as the assignee. The patcher is `_pby = (self.headers.get("X-Amux-Session") or "").strip() or None` (already captured upstream at line 47534). New condition:
+
+   ```python
+   if (new_session
+           and updated_item.get("owner_type") == "agent"
+           and updated_item.get("status") in ("todo", "backlog")
+           and _pby != new_session):
+       _notify_session_of_task(new_session, bid, updated_item.get("title", ""))
+   ```
+
+2. **No other change.** The POST path already has an equivalent `creator != session` guard; the deeper `notified` CAS inside `_notify_session_of_task` is the second line of defense for repeat PATCHes.
+
+**Verification:**
+- Syntax: `python3 -c "import ast; ast.parse(open('amux-server.py').read())"` passes.
+- Repro: with `X-Amux-Session: amux-helper` PATCH an item where `session=amux-helper` from any status into `backlog`. Observe tmux pane: NO "New board task assigned" message appears. Also confirm `notified` flag is unchanged by the PATCH (not accidentally bumped to 1).
+- Cross-session still works: with `X-Amux-Session: Jeremy` PATCH an item where `session=amux-helper` into `backlog`. Observe tmux: ping DOES appear (Jeremy parked it to amux-helper's queue, amux-helper should know).
+
 ## Plan for change: Dispatcher titles fact-check items for shared-auditor intake (Jeremy 2026-10-19 20:46) DONE
 
 **Context:** After the pending-chip ship on 2026-10-18, Jeremy saw no chips on T-131 CPAP messages. Root cause was NOT a UI bug: CD-Audit-Codex (the shared CD-* Codex auditor) was VOIDing every message-audit dispatch within ~12s. Its AGENTS.md rule says "originating session's org must be CD-<ClientSlug>, title must start `AUDIT CD-<Client>:`" and VOIDs anything else with `VOID - CD-* requesters only.` The fact-check dispatcher creates items titled `Fact-check <mid>` with `creator='audit-dispatcher'`, which fails both checks. Last 5 dispatches to CAC-130..126: all discarded; CAC-121..125 processed fine before the auditor rule was hardened. Jeremy picked option C: fix both the dispatcher (B) and the auditor's AGENTS.md (A).

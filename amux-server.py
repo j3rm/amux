@@ -47558,10 +47558,16 @@ class CCHandler(BaseHTTPRequestHandler):
                                   status=updated_item.get("status", ""))
                     # Auto-notify the (possibly new) assignee if the card is now an
                     # agent task waiting for pickup. Idempotent via the notified flag.
+                    # Skip when the patcher IS the assignee (self-park / self-reassign):
+                    # if you just PATCHed an item on your own queue, pinging you about
+                    # "New board task assigned" is spurious noise (AH-128 2026-10-19,
+                    # marketing-director self-parked MD-1/MD-3 doing->backlog). Mirrors
+                    # the creator!=session guard the POST-create path has at line 47035.
                     new_session = updated_item.get("session") or ""
                     if (new_session
                             and updated_item.get("owner_type") == "agent"
-                            and updated_item.get("status") in ("todo", "backlog")):
+                            and updated_item.get("status") in ("todo", "backlog")
+                            and _pby != new_session):
                         _notify_session_of_task(new_session, bid, updated_item.get("title", ""))
                     # Creator-notify on completion (Jeremy 2026-08-17). When
                     # the item transitions INTO a terminal status (done /
