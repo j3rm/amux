@@ -2,7 +2,30 @@
 
 **If you are Claude and you are about to edit `/mnt/gitdata/amux/amux-server.py`, this file is mandatory.** Every change must be planned here BEFORE you edit code. Completed plans stay in place as history, do NOT delete them. Read this file at the start of every session before touching amux-server.py.
 
-Last updated: 2026-10-18
+Last updated: 2026-10-19
+
+## Plan for change: Dispatcher titles fact-check items for shared-auditor intake (Jeremy 2026-10-19 20:46) DONE
+
+**Context:** After the pending-chip ship on 2026-10-18, Jeremy saw no chips on T-131 CPAP messages. Root cause was NOT a UI bug: CD-Audit-Codex (the shared CD-* Codex auditor) was VOIDing every message-audit dispatch within ~12s. Its AGENTS.md rule says "originating session's org must be CD-<ClientSlug>, title must start `AUDIT CD-<Client>:`" and VOIDs anything else with `VOID - CD-* requesters only.` The fact-check dispatcher creates items titled `Fact-check <mid>` with `creator='audit-dispatcher'`, which fails both checks. Last 5 dispatches to CAC-130..126: all discarded; CAC-121..125 processed fine before the auditor rule was hardened. Jeremy picked option C: fix both the dispatcher (B) and the auditor's AGENTS.md (A).
+
+**What changes (amux-server.py only, A is separate):**
+
+1. **Dispatcher title.** In `_dispatch_message_audit` (around line 51756), change title from `Fact-check {mid}` to `AUDIT {org}: Fact-check {mid}` where `org` is `row['org']` from the thread. For a CD-CPAP thread the title becomes `AUDIT CD-CPAP: Fact-check M-8970`, which matches shared-auditor intake prefix without renaming the item type.
+
+2. **Keep creator honest.** Creator stays `audit-dispatcher` / `audit-manual`. The auditor's AGENTS.md gets a parallel intake path (see fix A) that recognizes `message_audit`-tagged items by tag, not by requester session org. Mis-attributing the message author as the creator would be a lie and would confuse ownership queries.
+
+3. **Keep tags intact.** Items keep `audit:<mid>` and `message_audit` tags. The `message_audit` tag is the discriminator the auditor's new intake path will key off.
+
+**No other changes to amux-server.py.** Not changing the pending-chip query, not surfacing `discarded` state yet. If void-visibility becomes a problem again Jeremy can ask for a separate pass.
+
+**Parallel non-server change (fix A, no plan entry needed since not amux-server.py):**
+Edit `/mnt/gitdata/ClientData/_shared/CD-Audit-Codex/AGENTS.md` to add a "Fact-check intake" subsection that recognizes `message_audit`-tagged items as a separate protocol (read message body from desc, cross-check against the client dir named in the title's `AUDIT CD-<Client>:` prefix, POST verdict via `/api/message_audits`, mark board item done). The existing "CD-* requesters only" VOID rule keeps applying to code audits.
+
+**Verification:**
+- `python3 -c "import ast; ast.parse(open('amux-server.py').read())"` passes.
+- Dispatch a synthetic manual audit via `_dispatch_message_audit` call shape and inspect the created issue: title must be `AUDIT CD-CPAP: Fact-check M-xxxx`.
+- Grep AGENTS.md for the new section header to confirm the fact-check path is documented.
+- Jeremy triggers one manual ⚖ on a T-131 message after CD-Audit-Codex restarts; expect the item to flip `todo -> doing -> done` and a message_audits row to post (verdict chip replaces the pending chip).
 
 ## Plan for change: Thread message audit pending/running chips (Jeremy 2026-10-18 11:02) DONE
 

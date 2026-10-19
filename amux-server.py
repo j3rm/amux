@@ -51874,11 +51874,17 @@ def _dispatch_message_audit(mid: str, triggered_by: str = "auto") -> dict:
         )
         board_id = _next_issue_id(_prefix_from_session(auditor))
         creator = "audit-dispatcher" if triggered_by == "auto" else "audit-manual"
+        # Title prefix uses the thread's org so shared auditors (CD-Audit-Codex
+        # audits every CD-* client) can scope the audit to the right client dir
+        # off the title alone (Jeremy 2026-10-19). The `message_audit` tag is
+        # how the auditor distinguishes fact-check items from code-audit items;
+        # the AUDIT <Org>: prefix lets both paths share the same intake grammar.
+        audit_title = f"AUDIT {org}: Fact-check {mid}"
         db.execute(
             "INSERT INTO issues (id, title, desc, status, session, "
             "  creator, created, updated, owner_type, thread_id) "
             "VALUES (?, ?, ?, 'todo', ?, ?, ?, ?, 'agent', ?)",
-            (board_id, f"Fact-check {mid}", audit_desc, auditor, creator, now, now, row["tid"]),
+            (board_id, audit_title, audit_desc, auditor, creator, now, now, row["tid"]),
         )
         db.execute(
             "INSERT OR IGNORE INTO issue_tags (issue_id, tag) VALUES (?, ?)",
