@@ -2,7 +2,22 @@
 
 **If you are Claude and you are about to edit `/mnt/gitdata/amux/amux-server.py`, this file is mandatory.** Every change must be planned here BEFORE you edit code. Completed plans stay in place as history, do NOT delete them. Read this file at the start of every session before touching amux-server.py.
 
-Last updated: 2026-10-19
+Last updated: 2026-10-21
+
+## Plan for change: Thread header "Linked work" chip overflow (Jeremy 2026-10-21 11:21)
+
+**Problem.** T-222 has linked work across 14 distinct sessions. `_tWorkStripHtml` renders one chip per session with `flex-wrap: wrap`, producing a 2-row chip pile that visually tangles with the NEEDS YOU / BLOCKING / T-id / AUDIT badges above it (screenshot efaaff4d). The chip strip has no visible separator and no cap, so extreme-fanout threads make the header unreadable.
+
+**What.** In `_tWorkStripHtml`:
+1. Cap visible pills at 6 (sorted by severity worst-first, then by item count desc).
+2. If more than 6 distinct sessions, append a single `+N more` pill whose title tooltip lists the remainder (`<sess> · <count>` per line). No click handler needed; hover reveals the list.
+3. Also cache the TOTAL counts (orgs + items) in the LINKED label itself: `Linked work (<orgs> orgs, <items> items):` so the collapsed state still conveys scale.
+
+**Why.** Visually caps the strip at one row for the common case AND preserves full data (via tooltip) for the T-222 outlier. No new UI pattern, no modal, no state. Fully additive.
+
+**Verify.** Dashboard reload. T-222 header shows 6 pills + `+8 more`. Hover tooltip lists all 8 remaining sessions. Low-fanout threads (1-6 orgs) look unchanged. SW cache bump to force new JS everywhere.
+
+DONE
 
 ## Plan for change: PATCH auto-notify skips self-patch (AH-128, 2026-10-19) DONE
 

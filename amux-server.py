@@ -32792,16 +32792,33 @@ function _tWorkStripHtml(t) {
     'needs-approval': {bg:'#d47a2a', fg:'#1a1a1a'},
     'review': {bg:'#4e9fbf', fg:'#fff'},
   };
+  // Sort worst-severity-first, then by item count desc, so the most
+  // interesting sessions survive the cap.
+  const entries = Array.from(bySession.entries()).sort((a, b) => {
+    const sa = SEV[a[1].status] || 0, sb = SEV[b[1].status] || 0;
+    if (sb !== sa) return sb - sa;
+    return b[1].items.length - a[1].items.length;
+  });
+  const MAX_VISIBLE = 6;
+  const visible = entries.slice(0, MAX_VISIBLE);
+  const overflow = entries.slice(MAX_VISIBLE);
   const parts = [];
-  for (const [sess, info] of bySession.entries()) {
+  for (const [sess, info] of visible) {
     const c = PILL_COLORS[info.status] || PILL_COLORS['todo'];
     const tipLines = info.items.map(i => `${i.id} (${i.status}): ${i.title}`).join('\n');
     const tip = _tEsc(tipLines);
     const sessEsc = _tEsc(sess);
     parts.push(`<span class="t-work-pill" title="${tip}" style="background:${c.bg};color:${c.fg};padding:2px 8px;border-radius:10px;font-size:0.7rem;font-weight:600;white-space:nowrap;cursor:pointer;" onclick="event.stopPropagation();_tWorkPillClick('${_tEsc(t.id)}','${sessEsc}')">${sessEsc} · ${info.items.length}</span>`);
   }
+  if (overflow.length) {
+    const overflowTip = overflow.map(([s, info]) => `${s} (${info.status}, ${info.items.length})`).join('\n');
+    parts.push(`<span class="t-work-pill t-work-pill-overflow" title="${_tEsc(overflowTip)}" style="background:#3a3f48;color:#cfd3d9;padding:2px 8px;border-radius:10px;font-size:0.7rem;font-weight:600;white-space:nowrap;cursor:default;">+${overflow.length} more</span>`);
+  }
+  const totalItems = items.length;
+  const totalOrgs = entries.length;
+  const label = `Linked work (${totalOrgs} org${totalOrgs===1?'':'s'}, ${totalItems} item${totalItems===1?'':'s'}):`;
   return `<div class="t-work-strip" style="display:flex;flex-wrap:wrap;gap:6px;align-items:center;margin-top:6px;padding-left:28px;">
-    <span style="font-size:0.65rem;color:var(--muted);text-transform:uppercase;letter-spacing:0.04em;">Linked work:</span>
+    <span style="font-size:0.65rem;color:var(--muted);text-transform:uppercase;letter-spacing:0.04em;">${label}</span>
     ${parts.join('')}
   </div>`;
 }
@@ -43044,7 +43061,7 @@ SERVICE_WORKER = r"""
 // changes — the activate handler below deletes every cache whose name !=
 // this constant, so bumping is what evicts stale HTML from prior SW
 // installs. Companion to the Cache-Control: no-cache header on _html().
-const CACHE = 'amux-v0.8.13-2026-10-18';
+const CACHE = 'amux-v0.8.14-2026-10-21';
 const SHELL_URLS = ['/', '/manifest.json', '/icon.svg', '/icon.png', '/icon-192.png', '/icon-512.png'];
 
 // Install: pre-cache entire app shell
