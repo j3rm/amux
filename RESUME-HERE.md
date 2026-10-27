@@ -2,7 +2,51 @@
 
 **If you are Claude and you are about to edit `/mnt/gitdata/amux/amux-server.py`, this file is mandatory.** Every change must be planned here BEFORE you edit code. Completed plans stay in place as history, do NOT delete them. Read this file at the start of every session before touching amux-server.py.
 
-Last updated: 2026-10-21
+Last updated: 2026-10-27
+
+## Plan for change: rename `-Audit-Opus48` -> `-Audit-Opus` (version-free) + ShareScore audit pair (Jeremy 2026-10-27 15:28) DONE
+
+**Why.** The Opus48 suffix is baked into the audit-pair auto-wiring (`_notify_session_of_retake` siblings, `_auto_verify_from_audit_pair`, mint-audit-pair response). Jeremy renames Opus48 -> Opus so future Claude model bumps don't force another mass rename. ShareScore currently has a solo `ShareScore-audit`; promote it to the paired convention (`ShareScore-Audit-Codex` + new `ShareScore-Audit-Opus`) so ShareScore gets the same dual-audit routing every other product has.
+
+**Scope (one combined pass):**
+
+Sessions renamed via existing `POST /api/sessions/<name>/config {"rename": "..."}` endpoint:
+- `Ember-Audit-Opus48` -> `Ember-Audit-Opus` (running, 14 open issues)
+- `RTG-Audit-Opus48` -> `RTG-Audit-Opus` (running, 1 open issue)
+- `iSchedule-Audit-Opus48` -> `iSchedule-Audit-Opus` (idle, 0 open)
+- `ShareScore-audit` -> `ShareScore-Audit-Codex` (idle, 0 open)
+
+New session created via POST /api/sessions:
+- `ShareScore-Audit-Opus` (fresh, mirrors other `-Audit-Opus` sessions)
+
+**amux-server.py edits (13 occurrences):**
+
+1. **Behavioral (critical):** lines 10649, 11304-11309 — the two places where code DERIVES a sibling session name from the current one. Change `-Audit-Opus48` suffix to `-Audit-Opus` everywhere. The `-Audit-Codex` <-> `-Audit-Opus` suffix pair must stay in sync with the actual session names or audit auto-verify breaks.
+
+2. **Comments / doc strings:** lines 10119, 10130, 10185, 10269, 10301, 10595, 11505, 47294 — update textual references to new convention.
+
+**Non-server-code work in same pass (not blocked on RESUME-HERE but tracked here for completeness):**
+- 3 org yml files (`RTG.yml`, `iSchedule.yml`, `EmberCRM.yml`, `ShareScore.yml`): update `sessions:` list.
+- `session_tokens` table: `UPDATE session_tokens SET session='<new>' WHERE session='<old>'` for each renamed session. The server rename endpoint does NOT update this table (pre-existing gap; separate item if we want it fixed).
+
+**Order (matters — avoid broken-pair window):**
+1. Stop the 2 running sessions (`Ember-Audit-Opus48`, `RTG-Audit-Opus48`) so no audit lands mid-swap.
+2. Edit amux-server.py (hot-reload applies the new suffix logic).
+3. Call the rename endpoint for each of the 4 sessions.
+4. UPDATE `session_tokens` for 3 sessions.
+5. Update 3 yml files (sed `-Audit-Opus48` -> `-Audit-Opus`), plus ShareScore.yml (`ShareScore-audit` -> `ShareScore-Audit-Codex`, add `ShareScore-Audit-Opus`).
+6. Create ShareScore-Audit-Opus via POST /api/sessions, cloned from an existing `-Audit-Opus` session's env (CC_PROVIDER=claude, same mounts).
+7. **Set model = `claude-opus-5-5` on all 4 Opus sessions** (3 renames + new ShareScore-Audit-Opus) via `PATCH /api/sessions/<name>/config {"model":"claude-opus-5-5"}`. Jeremy's call 2026-10-27 15:30 — Opus 4.8 was the old model; bumping to Opus 5.5.
+8. Start sessions.
+8. Verify: pick one `-Audit-Codex` session and confirm `_notify_session_of_retake` resolves sibling as `<Org>-Audit-Opus` (not Opus48) via server log.
+9. Commit.
+
+**Verify.**
+- `curl /api/sessions` lists no `-Audit-Opus48` names; shows 4 new `-Audit-Opus` names + `ShareScore-Audit-Codex`.
+- Grep: `grep -c Opus48 amux-server.py` returns 0.
+- Grep yml: `grep -r Opus48 ~/.amux/orgs/*.yml` returns nothing.
+- `sqlite3 amux.db "SELECT DISTINCT session FROM issues WHERE session LIKE '%Opus48' OR session='ShareScore-audit';"` returns no rows (except historical soft-deleted which the rename endpoint intentionally skips with `WHERE deleted IS NULL`).
+- Create a test audit-pair via `/api/board/<id>/mint-audit-pair` on a RTG item; confirm response names `RTG-Audit-Codex` + `RTG-Audit-Opus`.
 
 ## Plan for change: Thread header "Linked work" chip overflow (Jeremy 2026-10-21 11:21)
 

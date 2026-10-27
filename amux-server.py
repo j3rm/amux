@@ -10116,7 +10116,7 @@ def _promote_backlog_when_dep_completes(completed_id: str, new_status: str,
 #
 # Both hooks rely on the conventional verdict marker "VERDICT: <PASS|
 # PASS-WITH-WARNINGS|FAIL>" at or near the start of the item desc — the format
-# Codex/Opus48/RTG-Research already use consistently. If a writer omits the
+# Codex/Opus/RTG-Research already use consistently. If a writer omits the
 # marker, the hook short-circuits (no auto-action; manual flow continues).
 
 # Prefixes that are NEVER valid targets — control-plane items (escalations,
@@ -10127,7 +10127,7 @@ def _promote_backlog_when_dep_completes(completed_id: str, new_status: str,
 _CONTROL_PLANE_PREFIXES = frozenset({
     "RR", "ER",          # *-Research adjudication escalations
     "RD", "ED",          # *-Dispatch routing directives (Dispatch retired but ids persist)
-    "RAC", "RAO",        # RTG-Audit-Codex / RTG-Audit-Opus48 audit items
+    "RAC", "RAO",        # RTG-Audit-Codex / RTG-Audit-Opus audit items
     "AH", "AW",          # amux-helper / AMUX-Watchdog items
     # AH-77 (RTG-Research 2026-08-18): build-verify + connectivity/ping
     # coordination items. Auditors can only VOID them, so audit-pair
@@ -10182,7 +10182,7 @@ def _resolve_adjudicator_session(org: str) -> str | None:
 
 def _is_audit_session(session: str) -> bool:
     """True if the session is one of the *-Audit-* auditors (RTG-Audit-Codex,
-    RTG-Audit-Opus48, Ember-Audit-Codex, Ember-Audit-Opus48, etc.)."""
+    RTG-Audit-Opus, Ember-Audit-Codex, Ember-Audit-Opus, etc.)."""
     if not session:
         return False
     return "-Audit-" in session
@@ -10266,7 +10266,7 @@ def _extract_tip_sha(desc: str) -> str:
 
 # Loose fallback for _extract_audited_sha (ER-591 diagnostic hint, 2026-09-19).
 # The strict parser requires `AUDITED-SHA:` at start-of-line with a hex value.
-# Some auditors' output pipelines (Ember-Audit-Opus48 specifically, 4x on EF-6)
+# Some auditors' output pipelines (Ember-Audit-Opus specifically, 4x on EF-6)
 # reliably emit the correct sha in their REPORT FILE header but the board-desc
 # verdict version omits the own-line format. The strict parse still gates
 # verdict application (weakening it is dangerous), but the alert can call out
@@ -10298,7 +10298,7 @@ def _extract_audited_sha_from_report_file(audit_id: str, audit_session: str) -> 
     Ember-Research verified safe on the Ember tree: exactly ONE
     `audit-reports/` dir under `/mnt/gitdata/EmberCRM/` (at
     `Ember_Core_Documents/audit-reports/`); walking up from an auditor's
-    CC_DIR (`.../.agents/Ember-Audit-{Codex,Opus48}`) hits the org root
+    CC_DIR (`.../.agents/Ember-Audit-{Codex,Opus}`) hits the org root
     and the sibling dir is unambiguous. All 809 existing reports
     conform to `<EAO|EAC>-N.md` — hard invariant.
 
@@ -10592,7 +10592,7 @@ _COORDINATION_TITLE_PREFIXES = (
     "ROUTING:",
     "TRACK:",
     "HELLO WORLD",
-    # 2026-08-28 (RTG-Audit-Opus48 substrate report during CALM MODE):
+    # 2026-08-28 (RTG-Audit-Opus substrate report during CALM MODE):
     # every Thread T-N reply that transitions its board wrapper to
     # `review` was auto-minting a fresh audit pair on both RAC + RAO.
     # 10 spurious mints on T-195 alone → 20 audits both had to VOID.
@@ -10646,7 +10646,7 @@ def _mint_audit_pair_unguarded(target_item: dict, db) -> dict | None:
         slog(f"[mint-skip] {tid}: no valid org (derived={org!r})")
         return None
     codex_session = f"{org}-Audit-Codex"
-    opus_session = f"{org}-Audit-Opus48"
+    opus_session = f"{org}-Audit-Opus"
     if not (CC_SESSIONS / f"{codex_session}.env").exists():
         slog(f"[mint-skip] {tid}: {codex_session}.env missing")
         return None
@@ -11301,12 +11301,12 @@ def _auto_verify_from_audit_pair(audit_item: dict, db) -> dict | None:
     if not target or target["status"] != "review":
         return None
     # Find the OTHER audit — same target, same org's OTHER auditor.
-    # The two auditors in any org pair as (-Audit-Codex) and (-Audit-Opus48).
+    # The two auditors in any org pair as (-Audit-Codex) and (-Audit-Opus).
     # Derive the sibling session by swapping that suffix.
     if my_session.endswith("-Audit-Codex"):
-        other_session = my_session[:-len("-Audit-Codex")] + "-Audit-Opus48"
-    elif my_session.endswith("-Audit-Opus48"):
-        other_session = my_session[:-len("-Audit-Opus48")] + "-Audit-Codex"
+        other_session = my_session[:-len("-Audit-Codex")] + "-Audit-Opus"
+    elif my_session.endswith("-Audit-Opus"):
+        other_session = my_session[:-len("-Audit-Opus")] + "-Audit-Codex"
     else:
         return None  # unknown auditor session shape
     # CRITICAL: anchor the title prefix — `LIKE '%target%'` previously matched
@@ -11502,7 +11502,7 @@ def _auto_verify_from_audit_pair(audit_item: dict, db) -> dict | None:
         # matters: false-verified is worse than no verdict. Delegate to
         # the shared helper (per-audit desc for loose-scan diagnostic hint
         # per ER-591 ask 1; per-audit session for report-file fallback
-        # per ER-613 ask — Opus48 recurring bare-desc case where the
+        # per ER-613 ask — Opus recurring bare-desc case where the
         # canonical AUDITED-SHA lives only in the audit-reports/<id>.md
         # file).
         _hold, _hold_reason, _target_tip, _resolutions = _check_target_tip_freshness(
@@ -47291,7 +47291,7 @@ class CCHandler(BaseHTTPRequestHandler):
                         "hint": ("Either the audit pair already exists and "
                                  "is fresh (see existing_audits), the "
                                  "target's org has no *-Audit-Codex + "
-                                 "*-Audit-Opus48 sessions, or the target's "
+                                 "*-Audit-Opus sessions, or the target's "
                                  "prefix is control-plane (RD/RR/RAC/RAO/...). "
                                  "Check existing_audits first."),
                     }, 409)
