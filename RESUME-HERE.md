@@ -2,7 +2,22 @@
 
 **If you are Claude and you are about to edit `/mnt/gitdata/amux/amux-server.py`, this file is mandatory.** Every change must be planned here BEFORE you edit code. Completed plans stay in place as history, do NOT delete them. Read this file at the start of every session before touching amux-server.py.
 
-Last updated: 2026-10-27
+Last updated: 2026-10-28
+
+## Plan for change: audit-mint dedup false-covers on closed audits with no AUDITED-SHA (Ember-Research 2026-10-28) DONE
+
+**Why.** Ember-Research reported EFR-1 stranded in review across 3 review-enters with no fresh audit pair minted. Root cause: `_mint_audit_pair_unguarded._covers()` treats any audit with no `AUDITED-SHA:` marker as "in-flight" (returns True → counts as covering), even when that audit is `done`+`VERDICT: FAIL`. The LIMIT 1 query picks the most-recent audit per auditor; for EFR-1 that's EAC-912 (done, FAIL, no AUDITED-SHA) + EAO-750 (doing, auto-parked, no AUDITED-SHA). Both false-cover → mint skipped → silent block. The "in-flight" assumption is only true for OPEN audits (todo/doing/backlog); a closed audit (done/verified) with no AUDITED-SHA is ill-formed (C4 won't trust it either) and must not block a fresh mint.
+
+**What.** In `_mint_audit_pair_unguarded`:
+1. `_existing()` SELECT: add `status` to the fetched columns.
+2. `_covers(existing_row)`: when `audited` is empty, return True only if `status in ('todo','doing','backlog','review')`. For closed statuses (`done`,`verified`), return False.
+
+**Verify.**
+- Replay path: PATCH EFR-1 desc with a trailing newline (touch) → mint hook fires → _covers(EAC-912) returns False → fresh EAC-NNN + EAO-NNN minted. (Opus side gets a second open item alongside EAO-750; Ember-Research can discard the stale one.)
+- Negative: an in-flight audit (status=doing, no AUDITED-SHA) still covers → no double-mint during the current cycle.
+- Syntax: `python3 -c "import ast; ast.parse(open('amux-server.py').read())"`.
+
+**Not in scope (deferred).** Auto-discard of stale open audit items at mint time (EAO-750-shaped orphans) is a separate hygiene concern; leaving it to the orchestrator keeps the fix minimal.
 
 ## Plan for change: rename `-Audit-Opus48` -> `-Audit-Opus` (version-free) + ShareScore audit pair (Jeremy 2026-10-27 15:28) DONE
 

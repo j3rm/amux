@@ -10658,10 +10658,12 @@ def _mint_audit_pair_unguarded(target_item: dict, db) -> dict | None:
     target_tip = _extract_tip_sha(target_item.get("desc") or "")
 
     def _existing(auditor: str):
-        # Fetch desc too so the TIP-SHA-aware dedup below can inspect
-        # AUDITED-SHA against the target's current TIP-SHA.
+        # Fetch desc + status too: TIP-SHA-aware dedup needs AUDITED-SHA from
+        # desc, and the no-AUDITED-SHA branch needs status to tell a genuine
+        # in-flight audit from an ill-formed closed one (Ember-Research
+        # 2026-10-28, EFR-1 strand).
         return db.execute(
-            "SELECT id, created, desc FROM issues "
+            "SELECT id, created, status, desc FROM issues "
             "WHERE session = ? AND deleted IS NULL AND status != 'discarded' "
             "  AND title LIKE ? ORDER BY created DESC LIMIT 1",
             (auditor, f"AUDIT {tid}:%"),
@@ -10688,17 +10690,23 @@ def _mint_audit_pair_unguarded(target_item: dict, db) -> dict | None:
             if not existing_row:
                 return False
             audited = _extract_audited_sha(existing_row["desc"] or "")
-            if not audited:
-                # In-flight audit (mint fresh, verdict not yet recorded).
-                # Consider it covering — when the auditor closes with
-                # AUDITED-SHA, the C4 TIP-SHA guard will catch any stale-
-                # sha at THAT point. Without this branch, every PATCH to
-                # a review item while audits are open would re-mint them
-                # (runaway loop, caught 2026-09-16 during live probe).
-                return True
-            return (audited == target_tip
-                    or target_tip.startswith(audited)
-                    or audited.startswith(target_tip))
+            if audited:
+                return (audited == target_tip
+                        or target_tip.startswith(audited)
+                        or audited.startswith(target_tip))
+            # No AUDITED-SHA marker. Only count as covering if the audit
+            # is genuinely still open — a closed audit (done/verified)
+            # with no AUDITED-SHA is ill-formed (the C4 TIP-SHA guard
+            # won't trust it either) and must not false-cover a fresh
+            # mint on a new TIP-SHA. Ember-Research 2026-10-28: EFR-1
+            # stranded 3 review-enters because EAC-912 (done, FAIL, no
+            # AUDITED-SHA) + EAO-750 (doing, no AUDITED-SHA) both got
+            # the old "in-flight" True branch and blocked every mint.
+            # Open-and-no-sha still covers (true in-flight, verdict not
+            # yet recorded) — this preserves the 2026-09-16 runaway-loop
+            # fix for the standard case.
+            status = existing_row["status"] or ""
+            return status in ("todo", "doing", "backlog", "review")
         codex_covers = _covers(codex_existing)
         opus_covers = _covers(opus_existing)
         if codex_covers and opus_covers:
