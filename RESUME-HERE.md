@@ -2,7 +2,46 @@
 
 **If you are Claude and you are about to edit `/mnt/gitdata/amux/amux-server.py`, this file is mandatory.** Every change must be planned here BEFORE you edit code. Completed plans stay in place as history, do NOT delete them. Read this file at the start of every session before touching amux-server.py.
 
-Last updated: 2026-10-28
+Last updated: 2026-11-02
+
+## Plan for change: /api/threads payload slice + lazy-load + search (Jeremy 2026-11-02) DONE
+
+**Why.** `GET /api/threads` ships every thread + every message in one blob. Current scale: 171 threads / 9,232 messages / **17.7 MB** per load. Mobile re-pulls that on every SSE refresh and takes forever to render.
+
+**What.**
+
+Server (amux-server.py):
+
+1. **GET /api/threads** (modified). For each thread, return the UNION of:
+   - the latest 50 messages (`ORDER BY position DESC, created DESC LIMIT 50`), AND
+   - every "always-show" message in that thread: `flagged=1` OR `status='working'` OR (`status='complete' AND to_session='' AND read=0`).
+   These are what the client already treats specially (`_tMsgAlwaysShow`); shipping them unconditionally keeps the Flagged section, unread badge, and working badge accurate without any client refactor. Dedup, sort chronologically. Add `message_count` (total non-discarded) and `older_count` so the client can show "Show N older messages" from the correct baseline.
+
+2. **GET /api/threads/<tid>/messages** (new). Query params `before` (anchor message id — optional) and `limit` (default 50, max 200). Returns up to `limit` messages immediately older than the anchor by (position, created), chronological ascending. If `before` omitted, returns the latest `limit`. Applies the same org-read filter as /api/threads.
+
+3. **GET /api/threads/search** (new). Query params `q` (required, min 2 chars) and `limit` (default 100, max 300). SQLite `lower(body) LIKE lower(?)` on non-discarded threads. Returns `[{id, thread_id, thread_title, from_session, to_session, created, snippet}]` with `snippet` = 140-char window centered on the first match. Applies the same org-read filter.
+
+Client (inline JS):
+
+1. Render path untouched — `t.messages` already carries flagged/unread/working regardless of age, so `_tRenderFlagSection`, `_updateThreadsBadge`, `_tThreadState` all stay correct.
+2. Thread header "N msgs" uses `t.message_count` (fall back to `t.messages.length`).
+3. `_tToggleShowAll` (per-thread "Show N older messages"): on first click, fetch `GET /api/threads/<tid>/messages?before=<oldest-rendered-mid>&limit=50`, append to the thread's `messages`, re-render. Chainable — if `older_count` still > rendered after append, show "Show N more older" again.
+4. Threads tab gets a search box near "+ New thread". On Enter (or debounced 500 ms, min 2 chars), hit `/api/threads/search?q=...`, render a results panel: `[T-title] M-id · from→to · snippet`. Click a hit → expand that thread, scroll to the message, highlight. Falls back to pulling the message via the thread-messages endpoint if it isn't already in `t.messages`.
+
+**Order:**
+1. Server: slice `_thread_to_dict` caller + add two new endpoints.
+2. Verify payload with curl: size drop, flagged/unread still present, lazy-load returns older chronologically, search finds a known phrase.
+3. Client: tweak the message-count label, rewire `_tToggleShowAll`, add search UI.
+4. Browser test: open biggest thread (T-151, 1585 msgs), confirm last 50 + flagged/unread visible, "Show older" fetches older, search works.
+5. Commit.
+
+**Verify.**
+- `curl -sk /api/threads | wc -c` → expect ~2 MB vs ~17.7 MB.
+- Payload still has every flagged/working/unread message regardless of age.
+- `curl -sk /api/threads/T-151/messages?before=<newest_mid>&limit=50` returns 50 older in chronological order.
+- `curl -sk "/api/threads/search?q=cypra"` returns matches with snippets.
+- Mobile PWA load time on Threads tab drops noticeably.
+- Syntax: `python3 -c "import ast; ast.parse(open('amux-server.py').read())"`.
 
 ## Plan for change: audit-mint dedup false-covers on closed audits with no AUDITED-SHA (Ember-Research 2026-10-28) DONE
 

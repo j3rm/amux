@@ -20249,8 +20249,13 @@ setTimeout(function(){var f=document.getElementById('js-fallback');if(f&&f.style
   <div style="display:flex;align-items:center;gap:12px;margin-bottom:8px;flex-wrap:wrap;">
     <h2 style="margin:0;font-size:1.1rem;">Threads</h2>
     <button class="btn" onclick="_threadsOpenNew()">+ New thread</button>
+    <input id="threads-search-input" type="text" placeholder="Search messages..."
+      oninput="_threadsSearchDebounced(this.value)"
+      onkeydown="if(event.key==='Enter'){event.preventDefault();_threadsSearch(this.value);} else if(event.key==='Escape'){this.value='';_threadsSearchClear();}"
+      style="flex:1;min-width:180px;max-width:340px;padding:6px 10px;border:1px solid var(--border);border-radius:5px;background:var(--card-bg,#0a0a0a);color:var(--fg);font-size:0.9rem;">
     <span style="color:var(--muted);font-size:0.8rem;">Conversations with agents. Every message can be replied to individually. Star to pin at top.</span>
   </div>
+  <div id="threads-search-results" style="display:none;margin-bottom:12px;"></div>
   <div id="threads-list"></div>
 </div>
 <!-- New-thread modal — also serves as per-message Reply modal via context flag. -->
@@ -32566,6 +32571,100 @@ async function _threadsLoad() {
     _threadsRender();
   } catch(e) {}
 }
+// Threads search (Jeremy 2026-11-02). Server endpoint
+// /api/threads/search?q=... returns up to 100 message hits with snippets.
+// Debounced on input (500 ms, min 2 chars); immediate on Enter. Clicking
+// a hit expands the thread and jumps to the message (fetching older if the
+// message isn't already in local cache).
+let _tSearchTimer = null;
+let _tSearchLastQ = '';
+function _threadsSearchDebounced(q) {
+  if (_tSearchTimer) clearTimeout(_tSearchTimer);
+  const trimmed = (q || '').trim();
+  if (trimmed.length < 2) { _threadsSearchClear(); return; }
+  _tSearchTimer = setTimeout(() => _threadsSearch(trimmed), 500);
+}
+async function _threadsSearch(q) {
+  const trimmed = (q || '').trim();
+  if (trimmed.length < 2) { _threadsSearchClear(); return; }
+  _tSearchLastQ = trimmed;
+  const panel = document.getElementById('threads-search-results');
+  if (!panel) return;
+  panel.style.display = 'block';
+  panel.innerHTML = `<div style="padding:10px 12px;color:var(--muted);font-size:0.85rem;">Searching for "${_tEsc(trimmed)}"...</div>`;
+  try {
+    const r = await fetch(API + '/api/threads/search?q=' + encodeURIComponent(trimmed) + '&limit=100');
+    if (!r.ok) {
+      panel.innerHTML = `<div style="padding:10px 12px;color:#e55;font-size:0.85rem;">Search failed (${r.status}).</div>`;
+      return;
+    }
+    const d = await r.json();
+    if (_tSearchLastQ !== trimmed) return;  // raced; newer query won
+    const hits = (d && d.hits) || [];
+    if (!hits.length) {
+      panel.innerHTML = `<div style="padding:10px 12px;color:var(--muted);font-size:0.85rem;">No matches for "${_tEsc(trimmed)}".</div>`;
+      return;
+    }
+    let html = `<div style="padding:8px 12px;color:var(--muted);font-size:0.75rem;border-bottom:1px solid var(--border);">${hits.length} match${hits.length===1?'':'es'} for "${_tEsc(trimmed)}" <a href="javascript:void(0)" onclick="document.getElementById('threads-search-input').value='';_threadsSearchClear()" style="float:right;color:var(--accent,#6aa);">clear</a></div>`;
+    for (const h of hits) {
+      const dir = (h.from_session || 'Jeremy') + ' → ' + (h.to_session || 'Jeremy');
+      html += `<div style="padding:8px 12px;border-bottom:1px solid var(--border);cursor:pointer;" onclick="_threadsSearchJump('${_tEsc(h.thread_id)}','${_tEsc(h.id)}')">
+        <div style="display:flex;align-items:baseline;gap:8px;font-size:0.72rem;color:var(--muted);flex-wrap:wrap;">
+          <span style="font-weight:600;color:var(--fg);">${_tEsc(h.id)}</span>
+          <span>${_tEsc(dir)}</span>
+          <span>in ${_tEsc(h.thread_id)} · ${_tEsc(h.thread_title || '')}</span>
+          <span style="flex:1;"></span>
+          <span>${_tFmtTime(h.created)}</span>
+        </div>
+        <div style="margin-top:4px;font-size:0.85rem;color:var(--fg);opacity:0.9;">${_tEsc(h.snippet || '')}</div>
+      </div>`;
+    }
+    panel.innerHTML = html;
+  } catch (e) {
+    panel.innerHTML = `<div style="padding:10px 12px;color:#e55;font-size:0.85rem;">Search error.</div>`;
+  }
+}
+function _threadsSearchClear() {
+  _tSearchLastQ = '';
+  const panel = document.getElementById('threads-search-results');
+  if (panel) { panel.style.display = 'none'; panel.innerHTML = ''; }
+}
+async function _threadsSearchJump(tid, mid) {
+  // If the target message isn't in local cache (older than the server-
+  // sliced window AND not previously lazy-fetched), pull enough older
+  // batches to bring it in. Then expand the thread and jump.
+  const t = (_threadsCache || []).find(x => x.id === tid);
+  if (t) {
+    const has = (arr) => arr.some(m => m.id === mid);
+    const cached = _tOlderCache.get(tid) || [];
+    if (!has(t.messages) && !has(cached)) {
+      for (let i = 0; i < 20; i++) {   // cap at 20 batches = 1000 msgs
+        await _tFetchOlder(tid);
+        const now = _tOlderCache.get(tid) || [];
+        if (has(now)) break;
+        if (now.length === cached.length) break;  // no more older — stop
+      }
+    }
+  }
+  _tExpanded.add(tid);
+  _tExpandedSave();
+  _tMsgExpanded.delete('!' + mid);
+  _tMsgExpanded.add(mid);
+  _threadsRender();
+  setTimeout(() => {
+    const rows = document.querySelectorAll('#threads-list [style*="border-radius:6px"]');
+    for (const el of rows) {
+      if (el.textContent && el.textContent.trim().startsWith(mid)) {
+        el.scrollIntoView({behavior:'smooth', block:'center'});
+        el.style.transition = 'background 0.4s';
+        const old = el.style.background;
+        el.style.background = 'rgba(240,192,42,0.25)';
+        setTimeout(() => { el.style.background = old; }, 900);
+        break;
+      }
+    }
+  }, 80);
+}
 function _updateThreadsBadge(list) {
   // Badge count = THREADS with at least one unread-to-Jeremy complete message,
   // matching the Inbox convention (count of threads, not messages). Prevents
@@ -32882,7 +32981,7 @@ function _tRenderThread(t) {
         ${auditModeChip}
         <span class="t-row-title t-row-title-inline" style="flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:1rem;font-weight:600;color:var(--fg);">${_tEsc(t.title)}</span>
         <button style="${_TICON_BTN_STYLE}opacity:0.55;flex-shrink:0;" onclick="event.stopPropagation();_tRenameThread('${tidEsc}')" title="Rename thread">✎</button>
-        <span style="font-size:0.7rem;color:var(--muted);white-space:nowrap;flex-shrink:0;">${t.messages.length} msg${t.messages.length===1?'':'s'}</span>
+        <span style="font-size:0.7rem;color:var(--muted);white-space:nowrap;flex-shrink:0;">${t.message_count ?? t.messages.length} msg${(t.message_count ?? t.messages.length)===1?'':'s'}</span>
         <span class="t-row-time" style="font-size:0.7rem;color:var(--muted);white-space:nowrap;flex-shrink:0;">${_tFmtTime(newestUpdated)}</span>
       </div>
       <div class="t-row-title-stacked" style="display:none;font-size:1rem;font-weight:600;color:var(--fg);margin-top:6px;line-height:1.3;word-wrap:break-word;">${_tEsc(t.title)}</div>
@@ -32897,10 +32996,47 @@ function _tRenderThread(t) {
 // scroll. Flagged / unread / still-working messages are ALWAYS visible
 // regardless of age — those are the ones Jeremy actually wants to see.
 let _tShowAllMsgs = new Set();
+// Jeremy 2026-11-02 payload-slice: server now ships only the latest ~50
+// messages per thread (plus flagged/unread/working, any age). When Jeremy
+// clicks "Show N older messages" past the local cutoff, lazy-fetch more
+// from /api/threads/<tid>/messages?before=<oldest>&limit=50 and cache
+// them here so SSE refreshes don't drop what he already loaded. Keyed by
+// thread id; value = array of older message dicts.
+let _tOlderCache = new Map();
+let _tOlderFetching = new Set();  // in-flight fetch guard, keyed by tid
 function _tToggleShowAll(tid) {
   if (_tShowAllMsgs.has(tid)) _tShowAllMsgs.delete(tid);
   else _tShowAllMsgs.add(tid);
   _threadsRender();
+}
+async function _tFetchOlder(tid) {
+  if (_tOlderFetching.has(tid)) return;
+  _tOlderFetching.add(tid);
+  try {
+    // Anchor = oldest message currently rendered for this thread (local
+    // messages + already-fetched older). The server returns messages
+    // strictly older than this anchor by (position, created).
+    const t = (_threadsCache || []).find(x => x.id === tid);
+    if (!t) return;
+    const combined = (t.messages || []).concat(_tOlderCache.get(tid) || []);
+    if (!combined.length) return;
+    combined.sort((a, b) => (a.position - b.position) || (a.created - b.created));
+    const anchor = combined[0].id;
+    const r = await fetch(API + '/api/threads/' + encodeURIComponent(tid)
+                          + '/messages?before=' + encodeURIComponent(anchor)
+                          + '&limit=50');
+    if (!r.ok) return;
+    const d = await r.json();
+    const fetched = (d && d.messages) || [];
+    if (!fetched.length) return;
+    const prior = _tOlderCache.get(tid) || [];
+    const seen = new Set(prior.map(m => m.id));
+    for (const m of fetched) if (!seen.has(m.id)) prior.push(m);
+    _tOlderCache.set(tid, prior);
+    _tShowAllMsgs.add(tid);
+    _threadsRender();
+  } catch (e) {}
+  finally { _tOlderFetching.delete(tid); }
 }
 function _tMsgAlwaysShow(m) {
   return m.status === 'working'
@@ -32913,8 +33049,15 @@ function _tRenderMessages(t) {
   // cards visually sit ON a distinct surface — makes the thread-vs-message
   // hierarchy read instantly instead of merging into a wall of cards.
   let html = `<div style="border-top:1px solid var(--border);padding:12px 14px;background:rgba(0,0,0,0.18);">`;
+  // Merge any lazy-fetched older messages into the render set (dedup by id).
+  const older = _tOlderCache.get(t.id) || [];
+  const merged = t.messages.slice();
+  if (older.length) {
+    const seen = new Set(merged.map(m => m.id));
+    for (const m of older) if (!seen.has(m.id)) merged.push(m);
+  }
   // Newest at top so the message you probably want to act on is first.
-  const msgs = t.messages.slice().sort((a,b) => (b.position - a.position) || (b.created - a.created));
+  const msgs = merged.sort((a,b) => (b.position - a.position) || (b.created - a.created));
   const showAll = _tShowAllMsgs.has(t.id);
   const READ_MAX = 5;
   const collapsibleTotal = msgs.filter(m => !_tMsgAlwaysShow(m)).length;
@@ -32927,11 +33070,20 @@ function _tRenderMessages(t) {
       readShown++;
     }
   }
-  // Truncation control: "Show N older" collapsed; "Collapse older" expanded.
-  const hidden = collapsibleTotal - readShown;
-  if (hidden > 0) {
+  // Truncation control. Two layers:
+  //   localHidden     = collapsibleTotal - readShown (in-memory, not yet shown)
+  //   serverRemaining = t.older_count - older.length (never fetched)
+  // Clicking the button first expands local hidden; then subsequent
+  // clicks lazy-fetch more from the server in 50-count batches.
+  const localHidden = collapsibleTotal - readShown;
+  const serverRemaining = Math.max(0, (t.older_count || 0) - older.length);
+  const totalHidden = localHidden + serverRemaining;
+  if (totalHidden > 0) {
+    const action = localHidden > 0
+      ? `_tToggleShowAll('${tidEsc}')`
+      : `_tFetchOlder('${tidEsc}')`;
     html += `<div style="text-align:center;padding:6px 8px 4px;font-size:0.8rem;">
-      <a href="javascript:void(0)" onclick="_tToggleShowAll('${tidEsc}')" style="color:var(--accent, #6aa);text-decoration:none;border-bottom:1px dashed currentColor;">Show ${hidden} older message${hidden===1?'':'s'}</a>
+      <a href="javascript:void(0)" onclick="${action}" style="color:var(--accent, #6aa);text-decoration:none;border-bottom:1px dashed currentColor;">Show ${totalHidden} older message${totalHidden===1?'':'s'}</a>
     </div>`;
   } else if (showAll && collapsibleTotal > READ_MAX) {
     html += `<div style="text-align:center;padding:6px 8px 4px;font-size:0.8rem;">
@@ -44490,17 +44642,201 @@ class CCHandler(BaseHTTPRequestHandler):
                 if _filter_reads:
                     rows = [r for r in rows
                             if not (r["org"] or "").strip() or (r["org"] or "").strip() == _reader_org]
-                all_msgs = db.execute(
-                    "SELECT m.* FROM messages m "
-                    "JOIN threads t ON t.id = m.thread_id "
-                    "WHERE t.discarded = 0 "
-                    "ORDER BY m.thread_id, m.position, m.created"
-                ).fetchall()
+                # Payload slice (Jeremy 2026-11-02). Previously shipped every
+                # thread + every message (~17.7 MB on 9k msgs); mobile re-
+                # pulled it on every SSE refresh. Per thread, return the
+                # UNION of: (a) the latest 50 messages by (position, created),
+                # and (b) every always-show message (flagged OR status=
+                # 'working' OR unread-to-Jeremy complete). Dedup, sort
+                # chronologically. The always-show inclusion is what lets
+                # _tRenderFlagSection, _updateThreadsBadge, and _tThreadState
+                # stay accurate without any client-side refactor — those
+                # three already filter `t.messages` by exactly this
+                # predicate (`_tMsgAlwaysShow`). Also attach message_count
+                # (total non-discarded in-thread) and older_count so the
+                # client "Show N older messages" affordance knows the
+                # correct baseline.
+                _tids = [r["id"] for r in rows]
                 by_thread: dict = {}
-                for m in all_msgs:
-                    by_thread.setdefault(m["thread_id"], []).append(m)
-                return self._json([_thread_to_dict(r, by_thread.get(r["id"], []))
-                                   for r in rows])
+                counts_by_tid: dict = {}
+                if _tids:
+                    _ph = ",".join("?" for _ in _tids)
+                    # Total count per thread.
+                    for cr in db.execute(
+                        f"SELECT thread_id, COUNT(*) AS c FROM messages "
+                        f"WHERE thread_id IN ({_ph}) GROUP BY thread_id",
+                        tuple(_tids),
+                    ).fetchall():
+                        counts_by_tid[cr["thread_id"]] = cr["c"]
+                    # Always-show messages (full set, any age).
+                    _always = db.execute(
+                        f"SELECT * FROM messages WHERE thread_id IN ({_ph}) "
+                        f"  AND (flagged = 1 OR status = 'working' "
+                        f"       OR (status = 'complete' AND to_session = '' "
+                        f"           AND read = 0))",
+                        tuple(_tids),
+                    ).fetchall()
+                    _by_tid_always: dict = {}
+                    for m in _always:
+                        _by_tid_always.setdefault(m["thread_id"], []).append(m)
+                    # Latest-50 per thread. SQLite's window-function form is
+                    # cleaner than a correlated subquery and runs on the
+                    # existing (thread_id, position, created) index.
+                    _latest = db.execute(
+                        f"SELECT * FROM ("
+                        f"  SELECT m.*, "
+                        f"         ROW_NUMBER() OVER ("
+                        f"           PARTITION BY thread_id "
+                        f"           ORDER BY position DESC, created DESC"
+                        f"         ) AS rn "
+                        f"    FROM messages m "
+                        f"   WHERE thread_id IN ({_ph})"
+                        f") WHERE rn <= 50",
+                        tuple(_tids),
+                    ).fetchall()
+                    _by_tid_latest: dict = {}
+                    for m in _latest:
+                        _by_tid_latest.setdefault(m["thread_id"], []).append(m)
+                    # Union + dedup by id, chronological sort.
+                    for tid in _tids:
+                        seen = set()
+                        merged = []
+                        for m in _by_tid_latest.get(tid, []) + _by_tid_always.get(tid, []):
+                            if m["id"] in seen:
+                                continue
+                            seen.add(m["id"])
+                            merged.append(m)
+                        merged.sort(key=lambda m: (m["position"], m["created"]))
+                        by_thread[tid] = merged
+                out = []
+                for r in rows:
+                    d = _thread_to_dict(r, by_thread.get(r["id"], []))
+                    d["message_count"] = counts_by_tid.get(r["id"], len(d.get("messages") or []))
+                    d["older_count"] = max(0, d["message_count"] - len(d.get("messages") or []))
+                    out.append(d)
+                return self._json(out)
+
+            # GET /api/threads/<tid>/messages — lazy-load older messages
+            # for a single thread (Jeremy 2026-11-02 payload-slice).
+            # Query params:
+            #   before=<msg_id>  — anchor; return messages strictly older
+            #                      than this one by (position, created).
+            #                      If omitted, return the latest `limit`.
+            #   limit=<n>        — default 50, clamped to [1, 200].
+            # Returns messages in chronological ascending order. Applies
+            # the same org-read filter as GET /api/threads.
+            _tmsgs_m = re.match(r"^/api/threads/([A-Za-z0-9_-]+)/messages$", path)
+            if method == "GET" and _tmsgs_m:
+                _tid = _tmsgs_m.group(1)
+                _trow = db.execute(
+                    "SELECT id, org, discarded FROM threads WHERE id = ?",
+                    (_tid,),
+                ).fetchone()
+                if not _trow or _trow["discarded"]:
+                    return self._json({"error": "thread not found"}, 404)
+                _is_dashboard_read = _session_destructive_allowed(self.headers)
+                _reader_session = (self.headers.get("X-Amux-Session") or "").strip()
+                if _reader_session and not _is_dashboard_read:
+                    _reader_org = _session_org(_reader_session) or ""
+                    _torg = (_trow["org"] or "").strip()
+                    if _torg and _torg != _reader_org:
+                        return self._json({"error": "forbidden"}, 403)
+                try:
+                    _limit = int(qs.get("limit", ["50"])[0])
+                except Exception:
+                    _limit = 50
+                _limit = max(1, min(_limit, 200))
+                _before = (qs.get("before", [""])[0] or "").strip()
+                if _before:
+                    _anchor = db.execute(
+                        "SELECT position, created FROM messages "
+                        "WHERE id = ? AND thread_id = ?",
+                        (_before, _tid),
+                    ).fetchone()
+                    if not _anchor:
+                        return self._json({"error": "before anchor not found in thread"}, 400)
+                    rows = db.execute(
+                        "SELECT * FROM messages "
+                        "WHERE thread_id = ? "
+                        "  AND (position < ? "
+                        "       OR (position = ? AND created < ?)) "
+                        "ORDER BY position DESC, created DESC LIMIT ?",
+                        (_tid, _anchor["position"], _anchor["position"],
+                         _anchor["created"], _limit),
+                    ).fetchall()
+                else:
+                    rows = db.execute(
+                        "SELECT * FROM messages WHERE thread_id = ? "
+                        "ORDER BY position DESC, created DESC LIMIT ?",
+                        (_tid, _limit),
+                    ).fetchall()
+                msgs = sorted((dict(r) for r in rows),
+                              key=lambda m: (m["position"], m["created"]))
+                return self._json({"thread_id": _tid, "messages": msgs,
+                                   "returned": len(msgs)})
+
+            # GET /api/threads/search?q=<term>&limit=<n> — full-text-ish
+            # search across non-discarded messages (Jeremy 2026-11-02).
+            # Case-insensitive LIKE on body; 9k messages is small enough
+            # that FTS isn't needed yet. Returns hit shape with snippet.
+            # Applies org-read filter identical to /api/threads.
+            if method == "GET" and path == "/api/threads/search":
+                _q = (qs.get("q", [""])[0] or "").strip()
+                if len(_q) < 2:
+                    return self._json({"error": "q must be at least 2 characters"}, 400)
+                try:
+                    _limit = int(qs.get("limit", ["100"])[0])
+                except Exception:
+                    _limit = 100
+                _limit = max(1, min(_limit, 300))
+                _is_dashboard_read = _session_destructive_allowed(self.headers)
+                _reader_session = (self.headers.get("X-Amux-Session") or "").strip()
+                _reader_org = ""
+                _filter_reads = False
+                if _reader_session and not _is_dashboard_read:
+                    _reader_org = _session_org(_reader_session) or ""
+                    _filter_reads = True
+                _pat = f"%{_q.lower()}%"
+                rows = db.execute(
+                    "SELECT m.id, m.thread_id, m.from_session, m.to_session, "
+                    "       m.body, m.created, "
+                    "       t.title AS thread_title, t.org AS thread_org "
+                    "  FROM messages m "
+                    "  JOIN threads t ON t.id = m.thread_id "
+                    " WHERE t.discarded = 0 "
+                    "   AND m.status != 'discarded' "
+                    "   AND lower(m.body) LIKE ? "
+                    " ORDER BY m.created DESC LIMIT ?",
+                    (_pat, _limit),
+                ).fetchall()
+                hits = []
+                for r in rows:
+                    if _filter_reads:
+                        _torg = (r["thread_org"] or "").strip()
+                        if _torg and _torg != _reader_org:
+                            continue
+                    _body = r["body"] or ""
+                    _idx = _body.lower().find(_q.lower())
+                    if _idx < 0:
+                        _snip = _body[:140]
+                    else:
+                        _s = max(0, _idx - 60)
+                        _e = min(len(_body), _idx + len(_q) + 80)
+                        _snip = _body[_s:_e]
+                        if _s > 0:
+                            _snip = "..." + _snip
+                        if _e < len(_body):
+                            _snip = _snip + "..."
+                    hits.append({
+                        "id": r["id"],
+                        "thread_id": r["thread_id"],
+                        "thread_title": r["thread_title"],
+                        "from_session": r["from_session"],
+                        "to_session": r["to_session"],
+                        "created": r["created"],
+                        "snippet": _snip,
+                    })
+                return self._json({"q": _q, "returned": len(hits), "hits": hits})
 
             # ── POST /api/threads — create thread + first message ───────────
             if method == "POST" and path == "/api/threads":
