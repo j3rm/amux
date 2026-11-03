@@ -2,7 +2,21 @@
 
 **If you are Claude and you are about to edit `/mnt/gitdata/amux/amux-server.py`, this file is mandatory.** Every change must be planned here BEFORE you edit code. Completed plans stay in place as history, do NOT delete them. Read this file at the start of every session before touching amux-server.py.
 
-Last updated: 2026-11-02
+Last updated: 2026-11-03
+
+## Plan for change: board re-queue notified reset (AH-135, CD-NPP 2026-11-03) DONE
+
+**Why.** CD-NPP reported CAC-282 stalled 18 min in CD-Audit-Codex's todo queue after an in-place retitle fixed an intake BLOCK. Root cause: `_notify_session_of_task` is atomically idempotent on the `notified` flag (0→1 CAS). The PATCH handler at ~L47876 already resets `notified=0` when the session value in body differs from prior_session, but if the auditor's reject flow leaves session unchanged and the requester PATCHes title+status in place, `notified` stays at 1 and the auto-notify at ~L47932 no-ops. The 30-min reboost sweeper eventually fires a fresh push, but 30 min is noisy for client-deadline work.
+
+**What.** In the PATCH handler, reset `notified=0` additionally when either:
+1. `body.status in ('todo','backlog')` AND `prior.status not in ('todo','backlog')` — a re-queue transition. The assignee needs a fresh "pick this up" push; the earlier notify was for the earlier queuing.
+2. `body.renotify is true` — explicit opt-in flag for the fully-in-place retry pattern (auditor flagged, requester corrected, status never left todo).
+
+The existing auto-notify block at ~L47932 fires after the UPDATE, so a reset-to-0 is picked up by the idempotent CAS in `_notify_session_of_task` and a push goes out.
+
+**Verify.**
+- E2E probe: create board item assigned to idle session → notified=1. PATCH status=review (with gate_ack:true) → notified=1 unchanged. PATCH status=todo → notified cycles 1→0→1 via auto-notify fire. renotify:true PATCH → same cycle.
+- Syntax: `python3 -c "import ast; ast.parse(open('amux-server.py').read())"`.
 
 ## Plan for change: /api/threads payload slice + lazy-load + search (Jeremy 2026-11-02) DONE
 

@@ -47876,6 +47876,30 @@ class CCHandler(BaseHTTPRequestHandler):
                     # If session is being changed, reset notified so the new assignee gets pinged
                     if "session" in body and (body.get("session") or None) != prior_session:
                         set_clauses.append("notified = 0")
+                    # AH-135 (CD-NPP 2026-11-03): re-queue reset. When an
+                    # item transitions INTO todo/backlog from a non-queue
+                    # state (review, blocked, done, verified, discarded,
+                    # doing), the assignee needs a fresh "pick this up"
+                    # push — the earlier notify was for the earlier
+                    # queuing. Without this, a BLOCKED-then-fixed loop
+                    # (auditor rejects on title / content, requester
+                    # corrects in place, status cycles back to todo) sits
+                    # silently in the assignee's queue until the 30m
+                    # reboost sweep fires. Reset notified so the
+                    # auto-notify block below can re-fire the push.
+                    _new_status_val = body.get("status") if "status" in body else (prior["status"] if prior else "")
+                    _prior_status_val = prior["status"] if prior else ""
+                    if (_new_status_val in ("todo", "backlog")
+                            and _prior_status_val not in ("todo", "backlog")):
+                        set_clauses.append("notified = 0")
+                    # Explicit `renotify: true` body flag — caller opt-in
+                    # to re-fire the assignee push without changing
+                    # session or status. Useful when the retry happened
+                    # fully in-place (auditor-rejected flow where status
+                    # stayed at todo throughout). See AH-135 for the
+                    # worked example.
+                    if bool(body.get("renotify")):
+                        set_clauses.append("notified = 0")
                     # ER-624 (Ember-Research 2026-09-29): reset stale_todo_boost_count
                     # when the item leaves 'todo'. Boost count is "boosts since current
                     # entry to todo state"; a status transition out of todo (worker
