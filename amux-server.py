@@ -5327,6 +5327,24 @@ CREATE INDEX IF NOT EXISTS idx_issues_session ON issues(session);
 CREATE INDEX IF NOT EXISTS idx_issues_updated ON issues(updated);
 CREATE INDEX IF NOT EXISTS idx_issues_due     ON issues(due) WHERE due IS NOT NULL;
 CREATE INDEX IF NOT EXISTS idx_issue_tags_tag ON issue_tags(tag);
+-- Append-only ping log (AH-138). One row per fired notify so we can report
+-- ping volume per session/day and separate awake-but-ignored from asleep
+-- (raw per-item boost_count on `issues` is a current-state counter, not a
+-- history).
+CREATE TABLE IF NOT EXISTS board_notify_events (
+    id                   INTEGER PRIMARY KEY AUTOINCREMENT,
+    item_id              TEXT NOT NULL,
+    session              TEXT NOT NULL,
+    event_type           TEXT NOT NULL,
+    fired_at             INTEGER NOT NULL,
+    item_status_at_fire  TEXT NOT NULL DEFAULT '',
+    boost_count_at_fire  INTEGER NOT NULL DEFAULT 0,
+    item_age_sec         INTEGER NOT NULL DEFAULT 0,
+    session_running      INTEGER NOT NULL DEFAULT 0
+);
+CREATE INDEX IF NOT EXISTS idx_bne_item         ON board_notify_events(item_id);
+CREATE INDEX IF NOT EXISTS idx_bne_session_fire ON board_notify_events(session, fired_at);
+CREATE INDEX IF NOT EXISTS idx_bne_fired        ON board_notify_events(fired_at);
 CREATE TABLE IF NOT EXISTS tasks (
     id          TEXT PRIMARY KEY,
     session     TEXT NOT NULL,
@@ -7160,6 +7178,46 @@ def _send_failure_is_retriable(msg: str) -> bool:
     ))
 
 
+def _log_board_notify(item_id: str, session_name: str, event_type: str,
+                      item_status: str = "", boost_count: int = 0) -> None:
+    """Append one row to board_notify_events for every fired notify (AH-138).
+    Called from each real notify-fire site so we can later report ping volume
+    per session/day AND split "awake and ignored" from "wasn't running" (raw
+    per-item boost_count on `issues` is a current-state counter, not a
+    history). Best-effort: swallows any error so a failed log never blocks
+    the real notify. Runs synchronously inside whatever thread already drives
+    the notify, since the inserts are tiny and we want session_running to
+    reflect the moment the push went out."""
+    try:
+        now = int(time.time())
+        try:
+            running = tmux_name(session_name) in _tmux_info_map()
+        except Exception:
+            running = False
+        age = 0
+        try:
+            row = get_db().execute(
+                "SELECT created FROM issues WHERE id=?", (item_id,)
+            ).fetchone()
+            if row and row["created"]:
+                age = max(0, now - int(row["created"]))
+        except Exception:
+            pass
+        db = get_db()
+        db.execute(
+            "INSERT INTO board_notify_events "
+            "(item_id, session, event_type, fired_at, item_status_at_fire, "
+            " boost_count_at_fire, item_age_sec, session_running) "
+            "VALUES (?,?,?,?,?,?,?,?)",
+            (item_id, session_name or "", event_type, now,
+             item_status or "", int(boost_count or 0), age,
+             1 if running else 0),
+        )
+        db.commit()
+    except Exception:
+        pass
+
+
 def _notify_session_of_task(session_name: str, item_id: str, title: str):
     """Push a one-line task pickup notice into the target session's tmux pane.
     Idempotent per (session, item_id): we atomically flip the issue's `notified`
@@ -7195,6 +7253,11 @@ def _notify_session_of_task(session_name: str, item_id: str, title: str):
                 # 2026-09-11, RTG-Research report).
                 db.execute("UPDATE issues SET notified=0 WHERE id=?", (item_id,))
                 db.commit()
+                return
+            # AH-138: record only after we commit to this being a delivered
+            # push (ok, OR non-retriable failure that leaves notified=1).
+            _log_board_notify(item_id, session_name, "initial",
+                              item_status="todo", boost_count=0)
         except Exception:
             pass
     threading.Thread(target=_run, daemon=True).start()
@@ -7407,6 +7470,8 @@ def _notify_stale_doing_assignee(assignee_session: str, item_id: str,
                 f"for substrate issues). If done: PATCH to `review`."
             )
             send_text(assignee_session, text)
+            _log_board_notify(item_id, assignee_session, "stale_doing",
+                              item_status="doing", boost_count=0)
         except Exception:
             pass
     threading.Thread(target=_run, daemon=True).start()
@@ -7435,6 +7500,8 @@ def _notify_stale_doing_master(master_session: str, worker_session: str,
                 f"restart. Do NOT restart a session that's actively working."
             )
             send_text(master_session, text)
+            _log_board_notify(item_id, master_session, "master_escalation",
+                              item_status="doing", boost_count=0)
         except Exception:
             pass
     threading.Thread(target=_run, daemon=True).start()
@@ -7608,6 +7675,8 @@ def _notify_stale_doing_cold_thread(assignee_session: str, item_id: str,
                 f"close this item if the block no longer matters."
             )
             send_text(assignee_session, text)
+            _log_board_notify(item_id, assignee_session, "cold_thread",
+                              item_status="doing", boost_count=0)
         except Exception:
             pass
     threading.Thread(target=_run, daemon=True).start()
@@ -7901,6 +7970,8 @@ def _notify_session_of_stale_todo(session_name: str, item_id: str, title: str,
                     f"a one-line reason. Check `amux board show {item_id}`."
                 )
             send_text(session_name, _text)
+            _log_board_notify(item_id, session_name, "reboost",
+                              item_status="todo", boost_count=_n)
         except Exception:
             pass
     threading.Thread(target=_run, daemon=True).start()
@@ -8081,6 +8152,9 @@ def _sweep_stale_todos_reboost():
                     db.commit()
                     _escalate_stale_todo_to_jeremy(_iid, row["title"] or "",
                                                   _sess, _new_boost_count)
+                    _log_board_notify(_iid, _sess, "parked",
+                                      item_status="backlog",
+                                      boost_count=_new_boost_count)
                     _escalated += 1
                     _flagged += 1
                     continue
@@ -46563,6 +46637,97 @@ class CCHandler(BaseHTTPRequestHandler):
                     s["output"] += bl.get("output", 0)
             save_token_baseline(raw_stats)
             return self._json({"ok": True})
+
+        # GET /api/stats/board-pings?days=N — AH-138.
+        # How much is amux pinging agents and which agents are ignoring
+        # the pings. One row per fired notify is appended to
+        # board_notify_events; this endpoint rolls those up.
+        # session_running at fire time lets us split "awake-but-ignored"
+        # from "wasn't running" (Cypra's caveat on CE-93 / CE-90: a
+        # reboost fired while the session was asleep is not an ignore).
+        if method == "GET" and path == "/api/stats/board-pings":
+            try:
+                days = int((qs.get("days", ["7"])[0] or "7"))
+            except (ValueError, TypeError):
+                days = 7
+            days = max(1, min(90, days))
+            cutoff = int(time.time()) - days * 86400
+            db = get_db()
+            total = db.execute(
+                "SELECT COUNT(*) AS c FROM board_notify_events "
+                "WHERE fired_at >= ?", (cutoff,)
+            ).fetchone()["c"]
+            distinct_items = db.execute(
+                "SELECT COUNT(DISTINCT item_id) AS c FROM board_notify_events "
+                "WHERE fired_at >= ?", (cutoff,)
+            ).fetchone()["c"]
+            by_type = [
+                {"event_type": r["event_type"], "count": r["c"]}
+                for r in db.execute(
+                    "SELECT event_type, COUNT(*) AS c FROM board_notify_events "
+                    "WHERE fired_at >= ? GROUP BY event_type ORDER BY c DESC",
+                    (cutoff,)
+                )
+            ]
+            by_session = [
+                {
+                    "session": r["session"],
+                    "pings": r["pings"],
+                    "items": r["items"],
+                    "awake_pings": r["awake_pings"],
+                    "asleep_pings": r["asleep_pings"],
+                    "parked": r["parked"],
+                    "reboosts": r["reboosts"],
+                }
+                for r in db.execute(
+                    "SELECT session, "
+                    "       COUNT(*) AS pings, "
+                    "       COUNT(DISTINCT item_id) AS items, "
+                    "       SUM(CASE WHEN session_running=1 THEN 1 ELSE 0 END) AS awake_pings, "
+                    "       SUM(CASE WHEN session_running=0 THEN 1 ELSE 0 END) AS asleep_pings, "
+                    "       SUM(CASE WHEN event_type='parked' THEN 1 ELSE 0 END) AS parked, "
+                    "       SUM(CASE WHEN event_type='reboost' THEN 1 ELSE 0 END) AS reboosts "
+                    "FROM board_notify_events "
+                    "WHERE fired_at >= ? "
+                    "GROUP BY session "
+                    "ORDER BY pings DESC",
+                    (cutoff,)
+                )
+            ]
+            top_items = [
+                {
+                    "item_id": r["item_id"],
+                    "session": r["session"],
+                    "pings": r["pings"],
+                    "reboosts": r["reboosts"],
+                    "awake_pings": r["awake_pings"],
+                    "first_ping": r["first_ping"],
+                    "last_ping": r["last_ping"],
+                }
+                for r in db.execute(
+                    "SELECT item_id, "
+                    "       MAX(session) AS session, "
+                    "       COUNT(*) AS pings, "
+                    "       SUM(CASE WHEN event_type='reboost' THEN 1 ELSE 0 END) AS reboosts, "
+                    "       SUM(CASE WHEN session_running=1 THEN 1 ELSE 0 END) AS awake_pings, "
+                    "       MIN(fired_at) AS first_ping, "
+                    "       MAX(fired_at) AS last_ping "
+                    "FROM board_notify_events "
+                    "WHERE fired_at >= ? "
+                    "GROUP BY item_id "
+                    "ORDER BY pings DESC "
+                    "LIMIT 20",
+                    (cutoff,)
+                )
+            ]
+            return self._json({
+                "days": days,
+                "total_pings": total,
+                "distinct_items_pinged": distinct_items,
+                "by_type": by_type,
+                "by_session": by_session,
+                "top_items": top_items,
+            })
 
         # GET /api/recordings — list all recordings in ~/.amux/recordings/
         if method == "GET" and path == "/api/recordings":

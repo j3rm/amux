@@ -2,7 +2,40 @@
 
 **If you are Claude and you are about to edit `/mnt/gitdata/amux/amux-server.py`, this file is mandatory.** Every change must be planned here BEFORE you edit code. Completed plans stay in place as history, do NOT delete them. Read this file at the start of every session before touching amux-server.py.
 
-Last updated: 2026-11-03
+Last updated: 2026-11-04
+
+## Plan for change: board notify-ping event log + stats endpoint (AH-138, Jeremy 2026-11-03 via Cypra)
+
+**Why.** Jeremy asked for "visibility into how much Amux is having to ping agents to get board items done. And how some agents ignore the board items." Raw material partially exists per-item (`stale_todo_boost_count`, `notified`, `stale_notified`, `stale_doing_nudged_at`) but it's only the CURRENT state, not history, so we can't answer "pings per day," "pings per session per day," or "pings fired while the session was running vs asleep." Cypra's relay flagged (correctly) that raw reboost counts conflate "agent ignored it" with "agent wasn't awake" (CE-93, CE-90 both fired reboosts while their session was asleep, then got picked up the moment it woke).
+
+**What.**
+
+1. New append-only table `board_notify_events` capturing one row per fired notify:
+   - `id` (autoincr), `item_id`, `session`, `event_type`, `fired_at`,
+     `item_status_at_fire`, `boost_count_at_fire`, `item_age_sec`, `session_running`.
+   - Indexes on `(item_id)`, `(session, fired_at)`, `(fired_at)`.
+2. Helper `_log_board_notify(item_id, session, event_type, item_status, boost_count)` near the other notify helpers. Probes `tmux_name(session) in _tmux_info_map()` at log time to record awake-at-ping. Best-effort, swallows errors.
+3. Hook five existing notify-fire sites to record a row:
+   - `_notify_session_of_task` → `initial` (only on successful send, so we don't log pings that were reset-and-retried on retriable tmux failures)
+   - `_notify_session_of_stale_todo` → `reboost`
+   - `_notify_stale_doing_assignee` → `stale_doing`
+   - `_notify_stale_doing_master` → `master_escalation`
+   - `_notify_stale_doing_cold_thread` → `cold_thread`
+   - Also log `parked` where `_sweep_stale_todos_reboost` auto-parks to backlog at the threshold.
+4. New endpoint `GET /api/stats/board-pings?days=N` (default 7, clamp 1-90). Returns:
+   - `total_pings`, `distinct_items_pinged`
+   - `by_type` array (event_type × count)
+   - `by_session` array (session × pings, items, awake_pings, asleep_pings, parked)
+   - `top_items` top-20 (item_id × pings, first/last fired_at, awake_pings)
+
+Dashboard UI (a widget on the stats tab) deferred to a follow-up commit - this commit is data-plane only so the record starts accumulating immediately.
+
+**Verify.**
+- Syntax: `python3 -c "import ast; ast.parse(open('amux-server.py').read())"`
+- Create a test board item assigned to amux-helper → one `initial` row in `board_notify_events` with session_running=1.
+- `GET /api/stats/board-pings?days=1` returns JSON with the row counted in `by_type` and `by_session`.
+- Existing notify behavior unchanged (push still goes to tmux, idempotent CAS still works, retriable failures still reset `notified=0`).
+- `/api/board/*` latency unchanged within noise (log insert is in the existing background notify thread, not the request path).
 
 ## Plan for change: board re-queue notified reset (AH-135, CD-NPP 2026-11-03) DONE
 
