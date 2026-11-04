@@ -7195,14 +7195,24 @@ def _log_board_notify(item_id: str, session_name: str, event_type: str,
         except Exception:
             running = False
         age = 0
+        actual_status = ""
         try:
             row = get_db().execute(
-                "SELECT created FROM issues WHERE id=?", (item_id,)
+                "SELECT created, status FROM issues WHERE id=?", (item_id,)
             ).fetchone()
-            if row and row["created"]:
-                age = max(0, now - int(row["created"]))
+            if row:
+                if row["created"]:
+                    age = max(0, now - int(row["created"]))
+                actual_status = row["status"] or ""
         except Exception:
             pass
+        # Callers pass a hint (e.g. "todo" for the reboost sweep, "doing" for
+        # stale-doing). Prefer the live DB status when we have it so the log
+        # faithfully reflects what the item ACTUALLY was at the moment the
+        # push went out. This matters for the `initial` call site, which the
+        # POST path invokes for status in ('todo','backlog') identically
+        # (2026-11-04 RA-1781 forensics — hardcoded "todo" misled the audit).
+        status_at_fire = actual_status or item_status or ""
         db = get_db()
         db.execute(
             "INSERT INTO board_notify_events "
@@ -7210,7 +7220,7 @@ def _log_board_notify(item_id: str, session_name: str, event_type: str,
             " boost_count_at_fire, item_age_sec, session_running) "
             "VALUES (?,?,?,?,?,?,?,?)",
             (item_id, session_name or "", event_type, now,
-             item_status or "", int(boost_count or 0), age,
+             status_at_fire, int(boost_count or 0), age,
              1 if running else 0),
         )
         db.commit()

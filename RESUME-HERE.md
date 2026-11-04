@@ -4,6 +4,16 @@
 
 Last updated: 2026-11-04
 
+## Plan for change: fix item_status_at_fire to use live DB status (AH-138 follow-up, 2026-11-04) DONE
+
+**Why.** My initial AH-138 implementation passed a hardcoded `item_status` string to `_log_board_notify` at each call site. For `initial` that was `"todo"` -- but `_notify_session_of_task` is called from the POST path AND the PATCH re-queue path, both of which gate on `status in ('todo','backlog')`. A backlog item that got re-notified would therefore log `item_status_at_fire='todo'` even when the item was actually at `backlog`. Discovered during RA-1781 forensics 2026-11-04 (Ember-Research channel); the misleading log row had me tell Ember the server "saw a todo moment" when the real cause was "the PATCH re-queue path auto-notifies for backlog too, and I logged a hardcoded string".
+
+**What.** Inside `_log_board_notify`, extend the existing `created` lookup to also pull `status`, and prefer the live DB value over the caller's hint. Caller's hint is kept as a fallback so any transient race (row read during the same ms the UPDATE commits) still records something useful.
+
+**Verify.**
+- Syntax: `python3 -c "import ast; ast.parse(open('amux-server.py').read())"` -- done.
+- Next `initial` fire on a backlog item should record `item_status_at_fire='backlog'`, not `'todo'`.
+
 ## Plan for change: board notify-ping event log + stats endpoint (AH-138, Jeremy 2026-11-03 via Cypra)
 
 **Why.** Jeremy asked for "visibility into how much Amux is having to ping agents to get board items done. And how some agents ignore the board items." Raw material partially exists per-item (`stale_todo_boost_count`, `notified`, `stale_notified`, `stale_doing_nudged_at`) but it's only the CURRENT state, not history, so we can't answer "pings per day," "pings per session per day," or "pings fired while the session was running vs asleep." Cypra's relay flagged (correctly) that raw reboost counts conflate "agent ignored it" with "agent wasn't awake" (CE-93, CE-90 both fired reboosts while their session was asleep, then got picked up the moment it woke).
