@@ -4297,6 +4297,30 @@ def _at_feedback_prompt(clean_output: str) -> bool:
             and "0: Dismiss" in tail)
 
 
+def _at_autocompact_recommend_prompt(clean_output: str) -> bool:
+    """Return True if Claude Code's "autocompact at 400k" recommend modal is showing.
+
+    Full modal text:
+      We recommend compacting earlier
+      ...
+      Want to autocompact at 400k tokens instead? ...
+      Autocompact at < 400k > tokens / Keep auto (1m tokens)
+      ↑/↓ choose · ←/→ change size · enter confirm · esc not now
+
+    Blocks the terminal like the feedback modal: it's a TUI prompt, not a text
+    input, so send_text can't answer it. Session sits idle on "idle" status.
+    Dismissing with Escape ("esc not now") is non-destructive — the user can
+    still invoke /autocompact later. Seen on CD-NPP 2026-11-06 — Jeremy had
+    to manually press Escape to unblock the session. Two independent markers
+    required so a docs-page mention or stray "esc" line alone doesn't match.
+    """
+    if not clean_output:
+        return False
+    tail = "\n".join(clean_output.splitlines()[-20:])
+    return ("Want to autocompact at" in tail
+            and "esc not now" in tail)
+
+
 def _at_shell_prompt(clean_output: str) -> bool:
     """Return True if the terminal looks like a bare shell prompt (no Claude UI)."""
     if _claude_ui_visible(clean_output):
@@ -4536,6 +4560,26 @@ def _snapshot_all_sessions_inner():
                     try:
                         send_text(name, "0")
                         slog(f"[feedback-dismiss] {name}: auto-dismissed feedback modal")
+                    except Exception:
+                        pass
+
+            # ── 1e. Reactive: Claude Code "autocompact at 400k" recommend modal ─
+            # TUI modal that appears when context crosses the recommend threshold.
+            # Options are "Autocompact at 400k tokens" / "Keep auto (1m tokens)"
+            # with "esc not now" to dismiss. It's a UI prompt, not a text input,
+            # so auto_continue and send_text both can't unblock it. Non-archived
+            # sessions sit idle until a human presses Escape (CD-NPP, 2026-11-06).
+            # Fix: send Escape ("esc not now" per the modal itself) from the sweep.
+            # Not gated on CC_AUTO_CONTINUE — this modal blocks interactive sessions
+            # too; the user can still invoke /autocompact later if they want it.
+            if (_at_autocompact_recommend_prompt(clean)
+                    and now - actions.get("last_autocompact_dismiss", 0) > 60):
+                cfg_ac = parse_env_file(f)
+                if cfg_ac.get("CC_ARCHIVED") != "1":
+                    actions["last_autocompact_dismiss"] = now
+                    try:
+                        send_keys(name, "Escape")
+                        slog(f"[autocompact-dismiss] {name}: auto-dismissed 'autocompact at 400k' recommend modal")
                     except Exception:
                         pass
 

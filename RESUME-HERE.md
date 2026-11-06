@@ -2,7 +2,21 @@
 
 **If you are Claude and you are about to edit `/mnt/gitdata/amux/amux-server.py`, this file is mandatory.** Every change must be planned here BEFORE you edit code. Completed plans stay in place as history, do NOT delete them. Read this file at the start of every session before touching amux-server.py.
 
-Last updated: 2026-11-04
+Last updated: 2026-11-06
+
+## Plan for change: auto-dismiss Claude Code's "autocompact at 400k" prompt (2026-11-06) DONE
+
+**Why.** Jeremy caught CD-NPP stuck idle on Claude Code's "We recommend compacting earlier / Want to autocompact at 400k tokens instead?" modal (tail of pane confirmed; preview_lines show option ribbon "↑/↓ choose · ←/→ change size · enter confirm · esc not now"). The modal is a TUI prompt, so `send_text` cannot answer it and auto_continue sessions sit idle until a human presses Escape. This is the same class of issue as section 1d of `_snapshot_all_sessions` (end-of-session feedback modal) and has the same fix: detect it and send the dismiss key from the health sweep.
+
+**What.**
+1. New detector `_at_autocompact_recommend_prompt(clean_output)` near `_at_feedback_prompt` (~line 4285). Returns True when tail contains both `"Want to autocompact at"` and `"esc not now"` — two independent markers from the modal, both unique to this prompt, so neither a documentation mention nor a stray "esc" line alone triggers it.
+2. New section 1e inside `_snapshot_all_sessions` (right after 1d, ~line 4541): if the detector matches and `now - actions.get("last_autocompact_dismiss", 0) > 60`, call `send_keys(name, "Escape")` and `slog` the dismissal. Gated behind `CC_ARCHIVED != "1"` like 1d. Does NOT require `CC_AUTO_CONTINUE=1` — the modal blocks interactive users too, not just headless workers.
+3. Rate-limit: 60s between dismiss attempts per session (matches 1d) in case the detector ever false-positives.
+
+**Verify.**
+- Syntax: `python3 -c "import ast; ast.parse(open('amux-server.py').read())"`.
+- Live: CD-NPP is the fire — already manually dismissed via `/api/sessions/CD-NPP/keys` Escape; if the prompt recurs, the new section should dismiss it within one snapshot cycle (~30s). Confirm by watching `preview_lines` through 2 cycles after save.
+- Non-regression: other TUI prompts (slash-command picker, resume picker, feedback modal) must not match — detector uses two unique strings, both from this specific modal.
 
 ## Plan for change: fix item_status_at_fire to use live DB status (AH-138 follow-up, 2026-11-04) DONE
 
