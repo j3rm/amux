@@ -2,7 +2,22 @@
 
 **If you are Claude and you are about to edit `/mnt/gitdata/amux/amux-server.py`, this file is mandatory.** Every change must be planned here BEFORE you edit code. Completed plans stay in place as history, do NOT delete them. Read this file at the start of every session before touching amux-server.py.
 
-Last updated: 2026-11-06
+Last updated: 2026-11-09
+
+## Plan for change: detect "Login expired · Please run /login" and Pushover Jeremy (2026-11-09) DONE
+
+**Why.** CD-Wyoming is wedged on `● Login expired · Please run /login`. Every board ping / stale-doing nudge re-triggers it, the session answers in 0s with the same line, and no actual work gets done. Jeremy has to notice manually and `/login` interactively. Unlike the autocompact modal, we CANNOT auto-dismiss this: `/login` is an OAuth flow that needs a human on the TTY. Right fix is detect + alert, not detect + act.
+
+**What.**
+1. New detector `_at_login_expired_prompt(clean_output)` near `_at_autocompact_recommend_prompt` (~line 4300). Returns True when the last ~20 lines contain BOTH `"Login expired"` AND `"run /login"`. Both markers are unique to Claude Code's expired-token line, so docs mentions or user-typed "/login" in a code block won't match.
+2. New section 1f inside `_snapshot_all_sessions` right after 1e (~line 4585): if the detector matches and `now - actions.get("last_login_expired_alert", 0) > 1800` (30 min), fire `_push_alert("login_expired", name, f"Session '{name}' needs /login. Token expired, pings bouncing.")`. Gated on `CC_ARCHIVED != "1"`. Does NOT send any keys — only alerts. 30-min cadence so the dashboard banner stays current but Jeremy's phone doesn't vibrate every 30s.
+3. Add `login_expired` to the Pushover muted-by-default list? NO — this one actually needs his attention. Leave it loud.
+
+**Verify.**
+- Syntax: `python3 -c "import ast; ast.parse(open('amux-server.py').read())"`.
+- Dry-test the detector against the real line captured in `~/.amux/logs/CD-Wyoming.log` — it must match. Negative test: `● Running /login` and `/login: Switch account or log in` must NOT match.
+- Live: within one snapshot cycle (~30s) after save, CD-Wyoming should emit a `login_expired` SSE alert + Pushover; `grep '\[alert\].*login_expired' ~/.amux/logs/server.log` should show the fire.
+- Non-regression: no key presses sent, no session restart, no board changes. This is a pure notification.
 
 ## Plan for change: auto-dismiss Claude Code's "autocompact at 400k" prompt (2026-11-06) DONE
 

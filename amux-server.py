@@ -4321,6 +4321,24 @@ def _at_autocompact_recommend_prompt(clean_output: str) -> bool:
             and "esc not now" in tail)
 
 
+def _at_login_expired_prompt(clean_output: str) -> bool:
+    """Return True if Claude Code is printing 'Login expired · Please run /login'.
+
+    Not a TUI modal — Claude Code just stamps this line every time the session
+    tries to do anything (board ping, nudge, user input), because its OAuth
+    token expired. We can't auto-fix it: /login is an interactive OAuth flow
+    that needs a human on the TTY. Right response is a one-shot Pushover to
+    Jeremy, not a key press. Seen on CD-Wyoming 2026-11-09 — every board
+    reboost just re-stamped the line and no work moved. Two independent
+    markers so a docs mention or user-typed /login in a code block won't match.
+    """
+    if not clean_output:
+        return False
+    tail = "\n".join(clean_output.splitlines()[-20:])
+    return ("Login expired" in tail
+            and "run /login" in tail)
+
+
 def _at_shell_prompt(clean_output: str) -> bool:
     """Return True if the terminal looks like a bare shell prompt (no Claude UI)."""
     if _claude_ui_visible(clean_output):
@@ -4582,6 +4600,23 @@ def _snapshot_all_sessions_inner():
                         slog(f"[autocompact-dismiss] {name}: auto-dismissed 'autocompact at 400k' recommend modal")
                     except Exception:
                         pass
+
+            # ── 1f. Reactive: Claude Code 'Login expired · Please run /login' ─
+            # OAuth token expired. Not a TUI modal — Claude Code just stamps
+            # this line every time the session gets a ping/nudge/input, and
+            # bounces off in 0s. We can't auto-fix: /login is an interactive
+            # OAuth flow that needs a human on the TTY. Right response is a
+            # one-shot alert so Jeremy knows to log the session back in.
+            # Rate-limit to 30 min/session so the dashboard banner + Pushover
+            # don't spam while the token stays expired.
+            if (_at_login_expired_prompt(clean)
+                    and now - actions.get("last_login_expired_alert", 0) > 1800):
+                cfg_le = parse_env_file(f)
+                if cfg_le.get("CC_ARCHIVED") != "1":
+                    actions["last_login_expired_alert"] = now
+                    _push_alert("login_expired", name,
+                                f"Session '{name}' needs /login. Token expired, pings bouncing.")
+                    slog(f"[login-expired] {name}: alerted (token expired, needs manual /login)")
 
             # ── 2. Reactive: thinking-block corruption → restart + replay ───
             if ("redacted_thinking" in clean and
