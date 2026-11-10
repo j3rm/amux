@@ -3818,11 +3818,18 @@ def _extract_claude_percent_and_reset(d: dict) -> tuple[float | None, int | None
     the OAuth usage endpoint has returned over time:
 
       shape A (current): {five_hour, seven_day, seven_day_opus} each
-                         {utilization: 0..1, resets_at: iso|unix}
+                         {utilization: 0..100, resets_at: iso|unix}
       shape B (fallback): {limits: [{kind, percent: 0..100, resets_at}, ...]}
                           where kind starting with "weekly" is the 7-day.
 
     Returns (percent_0_to_100, resets_at_unix_or_None). Unknown shape -> (None, None).
+
+    Historical trap (AH-159, 2026-11-10): shape A was once documented as 0..1
+    (ratio) and this parser multiplied by 100 whenever `util <= 1.0`. The
+    endpoint changed to emit percent-scale directly, so the rescale amplified
+    legitimately low utilizations (NWDDI at 1%) into 100% and flipped the
+    tone to danger. Values are now trusted as percent-scale, matching the
+    sibling `limits[*].percent` shape in the same payload.
     """
     sd = d.get("seven_day")
     if isinstance(sd, dict):
@@ -3833,8 +3840,6 @@ def _extract_claude_percent_and_reset(d: dict) -> tuple[float | None, int | None
             util = float(util)
         except (TypeError, ValueError):
             util = None
-        if util is not None and util <= 1.0:
-            util = util * 100.0
         return util, _parse_resets_at(sd.get("resets_at"))
     limits = d.get("limits")
     if isinstance(limits, list):

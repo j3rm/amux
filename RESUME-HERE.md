@@ -4,6 +4,21 @@
 
 Last updated: 2026-11-10
 
+## Plan for change: fix Claude (NWDDI) weekly-usage misparse showing 100% when it is 1% (AH-159, 2026-11-10)
+
+**Why.** Jeremy flagged dashboard "Claude (NWDDI)" showing danger tone at 100% while the Anthropic dashboard online shows 1%. The /api/usage raw payload has `seven_day.utilization: 1.0` AND `limits[weekly_all].percent: 1` (both percent-scale). Shape-A parser in `_extract_weekly_percent_and_reset` (amux-server.py ~3836) has `if util is not None and util <= 1.0: util = util * 100.0`, a stale rescaling for an old 0..1 ratio shape the endpoint no longer emits. Consequence: any time weekly utilization legitimately lands in [0.0, 1.0] (percent-scale meaning 0-1%) it gets amplified to 0-100% and flips the account into `danger` tone, over-reporting and probably Pushover-paging Jeremy.
+
+**What.**
+1. Remove the `util * 100.0` rescale. Trust `utilization` as percent-scale (matches the `limits[*].percent` shape it sits beside, matches current Anthropic API output verified live).
+2. Update the shape-A docstring: `utilization: 0..100` not `0..1`.
+3. No change to shape-B fallback (already percent-scale).
+
+**Verify.**
+- Syntax: `python3 -c "import ast; ast.parse(open('amux-server.py').read())"`.
+- `GET /api/usage` after save: `claude-nwddi.percent == 1.0`, tone `ok`. `claude-j3stwr.percent` unchanged (still 15.0).
+- Non-regression: an account with utilization `0.0` stays at 0 (not multiplied), `100.0` stays at 100 (not rescaled since the old code only triggered when `<= 1.0`).
+- Dashboard header meter: NWDDI shows ~1% blue bar not full red.
+
 ## Plan for change: Anthropic API spend tracking vs $200/mo credit (AH-158, 2026-11-10) DONE
 
 **Why.** Jeremy (channel 2026-11-10): "if we are going to use the API [for the amux-reviewer] ... we get $200 credit per month, so we need to make sure that we start tracking that." amux-reviewer just shipped (AH-155) and is the first direct Anthropic-API caller from amux-server. No telemetry today means a bug that fires the Haiku call 10/sec silently burns the monthly credit. The Usage tab already exists for per-account Claude Code weekly usage; the API spend is a separate concern (single Anthropic-API account, dollar budget, monthly reset) so it needs its own card.
