@@ -52910,11 +52910,20 @@ def _api_usage_log(event_type: str, model: str, usage: dict) -> None:
 def _reviewer_judge(body: str) -> dict:
     """Call Anthropic Haiku with the rubric; return verdict dict.
 
-    On any failure (no API key, network, non-JSON response) FAIL OPEN:
-    return {'verdict':'approved','rule':'api-error','reason':'<err>'}.
-    Fail-open is deliberate: an outage of the review service should
-    never silently swallow messages to Jeremy. Jeremy can read the
-    api-error reason on the message row to spot sustained outages.
+    Two failure modes, handled differently (AH-160, 2026-11-10):
+
+    1. DELIVERY failures (no API key, network error, HTTP non-200): fail
+       OPEN. Return verdict=approved, rule=api-error. Rationale: a true
+       outage should never silently swallow messages to Jeremy.
+
+    2. PARSE/SHAPE failures (empty response, non-JSON, no verdict field,
+       verdict not in {approved,rejected}): fail CLOSED. Return
+       verdict=rejected, rule=api-error. Rationale: the model responded
+       but we couldn't make sense of it; the message was never judged,
+       so the safer move is to bounce it back to the sender rather than
+       deliver it as if approved. On 2026-11-10 Haiku 5.5's default
+       thinking blocks ate the max_tokens budget and 45 messages slipped
+       through as api-error-approved before this split.
 
     Also returns `_usage` (the raw Anthropic usage dict) and `_model`
     so the caller can log it to api_usage. These extra keys are not
@@ -52928,9 +52937,16 @@ def _reviewer_judge(body: str) -> dict:
     rubric = _reviewer_load_rubric()
     model = "claude-haiku-5-5"
     # No temperature: deprecated on claude-haiku-5-5 and would 400 the call.
+    # thinking:disabled is REQUIRED. Haiku 5.5 emits an adaptive-thinking
+    # block by default, which consumed the entire 150-token max_tokens budget
+    # and produced zero text blocks (stop_reason=max_tokens). The sweep then
+    # parsed "" as JSON, raised, and fell through to fail-open "approved". 45
+    # messages slipped past the gate on 2026-11-10 before AH-160 traced this.
+    # The verdict is a tiny JSON object; no reasoning needed.
     payload = json.dumps({
         "model": model,
         "max_tokens": 150,
+        "thinking": {"type": "disabled"},
         "system": rubric,
         "messages": [{"role": "user", "content": body}],
     }).encode("utf-8")
@@ -52968,18 +52984,19 @@ def _reviewer_judge(body: str) -> dict:
         parsed = json.loads(text)
         verdict = str(parsed.get("verdict", "")).strip().lower()
         if verdict not in ("approved", "rejected"):
-            return {"verdict": "approved", "rule": "api-error",
-                    "reason": f"haiku returned non-verdict: {verdict!r}",
+            # Non-verdict parse: fail closed. See docstring item 2.
+            return {"verdict": "rejected", "rule": "api-error",
+                    "reason": f"reviewer could not judge (model returned non-verdict: {verdict!r}). Please re-send.",
                     "_usage": usage, "_model": model}
         rule = str(parsed.get("rule") or "")[:40]
         reason = str(parsed.get("reason") or "")[:400]
         return {"verdict": verdict, "rule": rule, "reason": reason,
                 "_usage": usage, "_model": model}
     except Exception as e:
-        # Preserve `usage` if we got that far before the exception (so the
-        # api_usage ledger still records the spend even when parse fails).
-        return {"verdict": "approved", "rule": "api-error",
-                "reason": f"haiku JSON parse failed: {e}"[:200],
+        # Parse failure: fail closed. See docstring item 2. Preserve `usage`
+        # if we got that far so the api_usage ledger still records spend.
+        return {"verdict": "rejected", "rule": "api-error",
+                "reason": f"reviewer could not judge (haiku JSON parse failed: {e}). Please re-send.",
                 "_usage": usage, "_model": model}
 
 

@@ -4,6 +4,27 @@
 
 Last updated: 2026-11-10
 
+## Plan for change: reviewer gate broken because Haiku 5.5 emits thinking blocks and eats the 150-token budget (AH-160, 2026-11-10)
+
+**Why.** Jeremy flagged M-10157 (Scorpio, long run-on wall of text, no formatting). It was audited and approved under `review_rule=api-error`, `review_reason="haiku JSON parse failed: Expecting value: line 1 column 1 (char 0)"`. Not an isolated case: today's `message_audits` log shows 45 messages approved via `rule=api-error` (vs 2 real rejections). The gate is effectively OFF.
+
+Root cause confirmed by replaying M-10157's body through `claude-haiku-5-5` with the same max_tokens=150 and server rubric: Haiku returned only a single `type=thinking` block (empty text, signature only) and `stop_reason=max_tokens`. The entire 150-token budget was consumed by extended thinking. The parser reads only `type=text` blocks, so `text=""` and `json.loads("")` raises the exact error seen in production. Adaptive thinking is default on Claude 4.6+ / 5 models per the claude-api skill drift table.
+
+Secondary issue (Jeremy's actual concern): the fail-open fallback approves messages the gate never actually judged. Current docstring defends this ("outage of the review service should never silently swallow messages") but in practice today it meant 45 un-audited messages, including formatless ones, hit Jeremy's inbox.
+
+**What.**
+1. Disable thinking on `_reviewer_judge`: add `"thinking": {"type": "disabled"}` to the request payload. This is a boolean verdict with ~40 bytes of JSON output. No reasoning needed; thinking is pure waste here (and today broke the call entirely).
+2. Keep `max_tokens=150` (plenty for the JSON verdict once thinking is off).
+3. Change fail-open semantics on parse failure: flag the message. Keep delivery (don't silently swallow) but mark `review_status='flagged'`, `review_rule='api-error'` so the dashboard surfaces it visually. Delivery exceptions (network, HTTPError, no-API-key) stay approved with api-error reason (actual outage path), but JSON-parse and non-verdict responses become `flagged` because they indicate the model misbehaved and the message was never judged.
+4. Non-regression: existing rejections (em-dash, etc.) unchanged; approved path unchanged for successful parses.
+
+**Verify.**
+- Syntax: `python3 -c "import ast; ast.parse(open('amux-server.py').read())"`.
+- Replay M-10157 shape through the fixed `_reviewer_judge` and confirm `stop_reason != max_tokens`, text block present, valid JSON verdict returned.
+- Post a clean Jeremy-shape thread message: approved, no api-error.
+- Post a formatless run-on message: rejected (not api-error flagged).
+- Dashboard: messages tagged `review_status=flagged` are visually distinct from approved/rejected.
+
 ## Plan for change: fix Claude (NWDDI) weekly-usage misparse showing 100% when it is 1% (AH-159, 2026-11-10)
 
 **Why.** Jeremy flagged dashboard "Claude (NWDDI)" showing danger tone at 100% while the Anthropic dashboard online shows 1%. The /api/usage raw payload has `seven_day.utilization: 1.0` AND `limits[weekly_all].percent: 1` (both percent-scale). Shape-A parser in `_extract_weekly_percent_and_reset` (amux-server.py ~3836) has `if util is not None and util <= 1.0: util = util * 100.0`, a stale rescaling for an old 0..1 ratio shape the endpoint no longer emits. Consequence: any time weekly utilization legitimately lands in [0.0, 1.0] (percent-scale meaning 0-1%) it gets amplified to 0-100% and flips the account into `danger` tone, over-reporting and probably Pushover-paging Jeremy.
