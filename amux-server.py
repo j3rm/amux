@@ -53083,13 +53083,48 @@ def _reviewer_sweep():
     for r in rows:
         mid = r["id"]
         body = r["body"] or ""
+        # Rewrite-loop cap (AH-161, 2026-11-10). Jeremy's rule: only ask
+        # twice. If this sender already has 2 rejections in this thread
+        # within the last hour, auto-approve this one so agents cannot spin
+        # forever trying to satisfy the reviewer. The sender saw two
+        # rejection board items; whatever they wrote next ships.
         try:
-            verdict = _reviewer_judge(body)
-        except Exception as e:
-            slog(f"[reviewer] judge threw for {mid}: {e}")
-            verdict = {"verdict": "approved", "rule": "api-error",
-                       "reason": f"judge threw: {e}"[:200],
+            prior_rejects = db.execute(
+                "SELECT COUNT(*) FROM messages "
+                "WHERE thread_id = ? AND from_session = ? "
+                "  AND review_status = 'rejected' "
+                "  AND reviewed_at > ? AND id != ?",
+                (r["thread_id"], r["from_session"],
+                 int(time.time()) - 3600, mid),
+            ).fetchone()[0]
+        except Exception:
+            prior_rejects = 0
+        if prior_rejects >= 2:
+            verdict = {"verdict": "approved", "rule": "rewrite-cap",
+                       "reason": f"auto-approved after {prior_rejects} prior rejections to cap rewrite loop",
                        "_usage": {}, "_model": "claude-haiku-5-5"}
+            slog(f"[reviewer] CAP {r['from_session']} {r['thread_id']}/{mid} prior={prior_rejects}")
+        else:
+            # Deterministic prechecks (AH-161, 2026-11-10). Haiku is unreliable
+            # at detecting specific Unicode codepoints (hallucinates em-dash on
+            # messages that have none, misses real ones). Do byte-level checks
+            # in Python first; only call Haiku for subjective judgment.
+            if "—" in body:
+                verdict = {"verdict": "rejected", "rule": "em-dash",
+                           "reason": "Contains an em-dash (U+2014). Use a period, colon, comma, parens, or plain hyphen.",
+                           "_usage": {}, "_model": "deterministic-precheck"}
+            elif "–" in body:
+                verdict = {"verdict": "rejected", "rule": "en-dash",
+                           "reason": "Contains an en-dash (U+2013). Use a plain hyphen for ranges and compound modifiers.",
+                           "_usage": {}, "_model": "deterministic-precheck"}
+            else:
+                try:
+                    verdict = _reviewer_judge(body)
+                except Exception as e:
+                    slog(f"[reviewer] judge threw for {mid}: {e}")
+                    verdict = {"verdict": "approved", "rule": "api-error",
+                               "reason": f"judge threw: {e}"[:200],
+                               "_usage": {}, "_model": "claude-haiku-5-5"}
         # Log the API call cost regardless of verdict shape so even
         # fail-open calls are accounted for.
         _api_usage_log("reviewer",

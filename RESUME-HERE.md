@@ -4,6 +4,38 @@
 
 Last updated: 2026-11-10
 
+## Plan for change: reviewer rejects legitimate approval-request messages, no rewrite cap (AH-161, 2026-11-10)
+
+**Why.** Jeremy flagged M-10191, M-10192, M-10193 (Scorpio, T-110). All three were legitimate reports of a plan + ask for Jeremy's YES before an infra change. All three rejected. Looking at Haiku's reasons:
+- M-10191: "leads with a bare directive and instruction to reply YES instead of stating the outcome first" (Scorpio DID lead with "DNS is correct for all nine. I can set this up." Haiku misread the ask-for-approval tail as the opener.)
+- M-10192: reason itself says "falls outside the thread-message rules this reviewer judges, so no verdict on its style applies" (Haiku explicitly says it can't judge, then returns verdict=rejected anyway)
+- M-10193: reason itself says "it has no ban-list violation; it is a clean report, so the rejection tag is unsupported and the verdict should be approved" (Haiku explicitly contradicts its own verdict)
+
+Two root causes:
+1. **Rubric does not acknowledge approval-request messages.** It is written as if every thread message is a reply/status report. Agents legitimately ASK Jeremy for a yes/no before a destructive change. The rubric offers no path to approve that shape.
+2. **Rubric tilts Haiku toward reject under uncertainty.** M-10193 is proof: Haiku correctly concluded "should be approved" but still emitted verdict=rejected. The rubric's phrasing has the model defaulting to reject when the message doesn't match the "lead with the answer" reply-report template.
+
+Secondary issue (Jeremy's second ask): **cap the rewrite loop at two.** Today a sender can be rejected forever. On the 3rd attempt, auto-approve to prevent agent-to-agent rewrite spin.
+
+**What.**
+1. Rewrite `~/.amux/reviewer-rubric.md`:
+   - Explicit DEFAULT: approve unless a CONCRETE ban is violated.
+   - Acknowledge two legitimate shapes: (a) status/reply reports, (b) approval-request / decision-ask messages. Both are allowed.
+   - Keep concrete bans: em-dash, en-dash, named preamble words (exhaustive list), addressing another named agent by colon.
+   - Remove subjective bans ("leads with the answer", "run-on", generic "rationale"). These are style suggestions, not gate failures.
+   - Add explicit "if uncertain, APPROVE" rule.
+2. Add rewrite-loop cap in `_reviewer_sweep`:
+   - Before calling `_reviewer_judge`, count prior rejections for (thread_id, from_session) within the last 1h.
+   - If count >= 2, auto-approve with `verdict=approved, rule=rewrite-cap, reason="auto-approved after 2 prior rejections; rewrite loop cap"`.
+   - Log the cap trigger so Jeremy can see it in the api_usage/audit trail.
+
+**Verify.**
+- Syntax: `python3 -c "import ast; ast.parse(open('amux-server.py').read())"`.
+- Replay M-10191, M-10192, M-10193 through `_reviewer_judge` with the new rubric. All three should approve.
+- Replay an em-dash violation: still rejects.
+- Simulate the cap: post 3 bad messages from a test session in the same thread. First two reject; third auto-approves with `rule=rewrite-cap`.
+- No regression on the thinking:disabled fix from AH-160.
+
 ## Plan for change: reviewer gate broken because Haiku 5.5 emits thinking blocks and eats the 150-token budget (AH-160, 2026-11-10)
 
 **Why.** Jeremy flagged M-10157 (Scorpio, long run-on wall of text, no formatting). It was audited and approved under `review_rule=api-error`, `review_reason="haiku JSON parse failed: Expecting value: line 1 column 1 (char 0)"`. Not an isolated case: today's `message_audits` log shows 45 messages approved via `rule=api-error` (vs 2 real rejections). The gate is effectively OFF.
