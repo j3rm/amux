@@ -5796,6 +5796,19 @@ CREATE TABLE IF NOT EXISTS message_audits (
 );
 CREATE INDEX IF NOT EXISTS idx_message_audits_mid ON message_audits(message_id);
 CREATE INDEX IF NOT EXISTS idx_message_audits_auditor ON message_audits(auditor);
+-- Merge-shrink guard dedup (AH-153, 2026-11-10, Ember-Research ER-1433).
+-- One row per (repo, merge-commit) the sweep has already inspected. The
+-- `fired_alert` column distinguishes "seen during bootstrap, no alert" (0)
+-- from "seen and alerted on shrink" (1) so a re-seed after DB wipe does
+-- not double-notify. The sweep skips any (repo, commit_sha) already here.
+CREATE TABLE IF NOT EXISTS merge_guard_seen_commits (
+    repo         TEXT NOT NULL,
+    commit_sha   TEXT NOT NULL,
+    seen_at      INTEGER NOT NULL,
+    fired_alert  INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY (repo, commit_sha)
+);
+CREATE INDEX IF NOT EXISTS idx_mgsc_repo ON merge_guard_seen_commits(repo);
 """
 
 
@@ -52179,6 +52192,238 @@ def _repos_scan():
         _sse_cache["repos"]["time"] = time.time()
 
 
+# Merge-shrink guard for append-only logs (AH-153, Ember-Research ER-1433).
+#
+# What this catches: a merge commit that silently deletes the bulk of a
+# tracked append-only log (e.g. MIGRATION_LOG.md) because one side of the
+# resolution was chosen without noticing the other parent carried the
+# majority of entries. Per-item presence probes YES-pass while every
+# other entry is gone; this invariant looks at the structure as a whole.
+#
+# Scope: every git repo under /mnt/gitdata at maxdepth 3 (same discovery
+# as _repos_scan). For each watched basename (default: MIGRATION_LOG.md)
+# that exists at HEAD, list merge commits touching that path and flag any
+# where the merged file's line count OR heading (^## ) count is less than
+# max(parent1, parent2). Deletions from an append-only log are an alarm
+# by definition - no three-way semantics needed.
+#
+# Why a server sweep, not a git pre-receive hook: in this environment the
+# local master runs 100+ commits ahead of origin for days (Jeremy deploys
+# from local master, pushes are rare). ER-1433 was 6 days of silent
+# corruption on local master before any push. A sweep at merge-landing
+# time catches it within one cycle; a push-time hook is wrong cadence.
+_MERGE_GUARD_CONFIG_PATH = CC_HOME / "merge-guard.json"
+_MERGE_GUARD_DEFAULT_CONFIG = {
+    "enabled": True,
+    "files": ["MIGRATION_LOG.md"],
+    "max_age_days": 14,
+}
+
+
+def _merge_guard_load_config() -> dict:
+    """Read ~/.amux/merge-guard.json, creating it with the default if absent.
+
+    Returns the parsed config dict. On any read/parse error, returns the
+    in-code default without touching disk (so a malformed file doesn't
+    silently kill the sweep).
+    """
+    try:
+        if not _MERGE_GUARD_CONFIG_PATH.exists():
+            _MERGE_GUARD_CONFIG_PATH.write_text(
+                json.dumps(_MERGE_GUARD_DEFAULT_CONFIG, indent=2) + "\n"
+            )
+            return dict(_MERGE_GUARD_DEFAULT_CONFIG)
+        cfg = json.loads(_MERGE_GUARD_CONFIG_PATH.read_text())
+        if not isinstance(cfg, dict):
+            return dict(_MERGE_GUARD_DEFAULT_CONFIG)
+        return cfg
+    except Exception:
+        return dict(_MERGE_GUARD_DEFAULT_CONFIG)
+
+
+def _merge_guard_git(repo_path: str, *args: str, timeout: float = 10.0) -> str:
+    """Run `git -C repo_path <args>` and return stdout (empty string on
+    any failure, timeout, or non-zero exit). Never raises; the sweep must
+    stay best-effort across every repo so one bad repo doesn't block the
+    others.
+    """
+    try:
+        r = subprocess.run(
+            ["git", "-C", repo_path, *args],
+            capture_output=True, text=True, timeout=timeout,
+        )
+        if r.returncode != 0:
+            return ""
+        return r.stdout
+    except Exception:
+        return ""
+
+
+def _merge_guard_metrics(repo_path: str, rev: str, path: str) -> tuple[int, int]:
+    """Return (line_count, heading_count) of <rev>:<path> in repo_path.
+
+    `line_count` is wc -l equivalent (counts newline-terminated lines;
+    a non-newline-terminated last line still counts). `heading_count`
+    counts lines matching `^## `. Returns (-1, -1) if the blob cannot be
+    read (deleted at that rev, binary, etc.), so the caller can treat
+    "unknown" as "do not alert" rather than as zero.
+    """
+    blob = _merge_guard_git(repo_path, "show", f"{rev}:{path}")
+    if not blob:
+        return (-1, -1)
+    lines = blob.splitlines()
+    headings = sum(1 for ln in lines if ln.startswith("## "))
+    return (len(lines), headings)
+
+
+def _merge_shrink_sweep():
+    """Flag merge commits that shrink an append-only log. AH-153.
+
+    Runs on the scheduler (300s) after a 90s startup delay so initial
+    _repos_scan has warmed. For each tracked repo under /mnt/gitdata
+    (maxdepth 3), for each watched basename that exists at HEAD, list
+    merge commits touching that path within max_age_days. Dedup via
+    merge_guard_seen_commits. On first-ever sight of a (repo, file)
+    pair, bulk-seed history as seen without alerting.
+    """
+    cfg = _merge_guard_load_config()
+    if not cfg.get("enabled", True):
+        return
+    watch_files = [str(f) for f in cfg.get("files") or [] if f]
+    if not watch_files:
+        return
+    max_age_days = int(cfg.get("max_age_days") or 14)
+    since_arg = f"{max_age_days} days ago"
+
+    try:
+        r = subprocess.run(
+            ["find", "/mnt/gitdata", "-maxdepth", "3", "-name", ".git", "-type", "d"],
+            capture_output=True, text=True, timeout=20,
+        )
+        git_dirs = [l for l in r.stdout.splitlines() if l.strip()]
+    except Exception:
+        return
+
+    db = get_db()
+    now = int(time.time())
+
+    for git_dir in git_dirs:
+        repo_path = os.path.dirname(git_dir)
+        repo_name = os.path.basename(repo_path)
+
+        for watch_file in watch_files:
+            # HEAD must contain the file; otherwise skip (not tracked here).
+            # ls-tree gives a non-empty line only when the path exists.
+            ls_tree = _merge_guard_git(repo_path, "ls-tree", "HEAD", watch_file)
+            if not ls_tree.strip():
+                continue
+
+            # Have we ever seen this (repo, file)? If not, bootstrap.
+            seen_any = db.execute(
+                "SELECT 1 FROM merge_guard_seen_commits WHERE repo = ? LIMIT 1",
+                (repo_name,),
+            ).fetchone()
+
+            log_out = _merge_guard_git(
+                repo_path, "log", "--merges",
+                f"--since={since_arg}", "--format=%H", "HEAD", "--", watch_file,
+            )
+            merge_shas = [s for s in log_out.splitlines() if s.strip()]
+            if not merge_shas:
+                continue
+
+            if not seen_any:
+                # First time seeing this repo at all - also seed with ALL
+                # historical merge commits touching this path (not just
+                # the max_age_days window), so a repo with ancient history
+                # doesn't re-alert on old truncations after a DB wipe.
+                full_hist = _merge_guard_git(
+                    repo_path, "log", "--merges",
+                    "--format=%H", "HEAD", "--", watch_file,
+                )
+                to_seed = [s for s in full_hist.splitlines() if s.strip()]
+                rows = [(repo_name, sha, now, 0) for sha in to_seed]
+                db.executemany(
+                    "INSERT OR IGNORE INTO merge_guard_seen_commits "
+                    "(repo, commit_sha, seen_at, fired_alert) VALUES (?,?,?,?)",
+                    rows,
+                )
+                db.commit()
+                slog(f"[merge-shrink] bootstrap: {repo_name}/{watch_file} "
+                     f"{len(rows)} commits recorded, no alerts")
+                continue
+
+            # Non-bootstrap: for each merge commit not already seen,
+            # measure parent vs merged and alert if shrunk.
+            for sha in merge_shas:
+                row = db.execute(
+                    "SELECT 1 FROM merge_guard_seen_commits "
+                    "WHERE repo = ? AND commit_sha = ?",
+                    (repo_name, sha),
+                ).fetchone()
+                if row:
+                    continue
+                parents = _merge_guard_git(
+                    repo_path, "rev-list", "--parents", "-n", "1", sha,
+                ).strip().split()
+                # parents[0] is sha itself; the rest are parents.
+                parent_shas = parents[1:] if len(parents) >= 2 else []
+                if len(parent_shas) < 2:
+                    db.execute(
+                        "INSERT OR IGNORE INTO merge_guard_seen_commits "
+                        "(repo, commit_sha, seen_at, fired_alert) VALUES (?,?,?,?)",
+                        (repo_name, sha, now, 0),
+                    )
+                    db.commit()
+                    continue
+                merged_ln, merged_hd = _merge_guard_metrics(repo_path, sha, watch_file)
+                if merged_ln < 0:
+                    db.execute(
+                        "INSERT OR IGNORE INTO merge_guard_seen_commits "
+                        "(repo, commit_sha, seen_at, fired_alert) VALUES (?,?,?,?)",
+                        (repo_name, sha, now, 0),
+                    )
+                    db.commit()
+                    continue
+                parent_metrics = [
+                    _merge_guard_metrics(repo_path, p, watch_file) for p in parent_shas
+                ]
+                parent_metrics = [m for m in parent_metrics if m[0] >= 0]
+                if not parent_metrics:
+                    db.execute(
+                        "INSERT OR IGNORE INTO merge_guard_seen_commits "
+                        "(repo, commit_sha, seen_at, fired_alert) VALUES (?,?,?,?)",
+                        (repo_name, sha, now, 0),
+                    )
+                    db.commit()
+                    continue
+                max_ln = max(m[0] for m in parent_metrics)
+                max_hd = max(m[1] for m in parent_metrics)
+                shrank = (merged_ln < max_ln) or (merged_hd < max_hd)
+                if shrank:
+                    msg = (
+                        f"{repo_name}: {sha[:12]} shrank {watch_file} - "
+                        f"headings {max_hd}->{merged_hd}, lines {max_ln}->{merged_ln}. "
+                        f"Inspect: git -C {repo_path} show {sha} -- {watch_file}"
+                    )
+                    _push_alert("merge_shrink", repo_name, msg)
+                    slog(f"[merge-shrink] ALERT {repo_name} {sha[:12]} "
+                         f"{watch_file} headings {max_hd}->{merged_hd} "
+                         f"lines {max_ln}->{merged_ln}")
+                    db.execute(
+                        "INSERT OR IGNORE INTO merge_guard_seen_commits "
+                        "(repo, commit_sha, seen_at, fired_alert) VALUES (?,?,?,?)",
+                        (repo_name, sha, now, 1),
+                    )
+                else:
+                    db.execute(
+                        "INSERT OR IGNORE INTO merge_guard_seen_commits "
+                        "(repo, commit_sha, seen_at, fired_alert) VALUES (?,?,?,?)",
+                        (repo_name, sha, now, 0),
+                    )
+                db.commit()
+
+
 _GATED_TITLE_RE = re.compile(r'^\s*(PARKED|GATED|BLOCKED)\b', re.IGNORECASE)
 _GATED_DESC_LINE_RE = re.compile(
     r'^\s*(GATED|BLOCKED-UNTIL|BLOCKED_UNTIL|BLOCKED-BY|BLOCKED_BY|PARKED|AWAITING|HOLD)\s*:',
@@ -53646,6 +53891,7 @@ def main():
     schedule_job(_usage_probe_job,       interval=60,                   name="usage_probe", initial_delay=25)
     schedule_job(_email_sync_job,        interval=_EMAIL_SYNC_INTERVAL, name="email_sync",  initial_delay=20)
     schedule_job(_repos_scan,            interval=60,                   name="repos_scan",    initial_delay=5)
+    schedule_job(_merge_shrink_sweep,    interval=300,                  name="merge_shrink",  initial_delay=90)
     # _board_watcher DISABLED 2026-08-27 (Jeremy CALM MODE + audit): redundant
     # with the external SCHED-38 script watchdog. Both nudge on `todo`+idle;
     # SCHED-38 is the documented modern path (visible in schedules UI, 15m

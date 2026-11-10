@@ -2,7 +2,30 @@
 
 **If you are Claude and you are about to edit `/mnt/gitdata/amux/amux-server.py`, this file is mandatory.** Every change must be planned here BEFORE you edit code. Completed plans stay in place as history, do NOT delete them. Read this file at the start of every session before touching amux-server.py.
 
-Last updated: 2026-11-09
+Last updated: 2026-11-10
+
+## Plan for change: merge-shrink guard for append-only logs (AH-153, 2026-11-10) DONE
+
+**Why.** Ember-Research filed ER-1433 (via amux channel): Ember Core MIGRATION_LOG.md silently truncated from 4351 lines / 103 headings to 16 / 2 at merge 4ef4ffb and sat on local master for 6 days (the deploy-from-unpushed-master pattern means local master runs 127 commits ahead of origin for days). Per-item presence checks YES-pass while every other entry is deleted. The restoration landed at 53b7107 (4583 lines), and seven unmerged branches edit MIGRATION_LOG.md (eac1223, eac923, eac925, eac917, eac1023, eac578, eac863), each a chance to re-truncate. ECM is hand-guarding interim; this invariant will be the only AUTOMATED backstop once shipped. A git pre-receive hook would fire at push time, which is 6 days late in this org's deploy pattern. A server sweep at merge-commit landing catches it within one cycle.
+
+**What.**
+1. New table `merge_guard_seen_commits (repo TEXT, commit_sha TEXT, seen_at INTEGER, fired_alert INTEGER DEFAULT 0, PRIMARY KEY(repo, commit_sha))`. Dedup + alert idempotency.
+2. Watchlist config file at `~/.amux/merge-guard.json`. Autocreated on first sweep if missing with default `{"enabled": true, "files": ["MIGRATION_LOG.md"], "max_age_days": 14}`. The `files` list is basenames (not paths); the sweep checks every tracked repo for each basename. Ignored if `enabled: false`.
+3. New sweep `_merge_shrink_sweep` placed near `_repos_scan`. Every 300s. For each git repo under /mnt/gitdata maxdepth 3 (same discovery as `_repos_scan`):
+   - For each watchlist file basename, confirm the file exists at HEAD of that repo. If not, skip.
+   - `git -C <repo> log --merges --since='<max_age_days> days ago' --format=%H HEAD -- <file>` for new merge commits.
+   - Skip commits already in `merge_guard_seen_commits` for this repo.
+   - FIRST-SEEN-ever for a (repo, file) pair: insert all current history commits with fired_alert=0, no alerts (bootstrap — the restoration already handled by humans; we only alarm on new incidents).
+   - For each new merge commit: compute `wc -l` and `grep -cE '^## '` on each of `commit:file`, `commit^1:file`, `commit^2:file` via `git show`. If merged line count < max(parents) OR merged heading count < max(parents), alert.
+4. Alert: `_push_alert("merge_shrink", repo_name, f"{repo}: {sha[:12]} shrank {file} - headings {old_max_hd}->{merged_hd}, lines {old_max_ln}->{merged_ln}. See `git -C {repo_path} show {sha} -- {file}`.")`. `merge_shrink` is NOT in `AMUX_PUSHOVER_MUTED_ALERTS` so Pushover fires. Sets `fired_alert=1` in the seen table.
+5. Register with `schedule_job(_merge_shrink_sweep, interval=300, name="merge_shrink", initial_delay=90)` alongside the other sweeps.
+
+**Verify.**
+- Syntax: `python3 -c "import ast; ast.parse(open('amux-server.py').read())"`.
+- After restart, first sweep logs `[merge-shrink] bootstrap: <repo>/<file> N commits recorded, no alerts` for each tracked (repo, file) that has history. SQLite: `select count(*) from merge_guard_seen_commits where fired_alert=0` should show the seeded rows.
+- Zero alerts should fire from existing history (the restoration already landed; this is baseline, not retroactive).
+- Future test: in a scratch repo, make a merge that drops ## headings from an append-only log and confirm the next sweep fires the alert with the correct delta numbers.
+- Non-regression: sweep is pure-read (`git show`, `git log`). Per-git-call timeout is 10s to avoid hanging on a slow repo. No writes to any tracked repo. No SSE/board changes. Dashboard sees the alert through the existing `_sse_alerts` channel.
 
 ## Plan for change: detect "Login expired · Please run /login" and Pushover Jeremy (2026-11-09) DONE
 
