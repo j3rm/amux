@@ -6591,6 +6591,26 @@ def _init_db():
         "ALTER TABLE messages ADD COLUMN review_rule   TEXT NOT NULL DEFAULT ''",
         "ALTER TABLE messages ADD COLUMN review_reason TEXT NOT NULL DEFAULT ''",
         "ALTER TABLE messages ADD COLUMN reviewed_at   INTEGER NOT NULL DEFAULT 0",
+        # api_usage (AH-158, 2026-11-10). Append-only log of every direct
+        # Anthropic API call amux-server makes (reviewer first, future
+        # callers extend `event_type`). Lets the Usage tab report MTD
+        # spend against the $200/mo API credit without a round trip to
+        # the Admin API. cost_usd is calculated at insert time from the
+        # pricing table in-code; model is recorded so the tab can
+        # retro-cost if rates change.
+        "CREATE TABLE IF NOT EXISTS api_usage ("
+        "  id INTEGER PRIMARY KEY AUTOINCREMENT, "
+        "  event_type TEXT NOT NULL, "
+        "  model TEXT NOT NULL, "
+        "  input_tokens INTEGER NOT NULL DEFAULT 0, "
+        "  output_tokens INTEGER NOT NULL DEFAULT 0, "
+        "  cache_creation_tokens INTEGER NOT NULL DEFAULT 0, "
+        "  cache_read_tokens INTEGER NOT NULL DEFAULT 0, "
+        "  cost_usd REAL NOT NULL DEFAULT 0.0, "
+        "  created INTEGER NOT NULL"
+        ")",
+        "CREATE INDEX IF NOT EXISTS idx_api_usage_created ON api_usage(created)",
+        "CREATE INDEX IF NOT EXISTS idx_api_usage_type_created ON api_usage(event_type, created)",
     ]:
         try:
             db.execute(migration)
@@ -20778,6 +20798,35 @@ setTimeout(function(){var f=document.getElementById('js-fallback');if(f&&f.style
 <!-- Usage view: full-detail cards from GET /api/usage (same payload as header bars). -->
 <!-- Mobile has no hover so the header bars' title=tooltips are invisible there; this tab is the pay-as-you-go version. -->
 <div id="usage-view" style="display:none;flex-direction:column;padding:12px 16px;overflow-y:auto;-webkit-overflow-scrolling:touch;gap:12px;">
+  <!-- AH-158: Anthropic API spend card (reviewer + other direct amux-server
+       calls). Separate from the per-account weekly usage below because that
+       tracks Claude Code session usage; this tracks direct API calls amux-
+       server makes on Jeremy's single Anthropic-API account ($200/month
+       credit). -->
+  <div id="api-usage-card" style="background:var(--surface);border:1px solid var(--border);border-radius:8px;padding:12px 14px;">
+    <div style="display:flex;align-items:center;justify-content:space-between;gap:8px;flex-wrap:wrap;margin-bottom:8px;">
+      <div>
+        <div style="font-weight:600;font-size:1rem;">Anthropic API spend (amux-server direct calls)</div>
+        <div id="api-usage-sub" style="color:var(--muted);font-size:0.78rem;margin-top:2px;">Loading...</div>
+      </div>
+      <button onclick="_apiUsageLoad(true)" style="padding:6px 12px;background:var(--surface);color:var(--text);border:1px solid var(--border);border-radius:6px;font-size:0.82rem;cursor:pointer;min-height:32px;">Refresh</button>
+    </div>
+    <div id="api-usage-bar-wrap" style="margin-top:6px;">
+      <div style="display:flex;align-items:baseline;justify-content:space-between;gap:8px;margin-bottom:4px;">
+        <span id="api-usage-spent"  style="font-size:1.4rem;font-weight:700;">$0.00</span>
+        <span id="api-usage-of"     style="font-size:0.85rem;color:var(--muted);">of $200.00 monthly credit</span>
+      </div>
+      <div style="height:10px;background:rgba(255,255,255,0.05);border-radius:5px;overflow:hidden;">
+        <div id="api-usage-bar" style="height:100%;background:#3a6ea5;width:0%;transition:width 0.3s;"></div>
+      </div>
+      <div style="display:flex;justify-content:space-between;color:var(--muted);font-size:0.78rem;margin-top:4px;">
+        <span id="api-usage-remaining">Remaining: $200.00</span>
+        <span id="api-usage-today">Today: $0.00</span>
+      </div>
+    </div>
+    <div id="api-usage-breakdown" style="margin-top:10px;display:grid;grid-template-columns:1fr 1fr;gap:8px;font-size:0.82rem;">
+    </div>
+  </div>
   <div style="display:flex;align-items:center;justify-content:space-between;gap:8px;flex-wrap:wrap;">
     <div>
       <div style="font-weight:600;font-size:1rem;">Weekly usage</div>
@@ -24532,6 +24581,7 @@ function _usageTabLoad() {
     updateWeeklyMeter();
   }
   _usageTabRender();
+  _apiUsageLoad(false);
 }
 function _usageTabRefresh() {
   // Force a fresh /api/usage pull regardless of the 20s guard.
@@ -24540,6 +24590,68 @@ function _usageTabRefresh() {
   const container = document.getElementById('usage-tab-cards');
   if (container) container.innerHTML = '<div class="uc-empty">Refreshing...</div>';
   updateWeeklyMeter();
+  _apiUsageLoad(true);
+}
+
+// AH-158: /api/stats/api-usage fetcher + renderer. Tracks reviewer + any
+// other direct Anthropic-API calls amux-server makes against Jeremy's
+// $200/month API credit. Separate from the per-account weekly usage above
+// because those track Claude Code sessions.
+let _apiUsageState = {data: null, inflight: false};
+function _apiUsageLoad(force) {
+  if (_apiUsageState.inflight) return;
+  if (!force && _apiUsageState.data) {
+    const age = Date.now() - (_apiUsageState.data._fetchedAt || 0);
+    if (age < 20000) { _apiUsageRender(); return; }
+  }
+  _apiUsageState.inflight = true;
+  fetch('/api/stats/api-usage').then(r => r.json()).then(d => {
+    d._fetchedAt = Date.now();
+    _apiUsageState.data = d;
+    _apiUsageState.inflight = false;
+    _apiUsageRender();
+  }).catch(() => {
+    _apiUsageState.inflight = false;
+    const sub = document.getElementById('api-usage-sub');
+    if (sub) sub.textContent = 'Failed to load';
+  });
+}
+function _apiUsageRender() {
+  const d = _apiUsageState.data;
+  if (!d) return;
+  const money = n => '$' + (Number(n) || 0).toFixed(2);
+  const money4 = n => '$' + (Number(n) || 0).toFixed(4);
+  const credit = Number(d.credit_usd) || 200;
+  const spent = Number(d.spent_month_usd) || 0;
+  const remaining = Number(d.remaining_usd) || 0;
+  const pct = Number(d.pct_used) || 0;
+  const today = Number((d.today && d.today.cost_usd) || 0);
+  const nowMonth = new Date().toISOString().slice(0, 7);
+  const setT = (id, v) => { const e = document.getElementById(id); if (e) e.textContent = v; };
+  setT('api-usage-sub', nowMonth + ' month-to-date, ' + ((d.month && d.month.events) || 0) + ' calls');
+  setT('api-usage-spent', money(spent));
+  setT('api-usage-of', 'of ' + money(credit) + ' monthly credit');
+  setT('api-usage-remaining', 'Remaining: ' + money(remaining));
+  setT('api-usage-today', 'Today: ' + money(today));
+  const bar = document.getElementById('api-usage-bar');
+  if (bar) {
+    bar.style.width = Math.min(100, Math.max(0, pct)).toFixed(1) + '%';
+    bar.style.background = pct >= 90 ? '#c0392b' : (pct >= 70 ? '#c99a2e' : '#3a6ea5');
+  }
+  const bd = document.getElementById('api-usage-breakdown');
+  if (bd) {
+    const byType = Array.isArray(d.by_type) ? d.by_type : [];
+    const byModel = Array.isArray(d.by_model) ? d.by_model : [];
+    const typeRows = byType.map(r =>
+      '<div><b>' + (r.event_type || '?') + '</b>: ' + money4(r.cost_usd) + ' (' + (r.events || 0) + ' calls)</div>'
+    ).join('') || '<div style="color:var(--muted);">No calls yet this month</div>';
+    const modelRows = byModel.map(r =>
+      '<div><b>' + (r.model || '?') + '</b>: ' + money4(r.cost_usd) + ' (' + (r.events || 0) + ' calls)</div>'
+    ).join('') || '<div style="color:var(--muted);">(none)</div>';
+    bd.innerHTML =
+      '<div><div style="color:var(--muted);font-size:0.75rem;text-transform:uppercase;letter-spacing:0.5px;margin-bottom:4px;">By event</div>' + typeRows + '</div>' +
+      '<div><div style="color:var(--muted);font-size:0.75rem;text-transform:uppercase;letter-spacing:0.5px;margin-bottom:4px;">By model</div>' + modelRows + '</div>';
+  }
 }
 
 // ── Header + dropdown ──
@@ -46966,6 +47078,100 @@ class CCHandler(BaseHTTPRequestHandler):
                 "top_items": top_items,
             })
 
+        # GET /api/stats/api-usage. AH-158. Direct-to-Anthropic API spend
+        # rolled up for the Usage tab. The Anthropic API ships with a $200/
+        # month credit; this endpoint reports month-to-date + today + a
+        # 30-day daily series so Jeremy can see the burn rate against that
+        # credit before it empties. amux-reviewer is the only caller today;
+        # future callers extend `event_type`.
+        if method == "GET" and path == "/api/stats/api-usage":
+            db = get_db()
+            now_t = int(time.time())
+            # Month boundary (UTC start-of-month). SQLite's strftime does
+            # the right thing with epoch seconds via datetime('unixepoch').
+            month_start = int(time.mktime(time.strptime(
+                time.strftime("%Y-%m-01 00:00:00", time.gmtime(now_t)),
+                "%Y-%m-%d %H:%M:%S"
+            ))) - time.timezone  # back to UTC epoch
+            day_start = int(time.mktime(time.strptime(
+                time.strftime("%Y-%m-%d 00:00:00", time.gmtime(now_t)),
+                "%Y-%m-%d %H:%M:%S"
+            ))) - time.timezone
+            try:
+                credit_month = float(os.environ.get("AMUX_API_MONTHLY_CREDIT_USD", "200") or 200)
+            except (TypeError, ValueError):
+                credit_month = 200.0
+            def _sum_window(start_epoch):
+                r = db.execute(
+                    "SELECT COUNT(*) AS n, "
+                    "       COALESCE(SUM(input_tokens),0) AS inp, "
+                    "       COALESCE(SUM(output_tokens),0) AS out, "
+                    "       COALESCE(SUM(cache_creation_tokens),0) AS cw, "
+                    "       COALESCE(SUM(cache_read_tokens),0) AS cr, "
+                    "       COALESCE(SUM(cost_usd),0.0) AS cost "
+                    "  FROM api_usage WHERE created >= ?",
+                    (start_epoch,)
+                ).fetchone()
+                return {
+                    "events": r["n"], "input_tokens": r["inp"],
+                    "output_tokens": r["out"], "cache_creation_tokens": r["cw"],
+                    "cache_read_tokens": r["cr"], "cost_usd": round(r["cost"], 6),
+                }
+            month = _sum_window(month_start)
+            today = _sum_window(day_start)
+            by_type = [
+                {"event_type": r["event_type"], "events": r["n"],
+                 "input_tokens": r["inp"], "output_tokens": r["out"],
+                 "cost_usd": round(r["cost"], 6)}
+                for r in db.execute(
+                    "SELECT event_type, COUNT(*) AS n, "
+                    "       COALESCE(SUM(input_tokens),0) AS inp, "
+                    "       COALESCE(SUM(output_tokens),0) AS out, "
+                    "       COALESCE(SUM(cost_usd),0.0) AS cost "
+                    "  FROM api_usage WHERE created >= ? "
+                    "  GROUP BY event_type ORDER BY cost DESC",
+                    (month_start,)
+                )
+            ]
+            by_model = [
+                {"model": r["model"], "events": r["n"],
+                 "cost_usd": round(r["cost"], 6)}
+                for r in db.execute(
+                    "SELECT model, COUNT(*) AS n, "
+                    "       COALESCE(SUM(cost_usd),0.0) AS cost "
+                    "  FROM api_usage WHERE created >= ? "
+                    "  GROUP BY model ORDER BY cost DESC",
+                    (month_start,)
+                )
+            ]
+            # Daily series, last 30 days, UTC day bucket.
+            thirty_days_ago = now_t - 30 * 86400
+            daily = [
+                {"date": r["day"], "events": r["n"],
+                 "cost_usd": round(r["cost"], 6)}
+                for r in db.execute(
+                    "SELECT strftime('%Y-%m-%d', created, 'unixepoch') AS day, "
+                    "       COUNT(*) AS n, "
+                    "       COALESCE(SUM(cost_usd),0.0) AS cost "
+                    "  FROM api_usage WHERE created >= ? "
+                    "  GROUP BY day ORDER BY day ASC",
+                    (thirty_days_ago,)
+                )
+            ]
+            return self._json({
+                "credit_usd": credit_month,
+                "spent_month_usd": month["cost_usd"],
+                "remaining_usd": round(credit_month - month["cost_usd"], 6),
+                "pct_used": round(100.0 * month["cost_usd"] / credit_month, 2) if credit_month else 0.0,
+                "month": month,
+                "today": today,
+                "by_type": by_type,
+                "by_model": by_model,
+                "daily": daily,
+                "pricing_per_mtok": _API_PRICING_PER_M,
+                "as_of": now_t,
+            })
+
         # GET /api/recordings — list all recordings in ~/.amux/recordings/
         if method == "GET" and path == "/api/recordings":
             import json as _json
@@ -52630,6 +52836,72 @@ def _reviewer_load_rubric() -> str:
         return _REVIEWER_RUBRIC_DEFAULT
 
 
+# Anthropic API price card (USD per 1M tokens). Standard tier only; fast mode
+# and >100K-prompt tiers not represented here because the reviewer never hits
+# them. Updated 2026-10-06 cache from the claude-api skill. If a cost is
+# needed for a model not in the table, _cost_usd returns 0 so an unknown
+# model never silently over/under-charges - a zero in the ledger is a visible
+# "unknown model, add to table" signal.
+_API_PRICING_PER_M = {
+    "claude-haiku-5-5":  {"input": 0.10,  "output": 0.50,
+                          "cache_read": 0.01,  "cache_write": 0.125},
+    "claude-sonnet-5-5": {"input": 2.00,  "output": 10.00,
+                          "cache_read": 0.20,  "cache_write": 2.50},
+    "claude-opus-5-5":   {"input": 4.00,  "output": 20.00,
+                          "cache_read": 0.40,  "cache_write": 5.00},
+    "claude-fable-5-1":  {"input": 10.00, "output": 50.00,
+                          "cache_read": 1.00,  "cache_write": 12.50},
+}
+
+
+def _api_cost_usd(model: str, usage: dict) -> float:
+    """Compute USD cost from a Messages API `usage` dict and a model.
+    Returns 0.0 for an unknown model (so a missing entry in the pricing
+    table is a visible zero in the ledger, not a silent misprice).
+    """
+    rates = _API_PRICING_PER_M.get(model)
+    if not rates:
+        return 0.0
+    inp = int(usage.get("input_tokens") or 0)
+    out = int(usage.get("output_tokens") or 0)
+    cr  = int(usage.get("cache_read_input_tokens") or 0)
+    cw  = int(usage.get("cache_creation_input_tokens") or 0)
+    cost = (
+        (inp * rates["input"])
+        + (out * rates["output"])
+        + (cr  * rates["cache_read"])
+        + (cw  * rates["cache_write"])
+    ) / 1_000_000.0
+    return round(cost, 8)
+
+
+def _api_usage_log(event_type: str, model: str, usage: dict) -> None:
+    """Append one row to api_usage. Swallows errors - the sweep must not
+    fail just because telemetry writes failed.
+    """
+    try:
+        db = get_db()
+        now_t = int(time.time())
+        db.execute(
+            "INSERT INTO api_usage (event_type, model, input_tokens, "
+            "  output_tokens, cache_creation_tokens, cache_read_tokens, "
+            "  cost_usd, created) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                event_type,
+                model,
+                int(usage.get("input_tokens") or 0),
+                int(usage.get("output_tokens") or 0),
+                int(usage.get("cache_creation_input_tokens") or 0),
+                int(usage.get("cache_read_input_tokens") or 0),
+                _api_cost_usd(model, usage),
+                now_t,
+            ),
+        )
+        db.commit()
+    except Exception as e:
+        slog(f"[api-usage] log failed ({event_type}): {e}")
+
+
 def _reviewer_judge(body: str) -> dict:
     """Call Anthropic Haiku with the rubric; return verdict dict.
 
@@ -52638,15 +52910,21 @@ def _reviewer_judge(body: str) -> dict:
     Fail-open is deliberate: an outage of the review service should
     never silently swallow messages to Jeremy. Jeremy can read the
     api-error reason on the message row to spot sustained outages.
+
+    Also returns `_usage` (the raw Anthropic usage dict) and `_model`
+    so the caller can log it to api_usage. These extra keys are not
+    persisted anywhere but the sweep's log call.
     """
     api_key = os.environ.get("ANTHROPIC_API_KEY", "")
     if not api_key:
         return {"verdict": "approved", "rule": "api-error",
-                "reason": "ANTHROPIC_API_KEY not set in server env"}
+                "reason": "ANTHROPIC_API_KEY not set in server env",
+                "_usage": {}, "_model": "claude-haiku-5-5"}
     rubric = _reviewer_load_rubric()
+    model = "claude-haiku-5-5"
     # No temperature: deprecated on claude-haiku-5-5 and would 400 the call.
     payload = json.dumps({
-        "model": "claude-haiku-5-5",
+        "model": model,
         "max_tokens": 150,
         "system": rubric,
         "messages": [{"role": "user", "content": body}],
@@ -52666,9 +52944,12 @@ def _reviewer_judge(body: str) -> dict:
             raw = resp.read().decode("utf-8", errors="replace")
     except Exception as e:
         return {"verdict": "approved", "rule": "api-error",
-                "reason": f"haiku call failed: {e}"[:200]}
+                "reason": f"haiku call failed: {e}"[:200],
+                "_usage": {}, "_model": model}
+    usage = {}
     try:
         data = json.loads(raw)
+        usage = data.get("usage") or {}
         text = ""
         for block in data.get("content") or []:
             if block.get("type") == "text":
@@ -52683,13 +52964,18 @@ def _reviewer_judge(body: str) -> dict:
         verdict = str(parsed.get("verdict", "")).strip().lower()
         if verdict not in ("approved", "rejected"):
             return {"verdict": "approved", "rule": "api-error",
-                    "reason": f"haiku returned non-verdict: {verdict!r}"}
+                    "reason": f"haiku returned non-verdict: {verdict!r}",
+                    "_usage": usage, "_model": model}
         rule = str(parsed.get("rule") or "")[:40]
         reason = str(parsed.get("reason") or "")[:400]
-        return {"verdict": verdict, "rule": rule, "reason": reason}
+        return {"verdict": verdict, "rule": rule, "reason": reason,
+                "_usage": usage, "_model": model}
     except Exception as e:
+        # Preserve `usage` if we got that far before the exception (so the
+        # api_usage ledger still records the spend even when parse fails).
         return {"verdict": "approved", "rule": "api-error",
-                "reason": f"haiku JSON parse failed: {e}"[:200]}
+                "reason": f"haiku JSON parse failed: {e}"[:200],
+                "_usage": usage, "_model": model}
 
 
 def _reviewer_file_rejection_board(msg_row, verdict: dict, thread_row):
@@ -52780,7 +53066,13 @@ def _reviewer_sweep():
         except Exception as e:
             slog(f"[reviewer] judge threw for {mid}: {e}")
             verdict = {"verdict": "approved", "rule": "api-error",
-                       "reason": f"judge threw: {e}"[:200]}
+                       "reason": f"judge threw: {e}"[:200],
+                       "_usage": {}, "_model": "claude-haiku-5-5"}
+        # Log the API call cost regardless of verdict shape so even
+        # fail-open calls are accounted for.
+        _api_usage_log("reviewer",
+                       verdict.get("_model") or "claude-haiku-5-5",
+                       verdict.get("_usage") or {})
         now_t = int(time.time())
         v = verdict.get("verdict", "approved")
         rule = (verdict.get("rule") or "")[:40]

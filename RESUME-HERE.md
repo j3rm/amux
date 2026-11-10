@@ -4,6 +4,25 @@
 
 Last updated: 2026-11-10
 
+## Plan for change: Anthropic API spend tracking vs $200/mo credit (AH-158, 2026-11-10) DONE
+
+**Why.** Jeremy (channel 2026-11-10): "if we are going to use the API [for the amux-reviewer] ... we get $200 credit per month, so we need to make sure that we start tracking that." amux-reviewer just shipped (AH-155) and is the first direct Anthropic-API caller from amux-server. No telemetry today means a bug that fires the Haiku call 10/sec silently burns the monthly credit. The Usage tab already exists for per-account Claude Code weekly usage; the API spend is a separate concern (single Anthropic-API account, dollar budget, monthly reset) so it needs its own card.
+
+**What.**
+1. Schema: `api_usage(id, event_type, model, input_tokens, output_tokens, cache_creation_tokens, cache_read_tokens, cost_usd, created)` with indexes on created + event_type. Added via migration list.
+2. `_API_PRICING_PER_M` dict keyed by model (haiku-5-5, sonnet-5-5, opus-5-5, fable-5-1) with per-MTok rates (input, output, cache_read, cache_write). `_api_cost_usd(model, usage)` returns 0 on unknown model so the ledger makes misprice visible, not silent.
+3. `_api_usage_log(event_type, model, usage)` inserts one row per API call. Swallows errors so telemetry never breaks the caller.
+4. `_reviewer_judge` returns `_usage` (raw Anthropic usage dict) and `_model` in its verdict. `_reviewer_sweep` logs after every judge, regardless of fail-open path. The JSON-parse exception path also preserves the usage dict so spend is tracked even when the model returns non-JSON.
+5. GET `/api/stats/api-usage`: returns `credit_usd` (env `AMUX_API_MONTHLY_CREDIT_USD`, default 200), `spent_month_usd`, `remaining_usd`, `pct_used`, `month`/`today` aggregate rows, `by_type`, `by_model`, 30-day `daily` series, `pricing_per_mtok`. Month and day boundaries are UTC-aligned.
+6. Usage tab UI: new `#api-usage-card` above the existing Weekly cards. Shows spent / credit with a progress bar (blue -> amber at 70% -> red at 90%), today's spend, remaining, by-event-type and by-model breakdowns. `_apiUsageLoad()` fetches `/api/stats/api-usage`; hooked into `_usageTabLoad()` + `_usageTabRefresh()`.
+
+**Verify.**
+- Syntax: `python3 -c "import ast; ast.parse(open('amux-server.py').read())"`. OK.
+- `GET /api/stats/api-usage` returns valid JSON with all expected keys (credit_usd=200, pct_used, by_type as list, by_model as list, today.cost_usd). OK.
+- Trigger a reviewer call (post a clean agent-to-Jeremy thread message). Within ~15s api_usage grows a row with real token counts and cost. Confirmed: 760 in + 150 out = $0.000151 at haiku-5-5 rates.
+- UI card paints spent/remaining and refresh button re-fetches without full tab reload.
+- Non-regression: existing Weekly usage cards still render; `/api/usage` untouched.
+
 ## Plan for change: amux-reviewer Haiku gatekeeper for thread posts + before/after filter (AH-155, 2026-11-10) DONE
 
 **Why.** Jeremy (channel 2026-11-10): agents keep posting run-on multi-blast thread messages despite CLAUDE.md 5-line/ADHD rules. Convention drift. Needs a Haiku-powered reviewer that must approve every agent thread post before Jeremy sees it. No suggestions - pass/fail only. Compression-resilient (rejected agent needs its original body back even if it has compressed context between send and reject).
