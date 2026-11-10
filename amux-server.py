@@ -6581,6 +6581,16 @@ def _init_db():
         # board desc — could otherwise style it as any trusted session).
         # Existing schedules migrate to '' → stamp shows 'unknown'.
         "ALTER TABLE schedules ADD COLUMN posted_by_session TEXT NOT NULL DEFAULT ''",
+        # amux-reviewer gate (AH-155, 2026-11-10). Agent thread posts to
+        # Jeremy pass through a Haiku-powered reviewer BEFORE Jeremy sees
+        # them. review_status in ('pending','approved','rejected').
+        # Default is 'approved' so the one-time migration doesn't strand
+        # every existing message in pending; only NEW agent-to-Jeremy
+        # inserts flip to pending via the POST/PATCH handlers.
+        "ALTER TABLE messages ADD COLUMN review_status TEXT NOT NULL DEFAULT 'approved'",
+        "ALTER TABLE messages ADD COLUMN review_rule   TEXT NOT NULL DEFAULT ''",
+        "ALTER TABLE messages ADD COLUMN review_reason TEXT NOT NULL DEFAULT ''",
+        "ALTER TABLE messages ADD COLUMN reviewed_at   INTEGER NOT NULL DEFAULT 0",
     ]:
         try:
             db.execute(migration)
@@ -20431,9 +20441,54 @@ setTimeout(function(){var f=document.getElementById('js-fallback');if(f&&f.style
       style="flex:1;min-width:180px;max-width:340px;padding:6px 10px;border:1px solid var(--border);border-radius:5px;background:var(--card-bg,#0a0a0a);color:var(--fg);font-size:0.9rem;">
     <span style="color:var(--muted);font-size:0.8rem;">Conversations with agents. Every message can be replied to individually. Star to pin at top.</span>
   </div>
+  <!-- AH-155 amux-reviewer gate: filter switch. Default "All" so Jeremy can
+       see pending + rejected alongside approved while the Haiku gate is being
+       validated. Flip to "Approved only" later for the quiet inbox view. -->
+  <div style="display:flex;align-items:center;gap:8px;margin-bottom:10px;flex-wrap:wrap;font-size:0.78rem;">
+    <span style="color:var(--muted);">Reviewer filter:</span>
+    <button id="t-rev-filter-all"       class="t-rev-filter-btn" onclick="_tReviewFilterSet('all')">All</button>
+    <button id="t-rev-filter-approved"  class="t-rev-filter-btn" onclick="_tReviewFilterSet('approved')">Approved only</button>
+    <button id="t-rev-filter-gated"     class="t-rev-filter-btn" onclick="_tReviewFilterSet('gated')">Pending + Rejected</button>
+    <span id="t-rev-filter-counts" style="color:var(--muted);margin-left:auto;"></span>
+  </div>
   <div id="threads-search-results" style="display:none;margin-bottom:12px;"></div>
   <div id="threads-list"></div>
 </div>
+<style>
+  .t-rev-filter-btn {
+    background: var(--card-bg, #0a0a0a);
+    color: var(--fg);
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    padding: 4px 10px;
+    cursor: pointer;
+    font-size: 0.78rem;
+    min-height: 32px;
+  }
+  .t-rev-filter-btn.active {
+    background: #3a6ea5;
+    color: #fff;
+    border-color: #3a6ea5;
+  }
+  /* Review-state accents (left border only; overrides direction accent on the
+     msg card via the .t-msg-review-* class set by _tRenderMsg). */
+  .t-msg-review-pending  { border-left-color: #c99a2e !important; }
+  .t-msg-review-rejected { border-left-color: #c0392b !important; }
+  .t-rev-badge {
+    display: inline-block;
+    padding: 1px 7px;
+    border-radius: 10px;
+    font-size: 0.65rem;
+    font-weight: 700;
+    letter-spacing: 0.02em;
+    text-transform: uppercase;
+  }
+  .t-rev-badge-pending  { background: #c99a2e; color: #111; }
+  .t-rev-badge-rejected { background: #c0392b; color: #fff; }
+  @media (max-width: 600px) {
+    .t-rev-filter-btn { min-height: 40px; }
+  }
+</style>
 <!-- New-thread modal — also serves as per-message Reply modal via context flag. -->
 <div id="t-new-modal" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,0.55);z-index:1000;justify-content:center;align-items:center;padding:20px;" onclick="if(event.target===this)_threadsCloseNew()">
   <div style="background:var(--card-bg,#111);border:1px solid var(--border);border-radius:8px;padding:16px 18px;max-width:640px;width:100%;">
@@ -32496,6 +32551,7 @@ function switchView(view) {
     if (_sseFallback && !boardTimer) boardTimer = setInterval(fetchBoard, 5000);
   } else if (view === 'threads') {
     _threadsLoad();
+    _tReviewFilterUpdateButtons();
     // SSE pushes threads updates; only poll when the stream is dead.
     if (_sseFallback && !_threadsTimer) _threadsTimer = setInterval(_threadsLoad, 5000);
   } else if (view === 'scheduler') {
@@ -33219,6 +33275,34 @@ function _tMsgAlwaysShow(m) {
       || !!m.flagged
       || (m.status === 'complete' && !m.to_session && !m.read);  // unread to Jeremy
 }
+// AH-155 reviewer filter. Default 'all' so Jeremy can see before+after while
+// validating the Haiku gate. Persisted in localStorage.
+let _tReviewFilter = localStorage.getItem('amux.tReviewFilter') || 'all';
+function _tReviewFilterSet(mode) {
+  if (!['all','approved','gated'].includes(mode)) mode = 'all';
+  _tReviewFilter = mode;
+  try { localStorage.setItem('amux.tReviewFilter', mode); } catch(e) {}
+  _tReviewFilterUpdateButtons();
+  _threadsRender();
+}
+function _tReviewFilterUpdateButtons() {
+  const ids = ['t-rev-filter-all','t-rev-filter-approved','t-rev-filter-gated'];
+  const map = {all:'t-rev-filter-all', approved:'t-rev-filter-approved', gated:'t-rev-filter-gated'};
+  for (const id of ids) {
+    const el = document.getElementById(id);
+    if (el) el.classList.remove('active');
+  }
+  const active = document.getElementById(map[_tReviewFilter] || map.all);
+  if (active) active.classList.add('active');
+}
+// Decide whether a message passes the current review filter.
+function _tReviewFilterPass(m) {
+  const rs = (m.review_status || 'approved');
+  if (_tReviewFilter === 'all') return true;
+  if (_tReviewFilter === 'approved') return rs === 'approved';
+  if (_tReviewFilter === 'gated') return rs === 'pending' || rs === 'rejected';
+  return true;
+}
 function _tRenderMessages(t) {
   const tidEsc = _tEsc(t.id);
   // Slightly darker inset background inside the expanded panel so the message
@@ -33233,7 +33317,11 @@ function _tRenderMessages(t) {
     for (const m of older) if (!seen.has(m.id)) merged.push(m);
   }
   // Newest at top so the message you probably want to act on is first.
-  const msgs = merged.sort((a,b) => (b.position - a.position) || (b.created - a.created));
+  let msgs = merged.sort((a,b) => (b.position - a.position) || (b.created - a.created));
+  // AH-155: apply the review filter. Messages the current filter hides are
+  // dropped before rendering; counts shown in the toolbar include every
+  // state so Jeremy can see what is being filtered out.
+  msgs = msgs.filter(_tReviewFilterPass);
   const showAll = _tShowAllMsgs.has(t.id);
   const READ_MAX = 5;
   const collapsibleTotal = msgs.filter(m => !_tMsgAlwaysShow(m)).length;
@@ -33349,13 +33437,29 @@ function _tRenderMsg(t, m) {
   } else if (isDashResp && m.from_session) {
     auditChipHtml = `<button style="${_TICON_BTN_STYLE}opacity:0.5;" title="Audit this message now" onclick="event.stopPropagation();_tAuditNow('${midEsc}')">⚖</button>`;
   }
-  let html = `<div style="margin:0 0 8px 0;border:1px solid var(--border);border-left:3px solid ${accent};background:${cardBg};border-radius:4px;">
+  // AH-155 reviewer status. pending = yellow badge + yellow accent (overrides
+  // direction accent); rejected = red badge + red accent; approved = no badge.
+  const revStatus = (m.review_status || 'approved');
+  const revCls = (revStatus === 'pending')  ? ' t-msg-review-pending'
+                : (revStatus === 'rejected') ? ' t-msg-review-rejected'
+                : '';
+  let revBadgeHtml = '';
+  if (revStatus === 'pending') {
+    revBadgeHtml = `<span class="t-rev-badge t-rev-badge-pending" title="Jeremy has NOT seen this message yet — awaiting amux-reviewer (Haiku) approval.">⧖ review pending</span>`;
+  } else if (revStatus === 'rejected') {
+    const rule = m.review_rule || 'other';
+    const reason = m.review_reason || '';
+    const tipAttr = _tEsc('Rejected (rule: ' + rule + '). ' + reason + ' — Jeremy did NOT see this. Agent got a board item to rewrite.');
+    revBadgeHtml = `<span class="t-rev-badge t-rev-badge-rejected" title="${tipAttr}">✗ rejected: ${_tEsc(rule)}</span>`;
+  }
+  let html = `<div class="t-msg${revCls}" style="margin:0 0 8px 0;border:1px solid var(--border);border-left:3px solid ${accent};background:${cardBg};border-radius:4px;">
     <div style="display:flex;align-items:center;gap:8px;padding:6px 10px;cursor:pointer;font-size:0.75rem;color:var(--muted);flex-wrap:wrap;" onclick="_tMsgToggle('${midEsc}', ${expanded})">
       <span style="width:12px;color:var(--muted);">${chev}</span>
       <button style="${_TICON_BTN_STYLE}" onclick="event.stopPropagation();_tFlagToggle('${midEsc}', ${flagged ? 'false' : 'true'})" title="${flagged ? 'Unflag' : 'Flag this message'}">${flagged ? _TICON_FLAG_ON : _TICON_FLAG_OFF}</button>
       <button style="${_TICON_BTN_STYLE}" onclick="event.stopPropagation();_tReplyTo('${tidEsc}','${midEsc}')" title="Reply to this message">${_TICON_REPLY}</button>
       ${canMarkRead ? `<button style="${_TICON_BTN_STYLE}" onclick="event.stopPropagation();_tMarkRead('${midEsc}')" title="Mark read">${_TICON_CHECK}</button>` : ''}
       <span style="background:${st.color};color:#fff;padding:1px 6px;border-radius:3px;font-weight:600;text-transform:uppercase;letter-spacing:0.03em;">${st.text}</span>
+      ${revBadgeHtml}
       <span style="font-weight:600;color:var(--fg);">${midEsc}</span>
       <span>${_tEsc(dir.label)}</span>
       ${auditChipHtml}
@@ -45364,12 +45468,19 @@ class CCHandler(BaseHTTPRequestHandler):
                 ).fetchone()
                 pos = pos_row["next_pos"]
                 mid = _next_issue_id("M")
+                # AH-155 reviewer gate: agent-to-Jeremy complete posts go
+                # 'pending' and are held for Haiku review. Everything
+                # else inserts 'approved' and delivers inline.
+                _review_initial = "pending" if (
+                    from_session and not to_session and new_status == "complete"
+                ) else "approved"
                 db.execute(
                     "INSERT INTO messages (id, thread_id, parent_id, from_session, "
-                    "  to_session, body, blocking, status, position, created, updated) "
-                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    "  to_session, body, blocking, status, position, review_status, "
+                    "  created, updated) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                     (mid, tid, parent_id, from_session, to_session, mbody,
-                     blocking, new_status, pos, now, now),
+                     blocking, new_status, pos, _review_initial, now, now),
                 )
                 db.execute("UPDATE threads SET updated = ? WHERE id = ?", (now, tid))
                 # Auto-clear the parent's blocking flag when a reply lands
@@ -45395,7 +45506,11 @@ class CCHandler(BaseHTTPRequestHandler):
                 # Only 'complete' messages get delivered — 'working' means the
                 # sender is still writing; deliver on the flip in PATCH.
                 # no_deliver=true skips (used by Move-to-Threads migration).
-                if new_status == "complete" and not bj.get("no_deliver"):
+                # AH-155: if the row is gated 'pending' by the reviewer, the
+                # sweep handles delivery after Haiku approves. Skip here.
+                if (new_status == "complete"
+                        and not bj.get("no_deliver")
+                        and _review_initial != "pending"):
                     _deliver(thread_row, msg_row)
                 return self._json(dict(msg_row), 201)
 
@@ -45514,13 +45629,33 @@ class CCHandler(BaseHTTPRequestHandler):
                             if addressed:
                                 return self._json(
                                     _addressing_error(addressed, msg_row["from_session"]), 400)
-                        db.execute(
-                            "UPDATE messages SET body = ?, status = ?, updated = ? "
-                            "WHERE id = ?", (new_body, new_status, now, mid),
+                        # AH-155 reviewer gate: when a working agent-to-Jeremy
+                        # draft is being finalized, flip review_status to
+                        # 'pending' so the sweep sees it and routes delivery
+                        # after Haiku judges. Other shapes (Jeremy's edits,
+                        # agent-to-agent is blocked above, partials) leave
+                        # review_status alone (default 'approved').
+                        _flip_to_pending = (
+                            was_working and new_status == "complete"
+                            and (msg_row["from_session"] or "")
+                            and not (msg_row["to_session"] or "")
                         )
+                        if _flip_to_pending:
+                            db.execute(
+                                "UPDATE messages SET body = ?, status = ?, "
+                                "  review_status = 'pending', review_rule = '', "
+                                "  review_reason = '', reviewed_at = 0, "
+                                "  updated = ? WHERE id = ?",
+                                (new_body, new_status, now, mid),
+                            )
+                        else:
+                            db.execute(
+                                "UPDATE messages SET body = ?, status = ?, updated = ? "
+                                "WHERE id = ?", (new_body, new_status, now, mid),
+                            )
                         db.execute("UPDATE threads SET updated = ? WHERE id = ?",
                                    (now, msg_row["thread_id"]))
-                        if was_working and new_status == "complete":
+                        if was_working and new_status == "complete" and not _flip_to_pending:
                             thread_row = db.execute(
                                 "SELECT * FROM threads WHERE id = ?",
                                 (msg_row["thread_id"],)
@@ -52424,6 +52559,286 @@ def _merge_shrink_sweep():
                 db.commit()
 
 
+# amux-reviewer: Haiku gatekeeper for agent-to-Jeremy thread posts.
+# AH-155, Jeremy ask 2026-11-10. See RESUME-HERE.md plan for rationale.
+#
+# Flow: agent POSTs a thread reply with from_session set and to_session
+# blank. Server inserts with review_status='pending', does NOT deliver.
+# `_reviewer_sweep` runs every 10s, pulls pending complete messages,
+# calls Haiku against the rubric at ~/.amux/reviewer-rubric.md, and:
+#   - on approved: calls `_deliver` (Pushover fires to Jeremy)
+#   - on rejected: files a board item to the sender with verbatim body
+#     + rule tag + reason. No Pushover.
+# All other message shapes (Jeremy's own posts, channels, board) are
+# untouched.
+_REVIEWER_RUBRIC_PATH = CC_HOME / "reviewer-rubric.md"
+_REVIEWER_RUBRIC_DEFAULT = """\
+You are amux-reviewer. Your sole job: judge whether an agent's thread
+message to Jeremy follows the human-readable rules. Return a verdict
+only. Do NOT propose rewrites; do NOT make suggestions.
+
+Jeremy has ADHD. Long, padded, run-on prose is noise he has to parse
+past. A disciplined message leads with the answer, uses plain
+punctuation, and stops.
+
+APPROVE a message that:
+- Leads with the answer, not preamble.
+- Fits roughly 5 lines (dense compactness is fine; multi-paragraph
+  padding is not).
+- Uses plain punctuation only: period, colon, comma, parentheses,
+  plain hyphen "-".
+- Reports exact numbers and names.
+- Ends when it has answered.
+
+REJECT a message that uses ANY of:
+- An em-dash (U+2014, "-") or en-dash (U+2013, "-") anywhere.
+  (Replacements: period, colon, comma, parens, plain hyphen.)
+- Preamble: "Just to be sure", "If you want", "I think", "my sense is",
+  "one open thing", "to be clear", "Quick note".
+- Echoed context Jeremy just gave in his prior message.
+- Run-on sentences: two or more independent clauses jammed with "and"
+  or commas where periods belong.
+- Rationale Jeremy did not ask for.
+- Hedges on hard facts ("about 8 GB" when "8.7 GB" is known).
+- Addressing another named session by colon ("Scorpio:", "iSchedule:",
+  etc.) in the body - threads are Jeremy's inbox only; another agent
+  will never see it.
+
+Return ONE compact JSON object and NOTHING ELSE:
+{"verdict": "approved" | "rejected", "rule": "<short-tag>", "reason": "<one sentence>"}
+
+Short-tag MUST be one of: em-dash, en-dash, preamble, run-on,
+echo-context, padding, hedge, rationale, addressed-other-agent, other.
+
+The reason is one sentence, used to tell the sending agent which rule
+tripped. Do not propose a rewrite. Do not quote the message back.
+"""
+
+
+def _reviewer_load_rubric() -> str:
+    """Load the rubric from disk; create with the default on first run.
+    Returns the rubric text. Errors fall back to the default so a
+    missing-file or permission issue never blocks the gate.
+    """
+    try:
+        if not _REVIEWER_RUBRIC_PATH.exists():
+            _REVIEWER_RUBRIC_PATH.write_text(_REVIEWER_RUBRIC_DEFAULT)
+            return _REVIEWER_RUBRIC_DEFAULT
+        txt = _REVIEWER_RUBRIC_PATH.read_text()
+        return txt if txt.strip() else _REVIEWER_RUBRIC_DEFAULT
+    except Exception:
+        return _REVIEWER_RUBRIC_DEFAULT
+
+
+def _reviewer_judge(body: str) -> dict:
+    """Call Anthropic Haiku with the rubric; return verdict dict.
+
+    On any failure (no API key, network, non-JSON response) FAIL OPEN:
+    return {'verdict':'approved','rule':'api-error','reason':'<err>'}.
+    Fail-open is deliberate: an outage of the review service should
+    never silently swallow messages to Jeremy. Jeremy can read the
+    api-error reason on the message row to spot sustained outages.
+    """
+    api_key = os.environ.get("ANTHROPIC_API_KEY", "")
+    if not api_key:
+        return {"verdict": "approved", "rule": "api-error",
+                "reason": "ANTHROPIC_API_KEY not set in server env"}
+    rubric = _reviewer_load_rubric()
+    # No temperature: deprecated on claude-haiku-5-5 and would 400 the call.
+    payload = json.dumps({
+        "model": "claude-haiku-5-5",
+        "max_tokens": 150,
+        "system": rubric,
+        "messages": [{"role": "user", "content": body}],
+    }).encode("utf-8")
+    try:
+        import urllib.request as _urlreq
+        req = _urlreq.Request(
+            "https://api.anthropic.com/v1/messages",
+            data=payload,
+            headers={
+                "x-api-key": api_key,
+                "anthropic-version": "2023-06-01",
+                "content-type": "application/json",
+            },
+        )
+        with _urlreq.urlopen(req, timeout=20) as resp:
+            raw = resp.read().decode("utf-8", errors="replace")
+    except Exception as e:
+        return {"verdict": "approved", "rule": "api-error",
+                "reason": f"haiku call failed: {e}"[:200]}
+    try:
+        data = json.loads(raw)
+        text = ""
+        for block in data.get("content") or []:
+            if block.get("type") == "text":
+                text += block.get("text") or ""
+        text = text.strip()
+        if text.startswith("```"):
+            text = text.strip("`")
+            if text.startswith("json"):
+                text = text[4:]
+            text = text.strip()
+        parsed = json.loads(text)
+        verdict = str(parsed.get("verdict", "")).strip().lower()
+        if verdict not in ("approved", "rejected"):
+            return {"verdict": "approved", "rule": "api-error",
+                    "reason": f"haiku returned non-verdict: {verdict!r}"}
+        rule = str(parsed.get("rule") or "")[:40]
+        reason = str(parsed.get("reason") or "")[:400]
+        return {"verdict": verdict, "rule": rule, "reason": reason}
+    except Exception as e:
+        return {"verdict": "approved", "rule": "api-error",
+                "reason": f"haiku JSON parse failed: {e}"[:200]}
+
+
+def _reviewer_file_rejection_board(msg_row, verdict: dict, thread_row):
+    """File a board item for the sender when their message was rejected.
+
+    Compression-resilience: the rejected agent may have compressed its
+    context between send and reject, so the board item carries the
+    FULL original body verbatim. The agent reads the board item on
+    wake and can rewrite without needing any prior memory of what it
+    wrote.
+    """
+    sender = msg_row["from_session"] or ""
+    if not sender:
+        return
+    tid = msg_row["thread_id"]
+    mid = msg_row["id"]
+    thread_title = thread_row["title"] if thread_row else ""
+    body = msg_row["body"] or ""
+    rule = verdict.get("rule") or "other"
+    reason = verdict.get("reason") or ""
+    sender_org = _session_org(sender) or ""
+    title = f"[amux-reviewer] Thread message rejected - rule: {rule}"
+    desc = (
+        f"amux-reviewer rejected your post to thread {tid} (message {mid}).\n\n"
+        f"Thread: {thread_title}\n"
+        f"Rule broken: **{rule}**\n"
+        f"Reason: {reason}\n\n"
+        f"Jeremy did NOT see this message. He will not see it.\n\n"
+        f"Your original body (verbatim, do NOT just resend - rewrite):\n\n"
+        f"```\n{body}\n```\n\n"
+        f"Reference: `~/.claude/CLAUDE.md` -> 'Replies to Jeremy' section. "
+        f"The rubric amux-reviewer uses lives at `~/.amux/reviewer-rubric.md`.\n\n"
+        f"When you have a shorter rewrite, POST a NEW message to the thread. "
+        f"PATCHing the old message body will send it back through the gate."
+    )
+    try:
+        db = get_db()
+        board_id = _next_issue_id(_prefix_from_session(sender))
+        now_t = int(time.time())
+        db.execute(
+            "INSERT INTO issues (id, title, desc, status, session, creator, "
+            "  created, updated, owner_type, org, posted_by_session) "
+            "VALUES (?, ?, ?, 'todo', ?, 'amux-reviewer', ?, ?, 'agent', ?, 'amux-reviewer')",
+            (board_id, title, desc, sender, now_t, now_t, sender_org or ""),
+        )
+        db.commit()
+        _board_changed()
+        try:
+            _notify_session_of_task(sender, board_id, title)
+        except Exception:
+            pass
+        slog(f"[reviewer] REJECT {sender} {tid}/{mid} rule={rule} -> {board_id}")
+    except Exception as e:
+        slog(f"[reviewer] failed to file rejection board for {mid}: {e}")
+
+
+def _reviewer_sweep():
+    """Review pending agent-to-Jeremy thread messages. AH-155.
+
+    Runs every 10s. Pulls at most 10 pending complete messages per
+    cycle (ordered oldest-first so a burst doesn't starve anyone),
+    calls Haiku, and routes approve/reject.
+    """
+    # Touch the rubric file so it exists even when the queue is idle.
+    # Lets Jeremy edit it live without having to wait for a message to
+    # trigger lazy creation.
+    try:
+        _reviewer_load_rubric()
+    except Exception:
+        pass
+    try:
+        db = get_db()
+        rows = db.execute(
+            "SELECT * FROM messages "
+            "WHERE status = 'complete' AND review_status = 'pending' "
+            "ORDER BY created ASC LIMIT 10"
+        ).fetchall()
+    except Exception as e:
+        slog(f"[reviewer] sweep query failed: {e}")
+        return
+    if not rows:
+        return
+    for r in rows:
+        mid = r["id"]
+        body = r["body"] or ""
+        try:
+            verdict = _reviewer_judge(body)
+        except Exception as e:
+            slog(f"[reviewer] judge threw for {mid}: {e}")
+            verdict = {"verdict": "approved", "rule": "api-error",
+                       "reason": f"judge threw: {e}"[:200]}
+        now_t = int(time.time())
+        v = verdict.get("verdict", "approved")
+        rule = (verdict.get("rule") or "")[:40]
+        reason = (verdict.get("reason") or "")[:400]
+        try:
+            db.execute(
+                "UPDATE messages SET review_status = ?, review_rule = ?, "
+                "  review_reason = ?, reviewed_at = ?, updated = ? "
+                "WHERE id = ?",
+                (v, rule, reason, now_t, now_t, mid),
+            )
+            db.commit()
+        except Exception as e:
+            slog(f"[reviewer] UPDATE failed for {mid}: {e}")
+            continue
+        try:
+            global _threads_version
+            _threads_version += 1
+        except Exception:
+            pass
+        thread_row = db.execute(
+            "SELECT * FROM threads WHERE id = ?", (r["thread_id"],)
+        ).fetchone()
+        if v == "approved":
+            try:
+                msg_row = db.execute(
+                    "SELECT * FROM messages WHERE id = ?", (mid,)
+                ).fetchone()
+                _reviewer_deliver_approved(thread_row, msg_row)
+            except Exception as e:
+                slog(f"[reviewer] deliver failed for {mid}: {e}")
+            slog(f"[reviewer] APPROVE {r['from_session']} {r['thread_id']}/{mid}")
+        else:
+            _reviewer_file_rejection_board(r, verdict, thread_row)
+
+
+def _reviewer_deliver_approved(thread_row, msg_row):
+    """Deliver a newly-approved message. Mirrors the inline `_deliver`
+    closure in the thread POST handler (which runs inside a request
+    scope and isn't callable from the sweep thread). Pushover to Jeremy
+    when to_session is blank; the sweep never sees agent-to-agent (the
+    post handler blocks that) so we only need the Jeremy-bound branch.
+    """
+    if not msg_row or not thread_row:
+        return
+    if (msg_row["to_session"] or "").strip():
+        return
+    tid = thread_row["id"]
+    title = thread_row["title"] or ""
+    sender = msg_row["from_session"] or "Jeremy"
+    blocking = msg_row["blocking"]
+    _send_pushover(
+        f"Thread reply from {sender}",
+        f"{tid}: {title[:200]}",
+        priority=1 if blocking else 0,
+    )
+
+
 _GATED_TITLE_RE = re.compile(r'^\s*(PARKED|GATED|BLOCKED)\b', re.IGNORECASE)
 _GATED_DESC_LINE_RE = re.compile(
     r'^\s*(GATED|BLOCKED-UNTIL|BLOCKED_UNTIL|BLOCKED-BY|BLOCKED_BY|PARKED|AWAITING|HOLD)\s*:',
@@ -53892,6 +54307,7 @@ def main():
     schedule_job(_email_sync_job,        interval=_EMAIL_SYNC_INTERVAL, name="email_sync",  initial_delay=20)
     schedule_job(_repos_scan,            interval=60,                   name="repos_scan",    initial_delay=5)
     schedule_job(_merge_shrink_sweep,    interval=300,                  name="merge_shrink",  initial_delay=90)
+    schedule_job(_reviewer_sweep,        interval=10,                   name="reviewer",      initial_delay=30)
     # _board_watcher DISABLED 2026-08-27 (Jeremy CALM MODE + audit): redundant
     # with the external SCHED-38 script watchdog. Both nudge on `todo`+idle;
     # SCHED-38 is the documented modern path (visible in schedules UI, 15m

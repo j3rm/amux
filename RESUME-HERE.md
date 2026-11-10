@@ -4,6 +4,30 @@
 
 Last updated: 2026-11-10
 
+## Plan for change: amux-reviewer Haiku gatekeeper for thread posts + before/after filter (AH-155, 2026-11-10) DONE
+
+**Why.** Jeremy (channel 2026-11-10): agents keep posting run-on multi-blast thread messages despite CLAUDE.md 5-line/ADHD rules. Convention drift. Needs a Haiku-powered reviewer that must approve every agent thread post before Jeremy sees it. No suggestions - pass/fail only. Compression-resilient (rejected agent needs its original body back even if it has compressed context between send and reject).
+
+**What.**
+1. Schema migrations: add to messages table - `review_status TEXT NOT NULL DEFAULT 'approved'`, `review_rule TEXT NOT NULL DEFAULT ''`, `review_reason TEXT NOT NULL DEFAULT ''`, `reviewed_at INTEGER NOT NULL DEFAULT 0`. Existing rows backfill as 'approved' so legacy threads do not strand in pending.
+2. Rubric file at `~/.amux/reviewer-rubric.md`. Autocreated with defaults derived from Jeremy's CLAUDE.md "Replies to Jeremy" + no-em-dash + threads-are-Jeremy-only. Read on every judge call (single-source, Jeremy can edit live).
+3. `_reviewer_judge(body) -> dict` calls Anthropic API directly (model claude-haiku-5-5, max_tokens 100, temperature 0) with the rubric as system prompt and the body as user prompt. Expects JSON `{"verdict":"approved|rejected","rule":"<tag>","reason":"<one sentence>"}`. Robust JSON parse (strip code fences). Fail-open on API error (set approved with rule='api-error').
+4. `_reviewer_sweep()` every 10s (initial_delay 30s): SELECT messages WHERE status='complete' AND review_status='pending' LIMIT 10 ORDER BY created ASC. For each: call judge, UPDATE row with verdict + rule + reason + reviewed_at. On approved: call `_deliver(thread_row, msg_row)` (delayed delivery). On rejected: do NOT deliver; insert a board item to the sender with verbatim body + rule + reason.
+5. POST /api/threads/<T>/messages: when `from_session` set AND `to_session`='' (agent to Jeremy) AND status will be 'complete': set review_status='pending', SKIP the existing `_deliver` call. The reviewer sweep handles delivery. Everything else (Jeremy's own replies, partials, dashboard-attributed) inserts 'approved' and delivers normally.
+6. PATCH /api/messages/<M> body with status flipping working->complete: same gating. Instead of calling _deliver on the finalize, set review_status='pending' if agent-to-Jeremy and let the sweep handle it.
+7. Rejection board item: title "[amux-reviewer] Thread message rejected - rule: <tag>". Desc has: destination thread/mid, rule, reason, "Your original body (verbatim, do NOT just resend):" + fenced body, pointer to CLAUDE.md. Session=sender, creator='amux-reviewer', org=sender's org, status='todo'.
+8. Dashboard UI: filter toolbar at top of THREADS section with three options: All / Approved only / Pending+Rejected. Default: All (so Jeremy can watch the gate work). Message rows get a review_status badge + yellow (pending) / red (rejected) left-border accent.
+9. GET /api/threads includes review_status + review_rule + review_reason on each message (already included once schema is in; `dict(row)` carries them). Filter is client-side only for v1.
+10. identity: creator='amux-reviewer' for board items. No tmux session; attribution-only.
+
+**Verify.**
+- Syntax: `python3 -c "import ast; ast.parse(open('amux-server.py').read())"`.
+- Rubric file created at ~/.amux/reviewer-rubric.md on first sweep.
+- Existing messages all show review_status='approved' (migration default).
+- Post a fresh agent-to-Jeremy thread message (CI: curl with X-Amux-Session: amux-helper). Immediately after POST, GET /api/threads/<T> shows review_status='pending'. Within ~10-12s the sweep updates it to approved or rejected. On approve: Jeremy's Pushover fires. On reject: board item to sender appears, no Pushover.
+- Non-regression: Jeremy's own posts (dashboard UI token) immediately deliver with status 'approved'. Channels and board are untouched.
+- Dashboard: filter switch toggles visibility of pending/rejected rows; default shows all three states with visual distinction.
+
 ## Plan for change: merge-shrink guard for append-only logs (AH-153, 2026-11-10) DONE
 
 **Why.** Ember-Research filed ER-1433 (via amux channel): Ember Core MIGRATION_LOG.md silently truncated from 4351 lines / 103 headings to 16 / 2 at merge 4ef4ffb and sat on local master for 6 days (the deploy-from-unpushed-master pattern means local master runs 127 commits ahead of origin for days). Per-item presence checks YES-pass while every other entry is deleted. The restoration landed at 53b7107 (4583 lines), and seven unmerged branches edit MIGRATION_LOG.md (eac1223, eac923, eac925, eac917, eac1023, eac578, eac863), each a chance to re-truncate. ECM is hand-guarding interim; this invariant will be the only AUTOMATED backstop once shipped. A git pre-receive hook would fire at push time, which is 6 days late in this org's deploy pattern. A server sweep at merge-commit landing catches it within one cycle.
