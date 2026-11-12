@@ -6626,6 +6626,13 @@ def _init_db():
         ")",
         "CREATE INDEX IF NOT EXISTS idx_api_usage_created ON api_usage(created)",
         "CREATE INDEX IF NOT EXISTS idx_api_usage_type_created ON api_usage(event_type, created)",
+        # AH-170 (2026-11-12, SAO-4 finding #8). Review-stall one-shot
+        # flag. Set by _sweep_stale_review the first time a review item
+        # crosses the 24h threshold (or the re-arm cutoff after an
+        # earlier ping). Cleared implicitly: when the item leaves
+        # review and re-enters, the sweep's own freshness compare
+        # makes the stale timestamp irrelevant.
+        "ALTER TABLE issues ADD COLUMN stale_review_pinged_at INTEGER NOT NULL DEFAULT 0",
     ]:
         try:
             db.execute(migration)
@@ -8571,6 +8578,125 @@ def _sweep_stale_todos_reboost():
                  f"{_zombies_skipped} zombies (>{_zombie_days}d) skipped")
     except Exception as _e:
         slog(f"[stale-todo-reboost] failed: {_e}")
+
+
+def _sweep_stale_review():
+    """Periodic sweep (AH-170, 2026-11-12, SAO-4 finding #8). Review items
+    that sit past the threshold with no C4/C3 close are the target
+    stuck at review with nobody told. No sweep covered `review` before
+    this one; 49 of 85 live review items were >24h old at audit time.
+
+    Behavior: one-shot Pushover to Jeremy per stall, with a compact
+    diagnosis of the pair state. Re-arms after
+    AMUX_STALE_REVIEW_RE_PING_HOURS (default 24h) so items that stay
+    stuck keep getting a daily reminder rather than one and done.
+
+    Diagnosis built from the audit-pair sibling rows (same shape as
+    _auto_verify_from_audit_pair): what auditors exist, what their
+    status is, whether they're both closed, whether a verdict was
+    recorded. Jeremy gets "ECI-109 review 25h: EAC-1302 doing 48h,
+    EAO-1069 done PASS — C4 single-audit waiting on Codex" instead
+    of "something's stuck somewhere."
+
+    Threshold: 24h (configurable AMUX_STALE_REVIEW_MIN_HOURS, 2-168).
+    Zombie: 14d (configurable AMUX_STALE_REVIEW_ZOMBIE_DAYS, 2-90).
+    Cap per tick: 5 (AMUX_STALE_REVIEW_CAP_PER_TICK, 1-20).
+    """
+    try:
+        _threshold_hours = 24
+        try:
+            _threshold_hours = max(2, min(168, int(os.environ.get("AMUX_STALE_REVIEW_MIN_HOURS", "24"))))
+        except (ValueError, TypeError):
+            pass
+        _re_ping_hours = 24
+        try:
+            _re_ping_hours = max(2, min(168, int(os.environ.get("AMUX_STALE_REVIEW_RE_PING_HOURS", "24"))))
+        except (ValueError, TypeError):
+            pass
+        _zombie_days = 14
+        try:
+            _zombie_days = max(2, min(90, int(os.environ.get("AMUX_STALE_REVIEW_ZOMBIE_DAYS", "14"))))
+        except (ValueError, TypeError):
+            pass
+        _cap_per_tick = 5
+        try:
+            _cap_per_tick = max(1, min(20, int(os.environ.get("AMUX_STALE_REVIEW_CAP_PER_TICK", "5"))))
+        except (ValueError, TypeError):
+            pass
+        _now = int(time.time())
+        _cutoff = _now - (_threshold_hours * 3600)
+        _re_ping_cutoff = _now - (_re_ping_hours * 3600)
+        _zombie_cutoff = _now - (_zombie_days * 86400)
+        db = get_db()
+        rows = db.execute(
+            "SELECT id, title, session, org, updated, desc, "
+            "       stale_review_pinged_at "
+            "FROM issues "
+            "WHERE status = 'review' AND deleted IS NULL "
+            "  AND updated < ? "
+            "ORDER BY updated ASC",
+            (_cutoff,),
+        ).fetchall()
+        _pinged_this_tick = 0
+        for row in rows:
+            if _pinged_this_tick >= _cap_per_tick:
+                break
+            try:
+                _tid = row["id"]
+                _upd = int(row["updated"] or 0)
+                _pinged = int(row["stale_review_pinged_at"] or 0)
+                _age_h = int((_now - _upd) / 3600)
+                # Zombie: silent-flag past the zombie cutoff. The item
+                # is historical review-rot, not a live pair waiting.
+                if _upd < _zombie_cutoff:
+                    db.execute(
+                        "UPDATE issues SET stale_review_pinged_at = ? WHERE id = ?",
+                        (_now, _tid),
+                    )
+                    db.commit()
+                    continue
+                # Already pinged recently? Skip until re-ping cutoff.
+                if _pinged > _re_ping_cutoff:
+                    continue
+                # Diagnose: what audit siblings exist and in what state?
+                # Match the title prefix convention used by audit items:
+                # `AUDIT <target>: ...`.
+                _title = (row["title"] or "")[:160]
+                _audits = db.execute(
+                    "SELECT id, session, status, desc FROM issues "
+                    "WHERE title LIKE ? AND deleted IS NULL "
+                    "ORDER BY created DESC LIMIT 6",
+                    (f"AUDIT {_tid}:%",),
+                ).fetchall()
+                _audit_bits = []
+                for _a in _audits:
+                    _v = _extract_verdict(_a["desc"] or "") or "?"
+                    _audit_bits.append(f"{_a['id']}({_a['session'].rsplit('-',1)[-1] if _a['session'] else '?'}, {_a['status']}, verdict={_v})")
+                _diag = " / ".join(_audit_bits) if _audit_bits else "no audit pair found"
+                _org = (row["org"] or "").strip()
+                def _push(_iid=_tid, _t=_title, _h=_age_h, _d=_diag, _o=_org):
+                    try:
+                        _send_pushover(
+                            "amux - review stall",
+                            (f"{_iid} - {_t}. At review {_h}h. "
+                             f"Audits: {_d}. Org={_o or '?'}. Investigate "
+                             f"or flip status."),
+                            priority=0,
+                        )
+                    except Exception as _pe:
+                        slog(f"[stale-review] {_iid}: pushover failed: {_pe}")
+                threading.Thread(target=_push, daemon=True).start()
+                db.execute(
+                    "UPDATE issues SET stale_review_pinged_at = ? WHERE id = ?",
+                    (_now, _tid),
+                )
+                db.commit()
+                _pinged_this_tick += 1
+                slog(f"[stale-review] {_tid} review {_age_h}h — pinged Jeremy ({_diag})")
+            except Exception as _re:
+                slog(f"[stale-review] row {row['id']}: {_re}")
+    except Exception as _e:
+        slog(f"[stale-review] failed: {_e}")
 
 
 def _notify_session_of_retake(session_name: str, item_id: str, title: str,
@@ -55020,6 +55146,12 @@ def main():
     # causes, not just pos-inversion — mechanical re-float beats a
     # per-root fix. Runs 60s AFTER stale_doing to stagger the load.
     schedule_job(_sweep_stale_todos_reboost, interval=300,               name="stale_todo_reboost_sweep", initial_delay=150)
+    # Stale-review sweep (AH-170, 2026-11-12, SAO-4 finding #8). Before
+    # this, no sweep covered `review` at all — 49 of 85 live review
+    # items were >24h old at audit time. Runs every 15 min, one-shot
+    # Pushover per item past threshold with a compact pair-state
+    # diagnosis; re-arms on the AMUX_STALE_REVIEW_RE_PING_HOURS cadence.
+    schedule_job(_sweep_stale_review,    interval=900,                  name="stale_review_sweep", initial_delay=180)
     # Dormant-schedule sweep (AH-96, 2026-08-24): daily, alerts once for
     # any schedule created enabled=0 that never fired past the grace
     # period (default 3d, tunable via AMUX_DORMANT_SCHEDULE_DAYS).

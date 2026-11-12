@@ -4,6 +4,33 @@
 
 Last updated: 2026-11-12
 
+## Plan for change: review-stall sweep + #7 status whitelist (AH-170, 2026-11-12)
+
+**Why.** SAO-4 HIGH findings #7 and #8 combined.
+
+#8: No sweep covers `review` at all. Targets stuck at review (paused auditor, split verdict, both-discarded, single-auditor org like CD) have zero signal to anyone. 49 of 85 live review items were >24h at audit time. Jeremy only ever sees this when he opens the dashboard.
+
+#7 (deferred): Non-canonical statuses (blocked, in_progress, needs-approval, open) are invisible to every sweep. 39 live items. The audit recommends mapping in_progress→doing, open→todo at PATCH ingress; folding blocked + needs-approval into a daily digest. Risk: 18 CCP in_progress items would suddenly become eligible for the stale-doing sweep and trigger a nudge cascade to CD-Classic-Pianos. Deferred for a dedicated follow-up commit after Jeremy clears the CCP nudge-cascade intent.
+
+**What (AH-170 scope: #8 only).**
+1. New column `stale_review_pinged_at` INTEGER NOT NULL DEFAULT 0 on `issues`.
+2. New sweep `_sweep_stale_review`, 15-min cadence, cap 5 per tick.
+3. Threshold 24h (AMUX_STALE_REVIEW_MIN_HOURS, 2-168).
+4. Re-ping cadence 24h (AMUX_STALE_REVIEW_RE_PING_HOURS, 2-168) — items that stay stuck keep getting a daily reminder.
+5. Zombie cutoff 14d (AMUX_STALE_REVIEW_ZOMBIE_DAYS) — silent-flag past 14d; historical review-rot is not actionable.
+6. Per-ping payload: target id + title + review age + compact audit-pair diagnosis (siblings + status + verdict). Jeremy sees "ECI-109 review 25h: EAC-1302(Codex, doing, verdict=?) / EAO-1069(Opus, done, verdict=PASS). Investigate or flip status."
+7. Register in `schedule_job` after `stale_todo_reboost_sweep`, initial_delay 180s.
+
+#7 deferred to AH-171 after Jeremy clears intent.
+
+**Verify.**
+1. `python3 -c "import ast; ast.parse(open('amux-server.py').read())"`.
+2. Column exists: `PRAGMA table_info(issues)` lists `stale_review_pinged_at`.
+3. Sweep registered: server slog shows `[sched] stale_review_sweep ...` on startup.
+4. First tick: at least one Pushover for the oldest review item (>24h, not zombie). Row's pinged_at is bumped.
+5. Second tick (within re-ping window): no ping for the same item.
+6. Zombie regression: a review item >14d gets silent-flagged (pinged_at set to now) with no Pushover. Verify via slog + inspect row.
+
 ## Plan for change: time-based re-arm for audit-session stale-doing (AH-169, 2026-11-12)
 
 **Why.** SAO-4 HIGH finding #1: my AH-165 comment claims "nudge + escalation keep firing" for audit sessions but the code gates both on `_nudged < _upd` / `_escalated < _upd`. Since nothing touches `updated` on a stalled audit, each tier fires exactly once per stall. Between 95m and the 7d zombie cutoff, audit items are silent. At 7d they get silenced forever by the zombie branch. Every one of tonight's 11 EAC/EAO items will repeat this unless re-arm is fixed.
