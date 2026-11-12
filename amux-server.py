@@ -8366,6 +8366,41 @@ def _sweep_stale_todos_reboost():
                 # Flag threshold reached — escalate to Jeremy, auto-park,
                 # mark stale_escalated so this item is permanently out of
                 # the reboost loop until a human re-engages.
+                #
+                # AH-167 (2026-11-12, SAO-4 finding #3): skip the auto-park
+                # for audit sessions. Parking an audit half to `backlog`
+                # silently disarms C4 (_auto_verify_from_audit_pair accepts
+                # sibling status in done/verified/review/discarded, NOT
+                # backlog) AND the `_covers` dedup counts the parked audit
+                # as covering, so re-PATCHing the target to review on the
+                # same TIP-SHA suppresses the re-mint. Target stuck at
+                # review for good. Mirror AH-165 doing-side park-skip.
+                if _new_boost_count >= _flag_threshold and _is_audit_session(_sess):
+                    slog(f"[stale-todo-reboost] {_iid} {_sess} — park SKIPPED "
+                         f"(audit session, boost={_new_boost_count}, C4 disarm). "
+                         f"Keeping at todo; nudge continues.")
+                    # Still bubble + re-notify to keep the pressure on.
+                    _min_row = db.execute(
+                        "SELECT COALESCE(MIN(pos), 0) AS m FROM issues "
+                        "WHERE session = ? AND status = 'todo' AND deleted IS NULL",
+                        (_sess,),
+                    ).fetchone()
+                    _min_pos = float(_min_row["m"]) if _min_row and _min_row["m"] is not None else 0.0
+                    _new_pos = _min_pos - 1024.0
+                    db.execute(
+                        "UPDATE issues SET pos = ?, notified = 0, "
+                        "                  updated = ?, "
+                        "                  stale_todo_boost_count = ? "
+                        "WHERE id = ?",
+                        (_new_pos, _now, _new_boost_count, _iid),
+                    )
+                    db.commit()
+                    _notify_session_of_task(_sess, _iid, row["title"] or "")
+                    _log_board_notify(_iid, _sess, "boost",
+                                      item_status="todo",
+                                      boost_count=_new_boost_count)
+                    _boosted += 1
+                    continue
                 if _new_boost_count >= _flag_threshold:
                     _cur_desc = row["desc"] or ""
                     _append = (
@@ -10394,10 +10429,16 @@ def _promote_backlog_when_dep_completes(completed_id: str, new_status: str,
         if not all_met:
             continue
         # Promote — reset notified so assignee gets a fresh ping via the
-        # normal auto-notify path.
+        # normal auto-notify path. AH-167 (2026-11-12): also reset
+        # stale_escalated and stale_todo_boost_count — symmetric to the
+        # PATCH-handler todo-entry reset; a backlog→todo promote is a
+        # fresh todo entry and must not carry forward prior boost
+        # pressure or the permanent escalated lock.
         now_ts = int(time.time())
         db.execute(
-            "UPDATE issues SET status = 'todo', updated = ?, notified = 0 "
+            "UPDATE issues SET status = 'todo', updated = ?, "
+            "                  notified = 0, stale_escalated = 0, "
+            "                  stale_todo_boost_count = 0 "
             "WHERE id = ?",
             (now_ts, row["id"]),
         )
@@ -11014,8 +11055,17 @@ def _mint_audit_pair_unguarded(target_item: dict, db) -> dict | None:
             # Open-and-no-sha still covers (true in-flight, verdict not
             # yet recorded) — this preserves the 2026-09-16 runaway-loop
             # fix for the standard case.
+            # AH-167 (2026-11-12, SAO-4 finding #3): `backlog` DROPPED
+            # from the covered-status set. A parked audit does not
+            # cover its target — the target re-entering review SHOULD
+            # re-mint. Previously, a reboost-park (or a manual park)
+            # of an audit suppressed every subsequent re-mint on the
+            # same TIP-SHA, leaving the target permanently stranded
+            # at review. Open-and-no-sha runaway-loop fix is
+            # preserved: "todo/doing/review" still covers in-flight
+            # audits.
             status = existing_row["status"] or ""
-            return status in ("todo", "doing", "backlog", "review")
+            return status in ("todo", "doing", "review")
         codex_covers = _covers(codex_existing)
         opus_covers = _covers(opus_existing)
         if codex_covers and opus_covers:
@@ -48629,6 +48679,19 @@ class CCHandler(BaseHTTPRequestHandler):
                     if ("status" in body
                             and body.get("status") != prior["status"]
                             and prior["status"] == "todo"):
+                        set_clauses.append("stale_todo_boost_count = 0")
+                    # AH-167 (2026-11-12, SAO-4 finding #4): on ANY
+                    # transition INTO todo from a non-todo status, reset
+                    # BOTH stale_escalated AND stale_todo_boost_count.
+                    # Previously, stale_escalated=1 was a permanent lock
+                    # (the reboost SELECT filters on stale_escalated=0),
+                    # so a parked-then-unparked item was stranded forever.
+                    # Live case: EAO-738 in todo for 393h with the lock
+                    # set. Fires alongside the existing AH-135 notified
+                    # reset for the same transition.
+                    if (_new_status_val == "todo"
+                            and _prior_status_val != "todo"):
+                        set_clauses.append("stale_escalated = 0")
                         set_clauses.append("stale_todo_boost_count = 0")
                     set_clauses.append("updated = ?")
                     params.append(now)

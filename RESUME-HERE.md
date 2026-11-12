@@ -4,6 +4,30 @@
 
 Last updated: 2026-11-12
 
+## Plan for change: reboost-park disarms C4 (second inversion); stale_escalated has no reset (AH-167, 2026-11-12)
+
+**Why.** SAO-4 audit (ShareScore-Audit-Opus) found the AH-165 class of bug repeated on the todo side, plus a permanent-lock bug that strands re-taken items. HIGH findings #3 + #4.
+
+Finding #3 (SECOND INVERSION): `_sweep_stale_todos_reboost` auto-parks at boost 4 to `backlog` with no audit-session skip. A parked audit todo is backlog → `_auto_verify_from_audit_pair` treats it as incomplete pair → C4 disarmed. Compounds via `_covers` (line ~11005): the "covered status" set includes backlog, so when the target re-enters review on the same TIP-SHA, the dedup suppresses the re-mint. Target stuck at review forever.
+
+Live confirmed by SAO-4: EAO-1070 (target EMBER-169 at review), IAC-357 and IAC-360 (target IA-52 at review). All three carry the AUTO-PARKED marker.
+
+Finding #4 (PERMANENT LOCK): `stale_escalated=1` is set by the reboost-park and no code path resets it. If someone PATCHes the item back to todo manually, it is permanently excluded from `_sweep_stale_todos_reboost` (the SELECT filters `stale_escalated = 0`). Live: EAO-738, in todo for 393h, still carries the marker.
+
+**What.**
+1. `_sweep_stale_todos_reboost`: skip the auto-park branch (line ~8369) for audit sessions. Mirror AH-165's park-skip reasoning: parking an audit half silently disarms C4. Nudge still fires on every reboost tick; only the terminal park is skipped. Audit todos that stay stale generate a slog line each tick, and the next recommended fix (#1 audit re-arm) addresses the longer-term loudness.
+2. `_covers` at line ~11005: remove `backlog` from the covered-status tuple. A backlog-parked audit does not cover its target; the target re-entering review SHOULD re-mint. Preserves runaway-loop fix for open-and-no-sha (which is "todo/doing/review" only).
+3. PATCH handler (line ~48629 area): on ANY status transition INTO `todo` from a non-todo state, reset `stale_escalated = 0` AND `stale_todo_boost_count = 0`. Add this alongside the existing AH-135 notified-reset and ER-624 boost-count-reset blocks.
+4. Dependency-promote (line ~10400): add `stale_escalated = 0, stale_todo_boost_count = 0` to the backlog→todo promote UPDATE for symmetry.
+5. Post-ship: unstick the three real stuck items by PATCHing EAO-1070, IAC-357, IAC-360 from backlog to todo. The new PATCH-handler reset block will clear their stale_escalated flag so the reboost sweep can touch them again.
+
+**Verify.**
+1. `python3 -c "import ast; ast.parse(open('amux-server.py').read())"`.
+2. Create a synthetic todo audit, set stale_todo_boost_count=3, trigger a reboost tick with staleness past the threshold. Expect boost to go to 4, no park, item stays at todo, slog line indicates audit-skip.
+3. Create a backlog-parked audit on a target at review. Re-PATCH target desc to force a mint-trigger. Expect a fresh audit pair to be minted (previously would be suppressed).
+4. Create a todo item with stale_escalated=1 and stale_todo_boost_count=4 (simulated AUTO-PARKED remnant). PATCH to backlog, then PATCH back to todo. Expect both flags to reset to 0. Next sweep picks it up normally.
+5. PATCH EAO-1070, IAC-357, IAC-360 from backlog to todo. Confirm status=todo, flags cleared. Confirm Ember-Audit-Opus (EAO-1070) and iSchedule-Audit-Codex (IAC-357/360) get a fresh notify via the existing notified-reset path.
+
 ## Plan for change: disable "agent started working" / "agent finished" client-side notifications (AH-166, 2026-11-12)
 
 **Why.** Jeremy (15:13): "Can you disable the agent working / finished notifications in AMUX... it does nothing for me." Two client-side browser notifications fire on every status transition (idle -> active and active -> idle) in `_checkSessionTransitions` at lines 23380 + 23382. Each managed session generates both on every turn. Zero actionable value for Jeremy; constant noise.
