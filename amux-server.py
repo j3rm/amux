@@ -23376,11 +23376,10 @@ function _checkSessionTransitions(newData) {
       if (s.status === 'waiting') {
         _fireSessionNotif(s.name, s.name + ' needs input', s.task_name || 'Waiting for a response');
         amuxTrack('session_waiting', { session: s.name, task: s.task_name || '', auto_continue: !!s.auto_continue });
-      } else if (s.status === 'active' && prev.status !== 'active') {
-        _fireSessionNotif(s.name, s.name + ' started working', s.task_name || '');
-      } else if (s.status === 'idle' && prev.status === 'active') {
-        _fireSessionNotif(s.name, s.name + ' finished', s.task_name || 'Task completed');
       }
+      // AH-166 (2026-11-12, Jeremy): "started working" and "finished"
+      // transition notifications removed — every managed session fired
+      // both on every turn with zero actionable value.
     }
     if (stoppedNow && prev.status !== '') {
       _fireSessionNotif(s.name, s.name + ' stopped', '');

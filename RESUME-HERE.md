@@ -4,6 +4,23 @@
 
 Last updated: 2026-11-12
 
+## Plan for change: disable "agent started working" / "agent finished" client-side notifications (AH-166, 2026-11-12)
+
+**Why.** Jeremy (15:13): "Can you disable the agent working / finished notifications in AMUX... it does nothing for me." Two client-side browser notifications fire on every status transition (idle -> active and active -> idle) in `_checkSessionTransitions` at lines 23380 + 23382. Each managed session generates both on every turn. Zero actionable value for Jeremy; constant noise.
+
+**What.**
+1. Remove the two `else if` branches at 23379-23380 (active transition) and 23381-23382 (idle-after-active transition) in `_checkSessionTransitions`.
+2. Keep the `waiting` branch (23376-23378) - this IS actionable (agent needs input).
+3. Keep the `stopped` branch (23385-23388) - this is distinct from idle and signals process exit.
+4. No server-side companion to remove - the "working"/"finished" labels are purely client-side notification text; there is no matching Pushover.
+5. amuxTrack calls are not affected (there was no track call on the two removed branches).
+
+**Verify.**
+1. `python3 -c "import ast; ast.parse(open('amux-server.py').read())"`.
+2. Open the dashboard; let a session cycle through active -> idle. Confirm no browser toast fires for "started working" or "finished."
+3. Trigger a waiting state (session asks for input). Confirm the "needs input" toast still fires.
+4. Stop a session. Confirm "stopped" toast still fires.
+
 ## Plan for change: stale-doing sweep silent-exempts every audit item (AH-165, 2026-11-12)
 
 **Why.** Jeremy asked tonight (14:06) for a full audit of nudge/follow-up scripts for "holes where agents could stall." Ember-Research escalated two concrete cases (EAC-1302 idle 48h, EAC-1317 idle 42h) that the sweep had never touched. Root cause confirmed in DB: both items have `stale_doing_nudged_at=None`, `stale_doing_escalated_at=None`. Sweep never fired.
