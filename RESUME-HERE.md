@@ -4,6 +4,21 @@
 
 Last updated: 2026-11-12
 
+## Plan for change: close the remaining SAO-4 LOW defects (AH-175, 2026-11-12)
+
+**Why.** Jeremy (16:55): "finish the last 3." SAO-4 #11, #12, #13. Each is LOW but all three could silently drop or duplicate work over time.
+
+**What.**
+1. #11 `stale_notified` permanent lock: PATCH-handler todo-re-entry reset block now also clears `stale_notified = 0`, so after a verified→doing→todo cycle the creator-notify arm again. Same clause added to the dependency-promote UPDATE for symmetry.
+2. #12 duplicate thread→board items: `_deliver` non-blocking path now SELECTs an open item (todo/doing/review) for the same thread+recipient and appends the preamble to its desc instead of minting a new one. T-171 had 16 CCP duplicates, T-187 had 6 CW duplicates. `notified = 0` reset on re-use so the pane nudge still fires.
+3. #13 org=NULL review items unswept + loose hex: `_sweep_review_items_for_bv_pass` SELECT now also includes `org IS NULL` rows, filtered in Python to `(row.org or _session_org(row.session)) == org`. Hex regex now requires at least one DIGIT so hex-shaped English words ("facade", "decoded", "accede") don't match and cause false cross-item mints.
+
+**Verify.**
+1. `python3 -c "import ast; ast.parse(open('amux-server.py').read())"`.
+2. #11: PATCH an item with `stale_notified=1` to `backlog`, then back to `todo`. Row shows `stale_notified=0`.
+3. #12: send two thread replies to the same session in the same thread. GET the recipient's board — only one Thread-tid item exists (updated, preamble appended twice with a separator).
+4. #13: BV PASS with a desc including the pure-letter "decoded" and a real hash like "abc1234". Only "abc1234" (has a digit) ends up in the candidate set. Separately: a review item with `org=NULL` but `session=CD-NPP` is picked up when the BV's org is `CD`.
+
 ## Plan for change: close the three SAO-4 LOW/MED defects that still cause silent stalls (AH-174, 2026-11-12)
 
 **Why.** Jeremy (16:51): "#9-14 are low but they are defects, that will lead to another instance of things not getting done? If so, correct them now." Three of the six do cause work to silently not get done:

@@ -10993,12 +10993,14 @@ def _promote_backlog_when_dep_completes(completed_id: str, new_status: str,
         # stale_escalated and stale_todo_boost_count — symmetric to the
         # PATCH-handler todo-entry reset; a backlog→todo promote is a
         # fresh todo entry and must not carry forward prior boost
-        # pressure or the permanent escalated lock.
+        # pressure or the permanent escalated lock. AH-175 adds
+        # stale_notified=0 so the creator-alert re-arms on a re-take.
         now_ts = int(time.time())
         db.execute(
             "UPDATE issues SET status = 'todo', updated = ?, "
             "                  notified = 0, stale_escalated = 0, "
-            "                  stale_todo_boost_count = 0 "
+            "                  stale_todo_boost_count = 0, "
+            "                  stale_notified = 0 "
             "WHERE id = ?",
             (now_ts, row["id"]),
         )
@@ -11854,17 +11856,29 @@ def _sweep_review_items_for_bv_pass(bv_item: dict, org: str, db,
     bv_desc = bv_item.get("desc", "") or ""
     if not bv_desc.strip():
         return []
-    # Extract candidate commit hashes: 7-40 hex chars, bounded on both sides
-    # by non-hex to avoid gluing e.g. "0123456789abcdef01" that continues.
-    hashes = set(re.findall(r"(?<![0-9a-f])[0-9a-f]{7,40}(?![0-9a-f])", bv_desc.lower()))
+    # Extract candidate commit hashes: 7-40 hex chars bounded on both
+    # sides by non-hex.
+    # AH-175 (2026-11-12, SAO-4 finding #13): require at least one
+    # DIGIT in the hash. Pure-letter hex-shaped words ("facade",
+    # "decoded", "accede") would otherwise match and cause false
+    # cross-item audit-pair mints. Real commit hashes contain digits
+    # with overwhelming probability (~99.9% for 7+ chars).
+    _candidates = set(re.findall(r"(?<![0-9a-f])[0-9a-f]{7,40}(?![0-9a-f])", bv_desc.lower()))
+    hashes = {h for h in _candidates if any(c.isdigit() for c in h)}
     if not hashes:
         return []
-    # Find review-status items in the same org.
+    # Find review-status items in the same org. AH-175 (SAO-4 #13):
+    # also include items where org IS NULL and session-derived org
+    # matches `org`. 125 org-NULL items were invisible to this sweep
+    # before.
     rows = db.execute(
         "SELECT id, title, desc, status, session, creator, org, updated "
-        "FROM issues WHERE status = 'review' AND deleted IS NULL AND org = ?",
+        "FROM issues WHERE status = 'review' AND deleted IS NULL "
+        "  AND (org = ? OR (org IS NULL AND session IS NOT NULL))",
         (org,),
     ).fetchall()
+    rows = [r for r in rows
+            if (r["org"] or _session_org(r["session"])) == org]
     minted_targets: list[str] = []
     for row in rows:
         if len(minted_targets) >= max_sweep:
@@ -45746,17 +45760,54 @@ class CCHandler(BaseHTTPRequestHandler):
                     except Exception as _e:
                         slog(f"[threads] {mid}: send_text failed: {_e}")
                 else:
-                    board_id = _next_issue_id(_prefix_from_session(recipient))
+                    # AH-175 (2026-11-12, SAO-4 finding #12): reuse an
+                    # open item for the same thread + recipient instead
+                    # of minting a new one per message. Pre-fix, T-171
+                    # had 16 CCP items and T-187 had 6 CW items, all in
+                    # doing/in_progress, duplicates of each other and
+                    # exempted-together by thread-active. If an open
+                    # item exists (todo/doing/review), append the new
+                    # preamble, bump `updated`, reset `notified=0` so
+                    # the auto-notify path re-fires the pane nudge.
+                    # Status (todo/doing/review) is preserved — a doing
+                    # item with a new thread reply stays at doing but
+                    # the recipient sees the fresh ping.
                     now_t = int(time.time())
-                    db.execute(
-                        "INSERT INTO issues (id, title, desc, status, session, creator, "
-                        "  created, updated, owner_type) "
-                        "VALUES (?, ?, ?, 'todo', ?, 'threads', ?, ?, 'agent')",
-                        (board_id, f"Thread {tid}: {title[:80]}", preamble,
-                         recipient, now_t, now_t),
-                    )
-                    db.commit()
-                    _board_changed()
+                    _existing = db.execute(
+                        "SELECT id, desc, status FROM issues "
+                        "WHERE title LIKE ? AND session = ? "
+                        "  AND status IN ('todo', 'doing', 'review') "
+                        "  AND deleted IS NULL "
+                        "ORDER BY created DESC LIMIT 1",
+                        (f"Thread {tid}:%", recipient),
+                    ).fetchone()
+                    if _existing:
+                        board_id = _existing["id"]
+                        _sep = "\n\n--- (new thread reply, "
+                        _sep += time.strftime("%Y-%m-%d %H:%M", time.localtime(now_t))
+                        _sep += ") ---\n\n"
+                        _new_desc = (_existing["desc"] or "") + _sep + preamble
+                        db.execute(
+                            "UPDATE issues SET desc = ?, updated = ?, "
+                            "                  notified = 0 "
+                            "WHERE id = ?",
+                            (_new_desc, now_t, board_id),
+                        )
+                        db.commit()
+                        _board_changed()
+                        slog(f"[threads] {mid}: appended to existing "
+                             f"{board_id} (thread {tid} → {recipient})")
+                    else:
+                        board_id = _next_issue_id(_prefix_from_session(recipient))
+                        db.execute(
+                            "INSERT INTO issues (id, title, desc, status, session, creator, "
+                            "  created, updated, owner_type) "
+                            "VALUES (?, ?, ?, 'todo', ?, 'threads', ?, ?, 'agent')",
+                            (board_id, f"Thread {tid}: {title[:80]}", preamble,
+                             recipient, now_t, now_t),
+                        )
+                        db.commit()
+                        _board_changed()
                     try:
                         _notify_session_of_task(recipient, board_id,
                                                 f"Thread {tid}: {title[:80]}")
@@ -49330,6 +49381,17 @@ class CCHandler(BaseHTTPRequestHandler):
                             and _prior_status_val != "todo"):
                         set_clauses.append("stale_escalated = 0")
                         set_clauses.append("stale_todo_boost_count = 0")
+                        # AH-175 (2026-11-12, SAO-4 finding #11): also
+                        # reset the stale_notified lock on a todo
+                        # re-entry. _sweep_stale_todos sets this to 1
+                        # for non-real creators (threads, Jeremy,
+                        # server-audit-mint) so the creator-alert
+                        # fires at most once per item lifetime; a
+                        # verified -> doing -> todo cycle never
+                        # re-armed. Reboost backstops the alert, but
+                        # the creator signal is lost. Reset so
+                        # subsequent cycles get a fresh creator ping.
+                        set_clauses.append("stale_notified = 0")
                     set_clauses.append("updated = ?")
                     params.append(now)
                     # AH-69: record the ACTUAL patcher's session on every PATCH.
