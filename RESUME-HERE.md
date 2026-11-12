@@ -4,6 +4,26 @@
 
 Last updated: 2026-11-12
 
+## Plan for change: status whitelist + blocked/needs-approval digest (AH-172, 2026-11-12)
+
+**Why.** SAO-4 HIGH-adjacent finding #7. 39 live items at non-canonical statuses are invisible to every sweep: 18 CCP in_progress, 3 open (LG-49/50, AMUX-18), 15 blocked, 3 needs-approval (AH-43/44/48). Jeremy-confirmed the full-map + migration path.
+
+**What.**
+1. New helper `_normalize_status()` with map `in_progress -> doing`, `in-progress -> doing`, `open -> todo`. Other values pass through unchanged (blocked, needs-approval, canonical statuses).
+2. Apply at POST ingress (`body.get("status", "todo")` normalized before DB insert).
+3. Apply at PATCH ingress (`body["status"]` mutated before the status-transition logic below it reads it, so AH-135 notified-reset and AH-167 stale_escalated-reset work on canonical values).
+4. One-shot migration at startup: UPDATE issues SET status = <canonical> WHERE status IN (...). Idempotent (reruns are no-ops once zero rows match). Expected impact: 18 CCP items flip to doing and immediately become stale-doing-sweep eligible.
+5. New daily digest sweep `_sweep_blocked_digest`: once per day, Pushover a count + 3-oldest-ids-with-age roll-up of blocked and needs-approval items. Clears the invisibility without changing behavior on legitimate gate states.
+
+**Verify.**
+1. `python3 -c "import ast; ast.parse(open('amux-server.py').read())"`.
+2. On reload, server slog shows `[status-migration] AH-172: total 21 rows canonicalized` (18 in_progress + 3 open).
+3. GET /api/board: 18 CCP items now show status=doing, 3 LG/AMUX items now show status=todo.
+4. First stale-doing-sweep tick: expect a nudge to CD-Classic-Pianos on the oldest CCP doing items (now visible to the sweep).
+5. Daily digest fires (initial_delay 1200s = 20m) with "blocked: 15 (...) | needs-approval: 3 (...)".
+6. New POST with `status=in_progress` → row is created at `doing`.
+7. PATCH `status=open` → row flips to `todo` and the AH-135/AH-167 reset blocks observe the canonical value.
+
 ## Plan for change: exemption-vs-zombie ordering + board-exemption age cap (AH-171, 2026-11-12)
 
 **Why.** SAO-4 MED findings #5 and #6, flagged as second-inversions.

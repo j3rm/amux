@@ -6674,6 +6674,28 @@ def _init_db():
             slog(f"[threads-migration] backfilled org on {_backfilled} thread(s)")
     except Exception as _e:
         slog(f"[threads-migration] backfill failed (non-fatal): {_e!r}")
+    # AH-172 (2026-11-12, SAO-4 finding #7): one-shot migration to
+    # canonicalize non-canonical statuses that no sweep covers.
+    # in_progress -> doing (18 CCP items identified by SAO-4)
+    # in-progress -> doing (defensive, same shape)
+    # open -> todo (3 items: LG-49, LG-50, AMUX-18)
+    # blocked and needs-approval are LEGITIMATE non-canonical and
+    # pass through unchanged (daily digest sweep covers them).
+    try:
+        _status_migrated = 0
+        for _from, _to in (("in_progress", "doing"), ("in-progress", "doing"), ("open", "todo")):
+            _cur = db.execute(
+                "UPDATE issues SET status = ? WHERE status = ? AND deleted IS NULL",
+                (_to, _from),
+            )
+            db.commit()
+            if _cur.rowcount:
+                _status_migrated += _cur.rowcount
+                slog(f"[status-migration] AH-172: {_cur.rowcount} rows {_from} → {_to}")
+        if _status_migrated:
+            slog(f"[status-migration] AH-172: total {_status_migrated} rows canonicalized")
+    except Exception as _e:
+        slog(f"[status-migration] AH-172 failed (non-fatal): {_e!r}")
     # Seed default status gates — generic wording so the checklists apply
     # equally to workers writing code, researchers writing thread answers,
     # and coordinators moving items around. Original defaults were worker-
@@ -8726,6 +8748,56 @@ def _sweep_stale_review():
                 slog(f"[stale-review] row {row['id']}: {_re}")
     except Exception as _e:
         slog(f"[stale-review] failed: {_e}")
+
+
+def _sweep_blocked_digest():
+    """Daily digest (AH-172, 2026-11-12, SAO-4 finding #7). Non-canonical
+    legit statuses (blocked, needs-approval) are invisible to every
+    other sweep. Daily digest Pushovers a count-based roll-up so the
+    pile doesn't stay silent.
+
+    Compact payload: count per status + the 3 oldest items in each.
+    Items that stay blocked for weeks surface each day, which is the
+    right cadence for a gate state.
+    """
+    try:
+        db = get_db()
+        _now = int(time.time())
+        rows = db.execute(
+            "SELECT id, title, session, status, updated FROM issues "
+            "WHERE status IN ('blocked', 'needs-approval') "
+            "  AND deleted IS NULL "
+            "ORDER BY updated ASC"
+        ).fetchall()
+        if not rows:
+            return
+        _by_status = {"blocked": [], "needs-approval": []}
+        for r in rows:
+            _by_status.setdefault(r["status"], []).append(r)
+        _parts = []
+        for _st, _items in _by_status.items():
+            if not _items:
+                continue
+            _oldest = []
+            for _it in _items[:3]:
+                _age_d = max(1, int((_now - int(_it["updated"] or 0)) / 86400))
+                _oldest.append(f"{_it['id']}({_age_d}d)")
+            _parts.append(f"{_st}: {len(_items)} ({', '.join(_oldest)})")
+        _msg = (
+            f"Daily digest of non-canonical statuses that no other "
+            f"sweep covers: {' | '.join(_parts)}. Open the board filter "
+            f"to each status to clear or re-route."
+        )
+        def _push():
+            try:
+                _send_pushover("amux - daily digest (blocked / needs-approval)",
+                               _msg, priority=0)
+            except Exception as _pe:
+                slog(f"[blocked-digest] pushover failed: {_pe}")
+        threading.Thread(target=_push, daemon=True).start()
+        slog(f"[blocked-digest] AH-172: {_msg}")
+    except Exception as _e:
+        slog(f"[blocked-digest] failed: {_e}")
 
 
 def _notify_session_of_retake(session_name: str, item_id: str, title: str,
@@ -10800,6 +10872,29 @@ def _is_audit_session(session: str) -> bool:
     if not session:
         return False
     return "-Audit-" in session
+
+
+# AH-172 (2026-11-12, SAO-4 finding #7). Non-canonical status
+# normalization: external imports and legacy CLIs sometimes write
+# `in_progress` and `open`, which no sweep covers, so items at those
+# statuses are invisible. Ingress-normalized to `doing` / `todo`
+# respectively. `blocked` and `needs-approval` are LEGITIMATE
+# non-canonical statuses (gate/wait states) — those pass through
+# unchanged and get folded into a daily digest sweep instead.
+_STATUS_INGRESS_MAP = {
+    "in_progress": "doing",
+    "in-progress": "doing",
+    "open": "todo",
+}
+
+
+def _normalize_status(status: "str | None") -> "str | None":
+    """Return canonical status for ingress writes, or the original value
+    if it's already canonical or legitimately non-canonical (blocked,
+    needs-approval, etc.)."""
+    if not status:
+        return status
+    return _STATUS_INGRESS_MAP.get(status, status)
 
 
 def _extract_verdict(desc: str) -> str:
@@ -48259,7 +48354,11 @@ class CCHandler(BaseHTTPRequestHandler):
                 prefix = _prefix_from_session(session)
                 item_id = _next_issue_id(prefix)
                 now = int(time.time())
-                status = body.get("status", "todo")
+                # AH-172 (SAO-4 #7): normalize non-canonical ingress
+                # statuses so sweeps and the dashboard see a canonical
+                # value. in_progress -> doing, open -> todo. Legit
+                # non-canonical (blocked, needs-approval) passes.
+                status = _normalize_status(body.get("status", "todo"))
                 due = body.get("due", "").strip() or None
                 due_time = body.get("due_time", "").strip() or None
                 creator = body.get("creator", "")
@@ -48913,6 +49012,12 @@ class CCHandler(BaseHTTPRequestHandler):
                                     "poster": _poster,
                                     "caller": _hdr_session,
                                 }, 403)
+                    # AH-172 (SAO-4 #7): normalize non-canonical PATCH
+                    # status ingress. in_progress -> doing, open -> todo.
+                    # Applied before the set_clauses loop so the
+                    # downstream transition logic reads canonical values.
+                    if "status" in body:
+                        body["status"] = _normalize_status(body.get("status"))
                     set_clauses, params = [], []
                     for k in ("title", "desc", "status", "session", "due", "due_time", "owner_type", "pinned", "pos", "org", "thread_id"):
                         if k in body:
@@ -55181,6 +55286,10 @@ def main():
     # Pushover per item past threshold with a compact pair-state
     # diagnosis; re-arms on the AMUX_STALE_REVIEW_RE_PING_HOURS cadence.
     schedule_job(_sweep_stale_review,    interval=900,                  name="stale_review_sweep", initial_delay=180)
+    # Blocked / needs-approval daily digest (AH-172, 2026-11-12, SAO-4
+    # finding #7). Legitimate non-canonical statuses that no other sweep
+    # covers get one Pushover per day with count + oldest items.
+    schedule_job(_sweep_blocked_digest,  interval=86400,                name="blocked_digest", initial_delay=1200)
     # Dormant-schedule sweep (AH-96, 2026-08-24): daily, alerts once for
     # any schedule created enabled=0 that never fired past the grace
     # period (default 3d, tunable via AMUX_DORMANT_SCHEDULE_DAYS).
