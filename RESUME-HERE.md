@@ -2,7 +2,28 @@
 
 **If you are Claude and you are about to edit `/mnt/gitdata/amux/amux-server.py`, this file is mandatory.** Every change must be planned here BEFORE you edit code. Completed plans stay in place as history, do NOT delete them. Read this file at the start of every session before touching amux-server.py.
 
-Last updated: 2026-11-11
+Last updated: 2026-11-12
+
+## Plan for change: C4 single-audit path UnboundLocalError on `_sha_a` / `_sha_b` (AH-163, 2026-11-12)
+
+**Why.** RTG-Research channel: RA-930/932/933/934/935 re-entered review 2026-11-11, Codex audits (RAC-8029..8033) closed with verdicts, targets still stuck at review — "zero Opus items exist" from the server's view. Server log confirms every RAC close at 2026-11-11 19:15 hit `UnboundLocalError: cannot access local variable '_sha_a'` at line 11594, inside `_auto_verify_from_audit_pair`. Same error already seen on EAO-1075 (2026-11-11 01:15) and EAO-1080 (01:46).
+
+Root cause chain:
+1. On 2026-10-29 11:46:31 someone soft-deleted RAO-8102..8106 (deleted=1793274391). RAO-7546 (RA-932, status=discarded, old August item) is the only non-deleted Opus row that survives the sibling query.
+2. When RAC-8030 PATCHes to done, C4 loads sibling via `SELECT ... WHERE deleted IS NULL ... ORDER BY created DESC LIMIT 1` — returns RAO-7546. `other_discarded=True`, `my_discarded=False` — falls into single-audit path at line 11585.
+3. `else` branch at 11591 executes `surviving_sha = _sha_a` at 11594. But `_sha_a` is defined later at line 11710 (`_sha_a = _extract_audited_sha(audit_item.get("desc") or "")`), inside the dual-audit path. UnboundLocalError.
+
+This has silently killed every single-audit C4 close since the RAO delete, including RA-932 etc. The outer try/except swallows the traceback to the log and returns None, so the target just sits at review.
+
+**What.**
+1. Move `_sha_a` and `_sha_b` extraction to BEFORE line 11566 (both-discarded check), so they're defined for every path. Also move `_target_tips` / `_target_tip` up if they're only used in the dual-path — keep those where they are if so (only the two sha vars are the actual bug).
+2. After the fix lands, manually mint the five missing Opus audits for RA-930/932/933/934/935 via POST /api/board so C4 can see a live pair for each. Session=RTG-Audit-Opus, title=`AUDIT <target>: <target title>`, desc=`[auto-minted 2026-11-12 ... on <target> re-review after C4 single-audit bug]`, status=todo, creator=amux-helper.
+
+**Verify.**
+1. `python3 -c "import ast; ast.parse(open('amux-server.py').read())"` — syntax.
+2. Confirm RAO-* items created and show in RTG-Audit-Opus queue.
+3. Channel reply to RTG-Research with diagnosis + mint-ids.
+4. Watch server log on next RAC close: no more UnboundLocalError.
 
 ## Plan for change: reviewer parses body as user turn when body contains a question (AH-162, 2026-11-11) DONE
 

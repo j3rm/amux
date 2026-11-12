@@ -11560,6 +11560,15 @@ def _auto_verify_from_audit_pair(audit_item: dict, db) -> dict | None:
             return None
     now = int(time.time())
     stamp = time.strftime("%Y-%m-%d %H:%M", time.localtime())
+    # Extract AUDITED-SHA from both audits up front so single-audit and
+    # dual-audit paths can reference them. Prior layout defined these only
+    # inside the dual path (line ~11710), which crashed the single-audit
+    # branch with UnboundLocalError when one sibling was discarded and the
+    # surviving verdict needed its sha (AH-163, 2026-11-12 — triggered
+    # after RAO-8102..8106 were soft-deleted 2026-10-29, leaving only
+    # discarded RAO-7546 for RA-932 and nothing for the rest).
+    _sha_a = _extract_audited_sha(audit_item.get("desc") or "")
+    _sha_b = _extract_audited_sha(other["desc"] or "")
     # Both discarded — target is likely itself a wrapper; leave in review
     # and notify master. Idempotent: master hop keys off target still
     # being in review, so a repeated C4 fire on the same pair won't spam.
@@ -11707,8 +11716,8 @@ def _auto_verify_from_audit_pair(audit_item: dict, db) -> dict | None:
     #         Research → worker, one hop shorter.
     #     The sha-freshness gate is about avoiding a FALSE VERIFIED, which
     #     only pass/pass can produce.
-    _sha_a = _extract_audited_sha(audit_item.get("desc") or "")
-    _sha_b = _extract_audited_sha(other["desc"] or "")
+    # _sha_a / _sha_b are extracted above (AH-163, 2026-11-12) so the
+    # single-audit branch can also reference them without crashing.
     _target_tips = _all_tip_shas(target["desc"] or "")
     _target_tip = _target_tips[-1] if _target_tips else ""
     _hold = False
