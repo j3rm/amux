@@ -4,6 +4,27 @@
 
 Last updated: 2026-11-12
 
+## Plan for change: exemption-vs-zombie ordering + board-exemption age cap (AH-171, 2026-11-12)
+
+**Why.** SAO-4 MED findings #5 and #6, flagged as second-inversions.
+
+#6 (second-inversion): The 7d zombie branch (line ~8003) silently suppresses all tiers forever and runs BEFORE the awaiting-external exemption at line ~8075. So the "your escalation went cold" nudge for thread-cold items is unreachable past 7d — the zombie branch wins. Same class as AH-165/AH-167 (silent exemption): correct intent (don't waste tokens on zombie items) implemented in an order that kills the legitimate cold-thread signal.
+
+#5: The board-ref exemption has no time cap. Mutual references (A refs B, B refs A, both at doing) exempt both items permanently. Also "any ref to any open item in another session" exempts indefinitely even when the referenced item is itself stalled. Audit recommends: cap at 24h.
+
+**What.**
+1. Reorder in `_sweep_stale_doing`: move the `_stale_doing_awaiting_external` call to BEFORE the zombie branch. Keep the cheap pre-checks (is_real_session, archived, is_running) first.
+2. Add board-exemption age cap: if `_kind == "board"` AND `_upd < _board_exempt_cutoff` (configurable AMUX_STALE_DOING_BOARD_EXEMPT_CAP_HOURS, default 24, clamped [1, 168]), do NOT skip. Fall through to tiers instead. Slog the cap-trigger.
+3. Zombie gate: if `_cold_ref_id` is set, DO NOT zombie-suppress — the item has a legitimate cold-thread signal that should fire. AH-169 audit-exemption already covered.
+4. Non-audit item not referenced by any exemption AND >7d: zombie-suppress unchanged (bumps flags, continues).
+
+**Verify.**
+1. `python3 -c "import ast; ast.parse(open('amux-server.py').read())"`.
+2. Mutual-ref case: create two agent-doing items A and B where A.desc refs B and B.desc refs A, both at doing. Pre-fix: both exempt-skipped on every tick. Post-fix: once either crosses the 24h board-exempt cap, that item falls through to Tier-1 nudge.
+3. Cold-thread + 7d case: item at doing 10d, desc refs a thread we last replied to >14d ago. Pre-fix: zombie-suppressed, cold nudge unreachable. Post-fix: exemption returns thread-cold, _cold_ref_id set, zombie branch skipped, cold-nudge fires.
+4. Regression: generic non-audit item at doing 10d with NO refs. Still zombie-suppressed, flags bumped, continues. No change.
+5. Regression: generic non-audit item at doing 3h with a ref to an open board item in another session. Still board-exempt, no nudge.
+
 ## Plan for change: review-stall sweep + #7 status whitelist (AH-170, 2026-11-12)
 
 **Why.** SAO-4 HIGH findings #7 and #8 combined.

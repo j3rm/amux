@@ -7992,6 +7992,16 @@ def _sweep_stale_doing():
             pass
         _audit_re_nudge_cutoff = _now - (_audit_re_nudge_min * 60)
         _audit_re_escalate_cutoff = _now - (_audit_re_escalate_min * 60)
+        # AH-171 (2026-11-12, SAO-4 finding #5): board-exemption age cap.
+        # Past this cutoff, an item that references an open board item
+        # in another session is nudged ANYWAY. Closes the mutual-ref
+        # permanent-exempt loop (A refs B, B refs A, both at doing).
+        _board_exempt_cap_hours = 24
+        try:
+            _board_exempt_cap_hours = max(1, min(168, int(os.environ.get("AMUX_STALE_DOING_BOARD_EXEMPT_CAP_HOURS", "24"))))
+        except (ValueError, TypeError):
+            pass
+        _board_exempt_cutoff = _now - (_board_exempt_cap_hours * 3600)
         _nudged_this_tick = 0
         _escalated_this_tick = 0
         _parked_this_tick = 0
@@ -8020,24 +8030,6 @@ def _sweep_stale_doing():
                 _parked = int(row["stale_doing_parked_at"] or 0)
                 # Skip if not a real session (would have session_dead alert instead)
                 if not _is_real_session(_sess):
-                    continue
-                # Zombie item (>7d old) — silent-suppress all three tiers.
-                # Not a stalled WORKER, just forgotten backlog.
-                #
-                # AH-169 (2026-11-12, SAO-4 finding #1): audit sessions
-                # exempt from the zombie branch. An audit stuck 7+ days
-                # is still a target stuck at review and still needs
-                # attention; silencing it is wrong. Audit items have
-                # their own re-arm cadence below.
-                if _upd < _zombie_cutoff and not _is_audit_session(_sess):
-                    db.execute(
-                        "UPDATE issues SET stale_doing_nudged_at = ?, "
-                        "                  stale_doing_escalated_at = ?, "
-                        "                  stale_doing_parked_at = ? "
-                        "WHERE id = ?",
-                        (_now, _now, _now, row["id"]),
-                    )
-                    db.commit()
                     continue
                 # Skip archived sessions — they're paused-by-design, no one
                 # is on the other end of the pane. Suppress via flag-flip so
@@ -8069,21 +8061,58 @@ def _sweep_stale_doing():
                 # different session, or a thread we last replied to
                 # (within cold cap). "thread-cold" falls through to nudge
                 # with different text ("your escalation went cold").
+                #
+                # AH-171 (2026-11-12, SAO-4 findings #5 + #6): moved to
+                # BEFORE the zombie branch so thread-cold items older
+                # than 7d still get the cold-thread nudge (previously
+                # zombie-suppressed and silent). Also: board-exemption
+                # cap — if the item itself is older than
+                # AMUX_STALE_DOING_BOARD_EXEMPT_CAP_HOURS, nudge anyway
+                # (closes the mutual-ref permanent-exempt loop).
                 _cold_ref_id = None
                 _cold_silent_days = 0
                 try:
                     _kind, _ref_id, _ref_who, _extra = _stale_doing_awaiting_external(
                         row["desc"] or "", _sess, db,
                         now_ts=_now, title=row["title"] or "")
-                    if _kind in ("board", "thread-active"):
+                    if _kind == "board":
+                        if _upd >= _board_exempt_cutoff:
+                            slog(f"[stale-doing] {row['id']} {_sess} — "
+                                 f"exempt (board: {_ref_id}@{_ref_who})")
+                            continue
+                        # Past the cap — fall through to nudge.
                         slog(f"[stale-doing] {row['id']} {_sess} — "
-                             f"exempt ({_kind}: {_ref_id}@{_ref_who})")
+                             f"board-exempt cap hit "
+                             f"({_board_exempt_cap_hours}h); nudging anyway "
+                             f"(ref {_ref_id}@{_ref_who})")
+                    elif _kind == "thread-active":
+                        slog(f"[stale-doing] {row['id']} {_sess} — "
+                             f"exempt (thread-active: {_ref_id}@{_ref_who})")
                         continue
-                    if _kind == "thread-cold":
+                    elif _kind == "thread-cold":
                         _cold_ref_id = _ref_id
                         _cold_silent_days = int(_extra or 0)
                 except Exception:
                     pass
+                # Zombie item (>7d old) — silent-suppress all three tiers.
+                # Not a stalled WORKER, just forgotten backlog.
+                #
+                # AH-169 (2026-11-12, SAO-4 #1): audit sessions exempt.
+                # AH-171 (2026-11-12, SAO-4 #6): if a cold-thread ref is
+                # set, DO NOT zombie-suppress — the cold-thread nudge is
+                # the legitimate signal for this stall.
+                if (_upd < _zombie_cutoff
+                        and not _is_audit_session(_sess)
+                        and not _cold_ref_id):
+                    db.execute(
+                        "UPDATE issues SET stale_doing_nudged_at = ?, "
+                        "                  stale_doing_escalated_at = ?, "
+                        "                  stale_doing_parked_at = ? "
+                        "WHERE id = ?",
+                        (_now, _now, _now, row["id"]),
+                    )
+                    db.commit()
+                    continue
                 _age_min = int((_now - _upd) / 60)
                 # First-tier nudge to assignee — only if we haven't already
                 # nudged for THIS stall (nudged_at >= updated means the item
