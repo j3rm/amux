@@ -4,6 +4,35 @@
 
 Last updated: 2026-11-12
 
+## Plan for change: atomic-append + conditional-update to stop sweep RMW data loss (AH-176, AH-162, 2026-11-12)
+
+**Why.** AH-162 (EmberCoreMigration, Ember-Research co-sign). First-hand reproduction: EMBER-168 PATCHed with 2925-char close + status=done at 22:49, response HTTP 200 echoed back the new desc. Same minute, the stale-doing sweep auto-parked the item; on re-read `desc` was the PRE-PATCH text + sweep's auto-park note and `status` was back to backlog. 2036 characters of closing record silently destroyed; agent's own HTTP 200 was the only signal of success. Would have gone unnoticed except for an unrelated re-read.
+
+Mechanism: sweep reads `desc` into memory, appends note in Python, writes back whole field with no version check or atomic append. Any agent PATCH landing between SELECT and UPDATE is clobbered. The auto-park message says "no touch after master escalation" which was false at write time — it was lying about what the item it was overwriting had just been touched by.
+
+**What.** Two complementary guards applied to every known RMW-on-desc in sweep and cascade code paths:
+1. SQL `||` atomic append: `UPDATE issues SET desc = COALESCE(desc, '') || ?` so the append happens atomically in the DB engine, never in Python. An agent PATCH that lands in the micro-window still has its desc change preserved (both writes compose).
+2. Conditional `WHERE` guard:
+   - Sweep writes (where the point IS to only act on a stale item): `WHERE id = ? AND updated = <orig_upd>`. If an agent PATCH bumped `updated` between SELECT and write, rowcount=0, slog, skip. The item was by definition not stale at write time.
+   - Cascade writes (C3/C4/BV-FAIL that transition status based on prior-review state): `WHERE id = ? AND status = 'review'`. If an agent flipped review→done concurrently, the cascade refuses to revert.
+   - `_apply_sha_mismatch_hold`: no WHERE guard (callers already status-gated by SELECT); atomic-append alone guarantees desc preservation. The note still lands if the item was concurrently touched, which is the right behavior for a diagnostic note.
+
+Guarded sites (all in this commit):
+- `_sweep_stale_doing` AH-164 park (status=backlog + desc append) → updated-guard + atomic append.
+- `_sweep_stale_todos_reboost` boost-4 park (status=backlog + desc append) → updated-guard + atomic append (plus the existing `stale_escalated = 0` guard retained).
+- `_apply_sha_mismatch_hold` → atomic append only.
+- Build-verify FAIL bounce (status=doing + desc append) → review-guard + atomic append.
+- C4 pair-apply (status change + desc append) → review-guard + atomic append.
+- C4 single-audit apply → same.
+- C3 adjudication apply → same.
+
+**Verify.**
+1. `python3 -c "import ast; ast.parse(open('amux-server.py').read())"`.
+2. Simulated race: stale-doing park hits an item that was PATCHed 100ms before the UPDATE. Expect rowcount=0, slog "RACE: item was PATCHed between SELECT and park write", no status flip, no desc clobber.
+3. Non-race path (item genuinely untouched since SELECT): park fires as before; desc append + status=backlog land.
+4. Cascade race: C4 pair-complete after an agent PATCHed target to `done`. Expect rowcount=0, target stays at `done`, slog audit trail.
+5. EMBER-168 already recovered manually by ECM's 22:52 re-close (status=done, desc rebuilt). No server-side recovery needed.
+
 ## Plan for change: close the remaining SAO-4 LOW defects (AH-175, 2026-11-12)
 
 **Why.** Jeremy (16:55): "finish the last 3." SAO-4 #11, #12, #13. Each is LOW but all three could silently drop or duplicate work over time.

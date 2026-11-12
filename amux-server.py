@@ -8394,15 +8394,28 @@ def _sweep_stale_doing():
                         f"is still live work, PATCH status back to doing with a "
                         f"one-line note on what's next.]"
                     )
-                    _new_desc = (row["desc"] or "") + _park_note
-                    db.execute(
+                    # AH-176 (2026-11-12, EmberCoreMigration AH-162 data-loss):
+                    # Atomic-append + conditional-on-unchanged-updated.
+                    # SQL `||` concats the note onto the current desc
+                    # inside the UPDATE itself, and the `WHERE updated = ?`
+                    # guard aborts the write if any agent PATCHed the item
+                    # between the sweep's SELECT and this UPDATE.
+                    # Pre-fix: EMBER-168's 2036-char close was destroyed
+                    # 2026-11-12 22:49 by exactly this race.
+                    _cur = db.execute(
                         "UPDATE issues SET status = 'backlog', "
                         "                  stale_doing_parked_at = ?, "
-                        "                  desc = ?, "
+                        "                  desc = COALESCE(desc, '') || ?, "
                         "                  updated = ? "
-                        "WHERE id = ?",
-                        (_now, _new_desc, _now, row["id"]),
+                        "WHERE id = ? AND updated = ?",
+                        (_now, _park_note, _now, row["id"], _upd),
                     )
+                    if _cur.rowcount == 0:
+                        slog(f"[stale-doing-park] {row['id']} {_sess} — "
+                             f"RACE: item was PATCHed between SELECT and "
+                             f"park write (AH-162 guard); skipping park.")
+                        db.commit()
+                        continue
                     db.commit()
                     _board_changed()
                     _log_board_notify(row["id"], _sess, "doing_parked",
@@ -8733,23 +8746,34 @@ def _sweep_stale_todos_reboost():
                     _boosted += 1
                     continue
                 if _new_boost_count >= _flag_threshold:
-                    _cur_desc = row["desc"] or ""
                     _append = (
                         f"\n\nAUTO-PARKED (stale-todo escalation): "
                         f"{_new_boost_count} reboosts to {_sess} without a "
                         f"status change or pickup. Parked to backlog and "
                         f"escalated to Jeremy."
                     )
-                    _new_desc = _cur_desc + _append
-                    db.execute(
+                    # AH-176 (2026-11-12, AH-162 data-loss guard):
+                    # atomic-append on desc, conditional on unchanged
+                    # updated, so an agent PATCH landing between the
+                    # sweep's SELECT and this UPDATE isn't clobbered.
+                    # Also preserves the stale_escalated=0 condition
+                    # for the original race guard on this flag.
+                    _row_upd = int(row["updated"] or 0)
+                    _cur = db.execute(
                         "UPDATE issues SET status = 'backlog', "
                         "                  stale_escalated = 1, "
                         "                  stale_todo_boost_count = ?, "
-                        "                  desc = ?, "
+                        "                  desc = COALESCE(desc, '') || ?, "
                         "                  updated = ? "
-                        "WHERE id = ? AND stale_escalated = 0",
-                        (_new_boost_count, _new_desc, _now, _iid),
+                        "WHERE id = ? AND stale_escalated = 0 AND updated = ?",
+                        (_new_boost_count, _append, _now, _iid, _row_upd),
                     )
+                    if _cur.rowcount == 0:
+                        slog(f"[stale-todo-reboost] {_iid} {_sess} — "
+                             f"RACE: item was PATCHed between SELECT and "
+                             f"park write (AH-162 guard); skipping park.")
+                        db.commit()
+                        continue
                     db.commit()
                     _escalate_stale_todo_to_jeremy(_iid, row["title"] or "",
                                                   _sess, _new_boost_count)
@@ -11439,10 +11463,16 @@ def _apply_sha_mismatch_hold(target_id: str, target: dict, hold_reason: str,
         f"Not applying verdict; delta re-audit against the target's "
         f"current tip needed before this can proceed.]"
     )
-    new_desc = (target["desc"] or "") + _mismatch_note
+    # AH-176 (2026-11-12, AH-162 data-loss guard): atomic-append on
+    # desc using SQL `||` so a concurrent agent PATCH that lands
+    # between the C4/C3 caller's SELECT and this write doesn't lose
+    # its desc edit. No `WHERE updated = ?` guard here because
+    # callers of _apply_sha_mismatch_hold frequently run in background
+    # threads after their own SELECT, and the note must land even if
+    # the target was touched; the atomic append preserves both writes.
     db.execute(
-        "UPDATE issues SET desc = ?, updated = ? WHERE id = ?",
-        (new_desc, now, target_id),
+        "UPDATE issues SET desc = COALESCE(desc, '') || ?, updated = ? WHERE id = ?",
+        (_mismatch_note, now, target_id),
     )
     db.commit()
     _board_changed()
@@ -11804,10 +11834,17 @@ def _auto_on_build_verify_close(item: dict, db) -> dict | None:
             f"\n\n[build-verify FAIL — bounced from review {time.strftime('%Y-%m-%d %H:%M', time.localtime(now))} "
             f"by {item['id']}. See its desc for build errors.]"
         )
-        new_desc = (target["desc"] or "") + bounce_note
+        # AH-176 (2026-11-12, AH-162 data-loss guard): atomic-append on
+        # desc using SQL `||` so a concurrent agent PATCH in the
+        # sub-second race window isn't clobbered. Status gate also
+        # verifies the item is still at review at write time so an
+        # agent-flip-to-done between SELECT and here is not reverted.
         db.execute(
-            "UPDATE issues SET status = 'doing', desc = ?, updated = ? WHERE id = ?",
-            (new_desc, now, target_id),
+            "UPDATE issues SET status = 'doing', "
+            "                  desc = COALESCE(desc, '') || ?, "
+            "                  updated = ? "
+            "WHERE id = ? AND status = 'review'",
+            (bounce_note, now, target_id),
         )
         db.commit()
         _board_changed()
@@ -12201,10 +12238,14 @@ def _auto_apply_adjudication(rr_item: dict, db) -> dict | None:
                  f"{verdict}, applying doing outcome despite sha-check "
                  f"note: {_rp}")
     note = f"\n\n[auto-applied {stamp} by C3: {rid} adjudicated {verdict} → {new_status}]"
-    new_desc = (target["desc"] or "") + note
+    # AH-176 (2026-11-12, AH-162 data-loss guard): atomic-append +
+    # status='review' guard, same shape as the C4 pair-apply.
     db.execute(
-        "UPDATE issues SET status = ?, desc = ?, updated = ? WHERE id = ?",
-        (new_status, new_desc, now, target_id),
+        "UPDATE issues SET status = ?, "
+        "                  desc = COALESCE(desc, '') || ?, "
+        "                  updated = ? "
+        "WHERE id = ? AND status = 'review'",
+        (new_status, note, now, target_id),
     )
     db.commit()
     _board_changed()
@@ -12441,10 +12482,14 @@ def _auto_verify_from_audit_pair(audit_item: dict, db) -> dict | None:
         note = (f"\n\n[auto-applied {stamp} by C4: single-audit "
                 f"({surviving_id}={surviving_verdict}, {discarded_id}=VOID/discarded) "
                 f"→ {new_status}{_report_note_single}]")
-        new_desc = (target["desc"] or "") + note
+        # AH-176 (2026-11-12, AH-162 data-loss guard): atomic-append +
+        # status='review' guard, same shape as the pair-apply above.
         db.execute(
-            "UPDATE issues SET status = ?, desc = ?, updated = ? WHERE id = ?",
-            (new_status, new_desc, now, target_id),
+            "UPDATE issues SET status = ?, "
+            "                  desc = COALESCE(desc, '') || ?, "
+            "                  updated = ? "
+            "WHERE id = ? AND status = 'review'",
+            (new_status, note, now, target_id),
         )
         db.commit()
         _board_changed()
@@ -12594,10 +12639,16 @@ def _auto_verify_from_audit_pair(audit_item: dict, db) -> dict | None:
     note = (f"\n\n[auto-applied {stamp} by C4: pair complete "
             f"({aid}={my_verdict}, {other['id']}={their_verdict}) → "
             f"{new_status}{_report_note}]")
-    new_desc = (target["desc"] or "") + note
+    # AH-176 (2026-11-12, AH-162 data-loss guard): atomic-append on
+    # desc using SQL `||` so a concurrent agent PATCH isn't clobbered.
+    # Status gate keeps the pair-apply idempotent and refuses to flip
+    # a target that already moved past review.
     db.execute(
-        "UPDATE issues SET status = ?, desc = ?, updated = ? WHERE id = ?",
-        (new_status, new_desc, now, target_id),
+        "UPDATE issues SET status = ?, "
+        "                  desc = COALESCE(desc, '') || ?, "
+        "                  updated = ? "
+        "WHERE id = ? AND status = 'review'",
+        (new_status, note, now, target_id),
     )
     db.commit()
     _board_changed()
