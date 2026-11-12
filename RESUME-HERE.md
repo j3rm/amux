@@ -4,6 +4,23 @@
 
 Last updated: 2026-11-12
 
+## Plan for change: master-session lookup hard-coded to {org}-Research (AH-168, 2026-11-12)
+
+**Why.** SAO-4 finding #2 (HIGH). Three callsites hard-code the escalate master as `{org}-Research`. Only Ember and RTG have one. For every other org (iSchedule has -Reviewer, CD/CYPRA/Scorpio have neither) the master lookup fails, escalation never fires, AND the AH-164 park is dead code because it requires `_escalated > 0`. 10 live doing items affected (CW-692/694-698/710, CID-62, CYPRA-186, CC-740) stay silent after one nudge forever.
+
+**What.**
+1. `_sweep_stale_doing` (line ~8086): replace `_master = f"{_org}-Research"` with `_master = _resolve_adjudicator_session(_org)`. On None: Pushover Jeremy directly (one-shot per stall, same mechanic as the master-escalate flag), set `stale_doing_escalated_at` so the park branch can proceed.
+2. `_apply_sha_mismatch_hold` (line ~10865): same substitution. On None: Pushover Jeremy. SHA-mismatches are rare but when they fire they must reach somebody.
+3. `_auto_verify_from_audit_pair` both-discarded (line ~11725): same substitution. On None: Pushover Jeremy ("C4 both-discarded, no adjudicator, your call").
+4. Park gate unchanged structurally — the fix lands via the audit finding that "set `stale_doing_escalated_at` on no-master-Pushover" so `_escalated > 0` becomes true for the no-master path and the park can fire.
+
+**Verify.**
+1. `python3 -c "import ast; ast.parse(open('amux-server.py').read())"`.
+2. Simulate a stale-doing on a CD-* session (no CD-Research): expect nudge at 45m, Pushover Jeremy at 90m (no-master escalate), park at 180m.
+3. Simulate on an iSchedule session: expect escalation to iSchedule-Reviewer (preferred over -Research by `_resolve_adjudicator_session`).
+4. Simulate on an Ember session: unchanged, still escalates to Ember-Research.
+5. Regression: Ember and RTG escalations still land on their existing -Research sessions.
+
 ## Plan for change: reboost-park disarms C4 (second inversion); stale_escalated has no reset (AH-167, 2026-11-12)
 
 **Why.** SAO-4 audit (ShareScore-Audit-Opus) found the AH-165 class of bug repeated on the todo side, plus a permanent-lock bug that strands re-taken items. HIGH findings #3 + #4.

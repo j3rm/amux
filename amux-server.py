@@ -8083,8 +8083,15 @@ def _sweep_stale_doing():
                     if not _org and "-" in _sess:
                         _org = _sess.split("-", 1)[0]
                     if _org:
-                        _master = f"{_org}-Research"
-                        if _is_real_session(_master) and _master != _sess:
+                        # AH-168 (2026-11-12, SAO-4 finding #2): use the
+                        # adjudicator lookup instead of hard-coding
+                        # {org}-Research. Only Ember and RTG have a
+                        # -Research; iSchedule has -Reviewer; CD/CYPRA/
+                        # Scorpio have neither. Previously, no-master
+                        # orgs got exactly one nudge and then silence
+                        # because the park branch requires _escalated>0.
+                        _master = _resolve_adjudicator_session(_org)
+                        if _master and _master != _sess:
                             _notify_stale_doing_master(_master, _sess, row["id"],
                                                        row["title"] or "", _age_min)
                             db.execute(
@@ -8093,6 +8100,34 @@ def _sweep_stale_doing():
                             )
                             _escalated_this_tick += 1
                             slog(f"[stale-doing] {row['id']} {_sess} idle {_age_min}m — escalated to {_master}")
+                        else:
+                            # No adjudicator for this org: Pushover Jeremy
+                            # directly (one-shot per stall via the flag).
+                            # Set stale_doing_escalated_at so the park
+                            # branch can proceed; a no-master stall still
+                            # needs the terminal park signal.
+                            _nm_title = (row["title"] or "")[:200]
+                            _nm_iid = row["id"]
+                            def _no_master_push(_iid=_nm_iid, _t=_nm_title, _s=_sess, _o=_org, _a=_age_min):
+                                try:
+                                    _send_pushover(
+                                        "amux - stale-doing no-master escalate",
+                                        (f"{_iid} - {_t}. Assigned to {_s} "
+                                         f"(org {_o}); idle {_a}m at doing. "
+                                         f"No adjudicator session for this org "
+                                         f"(no -Reviewer, no -Research). Your "
+                                         f"call: pick it up, reassign, or park."),
+                                        priority=0,
+                                    )
+                                except Exception as _pe:
+                                    slog(f"[stale-doing-no-master] {_iid}: pushover failed: {_pe}")
+                            threading.Thread(target=_no_master_push, daemon=True).start()
+                            db.execute(
+                                "UPDATE issues SET stale_doing_escalated_at = ? WHERE id = ?",
+                                (_now, row["id"]),
+                            )
+                            _escalated_this_tick += 1
+                            slog(f"[stale-doing] {row['id']} {_sess} idle {_age_min}m — no-master escalate (org={_org}) → Jeremy")
                 # Third-tier auto-park to backlog — AH-164 (Jeremy 2026-11-12).
                 # Only past the park cutoff AND an escalation has already
                 # fired for this stall AND we haven't already parked it.
@@ -10862,8 +10897,13 @@ def _apply_sha_mismatch_hold(target_id: str, target: dict, hold_reason: str,
     db.commit()
     _board_changed()
     _org = (target["org"] if "org" in target.keys() else None) or _session_org(my_session)
-    _master = f"{_org}-Research" if _org else None
-    if _master and _is_real_session(_master):
+    # AH-168 (2026-11-12, SAO-4 finding #2): adjudicator lookup via
+    # _resolve_adjudicator_session (prefers -Reviewer over -Research).
+    # On no-adjudicator org, Pushover Jeremy directly rather than
+    # silently holding — a SHA-MISMATCH that nobody sees is an
+    # un-actioned contract violation.
+    _master = _resolve_adjudicator_session(_org) if _org else None
+    if _master:
         def _run():
             try:
                 send_text(_master, (
@@ -10877,6 +10917,23 @@ def _apply_sha_mismatch_hold(target_id: str, target: dict, hold_reason: str,
         threading.Thread(target=_run, daemon=True).start()
         slog(f"[{source_label}] {target_id} SHA-MISMATCH — {hold_reason} — "
              f"notified {_master}, held")
+    else:
+        _mm_iid = target_id
+        _mm_title = (target["title"] or "")[:200]
+        def _mm_push(_iid=_mm_iid, _t=_mm_title, _hr=hold_reason, _sl=source_label, _o=_org):
+            try:
+                _send_pushover(
+                    f"amux - {_sl} SHA-MISMATCH (no adjudicator)",
+                    (f"{_iid} - {_t}. {_hr}. Org {_o} has no "
+                     f"-Reviewer / -Research session. Target held; "
+                     f"delta re-audit needed against current tip."),
+                    priority=0,
+                )
+            except Exception:
+                pass
+        threading.Thread(target=_mm_push, daemon=True).start()
+        slog(f"[{source_label}] {target_id} SHA-MISMATCH — {hold_reason} — "
+             f"no adjudicator for org={_org}, Pushovered Jeremy, held")
     return {"action": "held", "target": target_id,
             "sources": source_ids, "reason": "sha-mismatch"}
 
@@ -11722,8 +11779,12 @@ def _auto_verify_from_audit_pair(audit_item: dict, db) -> dict | None:
     # being in review, so a repeated C4 fire on the same pair won't spam.
     if my_discarded and other_discarded:
         _org = (target["org"] if "org" in target.keys() else None) or _session_org(my_session)
-        _master = f"{_org}-Research" if _org else None
-        if _master and _is_real_session(_master):
+        # AH-168 (2026-11-12, SAO-4 finding #2): use adjudicator lookup
+        # (prefers -Reviewer over -Research). On no-adjudicator, Pushover
+        # Jeremy — a both-discarded C4 that nobody sees is a target
+        # permanently stuck at review.
+        _master = _resolve_adjudicator_session(_org) if _org else None
+        if _master:
             def _run():
                 try:
                     send_text(_master, (
@@ -11736,6 +11797,24 @@ def _auto_verify_from_audit_pair(audit_item: dict, db) -> dict | None:
                     pass
             threading.Thread(target=_run, daemon=True).start()
             slog(f"[C4] {target_id} both-discarded ({aid}+{other['id']}) — notified {_master}")
+        else:
+            _bd_iid = target_id
+            _bd_title = (target["title"] or "")[:200]
+            _bd_aid, _bd_oid = aid, other["id"]
+            def _bd_push(_iid=_bd_iid, _t=_bd_title, _a=_bd_aid, _o=_bd_oid, _org=_org):
+                try:
+                    _send_pushover(
+                        "amux - C4 both-discarded (no adjudicator)",
+                        (f"{_iid} - {_t}. Both auditors VOIDed ({_a}, {_o}). "
+                         f"Org {_org} has no -Reviewer / -Research. Target "
+                         f"stuck at review; likely a wrapper to discard. "
+                         f"Your call."),
+                        priority=0,
+                    )
+                except Exception:
+                    pass
+            threading.Thread(target=_bd_push, daemon=True).start()
+            slog(f"[C4] {target_id} both-discarded ({aid}+{other['id']}) — no adjudicator for org={_org}, Pushovered Jeremy")
         return None
     # One discarded + one verdict — single-audit path. Apply the
     # surviving verdict alone; tag cascade note so provenance is clear.
