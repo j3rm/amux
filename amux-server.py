@@ -7631,19 +7631,34 @@ def _sweep_stale_todos():
 
 
 def _notify_stale_doing_assignee(assignee_session: str, item_id: str,
-                                 title: str, age_min: int):
+                                 title: str, age_min: int,
+                                 gate: dict | None = None):
     """Nudge the assignee's own pane when a doing item hasn't been touched.
     2026-08-20 (Jeremy — RTG-Research diagnosis of idle-agents-holding-
     doing-items). Best-effort tmux inject; runs in a background thread so
-    the sweep loop returns immediately."""
+    the sweep loop returns immediately.
+
+    AH-173 (2026-11-12, Ember-Research filing): `gate` optionally
+    carries {'line': str, 'blockers': [ids]} extracted from the item's
+    desc. When present, the nudge names the gate text and blocker
+    instead of only idle duration."""
     def _run():
         try:
+            _gate_bit = ""
+            if gate and gate.get("line"):
+                _blockers = ", ".join(gate.get("blockers") or []) or "-"
+                _gate_bit = (
+                    f" In-desc gate: \"{gate['line']}\" "
+                    f"(blockers: {_blockers}). Clear the gate before "
+                    f"treating this as an idle item."
+                )
             text = (
                 f"Stale DOING: {item_id} — {(title or '')[:80]} hasn't been "
-                f"updated in {age_min}m. If still working: bump `updated` "
-                f"(any PATCH). If stuck: PATCH back to `todo` and post a "
-                f"board item to your org's Research session (or amux-helper "
-                f"for substrate issues). If done: PATCH to `review`."
+                f"updated in {age_min}m.{_gate_bit} If still working: bump "
+                f"`updated` (any PATCH). If stuck: PATCH back to `todo` "
+                f"and post a board item to your org's Research session "
+                f"(or amux-helper for substrate issues). If done: PATCH "
+                f"to `review`."
             )
             send_text(assignee_session, text)
             _log_board_notify(item_id, assignee_session, "stale_doing",
@@ -7654,7 +7669,8 @@ def _notify_stale_doing_assignee(assignee_session: str, item_id: str,
 
 
 def _notify_stale_doing_master(master_session: str, worker_session: str,
-                               item_id: str, title: str, age_min: int):
+                               item_id: str, title: str, age_min: int,
+                               gate: dict | None = None):
     """Escalate a doing-item stall to the org's Research/master session.
     Fires once per stall via stale_doing_escalated_at flag.
 
@@ -7662,18 +7678,34 @@ def _notify_stale_doing_master(master_session: str, worker_session: str,
     firing): removed "restart the worker" advice — EA-10 incident showed
     that restarting an active session can destroy in-progress work. Master
     should INVESTIGATE first, not restart. Options named are investigate/
-    re-route/re-scope. Worker health check is the master's judgment call."""
+    re-route/re-scope. Worker health check is the master's judgment call.
+
+    AH-173 (2026-11-12, Ember-Research filing): `gate` optionally
+    carries {'line': str, 'blockers': [ids]}. When present, the master
+    sees the gate-and-blocker on the first escalation, so a 52h stall
+    whose owed action is one merge by one named agent doesn't require
+    a human-shaped desc read to notice."""
     def _run():
         try:
+            _gate_bit = ""
+            if gate and gate.get("line"):
+                _blockers = ", ".join(gate.get("blockers") or []) or "-"
+                _gate_bit = (
+                    f" In-desc gate: \"{gate['line']}\" "
+                    f"(blockers: {_blockers}). The owed action may be "
+                    f"one PATCH on the blocker item, not a re-route of "
+                    f"this one."
+                )
             text = (
                 f"Doing-item stall: {worker_session} has DOING item "
                 f"{item_id} — {(title or '')[:80]} with no `updated` bump "
-                f"in {age_min}m. Worker was auto-nudged with no response. "
-                f"Investigate before acting: peek the worker's pane, check "
-                f"the item's transcript, or check the session's status. "
-                f"Options: re-route the item, re-scope the spec, or (if "
-                f"the worker is genuinely wedged and you've verified it) "
-                f"restart. Do NOT restart a session that's actively working."
+                f"in {age_min}m. Worker was auto-nudged with no response."
+                f"{_gate_bit} Investigate before acting: peek the "
+                f"worker's pane, check the item's transcript, or check "
+                f"the session's status. Options: re-route the item, "
+                f"re-scope the spec, or (if the worker is genuinely "
+                f"wedged and you've verified it) restart. Do NOT "
+                f"restart a session that's actively working."
             )
             send_text(master_session, text)
             _log_board_notify(item_id, master_session, "master_escalation",
@@ -7684,6 +7716,50 @@ def _notify_stale_doing_master(master_session: str, worker_session: str,
 
 
 _ITEM_ID_RE = re.compile(r'\b([A-Z][A-Z0-9]{0,8}-\d+)\b')
+
+
+# AH-173 (2026-11-12, Ember-Research filing). Items that carry an
+# explicit in-desc gate (STOP block / DO-NOT-X-YET) stall in plain
+# sight because timer-only nudges reach the wrong parties. Surfacing
+# the gate text + the named blocker item on every stale-doing nudge
+# changes the nudge from "this is idle" to "this is idle waiting on
+# <X>" — actionable by whoever reads the nudge, including Jeremy.
+#
+# Pattern priorities, highest first:
+#   1. All-caps lines starting with STOP / DO NOT / BLOCKED / HOLD
+#      / WAITING / AWAITING / GATE (with optional punctuation).
+#   2. Case-insensitive versions of the same keywords.
+# Preference: lines inside a hash-fenced block (## ... ##) if any
+# matches live there.
+_GATE_LINE_RE = re.compile(
+    r'^[ \t]*(?:#*[ \t]*)?'
+    r'(?P<kw>STOP|DO NOT|DO-NOT|BLOCKED-BY|BLOCKED|HOLD|WAITING(?:\s+ON)?'
+    r'|AWAITING|GATE|BLOCKER|WAIT:)\b[^\n]{0,200}',
+    re.IGNORECASE | re.MULTILINE,
+)
+
+
+def _extract_gate(desc: str) -> dict:
+    """Pull the most salient gate line from a board item's desc and any
+    item-id blockers it mentions. Returns {'line': str, 'blockers': list}
+    or {'line': '', 'blockers': []} when no gate shape is found.
+    Caller decides whether to include the gate in nudge payloads.
+    """
+    if not desc:
+        return {"line": "", "blockers": []}
+    _hits = list(_GATE_LINE_RE.finditer(desc))
+    if not _hits:
+        return {"line": "", "blockers": []}
+    # Prefer the all-caps variant if any hit is substantially all-caps.
+    def _caps_score(s: str) -> int:
+        letters = [c for c in s if c.isalpha()]
+        if not letters:
+            return 0
+        return sum(1 for c in letters if c.isupper()) * 100 // len(letters)
+    _best = max(_hits, key=lambda m: _caps_score(m.group(0)))
+    _line = _best.group(0).strip().lstrip("#").strip()[:200]
+    _blockers = sorted(set(_ITEM_ID_RE.findall(_line)))
+    return {"line": _line, "blockers": _blockers}
 
 
 def _stale_doing_awaiting_external(desc: str, own_session: str, db,
@@ -8136,6 +8212,11 @@ def _sweep_stale_doing():
                     db.commit()
                     continue
                 _age_min = int((_now - _upd) / 60)
+                # AH-173 (2026-11-12, Ember-Research filing): extract any
+                # in-desc gate text (STOP block, DO-NOT-X-YET, etc.) and
+                # pass it to the nudge + escalate helpers so the alert
+                # surfaces "waiting on X" instead of only "idle Nm."
+                _gate = _extract_gate(row["desc"] or "")
                 # First-tier nudge to assignee — only if we haven't already
                 # nudged for THIS stall (nudged_at >= updated means the item
                 # hasn't been touched since our last nudge). Respect per-tick cap.
@@ -8158,8 +8239,9 @@ def _sweep_stale_doing():
                              f"cold-thread nudge ({_cold_ref_id}, "
                              f"silent {_cold_silent_days}d)")
                     else:
-                        _notify_stale_doing_assignee(_sess, row["id"], row["title"] or "", _age_min)
-                        slog(f"[stale-doing] {row['id']} {_sess} idle {_age_min}m — nudged assignee")
+                        _notify_stale_doing_assignee(_sess, row["id"], row["title"] or "", _age_min, gate=_gate)
+                        _gate_slog = f" gate=\"{_gate['line'][:60]}\"" if _gate.get("line") else ""
+                        slog(f"[stale-doing] {row['id']} {_sess} idle {_age_min}m — nudged assignee{_gate_slog}")
                     db.execute(
                         "UPDATE issues SET stale_doing_nudged_at = ? WHERE id = ?",
                         (_now, row["id"]),
@@ -8191,7 +8273,8 @@ def _sweep_stale_doing():
                         _master = _resolve_adjudicator_session(_org)
                         if _master and _master != _sess:
                             _notify_stale_doing_master(_master, _sess, row["id"],
-                                                       row["title"] or "", _age_min)
+                                                       row["title"] or "", _age_min,
+                                                       gate=_gate)
                             db.execute(
                                 "UPDATE issues SET stale_doing_escalated_at = ? WHERE id = ?",
                                 (_now, row["id"]),
@@ -8206,15 +8289,24 @@ def _sweep_stale_doing():
                             # needs the terminal park signal.
                             _nm_title = (row["title"] or "")[:200]
                             _nm_iid = row["id"]
-                            def _no_master_push(_iid=_nm_iid, _t=_nm_title, _s=_sess, _o=_org, _a=_age_min):
+                            _nm_gate = _gate
+                            def _no_master_push(_iid=_nm_iid, _t=_nm_title, _s=_sess, _o=_org, _a=_age_min, _g=_nm_gate):
                                 try:
+                                    _gate_bit = ""
+                                    if _g and _g.get("line"):
+                                        _blockers = ", ".join(_g.get("blockers") or []) or "-"
+                                        _gate_bit = (
+                                            f" Gate: \"{_g['line'][:120]}\" "
+                                            f"(blockers: {_blockers})."
+                                        )
                                     _send_pushover(
                                         "amux - stale-doing no-master escalate",
                                         (f"{_iid} - {_t}. Assigned to {_s} "
                                          f"(org {_o}); idle {_a}m at doing. "
                                          f"No adjudicator session for this org "
-                                         f"(no -Reviewer, no -Research). Your "
-                                         f"call: pick it up, reassign, or park."),
+                                         f"(no -Reviewer, no -Research)."
+                                         f"{_gate_bit} Your call: pick it up, "
+                                         f"reassign, or park."),
                                         priority=0,
                                     )
                                 except Exception as _pe:
@@ -8262,14 +8354,23 @@ def _sweep_stale_doing():
                     _log_board_notify(row["id"], _sess, "doing_parked",
                                       item_status="doing", boost_count=0)
                     _parked_title = (row["title"] or "")[:200]
-                    def _park_push(_iid=row["id"], _t=_parked_title, _s=_sess, _a=_age_min):
+                    _park_gate = _gate
+                    def _park_push(_iid=row["id"], _t=_parked_title, _s=_sess, _a=_age_min, _g=_park_gate):
                         try:
+                            _gate_bit = ""
+                            if _g and _g.get("line"):
+                                _blockers = ", ".join(_g.get("blockers") or []) or "-"
+                                _gate_bit = (
+                                    f" Gate: \"{_g['line'][:120]}\" "
+                                    f"(blockers: {_blockers})."
+                                )
                             _send_pushover(
                                 "amux - stale-doing auto-park",
                                 (f"{_iid} - {_t}. Assigned to {_s}; idle "
-                                 f"{_a}m at doing after nudge + master escalation. "
-                                 f"Auto-parked to backlog. Agent stopped working "
-                                 f"and never resumed; re-engage or reassign."),
+                                 f"{_a}m at doing after nudge + master escalation."
+                                 f"{_gate_bit} Auto-parked to backlog. Agent "
+                                 f"stopped working and never resumed; re-engage "
+                                 f"or reassign."),
                                 priority=0,
                             )
                         except Exception as _pe:
@@ -8293,14 +8394,23 @@ def _sweep_stale_doing():
                         (_now, row["id"]),
                     )
                     _parked_title = (row["title"] or "")[:200]
-                    def _audit_park_push(_iid=row["id"], _t=_parked_title, _s=_sess, _a=_age_min):
+                    _audit_park_gate = _gate
+                    def _audit_park_push(_iid=row["id"], _t=_parked_title, _s=_sess, _a=_age_min, _g=_audit_park_gate):
                         try:
+                            _gate_bit = ""
+                            if _g and _g.get("line"):
+                                _blockers = ", ".join(_g.get("blockers") or []) or "-"
+                                _gate_bit = (
+                                    f" Gate: \"{_g['line'][:120]}\" "
+                                    f"(blockers: {_blockers})."
+                                )
                             _send_pushover(
                                 "amux - audit stuck past park cutoff",
                                 (f"{_iid} - {_t}. Assigned to {_s}; idle "
                                  f"{_a}m at doing. Nudge + master escalate "
                                  f"both fired. Status KEPT at doing (C4 "
-                                 f"stays armed). Pick up the auditor, or "
+                                 f"stays armed)."
+                                 f"{_gate_bit} Pick up the auditor, or "
                                  f"intervene on this specific item."),
                                 priority=0,
                             )
@@ -8725,13 +8835,22 @@ def _sweep_stale_review():
                     _audit_bits.append(f"{_a['id']}({_a['session'].rsplit('-',1)[-1] if _a['session'] else '?'}, {_a['status']}, verdict={_v})")
                 _diag = " / ".join(_audit_bits) if _audit_bits else "no audit pair found"
                 _org = (row["org"] or "").strip()
-                def _push(_iid=_tid, _t=_title, _h=_age_h, _d=_diag, _o=_org):
+                # AH-173: surface any in-desc gate text too.
+                _gate = _extract_gate(row["desc"] or "")
+                def _push(_iid=_tid, _t=_title, _h=_age_h, _d=_diag, _o=_org, _g=_gate):
                     try:
+                        _gate_bit = ""
+                        if _g and _g.get("line"):
+                            _blockers = ", ".join(_g.get("blockers") or []) or "-"
+                            _gate_bit = (
+                                f" Gate: \"{_g['line'][:120]}\" "
+                                f"(blockers: {_blockers})."
+                            )
                         _send_pushover(
                             "amux - review stall",
                             (f"{_iid} - {_t}. At review {_h}h. "
-                             f"Audits: {_d}. Org={_o or '?'}. Investigate "
-                             f"or flip status."),
+                             f"Audits: {_d}.{_gate_bit} Org={_o or '?'}. "
+                             f"Investigate or flip status."),
                             priority=0,
                         )
                     except Exception as _pe:

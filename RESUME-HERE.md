@@ -4,6 +4,23 @@
 
 Last updated: 2026-11-12
 
+## Plan for change: surface in-desc gates on stale-doing / stale-review nudges (AH-173, 2026-11-12)
+
+**Why.** Ember-Research filing (co-signed EmberCoreMigration) after a 52h security-chain stall on EMBER-168 / RA-1834 / EAAC-89 / EAAC-94. Four items idled in plain sight while a STOP block in EAAC-94's desc (hash-fenced, all caps) named one owed action by one named agent. Timer-only nudges reached the wrong parties; required a human-shaped read of the desc to notice. Enhancement: when the sweep fires on an item whose desc carries a gate (STOP / DO NOT / BLOCKED-BY / HOLD / WAITING / AWAITING / GATE), surface the gate text + named blocker ids in the nudge payload.
+
+**What.**
+1. New `_extract_gate(desc)` helper: regex `_GATE_LINE_RE` matches gate-prefixed lines (case-insensitive). Returns `{line, blockers}` where blockers are `_ITEM_ID_RE` matches from the gate line. Prefers the most-all-caps match when multiple hits exist (ER's example was uppercase emphasis).
+2. `_notify_stale_doing_assignee` + `_notify_stale_doing_master` accept optional `gate` kwarg and append a "Gate: ... (blockers: ...)" clause when present.
+3. `_sweep_stale_doing` calls `_extract_gate` once per row and passes the result to nudge + master-escalate + no-master-push + auto-park-push + audit-park-push. Slog line includes gate head for visibility.
+4. `_sweep_stale_review` also surfaces the gate in its Pushover payload (same source, same value).
+
+**Verify.**
+1. `python3 -c "import ast; ast.parse(open('amux-server.py').read())"`.
+2. Pick an item with a clear STOP-block desc (EAAC-94 is the reference case). Manually call `_extract_gate(desc)` and confirm it returns a sensible line + blocker ids.
+3. Next sweep tick on a stall with a gate: slog line shows `gate="..."` tail; the nudge text (assignee + master) names the gate; Pushover (if park fires) includes the gate.
+4. Regression: an item with no gate language in desc. nudge/escalate text unchanged. No synthetic gate text.
+5. The AH-168 no-master Pushover and AH-169 audit-park Pushover both include gate when present.
+
 ## Plan for change: status whitelist + blocked/needs-approval digest (AH-172, 2026-11-12)
 
 **Why.** SAO-4 HIGH-adjacent finding #7. 39 live items at non-canonical statuses are invisible to every sweep: 18 CCP in_progress, 3 open (LG-49/50, AMUX-18), 15 blocked, 3 needs-approval (AH-43/44/48). Jeremy-confirmed the full-map + migration path.
