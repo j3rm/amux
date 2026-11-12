@@ -7723,7 +7723,17 @@ def _stale_doing_awaiting_external(desc: str, own_session: str, db,
         except Exception:
             pass
     # (a) Board-item ref → open in a different session?
-    if board_ids:
+    # AH-165 (2026-11-12): audit sessions are DISQUALIFIED from this
+    # branch. Audit items (-Audit-Codex / -Audit-Opus) always reference
+    # their target in title/desc, and the target is always at review
+    # while being audited (that's why the audit was minted). Treating
+    # the audit as "awaiting external closure" is inverted: the audit
+    # closing is what unblocks the target. Pre-fix, every EAC-/RAC-/
+    # EAO-/RAO- doing item was permanently sweep-exempt (nudge/
+    # escalate/park all skipped). Thread-ref branches below still
+    # apply to audit sessions: an auditor waiting on a Jeremy thread
+    # reply is genuinely waiting.
+    if board_ids and not _is_audit_session(own_session):
         placeholders = ",".join("?" for _ in board_ids)
         try:
             rows = db.execute(
@@ -8087,8 +8097,17 @@ def _sweep_stale_doing():
                 # Only past the park cutoff AND an escalation has already
                 # fired for this stall AND we haven't already parked it.
                 # Stops the "nudge, escalate, silence, stall forever" pattern.
+                #
+                # AH-165 (2026-11-12): skip the park tier for audit sessions.
+                # Parking an audit half to `backlog` silently disarms C4
+                # (_auto_verify_from_audit_pair accepts sibling status in
+                # done, verified, review, discarded — NOT backlog). An
+                # audit stall is a blocker on its target, not stale work
+                # to archive; let nudge + escalation keep firing until a
+                # human or Research unsticks it. Visible via slog.
                 if (_upd < _park_cutoff and _parked < _upd and _escalated > 0
-                        and _parked_this_tick < _park_cap_per_tick):
+                        and _parked_this_tick < _park_cap_per_tick
+                        and not _is_audit_session(_sess)):
                     _park_note = (
                         f"\n\n[auto-parked {time.strftime('%Y-%m-%d %H:%M', time.localtime(_now))} "
                         f"by stale-doing sweep: {_age_min}m idle at doing with no "

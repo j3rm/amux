@@ -4,6 +4,30 @@
 
 Last updated: 2026-11-12
 
+## Plan for change: stale-doing sweep silent-exempts every audit item (AH-165, 2026-11-12)
+
+**Why.** Jeremy asked tonight (14:06) for a full audit of nudge/follow-up scripts for "holes where agents could stall." Ember-Research escalated two concrete cases (EAC-1302 idle 48h, EAC-1317 idle 42h) that the sweep had never touched. Root cause confirmed in DB: both items have `stale_doing_nudged_at=None`, `stale_doing_escalated_at=None`. Sweep never fired.
+
+The hole: `_stale_doing_awaiting_external` (line ~7725) scans desc+title for item ids and silent-exempts if any board_ids reference matches an item in a DIFFERENT session with status in ('todo','doing','review'). Audit items ALWAYS reference their target in desc or title (e.g. "auto-minted on ECI-109 review-enter"), and the target is ALWAYS at review while being audited (that is literally why the audit was minted). Every audit item is therefore permanently sweep-exempt. The exemption direction is inverted: the audit closing unblocks the target, not vice versa.
+
+Impact: all 12 EAC-* items in doing, EAO-1081, CAC-384, and the matching RAC/RAO population in the historical ER-1539 report (15-22h idle class) were all stalled by the same hole.
+
+**Second hole (Ember-Research correction):** if AH-164's auto-park fires on an audit sibling at 180m, the parked sibling goes to `backlog`, which is NOT in `_auto_verify_from_audit_pair`'s accepted-sibling-status list (done, verified, review, discarded). Parking an audit silently disarms C4 for its pair. The fix for the exemption would recreate tonight's shape one layer down if park is left enabled for audits.
+
+**What.**
+1. `_stale_doing_awaiting_external`: gate the board-ref branch (line ~7725) on `not _is_audit_session(own_session)`. Thread-active and thread-cold branches stay active (an auditor legitimately waiting on a thread reply is still "waiting"). Minimal change — one condition on the outer `if board_ids:`.
+2. `_sweep_stale_doing`: wrap the Tier-3 park block (AH-164, line ~8050) in a `_is_audit_session(_sess)` skip. Tier-1 (nudge) and Tier-2 (escalate) keep firing. Audit items that stall will be LOUD (nudge + escalate to Research) but never auto-parked, so C4 stays armed. Rationale: a stuck audit item is a blocker on its target, not stale work to archive. Humans + Research escalation are the right unstick path.
+3. Log the skip-park with a different tag (`[stale-doing] ... — skip park (audit session, C4 disarm)`) so the behavior is visible in logs.
+
+**Verify.**
+1. `python3 -c "import ast; ast.parse(open('amux-server.py').read())"`.
+2. Pick a still-stuck audit item after the exemption fix lands. Watch the next 5-min sweep. Expect `[stale-doing] ... — nudged assignee`. Row flags update.
+3. Replay a non-audit item with a cross-session board-ref — exemption should still fire. No regression on the AH-90 Wattco case.
+4. Simulate a 180m-stale audit item (AMUX_STALE_DOING_PARK_MIN=1 temporarily on a test item with an audit session name) — confirm park skip logs, item stays at `doing`, no backlog PATCH.
+5. After fix: fire `_notify_session_of_task(Ember-Audit-Codex, EAC-1302|EAC-1317, title)` from the server shell to deliver the stuck items' first-ever assignment ping.
+
+Companion board item: CD-Audit-Codex to audit the full sweep stack (8 fns: `_sweep_stale_todos`, `_sweep_stale_todos_reboost`, `_sweep_stale_doing`, `_sweep_dormant_schedules`, `_sweep_review_items_for_bv_pass`, `_escalate_stale_todo_to_jeremy`, `_stale_doing_awaiting_external`, `_board_watcher_clear_nudged`) for similar silent-exemption or dead-session holes.
+
 ## Plan for change: stale-doing auto-park tier (AH-164, 2026-11-12) DONE
 
 **Why.** Jeremy (09:14 PM): "I ask what's the status and like oh we're working on it and they are only starting working on it again for some reason they stopped working." Current `_sweep_stale_doing` fires twice (nudge @ 45m, escalate to `<Org>-Research` @ 90m) and then goes silent forever on that stall — the item can sit at `doing` for days with no further signal. The symmetric pattern on the todo side auto-parks after N reboosts; the doing side has no equivalent, so stalled work just leaks until a human asks.
