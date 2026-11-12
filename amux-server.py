@@ -23967,6 +23967,8 @@ function _notifUpdateBadge() {
 }
 
 function _notifShowBanner(icon, title, body, session) {
+  // AH-178: right-side popover tiles disabled (Jeremy 2026-11-12). History panel + Pushover still deliver.
+  return;
   const container = document.getElementById('notif-banners');
   if (!container) return;
   const el = document.createElement('div');
