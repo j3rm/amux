@@ -34148,16 +34148,8 @@ function _tRenderThread(t) {
   const newestUpdated = t.messages.reduce((mx, m) => Math.max(mx, m.updated || 0), t.updated || 0);
   const tidEsc = _tEsc(t.id);
   const workStrip = _tWorkStripHtml(t);
-  // Audit-mode cycle button (dashboard-only — server strips audit_mode
-  // from agent reads, so this chip simply doesn't render for them).
-  // Clicking cycles off → on → manual → off.
-  let auditModeChip = '';
-  if (Object.prototype.hasOwnProperty.call(t, 'audit_mode')) {
-    const mode = t.audit_mode || 'off';
-    const next = mode === 'off' ? 'on' : mode === 'on' ? 'manual' : 'off';
-    const bg = mode === 'on' ? '#2b8a3e' : mode === 'manual' ? '#c99a2e' : '#555b63';
-    auditModeChip = `<span class="t-audit-mode-chip" title="Audit mode: ${_tEsc(mode)}. Click to change." style="background:${bg};color:#fff;padding:2px 8px;border-radius:10px;font-size:0.65rem;font-weight:700;cursor:pointer;letter-spacing:0.03em;flex-shrink:0;" onclick="event.stopPropagation();_tAuditModeToggle('${tidEsc}', '${next}')">AUDIT: ${_tEsc(mode).toUpperCase()}</span>`;
-  }
+  // AH-179: Audit feature removed (Jeremy 2026-11-12). Header AUDIT: ... chip hidden.
+  const auditModeChip = '';
   // Thread cards get a chunkier border-left (4px accent bar) to visually
   // separate them from the message cards inside; the rest of the border stays
   // thin. Thread header is heavier (larger title, more padding) so the
@@ -34378,32 +34370,11 @@ function _tRenderMsg(t, m) {
   // somewhere between "requested" and "verdict posted". Status is
   // todo (queued), doing (auditor is working on it), or review
   // (auditor flipped it waiting on something).
-  const pending = Array.isArray(m.audit_pending) ? m.audit_pending : [];
-  const isDashResp = (t && Object.prototype.hasOwnProperty.call(t, 'audit_mode'));
-  let auditChipHtml = '';
-  if (latestAudit) {
-    const vcolor = latestAudit.verdict === 'accurate' ? '#2b8a3e'
-                 : latestAudit.verdict === 'partially_accurate' ? '#c99a2e'
-                 : latestAudit.verdict === 'inaccurate' ? '#c0392b'
-                 : '#55606b';
-    const vLabel = (latestAudit.verdict || 'unknown').replace(/_/g, ' ');
-    auditChipHtml = `<span class="t-audit-chip" title="click to view auditor rationale" style="background:${vcolor};color:#fff;padding:1px 7px;border-radius:10px;font-size:0.65rem;font-weight:700;letter-spacing:0.02em;cursor:pointer;" onclick="event.stopPropagation();_tAuditDrawerToggle('${midEsc}')">${latestAudit.score}% · ${_tEsc(vLabel)}</span>`;
-  } else if (pending.length) {
-    const p0 = pending[0];
-    const pstatus = (p0.status || 'todo').toLowerCase();
-    // todo=queued (gray), doing=running (blue), review=blocked (amber)
-    const pcolor = pstatus === 'doing' ? '#3a6ea5'
-                 : pstatus === 'review' ? '#c99a2e'
-                 : '#55606b';
-    const plabel = pstatus === 'doing' ? 'running'
-                 : pstatus === 'review' ? 'needs input'
-                 : 'pending';
-    const auditorEsc = _tEsc(p0.auditor || 'auditor');
-    const titleAttr = `Audit ${_tEsc(plabel)} on ${_tEsc(p0.board_id || '')} (${auditorEsc}). Click for details.`;
-    auditChipHtml = `<span class="t-audit-chip" title="${titleAttr}" style="background:${pcolor};color:#fff;padding:1px 7px;border-radius:10px;font-size:0.65rem;font-weight:700;letter-spacing:0.02em;cursor:pointer;" onclick="event.stopPropagation();_tAuditDrawerToggle('${midEsc}')">⚖ ${_tEsc(plabel)} · ${auditorEsc}</span>`;
-  } else if (isDashResp && m.from_session) {
-    auditChipHtml = `<button style="${_TICON_BTN_STYLE}opacity:0.5;" title="Audit this message now" onclick="event.stopPropagation();_tAuditNow('${midEsc}')">⚖</button>`;
-  }
+  // AH-179: Audit feature removed (Jeremy 2026-11-12). Chips + per-message
+  // ⚖ button hidden. Historical audit rows + message_audits table preserved;
+  // _tAuditDrawerToggle / _tAuditNow kept as dead code so any stray onclick is
+  // silent, not a ReferenceError.
+  const auditChipHtml = '';
   // AH-155 reviewer status. pending = yellow badge + yellow accent (overrides
   // direction accent); rejected = red badge + red accent; approved = no badge.
   const revStatus = (m.review_status || 'approved');
@@ -55647,7 +55618,8 @@ def main():
     schedule_job(_evict_stale_caches,    interval=300,                  name="cache_evict", initial_delay=60)
     schedule_job(_cleanup_tmp,           interval=1800,                 name="tmp_cleanup", initial_delay=60)
     schedule_job(_threads_stale_working_reaper, interval=300,           name="threads_stale_working", initial_delay=120)
-    schedule_job(_audit_dispatcher,            interval=30,              name="audit_dispatch",        initial_delay=90)
+    # AH-179: Audit feature removed (Jeremy 2026-11-12). Scheduler disabled; function body kept.
+    # schedule_job(_audit_dispatcher,            interval=30,              name="audit_dispatch",        initial_delay=90)
     schedule_job(_auto_archive_idle,     interval=3600,                 name="auto_archive", initial_delay=300)
     # DISABLED 2026-07-06 (upstream f088f8e) — auto-steering every idle session
     # about stale doing/review cards woke ~20 sessions at once into a churn storm
