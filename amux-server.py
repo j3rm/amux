@@ -6523,6 +6523,16 @@ def _init_db():
         # `nudged_at < updated`.
         "ALTER TABLE issues ADD COLUMN stale_doing_nudged_at INTEGER NOT NULL DEFAULT 0",
         "ALTER TABLE issues ADD COLUMN stale_doing_escalated_at INTEGER NOT NULL DEFAULT 0",
+        # stale_doing_parked_at — AH-164 (Jeremy 2026-11-12). Third tier
+        # of _sweep_stale_doing. After nudge (45m) and master-escalation
+        # (90m) fire, items that sit at doing untouched past the park
+        # cutoff (default 180m) auto-park to backlog with a one-shot
+        # Pushover to Jeremy. Same reset semantic as the sibling columns:
+        # parked_at < updated means a touch happened and the park flag
+        # is re-armed. Prevents stalled doing items from leaking token
+        # cost in silence the way the stale-todo park prevents the same
+        # on the todo side.
+        "ALTER TABLE issues ADD COLUMN stale_doing_parked_at INTEGER NOT NULL DEFAULT 0",
         # stale_todo_boost_count — ER-624 (Ember-Research 2026-09-29, EAC-572
         # 3.6-day orphan). Counts consecutive todo-boost sweeps that
         # bubbled this item back to top-of-queue without a status change.
@@ -7899,6 +7909,14 @@ def _sweep_stale_doing():
     on exemption so the sweep re-evaluates each tick; the moment the
     referenced item closes the block is released and normal sweep
     behavior resumes.
+
+    Amendment 2026-11-12 (AH-164, Jeremy): third tier — auto-park to
+    backlog after `AMUX_STALE_DOING_PARK_MIN` minutes (default 180) with
+    a one-shot Pushover to Jeremy. Fires ONLY after the master escalation
+    has fired for this stall, so "nudge, escalate, park" are strictly
+    ordered. Mirrors the stale-todo auto-park so a stalled doing item
+    stops leaking sweep-nudge token cost once it's clear the agent is
+    not going to pick it back up without a human.
     """
     try:
         _threshold_min = 45
@@ -7906,9 +7924,15 @@ def _sweep_stale_doing():
             _threshold_min = max(15, min(240, int(os.environ.get("AMUX_STALE_DOING_MIN", "45"))))
         except (ValueError, TypeError):
             pass
+        _park_min = 180
+        try:
+            _park_min = max(60, min(1440, int(os.environ.get("AMUX_STALE_DOING_PARK_MIN", "180"))))
+        except (ValueError, TypeError):
+            pass
         _now = int(time.time())
         _cutoff = _now - (_threshold_min * 60)
         _escalate_cutoff = _now - (2 * _threshold_min * 60)
+        _park_cutoff = _now - (_park_min * 60)
         # Zombie cutoff (Ember-Research feedback 2026-08-20 after first
         # live firing): items >7d old aren't stalled WORKERS, they're
         # forgotten backlog. Escalating them as if a live worker just
@@ -7930,12 +7954,19 @@ def _sweep_stale_doing():
             _cap_per_tick = max(1, min(50, int(os.environ.get("AMUX_STALE_DOING_CAP_PER_TICK", "5"))))
         except (ValueError, TypeError):
             pass
+        _park_cap_per_tick = 3
+        try:
+            _park_cap_per_tick = max(1, min(50, int(os.environ.get("AMUX_STALE_DOING_PARK_CAP_PER_TICK", "3"))))
+        except (ValueError, TypeError):
+            pass
         _nudged_this_tick = 0
         _escalated_this_tick = 0
+        _parked_this_tick = 0
         db = get_db()
         rows = db.execute(
             "SELECT id, title, session, org, updated, desc, "
-            "       stale_doing_nudged_at, stale_doing_escalated_at "
+            "       stale_doing_nudged_at, stale_doing_escalated_at, "
+            "       stale_doing_parked_at "
             "FROM issues "
             "WHERE status = 'doing' AND owner_type = 'agent' AND deleted IS NULL "
             "  AND session IS NOT NULL AND session != '' "
@@ -7944,24 +7975,28 @@ def _sweep_stale_doing():
             (_cutoff,),
         ).fetchall()
         for row in rows:
-            if _nudged_this_tick >= _cap_per_tick and _escalated_this_tick >= _cap_per_tick:
-                break  # cap hit for both tiers
+            if (_nudged_this_tick >= _cap_per_tick
+                    and _escalated_this_tick >= _cap_per_tick
+                    and _parked_this_tick >= _park_cap_per_tick):
+                break  # cap hit for all three tiers
             try:
                 _sess = row["session"]
                 _upd = int(row["updated"] or 0)
                 _nudged = int(row["stale_doing_nudged_at"] or 0)
                 _escalated = int(row["stale_doing_escalated_at"] or 0)
+                _parked = int(row["stale_doing_parked_at"] or 0)
                 # Skip if not a real session (would have session_dead alert instead)
                 if not _is_real_session(_sess):
                     continue
-                # Zombie item (>7d old) — silent-suppress both tiers.
+                # Zombie item (>7d old) — silent-suppress all three tiers.
                 # Not a stalled WORKER, just forgotten backlog.
                 if _upd < _zombie_cutoff:
                     db.execute(
                         "UPDATE issues SET stale_doing_nudged_at = ?, "
-                        "                  stale_doing_escalated_at = ? "
+                        "                  stale_doing_escalated_at = ?, "
+                        "                  stale_doing_parked_at = ? "
                         "WHERE id = ?",
-                        (_now, _now, row["id"]),
+                        (_now, _now, _now, row["id"]),
                     )
                     db.commit()
                     continue
@@ -7973,9 +8008,10 @@ def _sweep_stale_doing():
                     if _env.get("CC_ARCHIVED") == "1":
                         db.execute(
                             "UPDATE issues SET stale_doing_nudged_at = ?, "
-                            "                  stale_doing_escalated_at = ? "
+                            "                  stale_doing_escalated_at = ?, "
+                            "                  stale_doing_parked_at = ? "
                             "WHERE id = ?",
-                            (_now, _now, row["id"]),
+                            (_now, _now, _now, row["id"]),
                         )
                         db.commit()
                         continue
@@ -8047,6 +8083,49 @@ def _sweep_stale_doing():
                             )
                             _escalated_this_tick += 1
                             slog(f"[stale-doing] {row['id']} {_sess} idle {_age_min}m — escalated to {_master}")
+                # Third-tier auto-park to backlog — AH-164 (Jeremy 2026-11-12).
+                # Only past the park cutoff AND an escalation has already
+                # fired for this stall AND we haven't already parked it.
+                # Stops the "nudge, escalate, silence, stall forever" pattern.
+                if (_upd < _park_cutoff and _parked < _upd and _escalated > 0
+                        and _parked_this_tick < _park_cap_per_tick):
+                    _park_note = (
+                        f"\n\n[auto-parked {time.strftime('%Y-%m-%d %H:%M', time.localtime(_now))} "
+                        f"by stale-doing sweep: {_age_min}m idle at doing with no "
+                        f"touch after master escalation. Moved to backlog. If this "
+                        f"is still live work, PATCH status back to doing with a "
+                        f"one-line note on what's next.]"
+                    )
+                    _new_desc = (row["desc"] or "") + _park_note
+                    db.execute(
+                        "UPDATE issues SET status = 'backlog', "
+                        "                  stale_doing_parked_at = ?, "
+                        "                  desc = ?, "
+                        "                  updated = ? "
+                        "WHERE id = ?",
+                        (_now, _new_desc, _now, row["id"]),
+                    )
+                    db.commit()
+                    _board_changed()
+                    _log_board_notify(row["id"], _sess, "doing_parked",
+                                      item_status="doing", boost_count=0)
+                    _parked_title = (row["title"] or "")[:200]
+                    def _park_push(_iid=row["id"], _t=_parked_title, _s=_sess, _a=_age_min):
+                        try:
+                            _send_pushover(
+                                "amux - stale-doing auto-park",
+                                (f"{_iid} - {_t}. Assigned to {_s}; idle "
+                                 f"{_a}m at doing after nudge + master escalation. "
+                                 f"Auto-parked to backlog. Agent stopped working "
+                                 f"and never resumed; re-engage or reassign."),
+                                priority=0,
+                            )
+                        except Exception as _pe:
+                            slog(f"[stale-doing-park] {_iid}: pushover failed: {_pe}")
+                    threading.Thread(target=_park_push, daemon=True).start()
+                    _parked_this_tick += 1
+                    slog(f"[stale-doing] {row['id']} {_sess} idle {_age_min}m — "
+                         f"auto-parked to backlog (tier 3)")
                 db.commit()
             except Exception as _re:
                 slog(f"[stale-doing-sweep] row {row['id']}: {_re}")

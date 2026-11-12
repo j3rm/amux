@@ -4,7 +4,29 @@
 
 Last updated: 2026-11-12
 
-## Plan for change: C4 single-audit path UnboundLocalError on `_sha_a` / `_sha_b` (AH-163, 2026-11-12)
+## Plan for change: stale-doing auto-park tier (AH-164, 2026-11-12) DONE
+
+**Why.** Jeremy (09:14 PM): "I ask what's the status and like oh we're working on it and they are only starting working on it again for some reason they stopped working." Current `_sweep_stale_doing` fires twice (nudge @ 45m, escalate to `<Org>-Research` @ 90m) and then goes silent forever on that stall — the item can sit at `doing` for days with no further signal. The symmetric pattern on the todo side auto-parks after N reboosts; the doing side has no equivalent, so stalled work just leaks until a human asks.
+
+Jeremy's ruling: coded sweep only, no LLM. Same shape as the rest of the system.
+
+**What.**
+1. New column `stale_doing_parked_at` INTEGER NOT NULL DEFAULT 0. ALTER TABLE in the schema-init block near the existing stale_doing_nudged_at/escalated_at ALTERs.
+2. Extend `_sweep_stale_doing` with a third tier:
+   - `_park_cutoff = _now - (_park_min * 60)` — default 180m (3h), configurable via `AMUX_STALE_DOING_PARK_MIN` clamped [60, 1440]. 2× the escalate cutoff, 4× the nudge cutoff.
+   - If item at `doing`, `_upd < _park_cutoff`, `_parked < _upd`, and `_escalated > 0` (only park items that already saw an escalation): PATCH status=`backlog`, set stale_doing_parked_at=now, bump updated, append a desc note naming the sweep and that the item was parked for silent-doing.
+   - Pushover Jeremy once per park (title "amux - stale-doing auto-park"), symmetric to `_escalate_stale_todo_to_jeremy`.
+   - `_log_board_notify(iid, sess, "doing_parked", item_status="doing", ...)` so the AH-138 stats roll it up.
+   - Per-tick cap `_parked_this_tick` with its own `AMUX_STALE_DOING_PARK_CAP_PER_TICK` default 3 (lower than nudge/escalate because park is destructive — spread across sweeps if a backlog hits).
+3. Exemptions inherit from the existing logic: zombie, archived session, not-running, awaiting-external all skip the park branch.
+
+**Verify.**
+1. `python3 -c "import ast; ast.parse(open('amux-server.py').read())"`.
+2. Pick a `doing` item old enough and confirm sweep logs `[stale-doing] ... auto-parked to backlog`. For a controlled test, temporarily set `AMUX_STALE_DOING_PARK_MIN=1` + `AMUX_STALE_DOING_MIN=1` and watch a test item.
+3. Confirm Pushover title fires once, not every tick (parked_at flag suppresses re-park).
+4. Confirm `GET /api/stats/board-pings?days=1` now shows `doing_parked` in by_type.
+
+## Plan for change: C4 single-audit path UnboundLocalError on `_sha_a` / `_sha_b` (AH-163, 2026-11-12) DONE
 
 **Why.** RTG-Research channel: RA-930/932/933/934/935 re-entered review 2026-11-11, Codex audits (RAC-8029..8033) closed with verdicts, targets still stuck at review — "zero Opus items exist" from the server's view. Server log confirms every RAC close at 2026-11-11 19:15 hit `UnboundLocalError: cannot access local variable '_sha_a'` at line 11594, inside `_auto_verify_from_audit_pair`. Same error already seen on EAO-1075 (2026-11-11 01:15) and EAO-1080 (01:46).
 
