@@ -7963,23 +7963,43 @@ def _sweep_dormant_schedules():
         _now = int(time.time())
         _cutoff = _now - (_days * 24 * 60 * 60)
         db = get_db()
+        # AH-174 (2026-11-12, SAO-4 finding #14): widen the predicate
+        # beyond enabled=0 && run_count=0 — a schedule that is enabled
+        # but has never fired AND is older than the grace period is
+        # ALSO dormant, just a different shape. Also allow re-alerts
+        # after AMUX_DORMANT_SCHEDULE_REALERT_DAYS (default 7d) so a
+        # schedule that stays dormant keeps getting weekly reminders
+        # instead of one-and-forever.
+        try:
+            _realert_days = max(1, min(90, int(os.environ.get("AMUX_DORMANT_SCHEDULE_REALERT_DAYS", "7"))))
+        except (ValueError, TypeError):
+            _realert_days = 7
+        _realert_cutoff = _now - (_realert_days * 86400)
         rows = db.execute(
-            "SELECT id, title, created FROM schedules "
+            "SELECT id, title, created, enabled, dormant_alerted_at FROM schedules "
             "WHERE deleted IS NULL "
-            "  AND enabled = 0 "
             "  AND run_count = 0 "
             "  AND created < ? "
-            "  AND (dormant_alerted_at IS NULL OR dormant_alerted_at = 0) "
+            "  AND ("
+            "       dormant_alerted_at IS NULL "
+            "    OR dormant_alerted_at = 0 "
+            "    OR dormant_alerted_at < ? "
+            "  ) "
             "ORDER BY created ASC",
-            (_cutoff,),
+            (_cutoff, _realert_cutoff),
         ).fetchall()
         if not rows:
             return
-        # Batch one Pushover for all newly-dormant schedules.
+        # Batch one Pushover for all newly-dormant schedules. AH-174
+        # (SAO-4 #14): include enabled state in the line so the
+        # response action is obvious (enabled=0 means "flip it on";
+        # enabled=1 means "it's on but never fires — fix the cron").
         lines = []
         for row in rows:
             _age_days = max(0, (_now - int(row["created"] or 0)) // 86400)
-            lines.append(f"SCHED-{row['id']} ({_age_days}d): {row['title'][:80]}")
+            _state = "enabled" if int(row["enabled"] or 0) else "disabled"
+            _realert_tag = " [re-alert]" if int(row["dormant_alerted_at"] or 0) else ""
+            lines.append(f"SCHED-{row['id']} ({_age_days}d, {_state}){_realert_tag}: {row['title'][:80]}")
         body = (
             f"{len(rows)} schedule(s) created enabled=0 and never fired "
             f"(older than {_days}d):\n\n" + "\n".join(lines) +
@@ -8148,8 +8168,42 @@ def _sweep_stale_doing():
                     pass
                 # Skip if the assignee isn't running — session_dead alerts
                 # cover the dead-process case. Sweep is for LIVE-BUT-STALLED.
+                #
+                # AH-174 (2026-11-12, SAO-4 finding #9): session_dead
+                # only fires for tmux-alive sessions; hibernated or
+                # fully-stopped owners of a doing item silently stall
+                # with no signal. If the item is past the park cutoff
+                # AND we haven't already Pushovered Jeremy for it, fire
+                # one-shot Pushover. Uses stale_doing_parked_at as the
+                # one-shot marker (same gate as AH-169 audit-park).
                 try:
                     if not is_running(_sess):
+                        if _upd < _park_cutoff and _parked == 0:
+                            _hib_iid = row["id"]
+                            _hib_title = (row["title"] or "")[:200]
+                            _hib_age = int((_now - _upd) / 60)
+                            def _hib_push(_iid=_hib_iid, _t=_hib_title, _s=_sess, _a=_hib_age):
+                                try:
+                                    _send_pushover(
+                                        "amux - doing item owned by stopped session",
+                                        (f"{_iid} - {_t}. Assigned to {_s}; "
+                                         f"idle {_a}m at doing but the owning "
+                                         f"session is NOT running (hibernated "
+                                         f"or stopped). No sweep tier can "
+                                         f"deliver to it. Wake the session, "
+                                         f"reassign, or park."),
+                                        priority=0,
+                                    )
+                                except Exception as _pe:
+                                    slog(f"[stale-doing-hib] {_iid}: pushover failed: {_pe}")
+                            threading.Thread(target=_hib_push, daemon=True).start()
+                            db.execute(
+                                "UPDATE issues SET stale_doing_parked_at = ? WHERE id = ?",
+                                (_now, row["id"]),
+                            )
+                            db.commit()
+                            slog(f"[stale-doing] {row['id']} {_sess} idle {_hib_age}m — "
+                                 f"owner not running, Pushovered Jeremy (once)")
                         continue
                 except Exception:
                     continue
@@ -8867,6 +8921,57 @@ def _sweep_stale_review():
                 slog(f"[stale-review] row {row['id']}: {_re}")
     except Exception as _e:
         slog(f"[stale-review] failed: {_e}")
+
+
+def _sweep_jeremy_digest():
+    """Weekly digest (AH-174, 2026-11-12, SAO-4 finding #10) of items
+    assigned to Jeremy. Jeremy has no env file so every other sweep's
+    `_is_real_session` skip silently excludes these items. 12 JEREM-*
+    items were sitting between 77h and 3104h at audit time.
+
+    One Pushover per week with count + 3 oldest per status so the pile
+    doesn't stay silent. Cadence lets the sweeps run daily without
+    spamming Jeremy on his own backlog.
+    """
+    try:
+        db = get_db()
+        _now = int(time.time())
+        rows = db.execute(
+            "SELECT id, title, status, updated FROM issues "
+            "WHERE session = 'Jeremy' AND status IN ('todo', 'doing', 'review') "
+            "  AND deleted IS NULL "
+            "ORDER BY updated ASC"
+        ).fetchall()
+        if not rows:
+            return
+        _by_status = {}
+        for r in rows:
+            _by_status.setdefault(r["status"], []).append(r)
+        _parts = []
+        for _st in ("todo", "doing", "review"):
+            _items = _by_status.get(_st, [])
+            if not _items:
+                continue
+            _oldest = []
+            for _it in _items[:3]:
+                _age_d = max(1, int((_now - int(_it["updated"] or 0)) / 86400))
+                _oldest.append(f"{_it['id']}({_age_d}d)")
+            _parts.append(f"{_st}: {len(_items)} ({', '.join(_oldest)})")
+        _msg = (
+            f"Weekly digest of Jeremy-assigned items (sweeps skip these "
+            f"since Jeremy has no env file): {' | '.join(_parts)}. "
+            f"Clear or reassign when you get a minute."
+        )
+        def _push():
+            try:
+                _send_pushover("amux - weekly digest (Jeremy's queue)",
+                               _msg, priority=0)
+            except Exception as _pe:
+                slog(f"[jeremy-digest] pushover failed: {_pe}")
+        threading.Thread(target=_push, daemon=True).start()
+        slog(f"[jeremy-digest] AH-174: {_msg}")
+    except Exception as _e:
+        slog(f"[jeremy-digest] failed: {_e}")
 
 
 def _sweep_blocked_digest():
@@ -55409,6 +55514,11 @@ def main():
     # finding #7). Legitimate non-canonical statuses that no other sweep
     # covers get one Pushover per day with count + oldest items.
     schedule_job(_sweep_blocked_digest,  interval=86400,                name="blocked_digest", initial_delay=1200)
+    # Jeremy-assigned weekly digest (AH-174, SAO-4 #10). Items with
+    # session='Jeremy' have no env file so _is_real_session skips them
+    # in every other sweep; 12 JEREM-* items were at 77h-3104h silent.
+    # One Pushover per week keeps the pile visible without spamming.
+    schedule_job(_sweep_jeremy_digest,   interval=604800,               name="jeremy_digest", initial_delay=1800)
     # Dormant-schedule sweep (AH-96, 2026-08-24): daily, alerts once for
     # any schedule created enabled=0 that never fired past the grace
     # period (default 3d, tunable via AMUX_DORMANT_SCHEDULE_DAYS).

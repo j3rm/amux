@@ -4,6 +4,27 @@
 
 Last updated: 2026-11-12
 
+## Plan for change: close the three SAO-4 LOW/MED defects that still cause silent stalls (AH-174, 2026-11-12)
+
+**Why.** Jeremy (16:51): "#9-14 are low but they are defects, that will lead to another instance of things not getting done? If so, correct them now." Three of the six do cause work to silently not get done:
+
+- #9: `is_running` skip assumes `session_dead` covers hibernated/tmux-dead owners. It doesn't — `session_dead` only fires for tmux-alive sessions. A doing item owned by a hibernated session gets zero signal.
+- #10: 12 JEREM-* items at 77h-3104h. Jeremy has no env file so `_is_real_session` skips them in every sweep. Silent forever.
+- #14: `dormant_alerted_at` is never reset. One missed schedule alert = never alerted again. Predicate also misses enabled schedules that have never fired.
+
+The other three (#11 stale_notified permanent lock, #12 duplicate thread→board items, #13 org=NULL review sweep) are quality-of-life — none of them silently drop work in a new way. AH-170 already covers review items regardless of org via a status-only SELECT.
+
+**What.**
+1. #9: In `_sweep_stale_doing`, after the `is_running` skip, if `_upd < _park_cutoff AND _parked == 0`, Pushover Jeremy once with "doing item owned by stopped session" and set `stale_doing_parked_at` as the one-shot marker. One ping per stall, no spam.
+2. #10: New `_sweep_jeremy_digest` scheduled weekly (604800s). SELECT items where `session='Jeremy'` and `status IN (todo, doing, review)`. Pushover count + 3 oldest per status.
+3. #14: Widen `_sweep_dormant_schedules` SELECT to include enabled schedules that have never fired (`run_count = 0` alone, not `enabled = 0 AND run_count = 0`). Re-alert after `AMUX_DORMANT_SCHEDULE_REALERT_DAYS` (default 7d, clamped [1, 90]) by allowing `dormant_alerted_at < realert_cutoff` into the SELECT. Line includes `enabled` flag and `[re-alert]` tag so the action is obvious.
+
+**Verify.**
+1. `python3 -c "import ast; ast.parse(open('amux-server.py').read())"`.
+2. #9 synthetic: mark a doing item's session as stopped, let it age past park cutoff. Expect one Pushover, `stale_doing_parked_at` bumped, no second Pushover on next tick.
+3. #10 live: at initial_delay+30m, Pushover fires once with the 12 JEREM-* items summarized. No repeat for a week.
+4. #14 live: an existing one-shot-alerted schedule past 7d since its alert re-fires on next daily tick. Line shows `[re-alert]` tag. A hypothetical enabled-but-never-fired schedule past the grace also appears.
+
 ## Plan for change: surface in-desc gates on stale-doing / stale-review nudges (AH-173, 2026-11-12)
 
 **Why.** Ember-Research filing (co-signed EmberCoreMigration) after a 52h security-chain stall on EMBER-168 / RA-1834 / EAAC-89 / EAAC-94. Four items idled in plain sight while a STOP block in EAAC-94's desc (hash-fenced, all caps) named one owed action by one named agent. Timer-only nudges reached the wrong parties; required a human-shaped read of the desc to notice. Enhancement: when the sweep fires on an item whose desc carries a gate (STOP / DO NOT / BLOCKED-BY / HOLD / WAITING / AWAITING / GATE), surface the gate text + named blocker ids in the nudge payload.
