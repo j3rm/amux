@@ -34373,7 +34373,10 @@ function _tRenderMsg(t, m) {
   // AH-179: Audit feature removed (Jeremy 2026-11-12). Chips + per-message
   // ⚖ button hidden. Historical audit rows + message_audits table preserved;
   // _tAuditDrawerToggle / _tAuditNow kept as dead code so any stray onclick is
-  // silent, not a ReferenceError.
+  // silent, not a ReferenceError. `pending` kept bound as [] so the drawer
+  // block below (which reads pending.length) doesn't throw and keeps the
+  // drawer permanently closed.
+  const pending = [];
   const auditChipHtml = '';
   // AH-155 reviewer status. pending = yellow badge + yellow accent (overrides
   // direction accent); rejected = red badge + red accent; approved = no badge.
