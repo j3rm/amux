@@ -45542,6 +45542,11 @@ class CCHandler(BaseHTTPRequestHandler):
                 sc = _sse_cache["sessions"]
                 sess_list = sc["data"] if sc["data"] is not None else []
                 def _get_git(s):
+                    # AH-177: skip archived/pseudo-sessions (CC_ARCHIVED=1). They share a tree with
+                    # their parent worker (e.g. amux-reviewer <-> amux-helper on jwesley-main) and
+                    # would otherwise paint a false "same branch" conflict banner on the real worker.
+                    if s.get("archived"):
+                        return None
                     name = s.get("name", "")
                     wd = s.get("dir", "")
                     if not wd:
