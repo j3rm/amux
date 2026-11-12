@@ -7969,6 +7969,22 @@ def _sweep_stale_doing():
             _park_cap_per_tick = max(1, min(50, int(os.environ.get("AMUX_STALE_DOING_PARK_CAP_PER_TICK", "3"))))
         except (ValueError, TypeError):
             pass
+        # AH-169 (2026-11-12, SAO-4 finding #1): audit sessions re-arm
+        # on wall-clock since last nudge/escalate, not on `updated`
+        # (which never changes on a stalled audit). Both tiers fire
+        # repeatedly on their own cadence until the human intervenes.
+        _audit_re_nudge_min = 45
+        try:
+            _audit_re_nudge_min = max(15, min(240, int(os.environ.get("AMUX_STALE_DOING_AUDIT_RE_NUDGE_MIN", "45"))))
+        except (ValueError, TypeError):
+            pass
+        _audit_re_escalate_min = 240
+        try:
+            _audit_re_escalate_min = max(60, min(1440, int(os.environ.get("AMUX_STALE_DOING_AUDIT_RE_ESCALATE_MIN", "240"))))
+        except (ValueError, TypeError):
+            pass
+        _audit_re_nudge_cutoff = _now - (_audit_re_nudge_min * 60)
+        _audit_re_escalate_cutoff = _now - (_audit_re_escalate_min * 60)
         _nudged_this_tick = 0
         _escalated_this_tick = 0
         _parked_this_tick = 0
@@ -8000,7 +8016,13 @@ def _sweep_stale_doing():
                     continue
                 # Zombie item (>7d old) — silent-suppress all three tiers.
                 # Not a stalled WORKER, just forgotten backlog.
-                if _upd < _zombie_cutoff:
+                #
+                # AH-169 (2026-11-12, SAO-4 finding #1): audit sessions
+                # exempt from the zombie branch. An audit stuck 7+ days
+                # is still a target stuck at review and still needs
+                # attention; silencing it is wrong. Audit items have
+                # their own re-arm cadence below.
+                if _upd < _zombie_cutoff and not _is_audit_session(_sess):
                     db.execute(
                         "UPDATE issues SET stale_doing_nudged_at = ?, "
                         "                  stale_doing_escalated_at = ?, "
@@ -8059,7 +8081,17 @@ def _sweep_stale_doing():
                 # First-tier nudge to assignee — only if we haven't already
                 # nudged for THIS stall (nudged_at >= updated means the item
                 # hasn't been touched since our last nudge). Respect per-tick cap.
-                if _nudged < _upd and _nudged_this_tick < _cap_per_tick:
+                #
+                # AH-169 (2026-11-12, SAO-4 finding #1): for audit sessions,
+                # re-arm on wall-clock since last nudge (not on `updated`,
+                # which never changes on a stalled audit). Default 45m
+                # re-fire cadence.
+                _audit_sess = _is_audit_session(_sess)
+                _nudge_eligible = (
+                    (_nudged < _audit_re_nudge_cutoff) if _audit_sess
+                    else (_nudged < _upd)
+                )
+                if _nudge_eligible and _nudged_this_tick < _cap_per_tick:
                     if _cold_ref_id:
                         _notify_stale_doing_cold_thread(
                             _sess, row["id"], row["title"] or "",
@@ -8077,8 +8109,16 @@ def _sweep_stale_doing():
                     _nudged_this_tick += 1
                 # Second-tier escalation to org master — only past the 2x
                 # threshold AND not already escalated for this stall.
-                if (_upd < _escalate_cutoff and _escalated < _upd
-                        and _escalated_this_tick < _cap_per_tick):
+                #
+                # AH-169 (2026-11-12, SAO-4 finding #1): for audit sessions,
+                # re-escalate on wall-clock (default 240m / 4h). Previously
+                # escalate was one-shot per stall.
+                _escalate_eligible = (
+                    (_upd < _escalate_cutoff
+                     and _escalated < _audit_re_escalate_cutoff) if _audit_sess
+                    else (_upd < _escalate_cutoff and _escalated < _upd)
+                )
+                if _escalate_eligible and _escalated_this_tick < _cap_per_tick:
                     _org = (row["org"] or "").strip()
                     if not _org and "-" in _sess:
                         _org = _sess.split("-", 1)[0]
@@ -8180,6 +8220,40 @@ def _sweep_stale_doing():
                     _parked_this_tick += 1
                     slog(f"[stale-doing] {row['id']} {_sess} idle {_age_min}m — "
                          f"auto-parked to backlog (tier 3)")
+                # AH-169 (2026-11-12, SAO-4 finding #1): for audit sessions,
+                # park-to-backlog is skipped (AH-165). Instead, Pushover
+                # Jeremy ONCE when the item crosses the park cutoff. Gate
+                # on `_parked == 0` so this fires exactly once; use
+                # stale_doing_parked_at as the one-shot flag (status stays
+                # `doing`, C4 stays armed). Visibility signal that nudge +
+                # escalation have both run and the item is still stuck.
+                elif (_upd < _park_cutoff and _parked == 0 and _escalated > 0
+                      and _parked_this_tick < _park_cap_per_tick
+                      and _audit_sess):
+                    db.execute(
+                        "UPDATE issues SET stale_doing_parked_at = ? WHERE id = ?",
+                        (_now, row["id"]),
+                    )
+                    _parked_title = (row["title"] or "")[:200]
+                    def _audit_park_push(_iid=row["id"], _t=_parked_title, _s=_sess, _a=_age_min):
+                        try:
+                            _send_pushover(
+                                "amux - audit stuck past park cutoff",
+                                (f"{_iid} - {_t}. Assigned to {_s}; idle "
+                                 f"{_a}m at doing. Nudge + master escalate "
+                                 f"both fired. Status KEPT at doing (C4 "
+                                 f"stays armed). Pick up the auditor, or "
+                                 f"intervene on this specific item."),
+                                priority=0,
+                            )
+                        except Exception as _pe:
+                            slog(f"[stale-doing-audit-park] {_iid}: pushover failed: {_pe}")
+                    threading.Thread(target=_audit_park_push, daemon=True).start()
+                    _log_board_notify(row["id"], _sess, "audit_park_notify",
+                                      item_status="doing", boost_count=0)
+                    _parked_this_tick += 1
+                    slog(f"[stale-doing] {row['id']} {_sess} idle {_age_min}m — "
+                         f"audit park-notify → Jeremy (status kept at doing, C4 armed)")
                 db.commit()
             except Exception as _re:
                 slog(f"[stale-doing-sweep] row {row['id']}: {_re}")

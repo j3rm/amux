@@ -4,6 +4,24 @@
 
 Last updated: 2026-11-12
 
+## Plan for change: time-based re-arm for audit-session stale-doing (AH-169, 2026-11-12)
+
+**Why.** SAO-4 HIGH finding #1: my AH-165 comment claims "nudge + escalation keep firing" for audit sessions but the code gates both on `_nudged < _upd` / `_escalated < _upd`. Since nothing touches `updated` on a stalled audit, each tier fires exactly once per stall. Between 95m and the 7d zombie cutoff, audit items are silent. At 7d they get silenced forever by the zombie branch. Every one of tonight's 11 EAC/EAO items will repeat this unless re-arm is fixed.
+
+**What.**
+1. Add `AMUX_STALE_DOING_AUDIT_RE_NUDGE_MIN` (default 45m, clamped [15, 240]) and `AMUX_STALE_DOING_AUDIT_RE_ESCALATE_MIN` (default 240m = 4h, clamped [60, 1440]).
+2. Zombie branch (line ~7999): add `not _is_audit_session(_sess)` so audit items are never silenced by the 7d cutoff. An audit stuck 7+ days is still a target stuck at review and still needs attention.
+3. Nudge tier: for audit sessions, replace `_nudged < _upd` with `_now - max(_nudged, _upd) > _re_nudge_min*60`. Non-audit path unchanged.
+4. Escalate tier: for audit sessions, replace `_escalated < _upd` with `_now - max(_escalated, _upd) > _re_escalate_min*60`. Non-audit path unchanged.
+5. Audit park-replacement: once past AH-164's park cutoff (180m) AND an escalation has fired AND `_parked == 0`, Pushover Jeremy once ("audit-item stuck past park cutoff, nudge/escalate/review the session"). Set `stale_doing_parked_at = _now` as the one-shot gate. Status stays `doing` (AH-165 contract preserved; C4 stays armed).
+
+**Verify.**
+1. `python3 -c "import ast; ast.parse(open('amux-server.py').read())"`.
+2. Simulated stall: audit item at doing, no `updated` touches. Expect nudge at 50m, 95m, 140m, ... (every 45m). Expect escalate at 95m, then every 240m. Expect single Pushover-Jeremy at 185m marked via `stale_doing_parked_at`. Item stays at `doing`.
+3. Zombie regression: a non-audit doing item >7d still gets zombie-suppressed. An audit doing item >7d keeps getting nudged.
+4. Non-audit path unchanged: nudge once, escalate once, park once, done.
+5. Live: EAC-1302 and the 10 others un-stuck tonight will see fresh nudges on the first sweep that has them >45m stale with `_nudged < _now - 45m`. Watch the slog.
+
 ## Plan for change: master-session lookup hard-coded to {org}-Research (AH-168, 2026-11-12)
 
 **Why.** SAO-4 finding #2 (HIGH). Three callsites hard-code the escalate master as `{org}-Research`. Only Ember and RTG have one. For every other org (iSchedule has -Reviewer, CD/CYPRA/Scorpio have neither) the master lookup fails, escalation never fires, AND the AH-164 park is dead code because it requires `_escalated > 0`. 10 live doing items affected (CW-692/694-698/710, CID-62, CYPRA-186, CC-740) stay silent after one nudge forever.
