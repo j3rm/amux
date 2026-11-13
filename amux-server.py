@@ -7688,14 +7688,18 @@ def _notify_stale_doing_assignee(assignee_session: str, item_id: str,
                 # specified BLOCKED reply is forwarded.
                 text = (
                     f"Stale DOING: {item_id}: {(title or '')[:80]} hasn't been "
-                    f"updated in {age_min}m.{_gate_bit} This is a tracked project "
-                    f"item. Reply on THIS board item (desc_append) with exactly one of: "
-                    f"(1) DONE + evidence, then PATCH to `review`; "
-                    f"(2) ROUTED: <board ids>; "
-                    f"(3) BLOCKED: WHAT / BY whom / UNBLOCKS when / who ACTS; "
-                    f"(4) still working + your next step. "
-                    f"Only a BLOCKED reply with all four facts is forwarded to "
-                    f"Projects. Do not contact Projects yourself."
+                    f"updated in {age_min}m.{_gate_bit} This item mirrors Zoho "
+                    f"Projects; scripts parse your reply. desc_append ONE of these, "
+                    f"each marker on its OWN line: "
+                    f"(1) done: a line `EVIDENCE: <sha / PR # / version / prod tag>`, "
+                    f"then PATCH to review (no EVIDENCE line = Zoho will not close); "
+                    f"(2) handed off: a line `ROUTED: <child item ids>`; "
+                    f"(3) gated on a human: a line `BLOCKED`, then lines "
+                    f"`ZOHO: <task id>`, `WHAT:`, `BY:`, `UNBLOCKS:`, `ACTS:` "
+                    f"(all four facts or it is rejected); "
+                    f"(4) still working: one line saying so + your next step. "
+                    f"Do not contact Zoho yourself. "
+                    f"Spec: skill zoho-project-report."
                 )
             else:
                 text = (
@@ -14065,6 +14069,9 @@ _MEM_CRITICAL_RULES = """\
   completion)`. `doing`, `review`, `backlog` are all quiet — only `todo` is
   ping-eligible. CLI: `amux board claim <id>` (flips to doing) or
   `amux board doing <id>`. Park not-now items to `backlog`.
+- **`[Zoho <KEY>]` board items are machine-parsed into Zoho Projects.** Put
+  `EVIDENCE:`, `ROUTED:` and the `BLOCKED` block each on its own line. Exact
+  formats: "Board items that mirror Zoho Projects" in _amux_shared.md.
 """
 
 
@@ -45684,14 +45691,24 @@ class CCHandler(BaseHTTPRequestHandler):
                 body = self._read_body()
                 content = body.get("content", "")
                 _GLOBAL_MEM_FILE.write_text(content)
-                # Recompose Claude memory for all registered sessions
+                # Recompose Claude memory for all registered sessions.
+                # Board AH-175: capture each agent's own MEMORY.md edits first,
+                # same as session start does; a bare recompose overwrote any
+                # agent memory written since the last capture.
+                _recomposed = 0
                 if CC_SESSIONS.exists():
                     for env_file in CC_SESSIONS.glob("*.env"):
                         sname = env_file.stem
                         wd = _session_work_dir(sname)
                         if wd:
+                            try:
+                                _capture_claude_memory_changes(sname, wd)
+                            except Exception as _ce:
+                                slog(f"[memory-global] capture failed for {sname}, skipped: {_ce!r}")
+                                continue
                             _write_claude_memory(sname, wd)
-                return self._json({"ok": True})
+                            _recomposed += 1
+                return self._json({"ok": True, "recomposed": _recomposed})
 
         # Habits API (/api/habits)
         if path == "/api/habits":

@@ -4,6 +4,27 @@
 
 Last updated: 2026-11-13
 
+## Plan for change: teach all agents the Zoho board-reply formats (board AH-175, 2026-11-13)
+
+**Why.** Jeremy via Cypra (T-224): agents' board replies on Zoho-mirrored items are machine-parsed by PAA's write-back and land in Zoho, so marker lines must be exact. Cypra asked for a <=25-line section in `~/.amux/memory/_global.md` and for the zoho stale-doing nudge to match the same formats.
+
+Gap found: `_global.md` is written to each agent's `_amux_shared.md` topic file, not inlined into MEMORY.md, and agents are told to read that file only "before ANY amux API call beyond board PATCH or threads reply". A board reply IS a board PATCH, so the section alone would be skipped exactly when it matters.
+
+**What.**
+1. `_global.md`: append section "Board items that mirror Zoho Projects" (not a server change; recompose via POST /api/memory/global so every registered session's `_amux_shared.md` is rewritten).
+2. `_MEM_CRITICAL_RULES`: add ONE bullet (3 lines) under the existing H1 (H1 unchanged, so the `_COMPOSED_ANCHORS` memory-wipe guard is unaffected) saying Zoho-mirrored items are machine-parsed and pointing at that section.
+3. `_notify_stale_doing_assignee` zoho branch: use the exact formats from skill zoho-project-report: `EVIDENCE: ...` own line; `ROUTED: <ids>` own line; `BLOCKED` then `ZOHO:` / `WHAT:` / `BY:` / `UNBLOCKS:` / `ACTS:` one per line; still working = one line + next step.
+
+4. Found while doing this: POST /api/memory/global recomposed every session's MEMORY.md with `_write_claude_memory` WITHOUT `_capture_claude_memory_changes` first (session start does capture). Any agent memory written since its last session start would be overwritten (same class as AH-107 wipes). Fix: capture before write per session; skip a session if capture throws; return `recomposed` count. Then use the endpoint to deliver this change fleet-wide.
+
+**Verify.**
+1. Syntax check.
+2. Before recompose: snapshot every MEMORY.md (scratchpad tar). After: diff each agent-owned portion (above the marker) is unchanged.
+3. After recompose: grep a host session's and a docker-org session's `_amux_shared.md` for the section, and their MEMORY.md for the new bullet.
+
+**DONE 2026-11-13 01:49.** POST /api/memory/global returned recomposed=70. 58 MEMORY.md files rewritten (sessions sharing a project dir share one), 58/58 carry the bullet, every rewritten `_amux_shared.md` carries the section. Capture saved fresh agent edits for Cypra-PAA and amux-reviewer; PAA's 104-line session memory is verbatim at the top of its new MEMORY.md. Host-side before/after diff: agent portion unchanged. Note: `~/.amux/orgs` is a symlink to /mnt/orgdata/amux-orgs, so `find ~/.amux/orgs ...` without a trailing slash finds nothing; my pre-snapshot missed the org files for that reason. Nudge text verified with send_text stubbed.
+3. Nudge text test with send_text stubbed (same harness as AH-171).
+
 ## Plan for change: scheduler holds the DB write lock across shell schedule runs (board AH-172, 2026-11-13)
 
 **Why.** Found while testing AH-171: board POST/PATCH return 500 "database is locked" in bursts on every 5-minute mark (00:20-00:45, 01:20, 01:25 UTC). In `_scheduler_loop` the DB-schedule branch runs each due schedule, then does `UPDATE schedules SET last_run/next_run` on the scheduler thread's connection, and only commits after the whole `for row in due` loop. Python's sqlite3 opens an implicit write transaction on that UPDATE, so while the NEXT due schedule's subprocess runs (board_intake, mailbox poll: tens of seconds), the write lock is held. Every other writer waits busy_timeout (5s) and fails. At :X0/:X5 three shell schedules fire together, so the window is the length of the 2nd and 3rd runs. Victims seen: Ember EAC-1416 / EAO-1163 PATCHes, Cypra CP-780, and board_intake's own POSTs.
