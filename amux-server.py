@@ -6650,6 +6650,13 @@ def _init_db():
         "WHEN OLD.status IS NOT NEW.status "
         "BEGIN UPDATE issues SET status_changed_at = CAST(strftime('%s','now') AS INTEGER) "
         "WHERE id = NEW.id; END",
+        # Board AH-171 (2026-11-13): signals for PAA's Zoho progress watchdog.
+        # `updated` is useless as "last agent activity" because the todo
+        # reboost bumps it every 30m; last_owner_update_at only moves when the
+        # assignee itself writes. parked_at is historical, never cleared.
+        "ALTER TABLE issues ADD COLUMN last_owner_update_at INTEGER NOT NULL DEFAULT 0",
+        "ALTER TABLE issues ADD COLUMN parked_at INTEGER NOT NULL DEFAULT 0",
+        "ALTER TABLE issues ADD COLUMN parked_reason TEXT",
     ]:
         try:
             db.execute(migration)
@@ -7659,6 +7666,12 @@ def _notify_stale_doing_assignee(assignee_session: str, item_id: str,
     carries {'line': str, 'blockers': [ids]} extracted from the item's
     desc. When present, the nudge names the gate text and blocker
     instead of only idle duration."""
+    _ext_src = None
+    try:
+        _r = get_db().execute("SELECT external_source FROM issues WHERE id = ?", (item_id,)).fetchone()
+        _ext_src = _r["external_source"] if _r else None
+    except Exception:
+        pass
     def _run():
         try:
             _gate_bit = ""
@@ -7669,14 +7682,30 @@ def _notify_stale_doing_assignee(assignee_session: str, item_id: str,
                     f"(blockers: {_blockers}). Clear the gate before "
                     f"treating this as an idle item."
                 )
-            text = (
-                f"Stale DOING: {item_id} — {(title or '')[:80]} hasn't been "
-                f"updated in {age_min}m.{_gate_bit} If still working: bump "
-                f"`updated` (any PATCH). If stuck: PATCH back to `todo` "
-                f"and post a board item to your org's Research session "
-                f"(or amux-helper for substrate issues). If done: PATCH "
-                f"to `review`."
-            )
+            if _ext_src == "zoho":
+                # Board AH-171 (Cypra ruling): the agent answers on the board
+                # item only; PAA forwards to Projects, and only a fully
+                # specified BLOCKED reply is forwarded.
+                text = (
+                    f"Stale DOING: {item_id}: {(title or '')[:80]} hasn't been "
+                    f"updated in {age_min}m.{_gate_bit} This is a tracked project "
+                    f"item. Reply on THIS board item (desc_append) with exactly one of: "
+                    f"(1) DONE + evidence, then PATCH to `review`; "
+                    f"(2) ROUTED: <board ids>; "
+                    f"(3) BLOCKED: WHAT / BY whom / UNBLOCKS when / who ACTS; "
+                    f"(4) still working + your next step. "
+                    f"Only a BLOCKED reply with all four facts is forwarded to "
+                    f"Projects. Do not contact Projects yourself."
+                )
+            else:
+                text = (
+                    f"Stale DOING: {item_id}: {(title or '')[:80]} hasn't been "
+                    f"updated in {age_min}m.{_gate_bit} If still working: bump "
+                    f"`updated` (any PATCH). If stuck: PATCH back to `todo` "
+                    f"and post a board item to your org's Research session "
+                    f"(or amux-helper for substrate issues). If done: PATCH "
+                    f"to `review`."
+                )
             send_text(assignee_session, text)
             _log_board_notify(item_id, assignee_session, "stale_doing",
                               item_status="doing", boost_count=0)
@@ -8422,10 +8451,11 @@ def _sweep_stale_doing():
                     _cur = db.execute(
                         "UPDATE issues SET status = 'backlog', "
                         "                  stale_doing_parked_at = ?, "
+                        "                  parked_at = ?, parked_reason = 'stale_doing', "
                         "                  desc = COALESCE(desc, '') || ?, "
                         "                  updated = ? "
                         "WHERE id = ? AND updated = ?",
-                        (_now, _park_note, _now, row["id"], _upd),
+                        (_now, _now, _park_note, _now, row["id"], _upd),
                     )
                     if _cur.rowcount == 0:
                         slog(f"[stale-doing-park] {row['id']} {_sess} — "
@@ -8780,10 +8810,11 @@ def _sweep_stale_todos_reboost():
                         "UPDATE issues SET status = 'backlog', "
                         "                  stale_escalated = 1, "
                         "                  stale_todo_boost_count = ?, "
+                        "                  parked_at = ?, parked_reason = 'stale_todo', "
                         "                  desc = COALESCE(desc, '') || ?, "
                         "                  updated = ? "
                         "WHERE id = ? AND stale_escalated = 0 AND updated = ?",
-                        (_new_boost_count, _append, _now, _iid, _row_upd),
+                        (_new_boost_count, _now, _append, _now, _iid, _row_upd),
                     )
                     if _cur.rowcount == 0:
                         slog(f"[stale-todo-reboost] {_iid} {_sess} — "
@@ -9224,6 +9255,10 @@ def _load_board(done_limit: int = 100, org: str | None = None,
                i.posted_by_session, i.posted_by_ip, i.last_patch_by,
                i.external_source, i.external_id, i.external_meta,
                COALESCE(i.status_changed_at, 0) AS status_changed_at,
+               COALESCE(i.last_owner_update_at, 0) AS last_owner_update_at,
+               COALESCE(i.parked_at, 0) AS parked_at, i.parked_reason,
+               COALESCE(i.stale_doing_nudged_at, 0) AS stale_doing_nudged_at,
+               COALESCE(i.stale_todo_boost_count, 0) AS stale_todo_boost_count,
                GROUP_CONCAT(t.tag) AS tags_csv"""
     # Explicit status filter short-circuits the terminal-status UNION math.
     if status_filter:
@@ -9379,6 +9414,10 @@ def _item_by_id(bid: str) -> dict | None:
                   i.posted_by_session, i.posted_by_ip, i.last_patch_by,
                   i.external_source, i.external_id, i.external_meta,
                   COALESCE(i.status_changed_at, 0) AS status_changed_at,
+                  COALESCE(i.last_owner_update_at, 0) AS last_owner_update_at,
+                  COALESCE(i.parked_at, 0) AS parked_at, i.parked_reason,
+                  COALESCE(i.stale_doing_nudged_at, 0) AS stale_doing_nudged_at,
+                  COALESCE(i.stale_todo_boost_count, 0) AS stale_todo_boost_count,
                   GROUP_CONCAT(t.tag) AS tags_csv
            FROM issues i
            LEFT JOIN issue_tags t ON t.issue_id = i.id
@@ -49181,9 +49220,9 @@ class CCHandler(BaseHTTPRequestHandler):
                 # The owner_type check in the WHERE prevents TOCTOU races where
                 # owner_type changes between the SELECT above and this UPDATE.
                 cur = db.execute(
-                    "UPDATE issues SET status='doing', session=?, updated=?"
+                    "UPDATE issues SET status='doing', session=?, updated=?, last_owner_update_at=?"
                     " WHERE id=? AND status IN ('todo','backlog') AND owner_type='agent' AND deleted IS NULL",
-                    (session_name, now, bid),
+                    (session_name, now, now, bid),
                 )
                 db.commit()
                 if cur.rowcount == 0:
@@ -49578,6 +49617,10 @@ class CCHandler(BaseHTTPRequestHandler):
                     _pby = (self.headers.get("X-Amux-Session") or "").strip() or None
                     set_clauses.append("last_patch_by = ?")
                     params.append(_pby)
+                    # Board AH-171: real agent activity, owner writes only.
+                    if _pby and prior_session and _pby.lower() == prior_session.lower():
+                        set_clauses.append("last_owner_update_at = ?")
+                        params.append(now)
                     params.append(bid)
                     if set_clauses:
                         db.execute(

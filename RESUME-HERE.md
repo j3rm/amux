@@ -4,6 +4,38 @@
 
 Last updated: 2026-11-13
 
+## Plan for change: scheduler holds the DB write lock across shell schedule runs (board AH-172, 2026-11-13)
+
+**Why.** Found while testing AH-171: board POST/PATCH return 500 "database is locked" in bursts on every 5-minute mark (00:20-00:45, 01:20, 01:25 UTC). In `_scheduler_loop` the DB-schedule branch runs each due schedule, then does `UPDATE schedules SET last_run/next_run` on the scheduler thread's connection, and only commits after the whole `for row in due` loop. Python's sqlite3 opens an implicit write transaction on that UPDATE, so while the NEXT due schedule's subprocess runs (board_intake, mailbox poll: tens of seconds), the write lock is held. Every other writer waits busy_timeout (5s) and fails. At :X0/:X5 three shell schedules fire together, so the window is the length of the 2nd and 3rd runs. Victims seen: Ember EAC-1416 / EAO-1163 PATCHes, Cypra CP-780, and board_intake's own POSTs.
+
+**What.** Commit right after each schedule's UPDATE inside the loop (both the `once` and recurring branches), so no write transaction is open while `_run_schedule` executes. The trailing `if due: db.commit()` becomes redundant but harmless; leave it. `_drain_and_fire_sched_events` already commits per schedule: no change.
+
+Not changed (noted for later): shell schedules still run serially on the scheduler thread, so a long shell job delays the 1s tick (internal sweeps). Separate issue.
+
+**Verify.**
+1. Syntax check.
+2. After reload, watch the next two 5-minute marks: zero "database is locked" lines in server.log, board writes during the window return 200.
+
+## Plan for change: owner-update + park signals for the Zoho progress watchdog (board AH-171, 2026-11-13)
+
+**Why.** Jeremy asked Cypra for a progress watchdog on Zoho-owned agent items. Agreed with Cypra on the channel: ONE pinger. amux keeps owning agent nudges (todo reboost every 30m, stale-doing nudge at 45m, park at 2h/180m); PAA's script (CP-785) only acts on the Zoho side and sends Jeremy one digest. PAA cannot use `updated` as "last agent activity" because the todo reboost bumps it every 30m. Cypra's asks: expose real signals on GET, Zoho-specific nudge text, and a park stamp PAA can read.
+
+**What.**
+1. Migrations: `issues.last_owner_update_at INTEGER NOT NULL DEFAULT 0`, `issues.parked_at INTEGER NOT NULL DEFAULT 0`, `issues.parked_reason TEXT`.
+2. last_owner_update_at: stamped in PATCH when X-Amux-Session equals the item's session before the PATCH (case-insensitive), and in the claim endpoint (the claimer becomes the owner). Sweeps never stamp it.
+3. parked_at + parked_reason ('stale_doing' / 'stale_todo'): stamped inside the two existing park UPDATEs (`_sweep_stale_doing` AH-164 park, `_sweep_stale_todos_reboost` boost-4 park). Historical, never cleared: an item is currently parked when status='backlog' AND parked_at > 0. The park also flips status, so PAA's existing status_changed_since pull already returns it.
+4. GET (`_COLS`, `_item_by_id`) returns last_owner_update_at, parked_at, parked_reason, stale_doing_nudged_at, stale_todo_boost_count.
+5. `_notify_stale_doing_assignee`: when the item has external_source='zoho', the nudge lists the four allowed replies (DONE + evidence / ROUTED: <ids> / BLOCKED with WHAT, BY, UNBLOCKS, ACTS / still working + next step), all on the board item, and says only a BLOCKED reply with all four facts is forwarded to Projects. Agents still never touch Zoho. Other items keep the current text.
+
+**Verify.**
+1. Syntax check; after reload PRAGMA shows the 3 columns.
+2. Owner PATCH stamps last_owner_update_at; a PATCH from another session does not.
+3. Claim stamps it.
+4. Simulate both parks on test items via direct UPDATE path? No: call the real sweep is heavy. Instead verify by code read plus one live test: create a zoho test item in doing with updated far in the past, let the sweep tick, confirm nudge text and park stamp. If the tick timing is impractical, verify the SQL by running the park UPDATE statements' column lists against the schema.
+5. Delete test items and null their external keys.
+
+**DONE 2026-11-13.** Live: owner PATCH stamps last_owner_update_at, a Cypra-header PATCH does not, claim stamps it, GET returns all five fields (test items AH-173/174, deleted, keys nulled). Nudge text and both park UPDATEs verified against a DB copy with send_text stubbed: Zoho item gets the four-reply text, a plain item keeps the old text, both parks set parked_at/parked_reason and flip status (trigger stamps status_changed_at). Also removed the em-dash from the stale-doing nudge text.
+
 ## Plan for change: board external-source fields for Zoho round-trip (board AH-166, 2026-11-13)
 
 **Why.** Jeremy 2026-11-13 19:01: Zoho Projects items must land on the board carrying their Zoho record id so that when the board item is done, a script (no LLM) writes completion back to Zoho. Cypra set direction on the amux-helper<->Cypra channel: generic external_id + external_source with a unique index; NO webhook (a missed webhook fails silently), instead a pull filter PAA's 5-min docker-exec schedule polls; preserve Zoho fields verbatim on the item; PAA retires its state-file dedupe once the index is live.
