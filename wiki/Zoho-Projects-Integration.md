@@ -31,6 +31,37 @@ bare host shell has no Zoho refresh token. SCHED-339 is kind=tmux because
 the audit has to wake PAA (and costs LLM tokens on every fire — keep it
 daily).
 
+## Board <-> Zoho contract (live 2026-11-13)
+
+Full spec: cypra-ops README, section "The Zoho <-> board substrate"
+(github.com/j3rm/cypra-ops, 8e0ed23). Summary:
+
+- Board items from Zoho carry `external_source=zoho`, `external_id`
+  (RTG task id) and `external_meta` (Zoho fields verbatim). Unique on
+  (source, id); a re-POST returns the existing item.
+- `status_changed_at` is stamped by a DB trigger on every status change,
+  so PAA's write-back pull (`?external_source=zoho&status_changed_since=`)
+  sees sweep and cascade transitions too.
+- One pinger: amux nudges agents (todo reboost 30m, stale-doing 45m, park
+  at ~2h todo / 180m doing). PAA's watchdog only acts on the Zoho side,
+  reading `last_owner_update_at` (assignee writes only, never `updated`)
+  and `parked_at` / `parked_reason`.
+
+**Done vs routed (Cypra ruling).** No new board status. When an agent
+hands work to child sessions it writes a line `ROUTED: <child item ids>`.
+Write-back treats ROUTED as comment-only and closes the Zoho task only
+when every listed child is done/verified with its own delivery evidence.
+A done item with no evidence and no ROUTED line is commented and
+escalated, never closed.
+
+**Delivery evidence is deliberately strict.** The loose version was wrong
+twice, and both would have closed a client-visible task: a keyword sniff
+matched "sent" inside "a send failure that neither marks the row sent nor
+dead", and a bare `[0-9a-f]{7,40}` matched the all-digit Zoho task id that
+intake puts in every item. Accepted: an explicit `EVIDENCE:` line, a sha
+with a cue word, a full 40-char sha, `PR #123`, a semver, or a dated prod
+tag.
+
 ## Known substrate gaps
 
 AH-164 review turned up two amux features that would simplify this
