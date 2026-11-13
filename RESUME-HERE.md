@@ -4,6 +4,18 @@
 
 Last updated: 2026-11-13
 
+## Plan for change: stale-doing board-exempt cap must not auto-park genuine external waits (2026-11-13)
+
+**Why.** RTG-Research friction report: RA-934 (deliberately held at doing, retake d2671ef waiting on RTG-PreBuild outage, refs RR-2623 in RTG-Research review) was exempt until 02:27, then at 02:32 hit MY AH-171 board-exempt cap (24h, keyed on `updated`) and in the SAME tick was nudged, escalated and auto-parked (1444m is past every tier). RA-930/1901/1902 are in the same state and would park one by one. The cap only existed to break the mutual-ref deadlock (two items each exempt because they cite the other).
+
+Measured: both refs cite RA-934 back (RR-2623, RP-399) because they are tickets ABOUT it, so "ref cites me back" is not a deadlock signal. A real deadlock is two stalled workers: the ref is itself `doing` AND cites this item.
+
+**What.** In `_sweep_stale_doing`, past the cap: keep nudge + escalation (one-shot each, already flag-guarded) as the "still blocked?" signal, but SKIP the tier-3 auto-park unless the ref is a deadlock partner (ref status = doing AND ref title/desc cites this id). Slog says which. No change below the cap, no change for audit sessions (already never parked).
+
+**Verify.** Syntax check; extract the decision into a helper `_stale_doing_ref_is_deadlock(db, ref_id, item_id)` and test it against live rows read-only: RA-934/RR-2623 -> not deadlock (review). Synthetic pair on a DB copy: two doing items citing each other -> deadlock.
+
+**DONE 2026-11-13 02:36.** Helper: RR-2623 (review) and RP-399 (backlog) -> not deadlock; synthetic doing+cites -> deadlock. Live tick 02:36: RA-930 hit the cap, nudged + escalated once, park HELD (would have parked pre-fix). RA-1784/RA-1786 <-> RR-2599 classified as doing deadlock partners (park still allowed, pre-fix behavior).
+
 ## Plan for change: board localStorage quota stops board re-render (2026-11-13)
 
 **Why.** Found by the Playwright check: `/api/board` is 5.50 MB (1058 items, 4.70 MB of it desc; the AH-166/171 fields add 0.23 MB), over Chrome's ~5 MB localStorage quota. `localStorage.setItem('amux_board_cache', j)` throws QuotaExceededError, and at the fetchBoard site it sits BEFORE `renderBoard()`, at the SSE `board` handler BEFORE the IDB mirror. So the dashboard board silently stops updating. The full board is already mirrored to IndexedDB (`_idb`), which is the durable offline cache; the localStorage copy is only a fast first paint.

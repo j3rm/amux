@@ -7811,6 +7811,22 @@ def _extract_gate(desc: str) -> dict:
     return {"line": _line, "blockers": _blockers}
 
 
+def _stale_doing_ref_is_deadlock(db, ref_id: str, item_id: str) -> bool:
+    """A board-exempt item whose ref is a deadlock partner: the ref is itself
+    stalled at `doing` and cites this item back. Only then may the sweep park
+    past the board-exempt cap. A ref in another queue (todo/review) that cites
+    this item is a ticket ABOUT it, i.e. a genuine external wait (RA-934)."""
+    try:
+        r = db.execute("SELECT status, title, desc FROM issues WHERE id = ? AND deleted IS NULL",
+                       (ref_id,)).fetchone()
+    except Exception:
+        return False
+    if not r or r["status"] != "doing":
+        return False
+    text = (r["title"] or "") + "\n" + (r["desc"] or "")
+    return re.search(r"\b" + re.escape(item_id) + r"\b", text) is not None
+
+
 def _stale_doing_awaiting_external(desc: str, own_session: str, db,
                                    now_ts: int = 0, title: str = ""):
     """Return (kind, ref_id, ref_who, extra) where kind is one of:
@@ -8272,6 +8288,7 @@ def _sweep_stale_doing():
                 # (closes the mutual-ref permanent-exempt loop).
                 _cold_ref_id = None
                 _cold_silent_days = 0
+                _ext_hold_ref = None
                 try:
                     _kind, _ref_id, _ref_who, _extra = _stale_doing_awaiting_external(
                         row["desc"] or "", _sess, db,
@@ -8281,11 +8298,18 @@ def _sweep_stale_doing():
                             slog(f"[stale-doing] {row['id']} {_sess} — "
                                  f"exempt (board: {_ref_id}@{_ref_who})")
                             continue
-                        # Past the cap — fall through to nudge.
-                        slog(f"[stale-doing] {row['id']} {_sess} — "
+                        # Past the cap: nudge + escalate as a "still blocked?"
+                        # signal, but only park a deadlock partner. RA-934
+                        # (2026-11-13) was parked mid-hold because the cap
+                        # passed every tier in one tick.
+                        if not _stale_doing_ref_is_deadlock(db, _ref_id, row["id"]):
+                            _ext_hold_ref = _ref_id
+                        slog(f"[stale-doing] {row['id']} {_sess}: "
                              f"board-exempt cap hit "
                              f"({_board_exempt_cap_hours}h); nudging anyway "
-                             f"(ref {_ref_id}@{_ref_who})")
+                             f"(ref {_ref_id}@{_ref_who}); "
+                             + ("park held, ref is an open external wait"
+                                if _ext_hold_ref else "ref is a doing deadlock partner, park allowed"))
                     elif _kind == "thread-active":
                         slog(f"[stale-doing] {row['id']} {_sess} — "
                              f"exempt (thread-active: {_ref_id}@{_ref_who})")
@@ -8435,7 +8459,8 @@ def _sweep_stale_doing():
                 # human or Research unsticks it. Visible via slog.
                 if (_upd < _park_cutoff and _parked < _upd and _escalated > 0
                         and _parked_this_tick < _park_cap_per_tick
-                        and not _is_audit_session(_sess)):
+                        and not _is_audit_session(_sess)
+                        and not _ext_hold_ref):
                     _park_note = (
                         f"\n\n[auto-parked {time.strftime('%Y-%m-%d %H:%M', time.localtime(_now))} "
                         f"by stale-doing sweep: {_age_min}m idle at doing with no "
