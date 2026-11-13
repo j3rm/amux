@@ -7688,17 +7688,16 @@ def _notify_stale_doing_assignee(assignee_session: str, item_id: str,
                 # specified BLOCKED reply is forwarded.
                 text = (
                     f"Stale DOING: {item_id}: {(title or '')[:80]} hasn't been "
-                    f"updated in {age_min}m.{_gate_bit} This item mirrors Zoho "
-                    f"Projects; scripts parse your reply. desc_append ONE of these, "
-                    f"each marker on its OWN line: "
-                    f"(1) done: a line `EVIDENCE: <sha / PR # / version / prod tag>`, "
-                    f"then PATCH to review (no EVIDENCE line = Zoho will not close); "
-                    f"(2) handed off: a line `ROUTED: <child item ids>`; "
-                    f"(3) gated on a human: a line `BLOCKED`, then lines "
-                    f"`ZOHO: <task id>`, `WHAT:`, `BY:`, `UNBLOCKS:`, `ACTS:` "
-                    f"(all four facts or it is rejected); "
-                    f"(4) still working: one line saying so + your next step. "
-                    f"Do not contact Zoho yourself. "
+                    f"updated in {age_min}m.{_gate_bit} HOW YOUR REPLY IS READ - you "
+                    f"cannot access Zoho; PAA makes every Zoho write. desc_append ONE "
+                    f"of these, each marker on its OWN line: "
+                    f"FINISHED -> `EVIDENCE: <what shipped and how you know>` "
+                    f"(a bare 'done' closes nothing), then PATCH to review; "
+                    f"ROUTED to child sessions -> `ROUTED: <child item ids>`; "
+                    f"BLOCKED -> four lines `WHAT:` `BY:` `UNBLOCKS:` `ACTS:` "
+                    f"(missing one and it is rejected); "
+                    f"STILL WORKING -> one line saying what is next; "
+                    f"NOT YOURS -> say so and name who should own it. "
                     f"Spec: skill zoho-project-report."
                 )
             else:
@@ -14069,9 +14068,9 @@ _MEM_CRITICAL_RULES = """\
   completion)`. `doing`, `review`, `backlog` are all quiet — only `todo` is
   ping-eligible. CLI: `amux board claim <id>` (flips to doing) or
   `amux board doing <id>`. Park not-now items to `backlog`.
-- **`[Zoho <KEY>]` board items are machine-parsed into Zoho Projects.** Put
-  `EVIDENCE:`, `ROUTED:` and the `BLOCKED` block each on its own line. Exact
-  formats: "Board items that mirror Zoho Projects" in _amux_shared.md.
+- **`[Zoho <KEY>]` board items are machine-parsed into Zoho Projects.** You need
+  no Zoho access. Put `EVIDENCE:`, `ROUTED:`, and `WHAT:` `BY:` `UNBLOCKS:` `ACTS:`
+  each on its own line. Exact wording: the HOW YOUR REPLY IS READ header on the item.
 """
 
 

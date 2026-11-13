@@ -23,6 +23,8 @@ Gap found: `_global.md` is written to each agent's `_amux_shared.md` topic file,
 3. After recompose: grep a host session's and a docker-org session's `_amux_shared.md` for the section, and their MEMORY.md for the new bullet.
 
 **DONE 2026-11-13 01:49.** POST /api/memory/global returned recomposed=70. 58 MEMORY.md files rewritten (sessions sharing a project dir share one), 58/58 carry the bullet, every rewritten `_amux_shared.md` carries the section. Capture saved fresh agent edits for Cypra-PAA and amux-reviewer; PAA's 104-line session memory is verbatim at the top of its new MEMORY.md. Host-side before/after diff: agent portion unchanged. Note: `~/.amux/orgs` is a symlink to /mnt/orgdata/amux-orgs, so `find ~/.amux/orgs ...` without a trailing slash finds nothing; my pre-snapshot missed the org files for that reason. Nudge text verified with send_text stubbed.
+
+**Follow-up (same item):** Cypra-PAA asked that agents see ONE wording: its `vocabulary.REPLY_HEADER` (cypra-ops zoho/vocabulary.py, 6 lines, also stamped on every intake desc and enforced by its tests). PAA's write-back keys only on the four `WHAT:` `BY:` `UNBLOCKS:` `ACTS:` lines; the `ZOHO:` and bare `BLOCKED` lines I took from skill zoho-project-report are not read (the item already carries external_id). Change: `_global.md` section embeds REPLY_HEADER verbatim; inline bullet and zoho nudge text reworded to the same vocabulary (adds NOT YOURS, drops ZOHO:/BLOCKED line). Recompose again via the now-capturing endpoint. Verify: section contains the header byte-for-byte, nudge test, 58/58 bullets.
 3. Nudge text test with send_text stubbed (same harness as AH-171).
 
 ## Plan for change: scheduler holds the DB write lock across shell schedule runs (board AH-172, 2026-11-13)
