@@ -14,7 +14,7 @@ deterministic server code.
 
 ---
 
-## C3 — adjudication-already-applied (in `amux-server.py`)
+## C3: adjudication-already-applied (in `amux-server.py`)
 
 **Trigger:** PATCH on any item whose assignee session ends in `-Research`
 (RTG-Research, Ember-Research, future `*-Research` orgs).
@@ -43,7 +43,7 @@ cascade is a no-op.
 
 ---
 
-## C4 — audit-pair-complete-triggers-verify (in `amux-server.py`)
+## C4: audit-pair-complete-triggers-verify (in `amux-server.py`)
 
 **Trigger:** PATCH on any item whose assignee session contains `-Audit-`
 (RTG-Audit-Codex, RTG-Audit-Opus48, Ember-Audit-Codex, Ember-Audit-Opus48,
@@ -63,7 +63,7 @@ audits have verdicts:
 The escalation-mint gate (below) then prevents duplicate RR-/ER- on mixed
 cases.
 
-**Why this exists:** Same reason as C3 — Dispatch wasn't reliably acting on
+**Why this exists:** Same reason as C3, Dispatch wasn't reliably acting on
 closed audit pairs. C4 ensures every completed pair drives the target's
 next status transition synchronously.
 
@@ -166,13 +166,13 @@ a routing directive); the absence is the signal.
 runs `pgrep -f "claude.*--name <session>"`. If no claude process is found
 for more than 60s consecutive:
 
-1. Push `session_dead` alert (NOT in the default mute list — reaches
+1. Push `session_dead` alert (NOT in the default mute list, reaches
    Pushover).
 2. If `CC_AUTO_CONTINUE=1`, auto-restart with the standard 90s debounce.
 
 **Why this exists:** Existing section 4b was status-gated and missed today's
 RTG-AzureBackup (Fable error loop, no shell prompt) and RTG-ActCloudPortal
-(post-batch-PATCH death). 4d is intentionally broader — process-presence
+(post-batch-PATCH death). 4d is intentionally broader, process-presence
 only, no UI heuristic.
 
 ---
@@ -210,7 +210,7 @@ routing_error`
 
 ---
 
-## Watchdog script — `scripts/watchdog.py`
+## Watchdog script: `scripts/watchdog.py`
 
 Replaces the AMUX-Watchdog agent. Runs every 15 min via SCHED-38
 (`kind=shell`, `AMUX_URL=https://localhost:8822 /usr/bin/python3
@@ -249,11 +249,11 @@ running AND idle.
 
 ## What was retired
 
-- **AMUX-Watchdog agent** — replaced by `scripts/watchdog.py`. Env file at
+- **AMUX-Watchdog agent**: replaced by `scripts/watchdog.py`. Env file at
   `~/.amux/sessions/AMUX-Watchdog.env` is marked `CC_ARCHIVED=1`.
-- **RTG-Dispatch agent** — replaced by C3/C4/escalate-gate/RD-routing
+- **RTG-Dispatch agent**: replaced by C3/C4/escalate-gate/RD-routing
   hooks. SCHED-40 disabled. Env file marked `CC_ARCHIVED=1`.
-- **Ember-Dispatch agent** — same as RTG-Dispatch. SCHED-41 disabled.
+- **Ember-Dispatch agent**: same as RTG-Dispatch. SCHED-41 disabled.
 
 All three sessions remain on disk in case rollback is ever needed.
 
@@ -262,7 +262,7 @@ All three sessions remain on disk in case rollback is ever needed.
 ## What persists across restarts
 
 Server-side hooks and the snapshot-loop detectors live in `amux-server.py`
-itself — they survive `os.execv` reloads and full process restarts.
+itself, they survive `os.execv` reloads and full process restarts.
 
 The watchdog script lives at `~/.amux/scripts/watchdog.py` (and is tracked
 in this repo at `scripts/watchdog.py` as a backup). Surviving a disk loss
