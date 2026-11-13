@@ -17,6 +17,8 @@ Not changed: C4 apply logic, strict parser, the 1-strict-line convention.
 
 **Verify.** Syntax; unit-test helpers on EAAC-116's live desc (expect declared [fe7e8fb, 91cf8d5], fe7e8fb uncovered). Run mint function against a DB copy for EAAC-116: no mint, note appended once, second call adds no note. Live: after reload, sweep flags EAAC-116 once; send_text reaches Ember_Auth_API_Core.
 
+**DONE 2026-11-13, commit d41f4cfa.** DB copy: EAAC-116, EAC-1366, EAAC-121 each flagged once (second call no-op), declared tips unchanged by the note, RA-1862 (single tip, covered) untouched. Read-only dry run of the sweep over live review items: no false flags. Same shape on all three: new tip on top, old strict line in the prior text below.
+
 ## Plan for change: stale-doing board-exempt cap must not auto-park genuine external waits (2026-11-13)
 
 **Why.** RTG-Research friction report: RA-934 (deliberately held at doing, retake d2671ef waiting on RTG-PreBuild outage, refs RR-2623 in RTG-Research review) was exempt until 02:27, then at 02:32 hit MY AH-171 board-exempt cap (24h, keyed on `updated`) and in the SAME tick was nudged, escalated and auto-parked (1444m is past every tier). RA-930/1901/1902 are in the same state and would park one by one. The cap only existed to break the mutual-ref deadlock (two items each exempt because they cite the other).
