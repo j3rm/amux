@@ -2,7 +2,65 @@
 
 **If you are Claude and you are about to edit `/mnt/gitdata/amux/amux-server.py`, this file is mandatory.** Every change must be planned here BEFORE you edit code. Completed plans stay in place as history, do NOT delete them. Read this file at the start of every session before touching amux-server.py.
 
-Last updated: 2026-11-12
+Last updated: 2026-11-13
+
+## Plan for change: board external-source fields for Zoho round-trip (board AH-166, 2026-11-13)
+
+**Why.** Jeremy 2026-11-13 19:01: Zoho Projects items must land on the board carrying their Zoho record id so that when the board item is done, a script (no LLM) writes completion back to Zoho. Cypra set direction on the amux-helper<->Cypra channel: generic external_id + external_source with a unique index; NO webhook (a missed webhook fails silently), instead a pull filter PAA's 5-min docker-exec schedule polls; preserve Zoho fields verbatim on the item; PAA retires its state-file dedupe once the index is live.
+
+**What.**
+1. Migrations: `issues.external_source TEXT`, `issues.external_id TEXT`, `issues.external_meta TEXT` (JSON), `issues.status_changed_at INTEGER NOT NULL DEFAULT 0`. Partial unique index `idx_issues_external` on (external_source, external_id) where both non-null. Index on status_changed_at.
+2. Trigger `trg_issues_status_changed`: AFTER UPDATE OF status, when OLD.status IS NOT NEW.status, stamp status_changed_at = now. A trigger, not handler code, because sweeps/cascades/C3/C4 flip status through many paths; PAA must see every transition. Trigger does not touch `updated`, so the AH-176 `WHERE updated=<orig>` guards are unaffected. Existing rows stay 0 (no backfill; no external items exist yet).
+3. POST /api/board: optional external_source (lowercased) + external_id (both or neither, else 400) + external_meta (object, <= 8 KB). If the pair already exists (including soft-deleted rows) return 200 with the existing item plus `existing: true` instead of minting. Concurrent double-POST: catch the IntegrityError from the unique index and return the winner the same way. status_changed_at = created on insert.
+4. PATCH /api/board/<id>: accept external_meta (object replaces) and external_source/external_id (link an existing item; both together; 409 if the pair belongs to another item).
+5. GET /api/board: filters `external_source` (exact, or `any` = has one), `external_id` (exact), `status_changed_since` (unix ts, strict >). Any of these disables the done_limit cap so no terminal transition is dropped from a pull. `_COLS` and `_item_by_id` return the four new fields; external_meta parsed to an object.
+
+**Verify.**
+1. `python3 -c "import ast; ast.parse(open('amux-server.py').read())"`.
+2. After reload: PRAGMA shows the 4 columns, the index, and the trigger.
+3. POST a test item with external_source=test, external_id=X1. POST again: 200, same id, existing=true.
+4. PATCH it todo->doing: status_changed_at moves; desc-only PATCH: status_changed_at unchanged.
+5. GET ?external_source=test&status_changed_since=<ts before PATCH> returns it; with ts after, empty.
+6. Soft-delete the test item (DELETE) after verification.
+
+**DONE 2026-11-13.** All 6 verify steps passed live (test items AH-167..170, deleted, their `test` keys nulled). Also verified: PATCH relink to a taken pair returns 409 with existing_id; a raw sweep-style `UPDATE issues SET status=...` stamps status_changed_at without touching `updated`; re-POST of a soft-deleted pair returns existing=true plus `deleted`. Gotcha hit during testing: the auto-reload settled 3s BEFORE the last edit was saved, so the PATCH code was not live and looked broken. If a just-edited path behaves like the old code, `touch amux-server.py` and retest before debugging.
+
+**Why.** Jeremy: "Disable those Notifcations pop over tiles in the right side of the AMUX screen, no one cares." The toast-style banners stack on the right, auto-dismiss at 5s, and add noise. The notification history panel (bell icon) is separate and stays. The Pushover push path is unrelated (server-side) and stays.
+
+**What.** Early-return at the top of `_notifShowBanner` (line ~23969). History panel + Pushover + in-browser notification sound/pane logic untouched. No CSS removal (the class may still render elsewhere if history panel reuses it).
+
+**Verify.**
+1. `python3 -c "import ast; ast.parse(open('amux-server.py').read())"`.
+2. Load dashboard, trigger a thread reply addressed to Jeremy. No right-side tile appears. Bell icon still updates count. Pushover still fires.
+
+## Plan for change: hide Audit button + chips, disable dispatcher (AH-179, 2026-11-12)
+
+**Why.** Jeremy: "The Audit Button is to easily clicked. Remove it, the feature never worked the way I wanted it to. Remove the feature entirely." The feature auto-verified thread replies via a dispatcher subprocess calling Claude on message_audits rows. Button on thread header (`⚖`) at line ~34403 fires a per-message audit. The scheduled `_audit_dispatcher` runs every 30s.
+
+**What.**
+1. Disable the scheduled `_audit_dispatcher` call at line ~55643 (comment out the register; keep the function body intact in case re-enable is later wanted).
+2. Hide the `⚖` thread-header button at line ~34403 (remove button HTML; keep `_tAuditNow` function body as dead-code safe).
+3. Hide the per-message audit verdict chips rendered at lines ~34381-34404 (`_audit_chip` output) by stubbing the chip-render function to return empty string.
+4. POST `/api/thread-audit` endpoint stays reachable but no-ops (early return) so any stale client invocation is silent, not a 500.
+
+Server-side table `message_audits`, column `threads.audit_mode`, and historical rows are preserved. No schema change.
+
+**Verify.**
+1. `python3 -c "import ast; ast.parse(open('amux-server.py').read())"`.
+2. Open a thread with an existing audit verdict. Chip is gone. `⚖` button is gone from header.
+3. Server log: `_audit_dispatcher starting` line absent on restart.
+4. POST /api/thread-audit returns 200 with `{"disabled": true}` (optional); or 204.
+
+## Plan for change: hide repo-conflict banner for archived sessions (AH-177, 2026-11-12)
+
+**Why.** Jeremy saw red text "another agent is using the same branch or repo." Both `amux-helper` and `amux-reviewer` resolve to `/mnt/gitdata/amux` on branch `jwesley-main`. `amux-reviewer` is CC_ARCHIVED=1 — it's a pseudo-session (an in-process sweep inside amux-server), not a running tmux worker. The client-side conflict grouping at lines ~24634-24649 keys on `repo + '::' + branch` with no `archived`/`is_running` filter, so a sweep that shares a tree with its parent session is painted as a real conflict.
+
+**What.** Server `/api/sessions-git` handler at line ~45526 already excludes sessions without `dir`. Add filter: skip sessions where `s.get("archived")` is truthy before `_get_git`. (Equivalently: filter client-side in `_conflict` grouping.) Server-side filter preferred since the same data drives any future conflict surface.
+
+**Verify.**
+1. `python3 -c "import ast; ast.parse(open('amux-server.py').read())"`.
+2. `curl -sk $AMUX_URL/api/sessions-git | python3 -c 'import json,sys; d=json.load(sys.stdin); print("amux-reviewer in results:", "amux-reviewer" in d)'`. Expected: False.
+3. Dashboard reload: no red "same branch" banner on the amux-helper card.
 
 ## Plan for change: atomic-append + conditional-update to stop sweep RMW data loss (AH-176, AH-162, 2026-11-12)
 

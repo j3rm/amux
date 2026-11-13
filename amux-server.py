@@ -6633,6 +6633,23 @@ def _init_db():
         # review and re-enters, the sweep's own freshness compare
         # makes the stale timestamp irrelevant.
         "ALTER TABLE issues ADD COLUMN stale_review_pinged_at INTEGER NOT NULL DEFAULT 0",
+        # Board AH-166 (2026-11-13): external-system round-trip (Zoho first).
+        # external_meta holds the source's fields verbatim as JSON.
+        "ALTER TABLE issues ADD COLUMN external_source TEXT",
+        "ALTER TABLE issues ADD COLUMN external_id TEXT",
+        "ALTER TABLE issues ADD COLUMN external_meta TEXT",
+        "ALTER TABLE issues ADD COLUMN status_changed_at INTEGER NOT NULL DEFAULT 0",
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_issues_external ON issues(external_source, external_id) "
+        "WHERE external_source IS NOT NULL AND external_id IS NOT NULL",
+        "CREATE INDEX IF NOT EXISTS idx_issues_status_changed ON issues(status_changed_at)",
+        # A trigger, not handler code: sweeps and cascades flip status through
+        # many paths, and the external pull must see every transition. Does not
+        # touch `updated`, so the AH-176 conditional-update guards still hold.
+        "CREATE TRIGGER IF NOT EXISTS trg_issues_status_changed "
+        "AFTER UPDATE OF status ON issues "
+        "WHEN OLD.status IS NOT NEW.status "
+        "BEGIN UPDATE issues SET status_changed_at = CAST(strftime('%s','now') AS INTEGER) "
+        "WHERE id = NEW.id; END",
     ]:
         try:
             db.execute(migration)
@@ -9140,7 +9157,10 @@ def _session_org(session_name: str | None) -> str | None:
 
 def _load_board(done_limit: int = 100, org: str | None = None,
                 status_filter: str | None = None,
-                session_filter: str | None = None) -> list:
+                session_filter: str | None = None,
+                external_source: str | None = None,
+                external_id: str | None = None,
+                status_changed_since: int | None = None) -> list:
     """Load non-deleted issues from SQLite, with tags joined.
 
     To keep payloads manageable, only the most recent `done_limit` items in
@@ -9181,11 +9201,29 @@ def _load_board(done_limit: int = 100, org: str | None = None,
         # session names.
         session_clause = " AND LOWER(i.session) = LOWER(?)"
         session_params = [session_filter]
+    # Board AH-166: external-source filters for the Zoho pull. Folded into
+    # session_clause because every query branch below appends it identically.
+    # Any of them lifts the done_limit cap so a pull never misses a transition.
+    if external_source == "any":
+        session_clause += " AND i.external_source IS NOT NULL"
+    elif external_source:
+        session_clause += " AND i.external_source = ?"
+        session_params.append(external_source.strip().lower())
+    if external_id:
+        session_clause += " AND i.external_id = ?"
+        session_params.append(external_id)
+    if status_changed_since is not None:
+        session_clause += " AND i.status_changed_at > ?"
+        session_params.append(int(status_changed_since))
+    if external_source or external_id or status_changed_since is not None:
+        done_limit = 0
     _COLS = """i.id, i.title, i.desc, i.status, i.session, i.creator,
                i.due, i.due_time, i.created, i.updated, i.owner_type, i.org,
                COALESCE(i.pinned, 0) AS pinned,
                COALESCE(i.pos, 0) AS pos,
                i.posted_by_session, i.posted_by_ip, i.last_patch_by,
+               i.external_source, i.external_id, i.external_meta,
+               COALESCE(i.status_changed_at, 0) AS status_changed_at,
                GROUP_CONCAT(t.tag) AS tags_csv"""
     # Explicit status filter short-circuits the terminal-status UNION math.
     if status_filter:
@@ -9244,6 +9282,7 @@ def _load_board(done_limit: int = 100, org: str | None = None,
         item = dict(row)
         tags_csv = item.pop("tags_csv") or ""
         item["tags"] = [t for t in tags_csv.split(",") if t]
+        item["external_meta"] = _parse_external_meta(item.get("external_meta"))
         result.append(item)
     # ER-624 tiebreaker (Ember-Research 2026-09-29, EAC-572 fallout):
     # when two items pos-collide (nearly-simultaneous mints both sampled
@@ -9338,6 +9377,8 @@ def _item_by_id(bid: str) -> dict | None:
                   COALESCE(i.pinned, 0) AS pinned,
                   COALESCE(i.pos, 0) AS pos,
                   i.posted_by_session, i.posted_by_ip, i.last_patch_by,
+                  i.external_source, i.external_id, i.external_meta,
+                  COALESCE(i.status_changed_at, 0) AS status_changed_at,
                   GROUP_CONCAT(t.tag) AS tags_csv
            FROM issues i
            LEFT JOIN issue_tags t ON t.issue_id = i.id
@@ -9350,7 +9391,56 @@ def _item_by_id(bid: str) -> dict | None:
     item = dict(row)
     tags_csv = item.pop("tags_csv") or ""
     item["tags"] = [t for t in tags_csv.split(",") if t]
+    item["external_meta"] = _parse_external_meta(item.get("external_meta"))
     return item
+
+
+def _parse_external_meta(raw):
+    if not raw:
+        return None
+    try:
+        return json.loads(raw)
+    except Exception:
+        return raw
+
+
+_EXTERNAL_META_MAX = 8192
+
+
+def _external_fields_from_body(body: dict):
+    """Validate external_source/external_id/external_meta from a board POST or
+    PATCH body (board AH-166). Returns (fields, error); fields only holds the
+    keys present in body. Source and id must be sent together."""
+    fields = {}
+    has_src, has_id = "external_source" in body, "external_id" in body
+    if has_src or has_id:
+        src = str(body.get("external_source") or "").strip().lower()
+        eid = str(body.get("external_id") or "").strip()
+        if bool(src) != bool(eid):
+            return None, "external_source and external_id must be sent together (or both empty to clear)"
+        fields["external_source"] = src or None
+        fields["external_id"] = eid or None
+    if "external_meta" in body:
+        meta = body.get("external_meta")
+        if meta in (None, "", {}):
+            fields["external_meta"] = None
+        else:
+            if not isinstance(meta, dict):
+                return None, "external_meta must be a JSON object"
+            enc = json.dumps(meta, separators=(",", ":"), sort_keys=True)
+            if len(enc) > _EXTERNAL_META_MAX:
+                return None, f"external_meta is {len(enc)} bytes; cap is {_EXTERNAL_META_MAX}"
+            fields["external_meta"] = enc
+    return fields, None
+
+
+def _existing_external_item(db, source: str, eid: str):
+    """Row for an external (source, id) pair, soft-deleted rows included,
+    because the unique index covers them too."""
+    return db.execute(
+        "SELECT id, deleted FROM issues WHERE external_source = ? AND external_id = ?",
+        (source, eid),
+    ).fetchone()
 
 
 def _prefix_from_session(session: str) -> str:
@@ -48618,10 +48708,20 @@ class CCHandler(BaseHTTPRequestHandler):
                 org = qs.get("org", [None])[0]
                 status_filter = qs.get("status", [None])[0]
                 session_filter = qs.get("session", [None])[0]
+                _since_raw = qs.get("status_changed_since", [None])[0]
+                _since = None
+                if _since_raw not in (None, ""):
+                    try:
+                        _since = int(_since_raw)
+                    except ValueError:
+                        return self._json({"error": "status_changed_since must be a unix timestamp (int)"}, 400)
                 return self._json(_load_board(
                     done_limit=done_limit, org=org,
                     status_filter=status_filter,
                     session_filter=session_filter,
+                    external_source=qs.get("external_source", [None])[0],
+                    external_id=qs.get("external_id", [None])[0],
+                    status_changed_since=_since,
                 ))
 
             # POST /api/board — create issue
@@ -48630,6 +48730,20 @@ class CCHandler(BaseHTTPRequestHandler):
                 title = body.get("title", "").strip()
                 if not title:
                     return self._json({"error": "missing title"}, 400)
+                # Board AH-166: external-source intake is idempotent. A re-pull
+                # of the same (source, id) returns the existing item, never a
+                # duplicate. Checked before any id is minted.
+                _ext, _ext_err = _external_fields_from_body(body)
+                if _ext_err:
+                    return self._json({"error": _ext_err}, 400)
+                if _ext.get("external_source"):
+                    _dup = _existing_external_item(db, _ext["external_source"], _ext["external_id"])
+                    if _dup:
+                        _dup_item = _item_by_id(_dup["id"]) or {"id": _dup["id"]}
+                        _dup_item["existing"] = True
+                        if _dup["deleted"]:
+                            _dup_item["deleted"] = _dup["deleted"]
+                        return self._json(_dup_item, 200)
                 session = body.get("session", "").strip()
                 # AH-79 (Cypra-PAA 2026-08-19): validate session against
                 # the real roster. A typo (session="PAA" vs "Cypra-PAA")
@@ -48839,15 +48953,32 @@ class CCHandler(BaseHTTPRequestHandler):
                     ).fetchone()
                     if _recent_row and _recent_row["thread_id"]:
                         _thread_id = _recent_row["thread_id"]
-                db.execute(
-                    """INSERT INTO issues (id, title, desc, status, session, creator, due, due_time,
-                                            created, updated, owner_type, pos, org,
-                                            posted_by_session, posted_by_ip, thread_id)
-                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-                    (item_id, title, desc, status, session or None, creator, due, due_time,
-                     now, now, owner_type, new_pos, org,
-                     posted_by, posted_ip, _thread_id),
-                )
+                try:
+                    db.execute(
+                        """INSERT INTO issues (id, title, desc, status, session, creator, due, due_time,
+                                                created, updated, owner_type, pos, org,
+                                                posted_by_session, posted_by_ip, thread_id,
+                                                external_source, external_id, external_meta,
+                                                status_changed_at)
+                           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                        (item_id, title, desc, status, session or None, creator, due, due_time,
+                         now, now, owner_type, new_pos, org,
+                         posted_by, posted_ip, _thread_id,
+                         _ext.get("external_source"), _ext.get("external_id"),
+                         _ext.get("external_meta"), now),
+                    )
+                except sqlite3.IntegrityError:
+                    # Lost a race with a concurrent POST of the same external
+                    # pair; hand back the winner instead of failing the pull.
+                    db.rollback()
+                    if not _ext.get("external_source"):
+                        raise
+                    _dup = _existing_external_item(db, _ext["external_source"], _ext["external_id"])
+                    if not _dup:
+                        raise
+                    _dup_item = _item_by_id(_dup["id"]) or {"id": _dup["id"]}
+                    _dup_item["existing"] = True
+                    return self._json(_dup_item, 200)
                 for tag in tags:
                     db.execute(
                         "INSERT OR IGNORE INTO issue_tags (issue_id, tag) VALUES (?, ?)",
@@ -49350,6 +49481,21 @@ class CCHandler(BaseHTTPRequestHandler):
                     if "creator" in body:
                         set_clauses.append("creator = ?")
                         params.append(body["creator"])
+                    # Board AH-166: link/relink an item to an external record,
+                    # or replace its external_meta.
+                    _ext, _ext_err = _external_fields_from_body(body)
+                    if _ext_err:
+                        return self._json({"error": _ext_err}, 400)
+                    if _ext.get("external_source"):
+                        _dup = _existing_external_item(db, _ext["external_source"], _ext["external_id"])
+                        if _dup and _dup["id"] != bid:
+                            return self._json({
+                                "error": "external_source/external_id already linked to another item",
+                                "existing_id": _dup["id"],
+                            }, 409)
+                    for _k, _v in _ext.items():
+                        set_clauses.append(f"{_k} = ?")
+                        params.append(_v)
                     # First assignment sets the org if it was never partitioned.
                     # Org does NOT follow later reassignments — work belongs to the
                     # org that owns it even if an outside session executes a step.
