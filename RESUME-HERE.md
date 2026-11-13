@@ -4,6 +4,20 @@
 
 Last updated: 2026-11-13
 
+## Plan for change: stop-gap rule, no production client writes without a Jeremy-approved PLAN (board AH-183, 2026-11-13)
+
+**Why.** Jeremy via Cypra (T-224): billable Zoho items now reach CD-* agents; no task work inside client production systems before a plan he approved. Effective now.
+
+**What.** Same delivery path as AH-175.
+1. `_MEM_CRITICAL_RULES`: one bullet (H1 unchanged): client-system items = READ + SANDBOX only; any production write needs a PLAN on the board item (what changes, which system, sandbox or prod, rollback, who is affected), status `blocked`, and Jeremy's explicit yes relayed by Cypra. Reads and drafts fine.
+2. `_global.md`: matching section with the PLAN template. Recompose via POST /api/memory/global (captures agent memory first since AH-175).
+3. Live CD-* sessions read MEMORY.md only at start, so send each running CD-* session one tmux line with the rule.
+4. Gate question (review only, no code): can gate_ack carry a "plan approved" checkbox.
+
+**Verify.** Syntax; MEMORY.md of every CD-* session (host and org paths, `~/.amux/orgs/` with trailing slash) carries the bullet; `_amux_shared.md` carries the section; agent portion above the marker unchanged (before/after snapshot); send_text delivery result per live CD-* session.
+
+**DONE 2026-11-13 16:18.** POST /api/memory/global recomposed=70; 58 MEMORY.md rewritten, all 58 carry the bullet, agent portion above the marker identical to the pre-change snapshot 58/58. All 14 CD-* MEMORY.md (org paths under /mnt/orgdata/amux-orgs/CD-*) carry it; CD-NPP _amux_shared.md carries the section. Channel notice delivered to all 14 running CD-* sessions (delivered=true each). Gate review: no code; answer on AH-183.
+
 ## Plan for change: C4 pairs with the wrong sibling; duplicate mints; no-pair-in-flight invariant (AH-181 follow-up, 2026-11-13)
 
 **Why.** Ember-Research: EAAC-96 and EAC-1309 sat at review 2 days on clean PASS/PASS pairs (EAC-1310+EAO-1076, EAC-1311+EAO-1077, minted together 11-11 01:14). At 18:36 a review-enter on a target with no TIP-SHA double-minted (EAC-1331/EAO-1091, EAC-1332/EAO-1092): the no-TIP dedup only compares `created` against target `updated`-60, so an open in-flight audit did not count. Codex VOIDed its duplicate, Opus's got parked to backlog. When EAC-1310 closed 11-12 20:40, C4 looked up the OTHER auditor's NEWEST audit for the target (EAO-1091, backlog) and returned None. Never applied. Also 03:42 today: Ember-Research's desc-only note PATCH at review minted a third pair on both (ER-556 any-PATCH-at-review trigger + no-TIP time dedup); I discarded those 4.

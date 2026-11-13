@@ -14348,6 +14348,12 @@ _MEM_CRITICAL_RULES = """\
 - **`[Zoho <KEY>]` board items are machine-parsed into Zoho Projects.** You need
   no Zoho access. Put `EVIDENCE:`, `ROUTED:`, and `WHAT:` `BY:` `UNBLOCKS:` `ACTS:`
   each on its own line. Exact wording: the HOW YOUR REPLY IS READ header on the item.
+- **No writes to a CLIENT PRODUCTION system without Jeremy's approved PLAN.**
+  (Jeremy, 2026-11-13.) For client-system items you may READ, and work in SANDBOX
+  only. Before ANY production write (records, config, scripts, functions,
+  workflows, data): post a `PLAN:` on your board item (what changes, which
+  system, sandbox or prod, rollback, who is affected), set status `blocked`, and
+  wait for Jeremy's explicit yes relayed by Cypra. Drafts and reads are fine.
 """
 
 
