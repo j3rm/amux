@@ -36448,7 +36448,7 @@ async function fetchBoard() {
     if (itemsChanged || statusesChanged) {
       lastBoardJSON = j;
       boardItems = data;
-      localStorage.setItem('amux_board_cache', j);
+      _setBoardCache(j);
       renderBoard();
     }
   } catch(e) {
@@ -37438,7 +37438,15 @@ async function boardDetailDelete() {
 
 function saveBoardCache() {
   lastBoardJSON = JSON.stringify(boardItems);
-  localStorage.setItem('amux_board_cache', lastBoardJSON);
+  _setBoardCache(lastBoardJSON);
+}
+
+// The board can exceed the ~5 MB localStorage quota. A throw here used to
+// abort renderBoard/the SSE handler; IndexedDB holds the durable copy, so this
+// fast-paint cache is best-effort and dropped (not left stale) when it fails.
+function _setBoardCache(j) {
+  try { localStorage.setItem('amux_board_cache', j); }
+  catch (e) { try { localStorage.removeItem('amux_board_cache'); } catch (_) {} }
 }
 
 async function addBoardItem(title, desc, status, session, tags, due, ownerType, dueTime) {
@@ -38622,7 +38630,7 @@ if (!boardItems.length) {
       boardItems = items.filter(i => !i.deleted);
       const j = JSON.stringify(boardItems);
       lastBoardJSON = j;
-      localStorage.setItem('amux_board_cache', j);
+      _setBoardCache(j);
       if (activeView === 'board') renderBoard();
       else if (activeView === 'calendar') renderCalendar();
     }
@@ -38650,7 +38658,7 @@ async function _runDeltaSync() {
       });
       const j = JSON.stringify(boardItems);
       lastBoardJSON = j;
-      localStorage.setItem('amux_board_cache', j);
+      _setBoardCache(j);
       _idb.applyIssueDelta(data.issues);
     }
     if (data.statuses && data.statuses.length) {
@@ -38742,7 +38750,7 @@ function connectSSE() {
         if (j !== lastBoardJSON) {
           lastBoardJSON = j;
           boardItems = msg.payload;
-          localStorage.setItem('amux_board_cache', j);
+          _setBoardCache(j);
           // Mirror to IDB for full offline durability (iOS-safe)
           _idb.applyIssueDelta(msg.payload);
           _idb.set('last_sync_ts', Math.floor(Date.now() / 1000));

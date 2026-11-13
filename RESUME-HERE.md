@@ -4,6 +4,18 @@
 
 Last updated: 2026-11-13
 
+## Plan for change: board localStorage quota stops board re-render (2026-11-13)
+
+**Why.** Found by the Playwright check: `/api/board` is 5.50 MB (1058 items, 4.70 MB of it desc; the AH-166/171 fields add 0.23 MB), over Chrome's ~5 MB localStorage quota. `localStorage.setItem('amux_board_cache', j)` throws QuotaExceededError, and at the fetchBoard site it sits BEFORE `renderBoard()`, at the SSE `board` handler BEFORE the IDB mirror. So the dashboard board silently stops updating. The full board is already mirrored to IndexedDB (`_idb`), which is the durable offline cache; the localStorage copy is only a fast first paint.
+
+**What.** One helper `_setBoardCache(j)`: try setItem; on any error, removeItem the key (so a stale snapshot is never loaded at next startup) and continue. Replace all 5 `localStorage.setItem('amux_board_cache', ...)` sites. Startup already falls back to IDB when the cache is missing.
+
+Not done here: shrinking the payload (desc bodies are 85% of it). Separate decision.
+
+**Verify.** Syntax check; Playwright: load dashboard, zero QuotaExceededError in console, board view renders items, a board PATCH made from curl shows up in the page within a few seconds (SSE path).
+
+**DONE 2026-11-13.** Playwright (scratchpad pw-board.js): 0 QuotaExceededError (was 2 per load), cache key absent as designed, a curl PATCH reached boardItems via SSE in 0.5-2.2s and renderBoard ran after it. DOM-text check is not usable in that profile: a saved board filter shows only 9 cards.
+
 ## Plan for change: hide the thread "Linked work" strip (2026-11-13)
 
 **Why.** Jeremy 20:22: the "Linked work (N orgs, N items): CD-NPP 1 · CD-Audit-Codex 1" strip on thread cards is not as useful as hoped. Remove it for now; later evolve it with Cypra into Project-friendly IDs (show that an agent is working EMB-123 = the Zoho item).
