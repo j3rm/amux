@@ -9023,75 +9023,110 @@ def _sweep_stale_review():
         slog(f"[stale-review] failed: {_e}")
 
 
-def _sweep_review_tip_coverage():
-    """AH-181 invariant (EmberCoreMigration 2026-11-13): an item at `review`
-    whose TIP-SHA has no audit item is an error state, not a quiet one.
-    Every 10 min, for review items 10 min to 7 days since last update that
-    declare a TIP-SHA in an org with both auditor sessions:
-      - several declared tips, one unaudited -> flag (desc note + assignee line)
-      - one tip, unaudited -> run the normal guarded mint (build-verify gate
-        included), so a re-take that missed its mint self-heals; if nothing
-        is minted and no open audit / build-verify exists, flag once.
-    Cap 5 actions per tick. Flags are deduped by a desc marker."""
+def _sweep_review_tip_coverage(dry_run: bool = False):
+    """AH-181 invariant (EmberCoreMigration + Ember-Research 2026-11-13):
+    an item at `review` with nothing auditing it is an error state, not a
+    quiet one. Three different bugs (re-take tip parsed wrong, C4 paired
+    with a parked duplicate, double mint) all looked like a healthy review.
+    Every 10 min, for review items 10 min to 7 days since last update, in
+    orgs with both auditor sessions, not audit/research/control-plane and
+    not a mint-exempt title:
+      tip branch (desc declares a TIP-SHA):
+        - several tips, one unaudited -> flag the assignee
+        - one tip, unaudited, nothing open -> normal guarded mint (self-heal);
+          if it mints nothing, flag
+      no-pair branch (30 min+ quiet): no audit / build-verify / escalation
+        open for the item -> flag the assignee and the org adjudicator with
+        the per-audit diagnosis. No automatic C4 re-fire (could repeat
+        escalations).
+    Flags are deduped by a desc marker; cap 5 actions per tick. dry_run
+    returns the planned actions without writing."""
+    plan = []
     try:
         now = int(time.time())
         db = get_db()
         rows = db.execute(
             "SELECT * FROM issues WHERE status = 'review' AND deleted IS NULL "
-            "  AND updated < ? AND updated > ? "
-            "  AND (desc LIKE '%TIP-SHA%' OR desc LIKE '%TIP_SHA%' OR desc LIKE '%TIP SHA%')",
+            "  AND updated < ? AND updated > ? ORDER BY updated ASC",
             (now - 600, now - 7 * 86400),
         ).fetchall()
         acted = 0
         for r in rows:
-            if acted >= 5:
+            if acted >= 5 and not dry_run:
                 break
             item = dict(r)
             tid = item["id"]
             try:
+                sess = item.get("session") or ""
                 if (tid.split("-", 1)[0] in _CONTROL_PLANE_PREFIXES
-                        or _is_audit_session(item.get("session") or "")
-                        or _is_research_session(item.get("session") or "")):
+                        or _is_audit_session(sess) or _is_research_session(sess)
+                        or _mint_title_exempt(item.get("title") or "")
+                        or (item.get("owner_type") or "agent") != "agent"):
                     continue
-                org = (item.get("org") or "").strip() or (item.get("session") or "").split("-", 1)[0]
+                org = (item.get("org") or "").strip() or sess.split("-", 1)[0]
                 if not org or not (CC_SESSIONS / f"{org}-Audit-Codex.env").exists() \
                         or not (CC_SESSIONS / f"{org}-Audit-Opus.env").exists():
                     continue
                 desc = item.get("desc") or ""
-                decl = _tip_sha_declarations(desc)
-                if not decl:
-                    continue
-                amb = _tip_sha_ambiguity_detail(db, tid, desc)
-                if amb:
-                    if _flag_tip_sha_problem(db, item, "ambiguous", amb):
-                        acted += 1
-                    continue
-                tip = decl[0]
-                if _tip_sha_covered(db, tid, tip):
-                    continue
-                # An open audit or build-verify for this target still counts
-                # as in flight (verdict, and so AUDITED-SHA, not written yet).
-                pending = db.execute(
+                in_flight = db.execute(
                     "SELECT id FROM issues WHERE deleted IS NULL "
                     "  AND status IN ('todo','doing','review') "
-                    "  AND (title LIKE ? OR title LIKE ?) LIMIT 1",
-                    (f"AUDIT {tid}:%", f"BUILD-VERIFY {tid}:%"),
+                    "  AND (title LIKE ? OR title LIKE ? OR title LIKE ? OR title LIKE ?) LIMIT 1",
+                    (f"AUDIT {tid}:%", f"BUILD-VERIFY {tid}:%",
+                     f"ESCALATE {tid}%", f"ESC-{tid}%"),
                 ).fetchone()
-                if pending:
+                decl = _tip_sha_declarations(desc)
+                if decl:
+                    amb = _tip_sha_ambiguity_detail(db, tid, desc)
+                    if amb:
+                        plan.append((tid, "flag-ambiguous"))
+                        if not dry_run and _flag_tip_sha_problem(db, item, "ambiguous", amb):
+                            acted += 1
+                        continue
+                    if not _tip_sha_covered(db, tid, decl[0]) and not in_flight:
+                        plan.append((tid, f"mint-at-{decl[0][:7]}"))
+                        if dry_run:
+                            continue
+                        acted += 1
+                        minted = _auto_mint_audit_pair(item, db)
+                        if minted:
+                            slog(f"[tip-sha-check] {tid}: self-heal mint at {decl[0][:7]}: {minted}")
+                        else:
+                            _flag_tip_sha_problem(
+                                db, item, "unaudited",
+                                f"Tip {decl[0][:7]} has no audit item and the mint declined "
+                                f"(see server log `[mint-skip] {tid}`).")
+                        continue
+                if in_flight or int(item.get("updated") or 0) > now - 1800:
                     continue
-                minted = _auto_mint_audit_pair(item, db)
-                acted += 1
-                if minted:
-                    slog(f"[tip-sha-check] {tid}: self-heal mint at {tip[:7]}: {minted}")
-                    continue
-                _flag_tip_sha_problem(
-                    db, item, "unaudited",
-                    f"Tip {tip[:7]} has no audit item and the mint declined "
-                    f"(see server log `[mint-skip] {tid}`).")
+                audits = db.execute(
+                    "SELECT id, session, status, desc FROM issues "
+                    "WHERE title LIKE ? AND deleted IS NULL ORDER BY created DESC LIMIT 6",
+                    (f"AUDIT {tid}:%",),
+                ).fetchall()
+                bits = []
+                for a in audits:
+                    v = _extract_verdict(a["desc"] or "") or "-"
+                    sha = _extract_audited_sha(a["desc"] or "")
+                    bits.append(f"{a['id']} {a['status']} verdict={v}"
+                                + (f" sha={sha[:7]}" if sha else ""))
+                diag = ("Audits: " + "; ".join(bits) + ".") if bits else "No audit item exists."
+                if decl:
+                    diag += f" Declared tip {decl[0][:7]}."
+                diag += (" Likely: C4 did not apply a closed pair, or no pair was minted. "
+                         "Adjudicator: apply/escalate per the verdicts, or the worker re-enters review.")
+                sig = ",".join(sorted(a["id"] for a in audits)) or "none"
+                adj = _resolve_adjudicator_session(org)
+                plan.append((tid, f"flag-no-pair [{sig}] -> {sess}" + (f" + {adj}" if adj else "")))
+                if not dry_run and _flag_tip_sha_problem(
+                        db, item, "no-pair", diag, sig=sig,
+                        also_notify=[adj] if adj else None):
+                    acted += 1
             except Exception as _ie:
                 slog(f"[tip-sha-check] {tid}: {_ie}")
     except Exception as _e:
         slog(f"[tip-sha-check] failed: {_e}")
+    return plan
 
 
 def _sweep_jeremy_digest():
@@ -11812,30 +11847,37 @@ def _tip_sha_covered(db, target_id: str, sha: str) -> bool:
     return False
 
 
-def _flag_tip_sha_problem(db, target: dict, kind: str, detail: str) -> bool:
+def _flag_tip_sha_problem(db, target: dict, kind: str, detail: str,
+                          sig: str = "", also_notify: "list | None" = None) -> bool:
     """Surface a review item whose tip has no audit (AH-181). Appends one
     note to the target desc and pushes one line to the assignee. Deduped
     by a `[tip-sha-check <sig>]` marker in the desc, so repeat PATCHes and
     sweep ticks do not stack notes. Returns True if it flagged now."""
     tid = target.get("id", "")
     desc = target.get("desc") or ""
-    sig = f"{kind}:{','.join(s[:7] for s in _tip_sha_declarations(desc))}"
+    sig = f"{kind}:{sig or ','.join(s[:7] for s in _tip_sha_declarations(desc))}"
     marker = f"[tip-sha-check {sig}]"
     if marker in desc:
         return False
     stamp = time.strftime('%Y-%m-%d %H:%M', time.localtime())
-    note = (f"{marker} {stamp}: NO AUDIT PAIR WAS MINTED. {detail} "
-            f"This item is at review but no auditor holds its current tip.")
+    if kind == "no-pair":
+        note = (f"{marker} {stamp}: STRANDED AT REVIEW. {detail} No audit, "
+                f"build-verify or escalation is in flight for this item.")
+    else:
+        note = (f"{marker} {stamp}: NO AUDIT PAIR WAS MINTED. {detail} "
+                f"This item is at review but no auditor holds its current tip.")
     new_desc = (desc.rstrip() + "\n\n" + note) if desc.strip() else note
     db.execute("UPDATE issues SET desc = ? WHERE id = ?", (new_desc, tid))
     db.commit()
     target["desc"] = new_desc
     slog(f"[tip-sha-check] {tid}: flagged {sig}: {detail}")
-    sess = (target.get("session") or "").strip()
-    if sess and _is_real_session(sess):
-        msg = (f"amux: {tid} is at review but got NO audit pair. {detail} "
-               f"See the [tip-sha-check] note at the end of its desc.")
-        threading.Thread(target=lambda: send_text(sess, msg), daemon=True).start()
+    head = ("is stranded at review (nothing in flight)" if kind == "no-pair"
+            else "is at review but got NO audit pair")
+    msg = (f"amux: {tid} {head}. {detail} "
+           f"See the [tip-sha-check] note at the end of its desc.")
+    for sess in [(target.get("session") or "").strip()] + list(also_notify or []):
+        if sess and _is_real_session(sess):
+            threading.Thread(target=lambda _s=sess: send_text(_s, msg), daemon=True).start()
     return True
 
 
@@ -11913,6 +11955,22 @@ _COORDINATION_TITLE_PREFIXES = (
 )
 
 
+# Notice/ruling title prefixes the mint skips (ER-559 note 2). Module level
+# since AH-181 so the review-coverage sweep applies the same exemptions.
+_MINT_NOTICE_PREFIXES = (
+    "ER RULING:", "RR RULING:", "ED RULING:", "RD RULING:",
+    "ER NOTICE:", "RR NOTICE:", "ED NOTICE:", "RD NOTICE:",
+    "ACK:", "NOTICE:",
+)
+
+
+def _mint_title_exempt(title: str) -> bool:
+    """True if the audit mint never mints for this target title."""
+    t = (title or "").strip().upper()
+    return (any(t.startswith(p.upper()) for p in _COORDINATION_TITLE_PREFIXES)
+            or any(t.startswith(p) for p in _MINT_NOTICE_PREFIXES))
+
+
 def _mint_audit_pair_unguarded(target_item: dict, db) -> dict | None:
     """Internal: actually mint the RAC + RAO audit pair, with no build-verify
     gate. Called both by _auto_mint_audit_pair (after the gate passes) and by
@@ -11940,12 +11998,7 @@ def _mint_audit_pair_unguarded(target_item: dict, db) -> dict | None:
     # (third shape-vs-kind occurrence — EMBER-122 → EAO-406/EAC-490). These
     # aren't code deliverables; nothing to audit. Fleet-wide pattern —
     # matches Ember's ER/ED and RTG's RR/RD ruling conventions.
-    _NOTICE_PREFIXES = (
-        "ER RULING:", "RR RULING:", "ED RULING:", "RD RULING:",
-        "ER NOTICE:", "RR NOTICE:", "ED NOTICE:", "RD NOTICE:",
-        "ACK:", "NOTICE:",
-    )
-    if any(_ttitle.startswith(p) for p in _NOTICE_PREFIXES):
+    if any(_ttitle.startswith(p) for p in _MINT_NOTICE_PREFIXES):
         slog(f"[mint-skip] {tid}: notice/ruling title prefix — no code to audit")
         return None
     org = (target_item.get("org") or "").strip()
@@ -12045,6 +12098,17 @@ def _mint_audit_pair_unguarded(target_item: dict, db) -> dict | None:
         # Otherwise mint — TIP-SHA moved past the covered sha (or one
         # auditor never covered it).
     else:
+        # AH-181 follow-up: an audit still open (todo/doing/review) covers
+        # regardless of age. The age-only check double-minted EAAC-96 and
+        # EAC-1309 at 11-11 18:36 while their first pair was in flight.
+        # Either side open is enough: at 18:36 EAO-1076 had already closed
+        # PASS and EAC-1310 was still doing; the open one closes into C4
+        # with its same-batch sibling, so a new pair only duplicates it.
+        _open = [r["id"] for r in (codex_existing, opus_existing)
+                 if r and (r["status"] or "") in ("todo", "doing", "review")]
+        if _open:
+            slog(f"[mint-skip] {tid}: audit still in flight ({', '.join(_open)})")
+            return None
         if codex_existing and int(codex_existing["created"]) >= fresh_threshold:
             slog(f"[mint-skip] {tid}: fresh codex audit already exists "
                  f"({codex_existing['id']}, created {codex_existing['created']} "
@@ -12682,13 +12746,30 @@ def _auto_verify_from_audit_pair(audit_item: dict, db) -> dict | None:
     # 7+ cases of accept-apply leaving target at review, log shows
     # "hook error: No item with that key"). Reconvert to dict so
     # downstream .get("session") calls work too.
-    _other_row = db.execute(
-        "SELECT id, status, desc, session FROM issues "
-        "WHERE session = ? AND deleted IS NULL "
-        "  AND title LIKE ? "
-        "ORDER BY created DESC LIMIT 1",
-        (other_session, f"AUDIT {target_id}:%"),
-    ).fetchone()
+    # AH-181 follow-up (Ember-Research 2026-11-13, EAAC-96/EAC-1309): the
+    # sibling is the audit minted in the SAME batch as this one, not the
+    # other auditor's newest. A duplicate pair minted later (one VOIDed,
+    # one parked to backlog) made "newest" the parked duplicate, and a
+    # clean PASS/PASS sat at review for two days. Fall back to newest only
+    # when no same-batch sibling exists (hand-made audits).
+    _my_created = int(audit_item.get("created") or 0)
+    _other_row = None
+    if _my_created:
+        _other_row = db.execute(
+            "SELECT id, status, desc, session FROM issues "
+            "WHERE session = ? AND deleted IS NULL "
+            "  AND title LIKE ? AND ABS(created - ?) <= 10 "
+            "ORDER BY created DESC LIMIT 1",
+            (other_session, f"AUDIT {target_id}:%", _my_created),
+        ).fetchone()
+    if _other_row is None:
+        _other_row = db.execute(
+            "SELECT id, status, desc, session FROM issues "
+            "WHERE session = ? AND deleted IS NULL "
+            "  AND title LIKE ? "
+            "ORDER BY created DESC LIMIT 1",
+            (other_session, f"AUDIT {target_id}:%"),
+        ).fetchone()
     other = dict(_other_row) if _other_row else None
     if not other or other["status"] not in ("done", "verified", "review", "discarded"):
         return None
@@ -49936,10 +50017,15 @@ class CCHandler(BaseHTTPRequestHandler):
                         # TIP-SHA-aware dedup decides whether the new TIP
                         # actually needs a fresh pair (skip if existing
                         # audits already cover it).
+                        # AH-181 follow-up: the desc-only branch exists for
+                        # TIP-SHA movers. On a target with no TIP-SHA it only
+                        # re-minted on unrelated notes (EAAC-96/EAC-1309 at
+                        # 03:42 on a backstop note), so require a TIP token.
                         if (updated_item.get("status") == "review"
                                 and prior
                                 and (prior["status"] != "review"
-                                     or updated_item.get("desc") != prior_desc)):
+                                     or (updated_item.get("desc") != prior_desc
+                                         and _tip_sha_declarations(updated_item.get("desc") or "")))):
                             minted = _auto_mint_audit_pair(updated_item, db)
                             if minted:
                                 cascaded = cascaded or minted

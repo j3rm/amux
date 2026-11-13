@@ -4,6 +4,20 @@
 
 Last updated: 2026-11-13
 
+## Plan for change: C4 pairs with the wrong sibling; duplicate mints; no-pair-in-flight invariant (AH-181 follow-up, 2026-11-13)
+
+**Why.** Ember-Research: EAAC-96 and EAC-1309 sat at review 2 days on clean PASS/PASS pairs (EAC-1310+EAO-1076, EAC-1311+EAO-1077, minted together 11-11 01:14). At 18:36 a review-enter on a target with no TIP-SHA double-minted (EAC-1331/EAO-1091, EAC-1332/EAO-1092): the no-TIP dedup only compares `created` against target `updated`-60, so an open in-flight audit did not count. Codex VOIDed its duplicate, Opus's got parked to backlog. When EAC-1310 closed 11-12 20:40, C4 looked up the OTHER auditor's NEWEST audit for the target (EAO-1091, backlog) and returned None. Never applied. Also 03:42 today: Ember-Research's desc-only note PATCH at review minted a third pair on both (ER-556 any-PATCH-at-review trigger + no-TIP time dedup); I discarded those 4.
+
+**What.**
+1. C4 sibling: prefer the other auditor's audit minted in the same batch (|created diff| <= 10s); fall back to newest only if none.
+2. Mint dedup without TIP-SHA: an open (todo/doing/review) audit by that auditor covers regardless of age.
+3. PATCH-site mint: a desc-only edit at review mints only when the target declares a TIP-SHA (the ER-556 purpose). Status transitions unchanged.
+4. Broaden `_sweep_review_tip_coverage` (Ember ask): review item 30 min+ quiet, org with auditors, not mint-exempt title, no audit/BV in flight, and not handled by the tip branch -> flag once (desc marker keyed by audit ids) to the assignee AND the org adjudicator, with the per-audit diagnosis. No auto C4 re-fire (could repeat escalations).
+
+**Verify.** Syntax; DB copy: replay C4 with EAC-1310 at pre-backstop state picks EAO-1076. Dry run of the sweep over live review items, list what it would flag before enabling.
+
+**DONE 2026-11-13.** Sibling query on live rows: EAC-1310->EAO-1076, EAC-1307->EAO-1074, EAC-1302->EAO-1069 (old query: EAO-1178 discarded, EAO-1086 backlog, EAO-1098 discarded). Sweep dry run on a DB copy: 0 false tip flags; 19 Ember items flagged no-pair, sampled 6, all genuine (audit pairs parked to backlog or a closed pair C4 never applied, e.g. RA-1867 PASS+PWW). Cap 5/tick spreads them over ~40 min.
+
 ## Plan for change: re-take at a new tip silently gets no audit pair (board AH-181, 2026-11-13)
 
 **Why.** EmberCoreMigration report on EAAC-116 (largest Ember cutover blocker). Log: every review-enter after the 03:20 FAIL/FAIL logged `[mint-skip] EAAC-116: existing pair already covers TIP-SHA 91cf8d5`. The re-take desc declares the new tip as `RE-TAKE TIP-SHA: fe7e8fb` (prefix, so the strict start-of-line `_TIP_SHA_RE` skips it), and the prior text kept below it still has a strict `TIP-SHA: 91cf8d5`. The mint reads the last strict line, sees the failed tip, finds it covered by EAC-1427/EAO-1171, and skips quietly. Not a dedup window, not an actor rule. The item sits at review looking audited.
