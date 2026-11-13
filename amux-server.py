@@ -10166,6 +10166,10 @@ def _scheduler_loop():
                     next_r = (_parse_next_run(expr) if expr else None) or _next_run_dt(sched)
                     db.execute("UPDATE schedules SET last_run=?, next_run=?, updated=? WHERE id=?",
                                (now_str, next_r, now_ts, sched["id"]))
+                # Board AH-172: commit per schedule. An open write txn here
+                # held the SQLite lock through the NEXT schedule's subprocess,
+                # and every board write in that window 500'd.
+                db.commit()
             if due:
                 db.commit()
         except Exception as e:

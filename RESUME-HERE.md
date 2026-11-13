@@ -16,6 +16,8 @@ Not changed (noted for later): shell schedules still run serially on the schedul
 1. Syntax check.
 2. After reload, watch the next two 5-minute marks: zero "database is locked" lines in server.log, board writes during the window return 200.
 
+**DONE 2026-11-13.** 01:30 and 01:35 marks: zero lock errors (vs 7 at 01:20, 4 at 01:25). Active probe 01:34:58-01:35:41, 15 PATCHes while the mailbox poll and board_intake ran: 15/15 HTTP 200, ~5ms each.
+
 ## Plan for change: owner-update + park signals for the Zoho progress watchdog (board AH-171, 2026-11-13)
 
 **Why.** Jeremy asked Cypra for a progress watchdog on Zoho-owned agent items. Agreed with Cypra on the channel: ONE pinger. amux keeps owning agent nudges (todo reboost every 30m, stale-doing nudge at 45m, park at 2h/180m); PAA's script (CP-785) only acts on the Zoho side and sends Jeremy one digest. PAA cannot use `updated` as "last agent activity" because the todo reboost bumps it every 30m. Cypra's asks: expose real signals on GET, Zoho-specific nudge text, and a park stamp PAA can read.
