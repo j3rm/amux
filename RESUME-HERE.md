@@ -4,6 +4,16 @@
 
 Last updated: 2026-11-13
 
+## Plan for change: hide the thread "Linked work" strip (2026-11-13)
+
+**Why.** Jeremy 20:22: the "Linked work (N orgs, N items): CD-NPP 1 · CD-Audit-Codex 1" strip on thread cards is not as useful as hoped. Remove it for now; later evolve it with Cypra into Project-friendly IDs (show that an agent is working EMB-123 = the Zoho item).
+
+**What.** In `_tRenderThread`, set `workStrip = ''` instead of calling `_tWorkStripHtml(t)`. Keep `_tWorkStripHtml` and the server-side `linked_issues` payload (the future Project-ID version builds on that data). UI-only.
+
+**Verify.** Syntax check; thread view loads, cards expand, no "Linked work" text in the rendered DOM; no console errors.
+
+**DONE 2026-11-13.** Headless Playwright: 22 thread cards, first expanded, 0 `.t-work-strip` elements, string only in script source. Console showed an unrelated real bug (board localStorage quota), handled as its own change below.
+
 ## Plan for change: teach all agents the Zoho board-reply formats (board AH-175, 2026-11-13)
 
 **Why.** Jeremy via Cypra (T-224): agents' board replies on Zoho-mirrored items are machine-parsed by PAA's write-back and land in Zoho, so marker lines must be exact. Cypra asked for a <=25-line section in `~/.amux/memory/_global.md` and for the zoho stale-doing nudge to match the same formats.

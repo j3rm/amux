@@ -34286,7 +34286,9 @@ function _tRenderThread(t) {
   const anyBlocking = t.messages.some(m => m.blocking === 1 && m.status !== 'discarded');
   const newestUpdated = t.messages.reduce((mx, m) => Math.max(mx, m.updated || 0), t.updated || 0);
   const tidEsc = _tEsc(t.id);
-  const workStrip = _tWorkStripHtml(t);
+  // Hidden (Jeremy 2026-11-13) until it shows Project-friendly IDs; data and
+  // _tWorkStripHtml are kept for that rework.
+  const workStrip = '';
   // AH-179: Audit feature removed (Jeremy 2026-11-12). Header AUDIT: ... chip hidden.
   const auditModeChip = '';
   // Thread cards get a chunkier border-left (4px accent bar) to visually
