@@ -4,6 +4,19 @@
 
 Last updated: 2026-11-13
 
+## Plan for change: re-take at a new tip silently gets no audit pair (board AH-181, 2026-11-13)
+
+**Why.** EmberCoreMigration report on EAAC-116 (largest Ember cutover blocker). Log: every review-enter after the 03:20 FAIL/FAIL logged `[mint-skip] EAAC-116: existing pair already covers TIP-SHA 91cf8d5`. The re-take desc declares the new tip as `RE-TAKE TIP-SHA: fe7e8fb` (prefix, so the strict start-of-line `_TIP_SHA_RE` skips it), and the prior text kept below it still has a strict `TIP-SHA: 91cf8d5`. The mint reads the last strict line, sees the failed tip, finds it covered by EAC-1427/EAO-1171, and skips quietly. Not a dedup window, not an actor rule. The item sits at review looking audited.
+
+**What.**
+1. Helper `_tip_sha_declarations(desc)`: distinct shas from strict lines plus a loose scan (`TIP[-_ ]SHA:` anywhere, e.g. `RE-TAKE TIP-SHA:`), prefix-deduped, document order. Helper `_tip_sha_covered(db, tid, sha)`: any non-discarded `AUDIT <tid>:` item whose AUDITED-SHA prefix-matches.
+2. In `_mint_audit_pair_unguarded`: if more than one distinct declared sha AND any of them is uncovered, do NOT mint (C4 would hold on the ambiguity anyway) and do NOT skip silently: `_flag_tip_sha_problem` appends one desc note to the target (deduped by a `[tip-sha-check <sig>]` marker so repeat PATCHes do not stack notes) and sends the assignee one tmux line: rewrite the desc with exactly one start-of-line `TIP-SHA: <new>`, superseded shas in prose without the token. Their fix PATCH re-fires the mint, which then mints at the clean tip.
+3. Invariant sweep `_sweep_review_tip_coverage` (every 600s): items at `review`, updated 10 min to 7 days ago, desc has a TIP-SHA token, not control-plane/audit/research assignee, org has both auditor env files. Ambiguous + uncovered: flag (same helper, same dedup). Single tip uncovered: call `_auto_mint_audit_pair` (normal gates incl. build-verify), so a re-take that missed its mint self-heals; if that still mints nothing and no open audit/BV exists, flag once. Cap 5 actions per tick.
+
+Not changed: C4 apply logic, strict parser, the 1-strict-line convention.
+
+**Verify.** Syntax; unit-test helpers on EAAC-116's live desc (expect declared [fe7e8fb, 91cf8d5], fe7e8fb uncovered). Run mint function against a DB copy for EAAC-116: no mint, note appended once, second call adds no note. Live: after reload, sweep flags EAAC-116 once; send_text reaches Ember_Auth_API_Core.
+
 ## Plan for change: stale-doing board-exempt cap must not auto-park genuine external waits (2026-11-13)
 
 **Why.** RTG-Research friction report: RA-934 (deliberately held at doing, retake d2671ef waiting on RTG-PreBuild outage, refs RR-2623 in RTG-Research review) was exempt until 02:27, then at 02:32 hit MY AH-171 board-exempt cap (24h, keyed on `updated`) and in the SAME tick was nudged, escalated and auto-parked (1444m is past every tier). RA-930/1901/1902 are in the same state and would park one by one. The cap only existed to break the mutual-ref deadlock (two items each exempt because they cite the other).

@@ -9023,6 +9023,77 @@ def _sweep_stale_review():
         slog(f"[stale-review] failed: {_e}")
 
 
+def _sweep_review_tip_coverage():
+    """AH-181 invariant (EmberCoreMigration 2026-11-13): an item at `review`
+    whose TIP-SHA has no audit item is an error state, not a quiet one.
+    Every 10 min, for review items 10 min to 7 days since last update that
+    declare a TIP-SHA in an org with both auditor sessions:
+      - several declared tips, one unaudited -> flag (desc note + assignee line)
+      - one tip, unaudited -> run the normal guarded mint (build-verify gate
+        included), so a re-take that missed its mint self-heals; if nothing
+        is minted and no open audit / build-verify exists, flag once.
+    Cap 5 actions per tick. Flags are deduped by a desc marker."""
+    try:
+        now = int(time.time())
+        db = get_db()
+        rows = db.execute(
+            "SELECT * FROM issues WHERE status = 'review' AND deleted IS NULL "
+            "  AND updated < ? AND updated > ? "
+            "  AND (desc LIKE '%TIP-SHA%' OR desc LIKE '%TIP_SHA%' OR desc LIKE '%TIP SHA%')",
+            (now - 600, now - 7 * 86400),
+        ).fetchall()
+        acted = 0
+        for r in rows:
+            if acted >= 5:
+                break
+            item = dict(r)
+            tid = item["id"]
+            try:
+                if (tid.split("-", 1)[0] in _CONTROL_PLANE_PREFIXES
+                        or _is_audit_session(item.get("session") or "")
+                        or _is_research_session(item.get("session") or "")):
+                    continue
+                org = (item.get("org") or "").strip() or (item.get("session") or "").split("-", 1)[0]
+                if not org or not (CC_SESSIONS / f"{org}-Audit-Codex.env").exists() \
+                        or not (CC_SESSIONS / f"{org}-Audit-Opus.env").exists():
+                    continue
+                desc = item.get("desc") or ""
+                decl = _tip_sha_declarations(desc)
+                if not decl:
+                    continue
+                amb = _tip_sha_ambiguity_detail(db, tid, desc)
+                if amb:
+                    if _flag_tip_sha_problem(db, item, "ambiguous", amb):
+                        acted += 1
+                    continue
+                tip = decl[0]
+                if _tip_sha_covered(db, tid, tip):
+                    continue
+                # An open audit or build-verify for this target still counts
+                # as in flight (verdict, and so AUDITED-SHA, not written yet).
+                pending = db.execute(
+                    "SELECT id FROM issues WHERE deleted IS NULL "
+                    "  AND status IN ('todo','doing','review') "
+                    "  AND (title LIKE ? OR title LIKE ?) LIMIT 1",
+                    (f"AUDIT {tid}:%", f"BUILD-VERIFY {tid}:%"),
+                ).fetchone()
+                if pending:
+                    continue
+                minted = _auto_mint_audit_pair(item, db)
+                acted += 1
+                if minted:
+                    slog(f"[tip-sha-check] {tid}: self-heal mint at {tip[:7]}: {minted}")
+                    continue
+                _flag_tip_sha_problem(
+                    db, item, "unaudited",
+                    f"Tip {tip[:7]} has no audit item and the mint declined "
+                    f"(see server log `[mint-skip] {tid}`).")
+            except Exception as _ie:
+                slog(f"[tip-sha-check] {tid}: {_ie}")
+    except Exception as _e:
+        slog(f"[tip-sha-check] failed: {_e}")
+
+
 def _sweep_jeremy_digest():
     """Weekly digest (AH-174, 2026-11-12, SAO-4 finding #10) of items
     assigned to Jeremy. Jeremy has no env file so every other sweep's
@@ -11693,6 +11764,98 @@ def _all_tip_shas(desc: str) -> list:
     return [m.lower() for m in _TIP_SHA_RE.findall(desc)]
 
 
+# AH-181 (EmberCoreMigration 2026-11-13, EAAC-116): a re-take desc said
+# `RE-TAKE TIP-SHA: fe7e8fb` (prefixed, so the strict start-of-line regex
+# skips it) above the prior text's strict `TIP-SHA: 91cf8d5`. The mint read
+# the old, already-audited tip and skipped quietly, so the item sat at review
+# with nothing auditing the new tip. This loose scan finds every declared
+# tip so the mint and the review sweep can tell "covered" from "ambiguous".
+# Diagnostic and flag-only: never used to pick a tip for C4.
+_TIP_SHA_LOOSE_RE = re.compile(
+    r'TIP[-_ ]SHA\s*:\s*`?([0-9a-f]{7,40})\b',
+    re.IGNORECASE,
+)
+
+
+def _tip_sha_declarations(desc: str) -> list:
+    """Distinct shas declared as a tip anywhere in desc (strict lines plus
+    loose mid-line `... TIP-SHA: <sha>`), lowered, document order, with
+    short/full forms of the same commit collapsed (AH-181)."""
+    if not desc:
+        return []
+    out = []
+    for m in _TIP_SHA_LOOSE_RE.findall(desc):
+        s = m.lower()
+        if not any(_shas_prefix_match(s, o) for o in out):
+            out.append(s)
+    return out
+
+
+def _tip_sha_covered(db, target_id: str, sha: str) -> bool:
+    """True if any non-discarded `AUDIT <target_id>:` item records an
+    AUDITED-SHA (strict, else loose) matching `sha` (AH-181)."""
+    rows = db.execute(
+        "SELECT id, session, desc FROM issues WHERE title LIKE ? AND deleted IS NULL "
+        "  AND status != 'discarded'",
+        (f"AUDIT {target_id}:%",),
+    ).fetchall()
+    for r in rows:
+        d = r["desc"] or ""
+        a = _extract_audited_sha(d) or _extract_audited_sha_loose(d)
+        if not a:
+            try:  # ER-613 report-file fallback, same as C4
+                a = _extract_audited_sha_from_report_file(r["id"], r["session"] or "")
+            except Exception:
+                a = ""
+        if a and _shas_prefix_match(a, sha):
+            return True
+    return False
+
+
+def _flag_tip_sha_problem(db, target: dict, kind: str, detail: str) -> bool:
+    """Surface a review item whose tip has no audit (AH-181). Appends one
+    note to the target desc and pushes one line to the assignee. Deduped
+    by a `[tip-sha-check <sig>]` marker in the desc, so repeat PATCHes and
+    sweep ticks do not stack notes. Returns True if it flagged now."""
+    tid = target.get("id", "")
+    desc = target.get("desc") or ""
+    sig = f"{kind}:{','.join(s[:7] for s in _tip_sha_declarations(desc))}"
+    marker = f"[tip-sha-check {sig}]"
+    if marker in desc:
+        return False
+    stamp = time.strftime('%Y-%m-%d %H:%M', time.localtime())
+    note = (f"{marker} {stamp}: NO AUDIT PAIR WAS MINTED. {detail} "
+            f"This item is at review but no auditor holds its current tip.")
+    new_desc = (desc.rstrip() + "\n\n" + note) if desc.strip() else note
+    db.execute("UPDATE issues SET desc = ? WHERE id = ?", (new_desc, tid))
+    db.commit()
+    target["desc"] = new_desc
+    slog(f"[tip-sha-check] {tid}: flagged {sig}: {detail}")
+    sess = (target.get("session") or "").strip()
+    if sess and _is_real_session(sess):
+        msg = (f"amux: {tid} is at review but got NO audit pair. {detail} "
+               f"See the [tip-sha-check] note at the end of its desc.")
+        threading.Thread(target=lambda: send_text(sess, msg), daemon=True).start()
+    return True
+
+
+def _tip_sha_ambiguity_detail(db, tid: str, desc: str):
+    """If desc declares more than one distinct tip and at least one is not
+    covered by any audit, return the flag text; else None (AH-181)."""
+    decl = _tip_sha_declarations(desc)
+    if len(decl) < 2:
+        return None
+    uncovered = [s for s in decl if not _tip_sha_covered(db, tid, s)]
+    if not uncovered:
+        return None
+    strict = _all_tip_shas(desc)
+    return (f"Desc declares {len(decl)} tips ({', '.join(s[:7] for s in decl)}); "
+            f"unaudited: {', '.join(s[:7] for s in uncovered)}; the parser reads "
+            f"{(strict[-1][:7] if strict else 'none')} (last start-of-line TIP-SHA). "
+            f"Fix: PATCH desc so exactly ONE line starts with `TIP-SHA: <current sha>`; "
+            f"write superseded shas in prose without the TIP-SHA token. That PATCH re-mints.")
+
+
 def _extract_target_id(text: str, exclude_id: str = "", title_text: str = "") -> str:
     """Return the first work-item id found in `text`, or ''.
 
@@ -11804,6 +11967,14 @@ def _mint_audit_pair_unguarded(target_item: dict, db) -> dict | None:
 
     target_updated = int(target_item.get("updated") or 0)
     target_tip = _extract_tip_sha(target_item.get("desc") or "")
+
+    # AH-181: several declared tips with one unaudited -> do not mint (C4
+    # would hold on the ambiguity) and do not skip silently either.
+    _amb = _tip_sha_ambiguity_detail(db, tid, target_item.get("desc") or "")
+    if _amb:
+        slog(f"[mint-skip] {tid}: ambiguous TIP-SHA, flagging")
+        _flag_tip_sha_problem(db, target_item, "ambiguous", _amb)
+        return None
 
     def _existing(auditor: str):
         # Fetch desc + status too: TIP-SHA-aware dedup needs AUDITED-SHA from
@@ -55848,6 +56019,8 @@ def main():
     # Pushover per item past threshold with a compact pair-state
     # diagnosis; re-arms on the AMUX_STALE_REVIEW_RE_PING_HOURS cadence.
     schedule_job(_sweep_stale_review,    interval=900,                  name="stale_review_sweep", initial_delay=180)
+    # AH-181: review item whose TIP-SHA has no audit = error state; flag or self-heal mint.
+    schedule_job(_sweep_review_tip_coverage, interval=600,              name="review_tip_coverage", initial_delay=240)
     # Blocked / needs-approval daily digest (AH-172, 2026-11-12, SAO-4
     # finding #7). Legitimate non-canonical statuses that no other sweep
     # covers get one Pushover per day with count + oldest items.
