@@ -51,7 +51,9 @@ future `*-Audit-*`).
 
 **Behavior:** Extracts this audit's verdict and target id. Looks up the
 mirror auditor's session (`-Audit-Codex` ↔ `-Audit-Opus48` sibling) and
-finds the most-recent non-discarded audit for the same target. If both
+pairs with the sibling minted in the SAME batch (created within 10s; the
+most-recent audit only as a fallback, AH-181 2026-11-13: a parked
+duplicate used to win and strand clean PASS/PASS pairs). If both
 audits have verdicts:
 
 - Both ACCEPT (PASS / PASS-WITH-WARNINGS) → target `verified`
@@ -64,6 +66,38 @@ cases.
 **Why this exists:** Same reason as C3 — Dispatch wasn't reliably acting on
 closed audit pairs. C4 ensures every completed pair drives the target's
 next status transition synchronously.
+
+### When a pair is minted (AH-181, ruled 2026-11-13)
+
+The mint fires on a transition INTO `review`, or on a desc-only PATCH at
+`review` when the target declares a TIP-SHA. Leaving review never mints.
+Dedup:
+
+- **Target declares a TIP-SHA:** a new pair only if no existing audit's
+  AUDITED-SHA matches that sha. Exactly ONE line may start with
+  `TIP-SHA: <sha>` (colon required). Write superseded shas in prose
+  without the token. Several declared tips with one unaudited = no mint
+  plus a loud `[tip-sha-check ambiguous]` note and assignee ping.
+- **No TIP-SHA:** any open (todo/doing/review) audit blocks a new pair;
+  otherwise age-based.
+
+**Prose-only re-take at an unchanged TIP-SHA does NOT re-mint. This is
+intended** (RA-1922 case). The code at that sha already has a dual audit;
+what changed is the item's text, which is adjudicator scope, same as C3.
+Path: worker amends the desc and re-enters review, the 10-minute sweep
+flags it `[tip-sha-check no-pair]` to the assignee and the org
+adjudicator, the adjudicator verifies the amendment and applies. Do not
+make a no-op commit to force a mint. If the amendment needs new CODE,
+commit it; the new TIP-SHA mints a pair.
+
+### Review invariant sweep (`_sweep_review_tip_coverage`, every 10 min)
+
+An item at `review` with nothing auditing it is an error state. Flags (once
+per state, desc marker `[tip-sha-check ...]`, 5 per tick): ambiguous tips;
+an unaudited single tip (self-heals by running the normal guarded mint);
+and any item 30m+ quiet with no audit, build-verify or escalation in
+flight (assignee + org adjudicator, with per-audit verdicts). It never
+re-fires C4 itself.
 
 ---
 
