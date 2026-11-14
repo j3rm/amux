@@ -2,7 +2,19 @@
 
 **If you are Claude and you are about to edit `/mnt/gitdata/amux/amux-server.py`, this file is mandatory.** Every change must be planned here BEFORE you edit code. Completed plans stay in place as history, do NOT delete them. Read this file at the start of every session before touching amux-server.py.
 
-Last updated: 2026-11-13
+Last updated: 2026-11-14
+
+## Plan for change: review-stall Pushover only when Jeremy is the blocker; hide reviewer-rejected drafts by default (board AH-185, 2026-11-14)
+
+**DONE 2026-11-14 04:08Z.** Dry run over live data: 189 review items, 18 wait on Jeremy (17 Zoho BLOCKED shapes with ACTS: Jeremy, 1 CP). Server reloaded; served dashboard has default 'approved'. A browser that already stored a choice in localStorage keeps it.
+
+**Why.** Jeremy (T-224 via Cypra): flood of notifications, "failure in audit pairs", agents appear to redo work. Evidence from server.log since 2026-11-13: `_sweep_stale_review` sent 142 "amux - review stall" Pushovers, 110 of them reading "Audits: no audit pair found". Those are orgs with no -Audit-Codex/-Audit-Opus pair by design (CD-*, Cypra CP/CYPRA, Scorpio, AH, Infra), so nothing failed; Jeremy reads it as an audit failure. ~33 Zoho intake items (CN-248..261, CD-CPAP 9, CD-SurfPrep 6 ...) sit at review since 2026-11-13 15:41Z and would add another wave at 24h. Second: amux-reviewer rejects a thread draft, the agent rewrites and resends, and the thread view default filter 'all' shows the rejected draft AND the rewrite (M-10560/10561, M-10566/10570, M-10634/10635 on T-202). Looks like the agent answered twice.
+
+**What.**
+1. `_sweep_stale_review`: Pushover only when the item is waiting on Jeremy: the gate line names Jeremy, or the tail of desc (last 1500 chars) has a line `ACTS:` / `BY:` / `WAITING ON` / `NEEDS` naming Jeremy. Otherwise slog `[stale-review] ... not Jeremy's, no push` and still stamp `stale_review_pinged_at` (no repeat scanning cost). No other behavior change.
+2. Thread view: default review filter `'approved'` instead of `'all'` (localStorage choice still wins). Rejected drafts stay reachable via the existing Gated / All buttons.
+
+**Verify.** ast parse; dry evaluation of the predicate over the current review rows (count Jeremy vs not); thread view loads with filter Approved active; no rejected draft visible on T-202 by default.
 
 ## Plan for change: stop-gap rule, no production client writes without a Jeremy-approved PLAN (board AH-183, 2026-11-13)
 

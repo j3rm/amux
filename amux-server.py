@@ -8895,6 +8895,26 @@ def _sweep_stale_todos_reboost():
         slog(f"[stale-todo-reboost] failed: {_e}")
 
 
+# AH-185: lines that name who the item is waiting on. The Zoho BLOCKED shape
+# uses ACTS:/BY:; older items use WAITING ON / NEEDS / AWAITING.
+_WAITS_ON_JEREMY_RE = re.compile(
+    r'^[ \t]*(?:ACTS|BY|WAITING\s+ON|AWAITING|NEEDS|BLOCKED[- ]BY|DECISION)\b[^\n]{0,200}\bJeremy\b',
+    re.IGNORECASE | re.MULTILINE,
+)
+
+
+def _review_waits_on_jeremy(desc: str, gate: dict | None = None) -> bool:
+    """True when a review item is waiting on Jeremy himself: its gate line
+    names him, or a recent ACTS:/BY:/WAITING ON/NEEDS line does. Only the
+    last 1500 chars of desc count, so a blocker that was cleared earlier
+    in the item's history does not keep paging him. Used by
+    _sweep_stale_review to decide Pushover vs log-only (AH-185)."""
+    g = gate if gate is not None else _extract_gate(desc or "")
+    if re.search(r'\bJeremy\b', (g or {}).get("line") or "", re.IGNORECASE):
+        return True
+    return bool(_WAITS_ON_JEREMY_RE.search((desc or "")[-1500:]))
+
+
 def _sweep_stale_review():
     """Periodic sweep (AH-170, 2026-11-12, SAO-4 finding #8). Review items
     that sit past the threshold with no C4/C3 close are the target
@@ -8991,6 +9011,19 @@ def _sweep_stale_review():
                 _org = (row["org"] or "").strip()
                 # AH-173: surface any in-desc gate text too.
                 _gate = _extract_gate(row["desc"] or "")
+                # AH-185 (2026-11-14): Pushover only when the item waits on
+                # Jeremy. 110 of 142 pushes on 11-13 read "no audit pair
+                # found" for orgs that have no auditor pair by design, and
+                # Jeremy read them as audit failures. Anything else is
+                # logged and stamped, not pushed.
+                if not _review_waits_on_jeremy(row["desc"] or "", _gate):
+                    db.execute(
+                        "UPDATE issues SET stale_review_pinged_at = ? WHERE id = ?",
+                        (_now, _tid),
+                    )
+                    db.commit()
+                    slog(f"[stale-review] {_tid} review {_age_h}h, not Jeremy's, no push ({_diag})")
+                    continue
                 def _push(_iid=_tid, _t=_title, _h=_age_h, _d=_diag, _o=_org, _g=_gate):
                     try:
                         _gate_bit = ""
@@ -34660,7 +34693,9 @@ function _tMsgAlwaysShow(m) {
 }
 // AH-155 reviewer filter. Default 'all' so Jeremy can see before+after while
 // validating the Haiku gate. Persisted in localStorage.
-let _tReviewFilter = localStorage.getItem('amux.tReviewFilter') || 'all';
+// AH-185: default 'approved'. With 'all', a reviewer-rejected draft and the
+// agent's rewrite both show, which reads as the agent answering twice.
+let _tReviewFilter = localStorage.getItem('amux.tReviewFilter') || 'approved';
 function _tReviewFilterSet(mode) {
   if (!['all','approved','gated'].includes(mode)) mode = 'all';
   _tReviewFilter = mode;
