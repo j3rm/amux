@@ -5987,6 +5987,8 @@ cmd="$1"; shift 2>/dev/null || true
 case "$cmd" in
   board)
     sub="$1"; shift 2>/dev/null || true
+    # `claim` = take the item: same as `doing` (memory + watchdog ping name it)
+    [ "$sub" = claim ] && sub=doing
     case "$sub" in
       done|doing|todo|backlog|review|verified|discarded)
         for id in "$@"; do
