@@ -13972,9 +13972,16 @@ def _ascript_str(s: str) -> str:
 
 
 def _project_name(work_dir: str) -> str:
-    """Return the Claude project folder name for a given work dir (mirrors Claude's own encoding)."""
+    """Return the Claude project folder name for a given work dir (mirrors Claude's own encoding).
+
+    Claude Code replaces EVERY non-alphanumeric character with '-' (so
+    `.agents` -> `-agents`, `vm_provisioner` -> `vm-provisioner`, spaces ->
+    '-'). Replacing only '/' (the old behavior) pointed resume lookups and
+    MEMORY.md composition at a folder Claude no longer reads: 26 sessions
+    fresh-started in the AH-189 restart and had not been receiving the
+    shared memory rules (2026-11-14). Old-encoding folders are left as is."""
     resolved = str(Path(work_dir).expanduser().resolve())
-    return resolved.replace("/", "-")
+    return re.sub(r"[^A-Za-z0-9]", "-", resolved)
 
 
 def _live_conv_id(name: str, work_dir: str = "") -> str:

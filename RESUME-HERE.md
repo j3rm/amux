@@ -4,6 +4,16 @@
 
 Last updated: 2026-11-14
 
+## Plan for change: `_project_name` must match Claude Code's folder encoding (found during AH-189 restart, 2026-11-14)
+
+**DONE (code) 2026-11-14 05:59Z.** All Claude sessions now resolve to an existing folder. Memory: backup at ~/.amux/memfix-backup-20261114; 25 affected sessions' stored + live agent notes merged (no loss); stale auto-generated blocks stripped from 11 agent files keeping note-link lines; recomposed 69; spot checks show rules once, one generated block. Second restart pass resumes each affected session's pre-05:12 conversation (resume_map in scratchpad).
+
+**Why.** Claude Code now names `~/.claude/projects/<x>` by replacing EVERY non-alphanumeric char with `-` (`.agents` -> `-agents`, `vm_provisioner` -> `vm-provisioner`, spaces -> `-`). amux's `_project_name` only replaced `/`. Two consequences for the 26 sessions whose CC_DIR has `.`, `_` or a space (all Ember, RTG-Research, RTG-Audit-Opus, Scorpio, iSchedule auditors/OPS, CD-Classic-Pianos, CD-InnovativeWaste, CD-MyOwnerCircle, Artemis, RTG ACP_* services): (1) start_session looked for the conversation in the wrong folder, popped the meta and FRESH-started them in the AH-189 restart; (2) `_ensure_memory` composed MEMORY.md into the old folder, which Claude no longer reads, so these sessions have NOT been receiving the shared amux rules (AH-175, AH-183, plan-first). Ember-Research's live MEMORY.md is a 4 KB file from 2026-07-07.
+
+**What.** `_project_name` = `re.sub(r'[^A-Za-z0-9]', '-', resolved)` (Claude's encoding). The old-encoding folders are left untouched (history, backups). Recompose memory so the shared rules land in the folders Claude reads, merging each folder's existing agent portion. Re-point each affected session's meta to its pre-restart conversation (newest jsonl in the new folder modified before 05:12Z) and restart them (staggered, active deferred) so they resume their real context with the rules loaded.
+
+**Verify.** `_project_name` on the 26 dirs equals an existing folder; composed MEMORY.md in the new folders carries the rules; restarted sessions launch with `--resume <prev uuid>`.
+
 ## Plan for change: server-side enforcement for `amux zoho plan` (board AH-189 / AH-187 JEREMY REQUIREMENT, 2026-11-14)
 
 **DONE 2026-11-14 05:10Z.** Negative tests all refused and logged: spoof no token 403, spoof wrong token 403, non-lead 403, malformed 400, not-JSON 400, NWDDI project 400, portal key 400, over-cap 429 (seeded rows removed), bypass `force` 400, agent `approved` 400. Lead file by PAA (24 leads). Added: zoho-projects MCP denied at launch for every non-Cypra Claude session (`_launch_deny_arg`), effective on restart. Memory: AH-183 scoped to client systems (own systems Ember/iSchedule/J3/RTG exempt), leads-only filing and project create.
