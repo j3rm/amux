@@ -9881,8 +9881,15 @@ def _zoho_plan_file(db, body: dict, caller: str, is_jeremy: bool = False,
             return _refuse(403, [f"lead allowlist {_ZOHO_PLAN_LEADS_FILE} missing or unreadable: "
                                  f"filing is closed until Cypra-PAA restores it"])
         if caller not in leads:
-            return _refuse(403, [f"{caller} is not a lead: only leads file Zoho plans "
-                                 f"(allowlist owned by Cypra-PAA). Ask your org lead to file it."])
+            # Name the family lead (same org), so a refused sub-session knows
+            # who files for it instead of seeing a broken tool (PAA, AH-189).
+            _org = _session_org(caller) or ""
+            _fam = sorted((l for l in leads if _org and (_session_org(l) or "") == _org),
+                          key=lambda l: (-len(os.path.commonprefix([l.lower(), caller.lower()])), l))
+            _who = ", ".join(_fam) if _fam else "your org lead (ask Cypra who)"
+            return _refuse(403, [f"plans are filed by your family lead ({_who}), not by {caller}. "
+                                 f"Put the plan on your board item and ask {_fam[0] if _fam else 'Cypra'} "
+                                 f"to file this one."])
     plan, probs = _zoho_plan_validate(body)
     dry = bool(body.get("dry_run"))
     src = None
