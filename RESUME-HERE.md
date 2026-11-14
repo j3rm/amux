@@ -4,6 +4,21 @@
 
 Last updated: 2026-11-14
 
+## Plan for change: server-side enforcement for `amux zoho plan` (board AH-189 / AH-187 JEREMY REQUIREMENT, 2026-11-14)
+
+**DONE 2026-11-14 05:10Z.** Negative tests all refused and logged: spoof no token 403, spoof wrong token 403, non-lead 403, malformed 400, not-JSON 400, NWDDI project 400, portal key 400, over-cap 429 (seeded rows removed), bypass `force` 400, agent `approved` 400. Lead file by PAA (24 leads). Added: zoho-projects MCP denied at launch for every non-Cypra Claude session (`_launch_deny_arg`), effective on restart. Memory: AH-183 scoped to client systems (own systems Ember/iSchedule/J3/RTG exempt), leads-only filing and project create.
+
+**Why.** Jeremy T-224 M-10699: the endpoint enforces every rule itself, like the thread guard and reviewer. No client-supplied identity trusted, no bypass.
+
+**What.** In `POST /api/zoho/plan`:
+1. Identity: caller = `_authenticated_session(headers)` (X-Amux-Session + X-Amux-Session-Token verified against session_tokens), or "Jeremy" when the dashboard UI token is present. A bare or mismatched X-Amux-Session is refused 403 ("unverified identity").
+2. Lead allowlist: `/mnt/gitdata/Cypra/ops/zoho/plan_leads.json` (owned by Cypra-PAA) `{"leads": [...]}` read per call. Not listed -> 403. Missing/unparseable -> refuse every agent (fail closed). Jeremy always allowed.
+3. Bypass keys refused outright (400): force, skip, skip_gate, bypass, no_gate, gate_ack, portal, portal_id, nwddi; and approval keys (plan_approval, approved, approval) from any caller but Jeremy. Jeremy may pass `approved: true` -> marker `PLAN-APPROVAL: APPROVED by Jeremy (dashboard, <date>)`.
+4. Every refusal is logged (`[zoho-plan] REFUSED`) and written to `zoho_plans` with status `refused` and the reasons.
+5. Existing: shape check, NWDDI refusal, dedup, caps, PAA gate in the writer. CLI sends X-Amux-Session-Token from env.
+
+**Negative tests.** non-lead, spoofed header (no token / wrong token), malformed, NWDDI target, over-cap (seeded ledger rows for a test caller, removed after), bypass key. Expect 403/403/400/400/429/400, each logged.
+
 ## Plan for change: `amux zoho plan` - file multi-step plans to RTG Zoho before work starts (board AH-187, 2026-11-14)
 
 **DONE 2026-11-14.** Writer = Cypra-PAA's zoho/plan_file.py (cypra-ops 9978928). Real test: R-1-T48 + R-1-T49/T50 in 'RTG - Infrastructure & Tools', read back independently (Open, High, Actor=Agent, 2 subtasks), dedup re-file returned ALREADY FILED, ZOHO-PLAN note on AH-187, then retired via plan_file.py --retire (parent + both steps Closed, SUPERSEDED). Intake turned R-1-T48 into AH-188 before the retire; discarded. Added PAA's rule: ok:false WITH a key = filed (status partial), never re-filed. Memory: _MEM_CRITICAL_RULES bullet + _global.md section; recomposed 69, 57/62 live composed files carry it (5 are dirs of deleted sessions). Note: the repo `amux` CLI is rewritten from the server's inline stub at startup (host /usr/local/bin/amux symlinks to it), so the inline copy is the source of truth.

@@ -6045,7 +6045,8 @@ if a.client_system: plan['client_system'] = True
 if a.dry_run: plan['dry_run'] = True
 url = os.environ.get('AMUX_URL', 'https://localhost:8822') + '/api/zoho/plan'
 req = urllib.request.Request(url, data=json.dumps(plan).encode(), method='POST',
-    headers={'Content-Type': 'application/json', 'X-Amux-Session': os.environ.get('AMUX_SESSION', '')})
+    headers={'Content-Type': 'application/json', 'X-Amux-Session': os.environ.get('AMUX_SESSION', ''),
+             'X-Amux-Session-Token': os.environ.get('AMUX_SESSION_TOKEN', '')})
 ctx = ssl.create_default_context(); ctx.check_hostname = False; ctx.verify_mode = ssl.CERT_NONE
 try:
     with urllib.request.urlopen(req, context=ctx, timeout=240) as r: d = json.load(r)
@@ -9823,8 +9824,65 @@ def _zoho_plan_run_writer(payload: dict, write: bool) -> dict:
     return parsed
 
 
-def _zoho_plan_file(db, body: dict, caller: str) -> "tuple[int, dict]":
-    """Handle POST /api/zoho/plan. Returns (http_status, response)."""
+_ZOHO_PLAN_LEADS_FILE = Path("/mnt/gitdata/Cypra/ops/zoho/plan_leads.json")
+# Keys that would let a caller skip a rule. They do not exist as features;
+# sending one is refused so nobody can believe a bypass worked (AH-189).
+_ZOHO_PLAN_BYPASS_KEYS = ("force", "skip", "skip_gate", "bypass", "no_gate", "gate_ack",
+                          "portal", "portal_id", "nwddi", "nwddi_portal")
+_ZOHO_PLAN_APPROVAL_KEYS = ("plan_approval", "approved", "approval")
+
+
+def _zoho_plan_leads() -> "set | None":
+    """The lead allowlist owned by Cypra-PAA, read on every call. None when
+    the file is missing or unparseable: the caller fails closed."""
+    try:
+        d = json.loads(_ZOHO_PLAN_LEADS_FILE.read_text())
+        leads = d.get("leads") if isinstance(d, dict) else None
+        if not isinstance(leads, list):
+            return None
+        return {str(x).strip() for x in leads if str(x).strip()}
+    except Exception:
+        return None
+
+
+def _zoho_plan_refuse(db, body: dict, caller: str, reasons: list, ip: str = "") -> None:
+    """Log and record a refusal. Never raises."""
+    try:
+        slog(f"[zoho-plan] REFUSED {caller} from {ip or '?'}: {'; '.join(reasons)[:300]}")
+        db.execute("INSERT INTO zoho_plans (dedup_key, source, title, filed_by, status, request, "
+                   "response, created) VALUES (?,?,?,?,?,?,?,?)",
+                   ("", str(body.get("source") or "")[:40], str(body.get("title") or "")[:200],
+                    caller[:80], "refused", json.dumps(body)[:20000],
+                    json.dumps({"ok": False, "reasons": reasons, "ip": ip}), int(time.time())))
+        db.commit()
+    except Exception as e:
+        slog(f"[zoho-plan] refusal log failed: {e}")
+
+
+def _zoho_plan_file(db, body: dict, caller: str, is_jeremy: bool = False,
+                    ip: str = "") -> "tuple[int, dict]":
+    """Handle POST /api/zoho/plan for a VERIFIED caller (the route proves
+    identity). Returns (http_status, response). Every refusal is logged and
+    recorded with status 'refused'."""
+    def _refuse(code, reasons):
+        _zoho_plan_refuse(db, body, caller, reasons, ip)
+        return code, {"ok": False, "status": "refused", "reasons": reasons}
+    _bad = [k for k in _ZOHO_PLAN_BYPASS_KEYS if k in body]
+    if _bad:
+        return _refuse(400, [f"{k!r} is not accepted: there is no bypass, and NWDDI is never a target"
+                             for k in _bad])
+    _appr = [k for k in _ZOHO_PLAN_APPROVAL_KEYS if k in body]
+    if _appr and not is_jeremy:
+        return _refuse(400, [f"{k!r} is not accepted from an agent: a client-system plan is approved "
+                             f"only by Jeremy, recorded by him" for k in _appr])
+    if not is_jeremy:
+        leads = _zoho_plan_leads()
+        if leads is None:
+            return _refuse(403, [f"lead allowlist {_ZOHO_PLAN_LEADS_FILE} missing or unreadable: "
+                                 f"filing is closed until Cypra-PAA restores it"])
+        if caller not in leads:
+            return _refuse(403, [f"{caller} is not a lead: only leads file Zoho plans "
+                                 f"(allowlist owned by Cypra-PAA). Ask your org lead to file it."])
     plan, probs = _zoho_plan_validate(body)
     dry = bool(body.get("dry_run"))
     src = None
@@ -9834,12 +9892,18 @@ def _zoho_plan_file(db, body: dict, caller: str) -> "tuple[int, dict]":
         if not src:
             probs.append(f"source {plan['source']!r} is not a live board item")
     if probs:
-        return 400, {"ok": False, "reasons": probs}
+        return _refuse(400, probs)
     plan["source"] = src["id"]
     caller_org = (_session_org(caller) or "") if caller else ""
     client = bool(body.get("client_system")) or caller_org.startswith("CD-") or caller.startswith("CD-")
+    _approved_by_jeremy = is_jeremy and bool(body.get("approved"))
+    _marker = ""
+    if client:
+        _marker = (f"PLAN-APPROVAL: APPROVED by Jeremy (dashboard, "
+                   f"{time.strftime('%Y-%m-%d', time.gmtime())})" if _approved_by_jeremy
+                   else _ZOHO_PLAN_APPROVAL_MARKER)
     payload = dict(plan, filed_by=caller or "Jeremy", client_system=client,
-                   plan_approval=_ZOHO_PLAN_APPROVAL_MARKER if client else "",
+                   plan_approval=_marker,
                    dedup_key=_zoho_plan_dedup_key(plan["source"], plan["title"]))
     dk = payload["dedup_key"]
     prior = db.execute("SELECT zoho_key, url, task_id, created FROM zoho_plans "
@@ -9861,9 +9925,9 @@ def _zoho_plan_file(db, body: dict, caller: str) -> "tuple[int, dict]":
         lim_d = _zoho_plan_limit("AMUX_ZOHO_PLAN_PER_DAY", 12)
         lim_f = _zoho_plan_limit("AMUX_ZOHO_PLAN_FLEET_PER_DAY", 60)
         if h >= lim_h or d >= lim_d or f >= lim_f:
-            return 429, {"ok": False, "reasons": [
+            return _refuse(429, [
                 f"rate limit: {who} {h}/{lim_h} this hour, {d}/{lim_d} today; fleet {f}/{lim_f} today. "
-                f"Ask Cypra if a burst is legitimate."]}
+                f"Ask Cypra if a burst is legitimate."])
     if not _ZOHO_PLAN_LOCK.acquire(timeout=200):
         return 503, {"ok": False, "reasons": ["another plan filing is in progress; retry"]}
     try:
@@ -14646,12 +14710,15 @@ _MEM_CRITICAL_RULES = """\
   workflows, data): post a `PLAN:` on your board item (what changes, which
   system, sandbox or prod, rollback, who is affected), set status `blocked`, and
   wait for Jeremy's explicit yes relayed by Cypra. Drafts and reads are fine.
+  CLIENT systems only: Jeremy's own (Ember, iSchedule, J3, RTG) need no per-plan
+  approval.
 - **More than one step? File the plan in Zoho BEFORE you start, then work FROM it.**
   (Jeremy, 2026-11-14.) `amux zoho plan --title .. --what .. --by .. --unblocks ..
   --acts .. --step .. --step .. --tier 1|2|99|parking-lot --source <your item>`
   (`--dry-run` first if unsure). Then work the filed task's steps in order, not
-  your own context. `FILED BUT INCOMPLETE` = filed: never re-file. Full rule:
-  section "Multi-step work: file the plan first" in _global.md.
+  your own context. `FILED BUT INCOMPLETE` = filed: never re-file. Only LEADS
+  file plans and create Zoho projects (server-enforced); not a lead = ask your
+  org lead. Full rule: section "Multi-step work: file the plan first" in _global.md.
 """
 
 
@@ -15327,6 +15394,20 @@ _CD_MCP_DENY_PATTERNS = (
     "mcp__smartermail-calendar-rtgroup__*",
 )
 _CD_MCP_DENY_ARG = " ".join(shlex.quote(p) for p in _CD_MCP_DENY_PATTERNS)
+# AH-189 (Jeremy T-224 M-10699): agents have no path to Zoho Projects except
+# POST /api/zoho/plan (PAA's writer). The zoho-projects MCP server is denied
+# for every Claude session outside the Cypra family, which owns Zoho writes.
+_ZOHO_PROJECTS_DENY_ARG = shlex.quote("mcp__zoho-projects__*")
+
+
+def _launch_deny_arg(name: str) -> str:
+    """The --disallowedTools suffix for a Claude launch of `name` ('' = none)."""
+    pats = []
+    if name.startswith("CD-"):
+        pats.append(_CD_MCP_DENY_ARG)
+    if not name.startswith("Cypra"):
+        pats.append(_ZOHO_PROJECTS_DENY_ARG)
+    return (" --disallowedTools " + " ".join(pats)) if pats else ""
 
 
 def _get_default_model() -> str:
@@ -15706,8 +15787,7 @@ def start_session(name: str, extra_flags: str = "", _skip_conv_id: bool = False)
             # CD-* client agents are Zoho-only. Deny communication MCP tools
             # (Gmail, Google Calendar/Drive, Apple Reminders/Calendar,
             # SmarterMail) meant for Cypra/Ember/marketing agents.
-            if name.startswith("CD-"):
-                cmd += " --disallowedTools " + _CD_MCP_DENY_ARG
+            cmd += _launch_deny_arg(name)
             # Default to sonnet if no --model specified anywhere
             if "--model" not in cmd:
                 cmd += " --model sonnet"
@@ -16036,8 +16116,7 @@ def start_session(name: str, extra_flags: str = "", _skip_conv_id: bool = False)
                         mcp_chrome = mcp_dir / "mcp-chrome.json"
                         if mcp_chrome.exists():
                             cmd_fresh += f" --mcp-config {shlex.quote(str(mcp_chrome))}"
-                    if name.startswith("CD-"):
-                        cmd_fresh += " --disallowedTools " + _CD_MCP_DENY_ARG
+                    cmd_fresh += _launch_deny_arg(name)
                     if "--model" not in cmd_fresh:
                         cmd_fresh += " --model sonnet"
                     subprocess.run([*_tmux_prefix(name), "send-keys", "-t", tmux_target(name), "-l", cmd_fresh],
@@ -46275,14 +46354,30 @@ class CCHandler(BaseHTTPRequestHandler):
         # AH-187: POST /api/zoho/plan (file a multi-step plan to RTG Zoho via
         # PAA's writer), GET /api/zoho/plans (ledger).
         if path == "/api/zoho/plan" and method == "POST":
-            _zp_caller = (self.headers.get("X-Amux-Session") or "").strip()
-            if _zp_caller and not _is_real_session(_zp_caller):
-                return self._json({"ok": False, "reasons": [f"unknown session {_zp_caller!r}"]}, 403)
+            # AH-189: identity is proven server side. An agent must present
+            # X-Amux-Session + X-Amux-Session-Token (minted at session start);
+            # the dashboard UI token means Jeremy. A bare header is refused.
+            _zp_claimed = (self.headers.get("X-Amux-Session") or "").strip()
+            _zp_caller = _authenticated_session(self.headers)
+            _zp_jeremy = (not _zp_caller) and _session_destructive_allowed(self.headers)
             try:
                 _zp_body = self._read_body() or {}
             except Exception:
-                return self._json({"ok": False, "reasons": ["body is not JSON"]}, 400)
-            _zp_code, _zp_res = _zoho_plan_file(get_db(), _zp_body, _zp_caller)
+                _zp_body = None
+            if not _zp_caller and not _zp_jeremy:
+                _why = (f"unverified identity: X-Amux-Session {_zp_claimed!r} without a valid "
+                        f"X-Amux-Session-Token" if _zp_claimed else
+                        "no identity: send X-Amux-Session and X-Amux-Session-Token "
+                        "(amux zoho plan does this from your session env)")
+                _zoho_plan_refuse(get_db(), _zp_body if isinstance(_zp_body, dict) else {},
+                                  _zp_claimed or "?", [_why], self.client_address[0])
+                return self._json({"ok": False, "status": "refused", "reasons": [_why]}, 403)
+            if not isinstance(_zp_body, dict):
+                _zoho_plan_refuse(get_db(), {}, _zp_caller or "Jeremy", ["body is not a JSON object"],
+                                  self.client_address[0])
+                return self._json({"ok": False, "status": "refused", "reasons": ["body is not a JSON object"]}, 400)
+            _zp_code, _zp_res = _zoho_plan_file(get_db(), _zp_body, _zp_caller or "Jeremy",
+                                                is_jeremy=_zp_jeremy, ip=self.client_address[0])
             return self._json(_zp_res, _zp_code)
         if path == "/api/zoho/plans" and method == "GET":
             _zq = parse_qs(urlparse(self.path).query)

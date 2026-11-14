@@ -64,7 +64,8 @@ if a.client_system: plan['client_system'] = True
 if a.dry_run: plan['dry_run'] = True
 url = os.environ.get('AMUX_URL', 'https://localhost:8822') + '/api/zoho/plan'
 req = urllib.request.Request(url, data=json.dumps(plan).encode(), method='POST',
-    headers={'Content-Type': 'application/json', 'X-Amux-Session': os.environ.get('AMUX_SESSION', '')})
+    headers={'Content-Type': 'application/json', 'X-Amux-Session': os.environ.get('AMUX_SESSION', ''),
+             'X-Amux-Session-Token': os.environ.get('AMUX_SESSION_TOKEN', '')})
 ctx = ssl.create_default_context(); ctx.check_hostname = False; ctx.verify_mode = ssl.CERT_NONE
 try:
     with urllib.request.urlopen(req, context=ctx, timeout=240) as r: d = json.load(r)
