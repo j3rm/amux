@@ -9889,7 +9889,8 @@ def _zoho_plan_file(db, body: dict, caller: str, is_jeremy: bool = False,
             _who = ", ".join(_fam) if _fam else "your org lead (ask Cypra who)"
             return _refuse(403, [f"plans are filed by your family lead ({_who}), not by {caller}. "
                                  f"Put the plan on your board item and ask {_fam[0] if _fam else 'Cypra'} "
-                                 f"to file this one."])
+                                 f"to file this one: post a board item to it (POST /api/board, session: "
+                                 f"\"{_fam[0] if _fam else 'Cypra'}\") with the title, four facts and steps."])
     plan, probs = _zoho_plan_validate(body)
     dry = bool(body.get("dry_run"))
     src = None
