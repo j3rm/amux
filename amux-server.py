@@ -54257,8 +54257,12 @@ REJECT a message that uses ANY of:
   etc.) in the body - threads are Jeremy's inbox only; another agent
   will never see it.
 
-Return ONE compact JSON object and NOTHING ELSE:
-{"verdict": "approved" | "rejected", "rule": "<short-tag>", "reason": "<one sentence>"}
+Return ONE compact JSON object and NOTHING ELSE, keys in THIS order
+(reason first, verdict last):
+{"reason": "<one sentence>", "rule": "<short-tag>", "verdict": "approved" | "rejected"}
+
+Decide the verdict FROM your reason. If your reason does not name a
+listed ban the message actually breaks, the verdict is "approved".
 
 Short-tag MUST be one of: em-dash, en-dash, preamble, run-on,
 echo-context, padding, hedge, rationale, addressed-other-agent, other.
@@ -54349,6 +54353,24 @@ def _api_usage_log(event_type: str, model: str, usage: dict) -> None:
         slog(f"[api-usage] log failed ({event_type}): {e}")
 
 
+# AH-186: phrases by which a Haiku "rejected" reason admits that no listed
+# ban was broken. Matched against the reason only, never the message.
+_REVIEWER_CONTRADICTION_RE = re.compile(
+    r"should be approved"
+    r"|\bnot (?:one of|on) the (?:banned|listed)"
+    r"|\bnot a (?:listed|banned)"
+    r"|does not match (?:a|any) (?:banned|listed)"
+    r"|\bno (?:listed|banned) (?:ban|phrase|opener|rule)"
+    r"|\bno listed ban\b|\bno ban\b[^.]{0,40}\b(?:triggered|applies|matched)"
+    r"|false (?:positive|alarm)"
+    r"|\bnon-violation\b"
+    r"|rejection is (?:not supported|incorrect|wrong)"
+    r"|verdict (?:on the stated rules )?is approved"
+    r"|correct verdict[^.]{0,40}\bapproved",
+    re.IGNORECASE,
+)
+
+
 def _reviewer_judge(body: str) -> dict:
     """Call Anthropic Haiku with the rubric; return verdict dict.
 
@@ -54403,7 +54425,9 @@ def _reviewer_judge(body: str) -> dict:
     )
     payload = json.dumps({
         "model": model,
-        "max_tokens": 150,
+        # 300 (AH-186): reason now comes first; 150 risked truncating the
+        # JSON before the verdict, which fails closed.
+        "max_tokens": 300,
         "thinking": {"type": "disabled"},
         "system": rubric,
         "messages": [{"role": "user", "content": user_content}],
@@ -54448,6 +54472,13 @@ def _reviewer_judge(body: str) -> dict:
                     "_usage": usage, "_model": model}
         rule = str(parsed.get("rule") or "")[:40]
         reason = str(parsed.get("reason") or "")[:400]
+        # AH-186: a rejection whose own reason concludes no listed ban
+        # applies is the model contradicting itself (M-10679 and ~10
+        # more since 11-10). Follow the reasoning, not the verdict token.
+        if verdict == "rejected" and _REVIEWER_CONTRADICTION_RE.search(reason):
+            slog(f"[reviewer] judge-contradiction: rejected/{rule} flipped to approved: {reason[:160]}")
+            return {"verdict": "approved", "rule": "judge-contradiction",
+                    "reason": reason, "_usage": usage, "_model": model}
         return {"verdict": verdict, "rule": rule, "reason": reason,
                 "_usage": usage, "_model": model}
     except Exception as e:

@@ -4,6 +4,19 @@
 
 Last updated: 2026-11-14
 
+## Plan for change: amux-reviewer rejects while its own reason says approve (board AH-186, 2026-11-14)
+
+**DONE 2026-11-14.** Guard flips 11 of the past Haiku rejections (all self-contradicting: M-10193, 10275, 10328, 10355, 10402, 10422, 10438, 10481, 10560, 10634, 10679); keeps genuine ones (M-10458 'not on the approved opener list' kept after narrowing). Live rubric reordered (backup reviewer-rubric.md.bak-20261114). Live Haiku calls with the new rubric: M-10679, M-10560, M-10566 all approved with consistent reasons.
+
+**Why.** marketing-director MD-14 / M-10679: rule=preamble, reason "...not supported by the listed bans; the message should be approved." Not a one-off: since 11-10 at least 10 Haiku rejections carry a reason that concludes no listed ban applies (M-10679, 10634, 10560, 10438, 10422, 10402, 10355, 10328, 10275, 10567...). Cause: the JSON shape puts `verdict` first, so Haiku commits to a verdict token before it writes the reasoning, then the reasoning disagrees. Each one costs the sender a rewrite and shows Jeremy a duplicate (AH-185).
+
+**What.**
+1. Rubric output order: `{"reason": ..., "rule": ..., "verdict": ...}`, with a line "decide the verdict from your reason: if the reason finds no listed ban, verdict is approved". Both `_REVIEWER_RUBRIC_DEFAULT` and the live `~/.amux/reviewer-rubric.md` (customized, differs from default; edit only its Output block, backup first).
+2. Deterministic guard in `_reviewer_judge` after parse: verdict=rejected AND reason matches a contradiction pattern ("should be approved", "not (one of|on) the (banned|listed)", "not a listed", "does not match a banned", "no listed ban", "false (positive|alarm)", "non-violation", "rejection is (not supported|incorrect)", "verdict .* approved") -> verdict approved, rule `judge-contradiction`, reason kept. Logged.
+3. max_tokens 150 -> 300 so reason-first cannot truncate the JSON (truncation fails closed).
+
+**Verify.** ast; run the guard regex over all rejected review_reason rows since 11-10 and list which flip (expect the self-contradicting ones only, not M-10566 padding / em-dash ones); one live judge call on M-10679's body returns approved.
+
 ## Plan for change: review-stall Pushover only when Jeremy is the blocker; hide reviewer-rejected drafts by default (board AH-185, 2026-11-14)
 
 **DONE 2026-11-14 04:08Z.** Dry run over live data: 189 review items, 18 wait on Jeremy (17 Zoho BLOCKED shapes with ACTS: Jeremy, 1 CP). Server reloaded; served dashboard has default 'approved'. A browser that already stored a choice in localStorage keeps it.
