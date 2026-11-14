@@ -4,6 +4,28 @@
 
 Last updated: 2026-11-14
 
+## Plan for change: `amux zoho plan` - file multi-step plans to RTG Zoho before work starts (board AH-187, 2026-11-14)
+
+**DONE 2026-11-14.** Writer = Cypra-PAA's zoho/plan_file.py (cypra-ops 9978928). Real test: R-1-T48 + R-1-T49/T50 in 'RTG - Infrastructure & Tools', read back independently (Open, High, Actor=Agent, 2 subtasks), dedup re-file returned ALREADY FILED, ZOHO-PLAN note on AH-187, then retired via plan_file.py --retire (parent + both steps Closed, SUPERSEDED). Intake turned R-1-T48 into AH-188 before the retire; discarded. Added PAA's rule: ok:false WITH a key = filed (status partial), never re-filed. Memory: _MEM_CRITICAL_RULES bullet + _global.md section; recomposed 69, 57/62 live composed files carry it (5 are dirs of deleted sessions). Note: the repo `amux` CLI is rewritten from the server's inline stub at startup (host /usr/local/bin/amux symlinks to it), so the inline copy is the source of truth.
+
+**Why.** Jeremy (T-224 M-10687, via Cypra): any plan that cannot be finished in one step is FILED BEFORE ANY WORK STARTS, or it gets forgotten. Agents have no Zoho access; PAA owns the gate and the writer.
+
+**What (amux side).**
+1. Table `zoho_plans` (id, dedup_key UNIQUE, source, title, filed_by, status ok|rejected|error|dry, zoho_key, task_id, url, request JSON, response JSON, created).
+2. `POST /api/zoho/plan`. Caller = X-Amux-Session (must be a real session; Jeremy/dashboard also allowed). Body: title, what, by, unblocks, acts, steps (list, >= 2), tier (1|2|99|parking-lot), source (existing board item id), optional project, owner, actor, resume_on, client_system, dry_run.
+   - Validates shape locally (400 with the list of problems).
+   - Refuses any portal/project hint naming NWDDI (RTG only, ever).
+   - Client-system plans (caller org CD-* or client_system=true) carry `PLAN-APPROVAL: PENDING - Jeremy's yes via Cypra required before any production write (AH-183)`.
+   - Dedup: sha1(source + normalized title). An ok row returns the existing Zoho key, `duplicate: true`, no call.
+   - Rate limit: per session 4/hour and 12/day, fleet 60/day (env AMUX_ZOHO_PLAN_*), 429 when exceeded. Dry runs exempt from the cap but share a lock.
+   - Calls the writer (env AMUX_ZOHO_PLAN_CMD, default `docker exec -i amux-org-Cypra /usr/local/bin/python3 /mnt/gitdata/Cypra/ops/zoho/plan_file.py [--write]`) with JSON on stdin, 180s timeout, one call at a time. Contract agreed with Cypra-PAA on channel. Zoho token never leaves the Cypra container.
+   - On ok: record; desc_append `ZOHO-PLAN: <key> <url>` on the source item.
+3. `GET /api/zoho/plans[?source=&session=]` lists the ledger.
+4. CLI `amux zoho plan ...` (repo `amux` script, which containers symlink) and the inline stub copy.
+5. Memory rule (AH-175 slot): "more than one step -> `amux zoho plan` BEFORE starting, then work from the filed task".
+
+**Verify.** ast; dry run via CLI from a container; real test plan filed (title `AMUX-PLAN-TEST ...`), read back key/subtasks/Actor, then deleted via PAA's cleanup mode; ledger row; desc_append on the source item.
+
 ## Plan for change: amux-reviewer rejects while its own reason says approve (board AH-186, 2026-11-14)
 
 **DONE 2026-11-14.** Guard flips 11 of the past Haiku rejections (all self-contradicting: M-10193, 10275, 10328, 10355, 10402, 10422, 10438, 10481, 10560, 10634, 10679); keeps genuine ones (M-10458 'not on the approved opener list' kept after narrowing). Live rubric reordered (backup reviewer-rubric.md.bak-20261114). Live Haiku calls with the new rubric: M-10679, M-10560, M-10566 all approved with consistent reasons.

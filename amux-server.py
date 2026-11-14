@@ -6016,6 +6016,66 @@ items=json.load(sys.stdin)
 for i in items: print(i.get('id',''),i.get('status',''),i.get('title',''))" ;;
       *) echo "amux board: unknown subcommand: $sub" >&2; exit 1 ;;
     esac ;;
+  zoho)
+    # AH-187: file a multi-step plan to RTG Zoho BEFORE starting work.
+    sub="$1"; shift 2>/dev/null || true
+    case "$sub" in
+      plan)
+        python3 - "$@" <<'PY'
+import argparse, json, os, ssl, sys, urllib.request, urllib.error
+ap = argparse.ArgumentParser(prog='amux zoho plan',
+    description='File a multi-step plan (parent task + one subtask per step) in RTG Zoho before work starts.')
+ap.add_argument('-f', '--file', help='JSON file with the plan (flags override its fields)')
+ap.add_argument('--title'); ap.add_argument('--what'); ap.add_argument('--by')
+ap.add_argument('--unblocks'); ap.add_argument('--acts')
+ap.add_argument('--step', action='append', default=[], help='one per step, in order (2-12)')
+ap.add_argument('--tier', help='1 | 2 | 99 | parking-lot')
+ap.add_argument('--source', help='board item id this plan belongs to')
+ap.add_argument('--project'); ap.add_argument('--owner'); ap.add_argument('--actor')
+ap.add_argument('--resume-on', dest='resume_on', help='YYYY-MM-DD')
+ap.add_argument('--client-system', action='store_true', help='plan touches a client system (AH-183)')
+ap.add_argument('--dry-run', action='store_true', help='gate + dedup only, nothing reaches Zoho')
+a = ap.parse_args()
+plan = json.load(open(a.file)) if a.file else {}
+for k in ('title', 'what', 'by', 'unblocks', 'acts', 'tier', 'source', 'project', 'owner', 'actor', 'resume_on'):
+    v = getattr(a, k)
+    if v: plan[k] = v
+if a.step: plan['steps'] = a.step
+if a.client_system: plan['client_system'] = True
+if a.dry_run: plan['dry_run'] = True
+url = os.environ.get('AMUX_URL', 'https://localhost:8822') + '/api/zoho/plan'
+req = urllib.request.Request(url, data=json.dumps(plan).encode(), method='POST',
+    headers={'Content-Type': 'application/json', 'X-Amux-Session': os.environ.get('AMUX_SESSION', '')})
+ctx = ssl.create_default_context(); ctx.check_hostname = False; ctx.verify_mode = ssl.CERT_NONE
+try:
+    with urllib.request.urlopen(req, context=ctx, timeout=240) as r: d = json.load(r)
+except urllib.error.HTTPError as e:
+    try: d = json.load(e)
+    except Exception: d = {'ok': False, 'reasons': ['HTTP %s' % e.code]}
+except Exception as e:
+    d = {'ok': False, 'reasons': [str(e)]}
+if d.get('ok'):
+    tag = 'DRY RUN ok' if plan.get('dry_run') else ('ALREADY FILED' if d.get('duplicate') or d.get('duplicate_of') else 'FILED')
+    print('%s: %s %s' % (tag, d.get('key') or '', d.get('url') or ''))
+    for s in d.get('subtasks') or []: print('  %s  %s' % (s.get('key', ''), s.get('title', '')))
+    if d.get('project'): print('  project: %s' % d['project'])
+elif d.get('key'):
+    print('FILED BUT INCOMPLETE: %s %s  (do NOT re-file; tell Cypra)' % (d.get('key'), d.get('url') or ''))
+    for r in d.get('reasons') or []: print('  - ' + str(r))
+else:
+    print('NOT FILED (%s):' % d.get('status', 'error'))
+    for r in d.get('reasons') or []: print('  - ' + str(r))
+    if d.get('projects'): print('  projects: ' + ', '.join(d['projects']))
+sys.exit(0 if d.get('ok') else 1)
+PY
+        ;;
+      plans)
+        q=""; [ -n "$1" ] && q="?source=$1"
+        curl -sk "$AMUX_URL/api/zoho/plans$q" | python3 -c "
+import json,sys
+for r in json.load(sys.stdin): print(r['source'], r['status'], r.get('zoho_key') or '-', r['filed_by'], r['title'])" ;;
+      *) echo "amux zoho: unknown subcommand: $sub (plan | plans [SOURCE])" >&2; exit 1 ;;
+    esac ;;
   crm)
     sub="$1"; shift 2>/dev/null || true
     case "$sub" in
@@ -6201,6 +6261,7 @@ for s in json.load(sys.stdin): print(s['name'], '(running)' if s.get('running') 
     echo "revoked" ;;
   help|--help|-h|"")
     echo "amux board <done|doing|todo> <ITEM_ID>  — update board item status"
+    echo "amux zoho plan --title .. --step .. --step .. --tier .. --source ID  - file a multi-step plan to RTG Zoho BEFORE work (--dry-run, -f plan.json)"
     echo "amux board add <title>                  — create a new board item"
     echo "amux board list                         — list board items"
     echo "amux crm add <name> [field=val ...]    — add a contact (fields: company email role phone linkedin)"
@@ -6633,6 +6694,25 @@ def _init_db():
         # review and re-enters, the sweep's own freshness compare
         # makes the stale timestamp irrelevant.
         "ALTER TABLE issues ADD COLUMN stale_review_pinged_at INTEGER NOT NULL DEFAULT 0",
+        # AH-187 (2026-11-14): ledger for `amux zoho plan`. dedup_key is
+        # sha1(source + normalized title); an ok row short-circuits a
+        # repeat filing to the same Zoho key.
+        "CREATE TABLE IF NOT EXISTS zoho_plans ("
+        "  id INTEGER PRIMARY KEY AUTOINCREMENT, "
+        "  dedup_key TEXT NOT NULL, "
+        "  source TEXT NOT NULL, "
+        "  title TEXT NOT NULL, "
+        "  filed_by TEXT NOT NULL, "
+        "  status TEXT NOT NULL, "
+        "  zoho_key TEXT, "
+        "  task_id TEXT, "
+        "  url TEXT, "
+        "  request TEXT, "
+        "  response TEXT, "
+        "  created INTEGER NOT NULL"
+        ")",
+        "CREATE INDEX IF NOT EXISTS idx_zoho_plans_dedup ON zoho_plans(dedup_key, status)",
+        "CREATE INDEX IF NOT EXISTS idx_zoho_plans_filed ON zoho_plans(filed_by, created)",
         # Board AH-166 (2026-11-13): external-system round-trip (Zoho first).
         # external_meta holds the source's fields verbatim as JSON.
         "ALTER TABLE issues ADD COLUMN external_source TEXT",
@@ -9647,6 +9727,185 @@ def _existing_external_item(db, source: str, eid: str):
         "SELECT id, deleted FROM issues WHERE external_source = ? AND external_id = ?",
         (source, eid),
     ).fetchone()
+
+
+# ── AH-187: `amux zoho plan` ─────────────────────────────────────────────────
+# Jeremy (T-224 M-10687): any plan that cannot be finished in one step is
+# FILED in the RTG Zoho portal BEFORE work starts. amux is the API/CLI
+# layer only: shape check, rate limit, dedup ledger, AH-183 marker, and a
+# note on the source board item. The gate and the ONLY Zoho writer belong
+# to Cypra-PAA (cypra-ops zoho/plan_file.py) and run inside amux-org-Cypra,
+# so no Zoho token ever reaches amux or an agent. NWDDI is never written.
+_ZOHO_PLAN_TIERS = ("1", "2", "99", "parking-lot")
+_ZOHO_PLAN_LOCK = threading.Lock()
+_ZOHO_PLAN_APPROVAL_MARKER = ("PLAN-APPROVAL: PENDING - Jeremy's yes via Cypra required "
+                              "before any production write (AH-183)")
+
+
+def _zoho_plan_cmd(write: bool) -> list:
+    raw = os.environ.get("AMUX_ZOHO_PLAN_CMD", "").strip()
+    base = shlex.split(raw) if raw else [
+        "docker", "exec", "-i", "amux-org-Cypra", "/usr/local/bin/python3",
+        "/mnt/gitdata/Cypra/ops/zoho/plan_file.py"]
+    return base + (["--write"] if write else [])
+
+
+def _zoho_plan_limit(name: str, default: int) -> int:
+    try:
+        return max(1, int(os.environ.get(name, str(default))))
+    except (TypeError, ValueError):
+        return default
+
+
+def _zoho_plan_validate(body: dict) -> "tuple[dict, list]":
+    """Normalize the request; return (plan, problems). Local shape only;
+    the content rules are PAA's gate."""
+    probs = []
+    s = lambda k: str(body.get(k) or "").strip()
+    plan = {k: s(k) for k in ("title", "what", "by", "unblocks", "acts", "tier",
+                              "source", "project", "owner", "actor", "resume_on")}
+    steps = body.get("steps")
+    if isinstance(steps, str):
+        steps = [x for x in steps.splitlines()]
+    steps = [str(x).strip() for x in (steps or []) if str(x).strip()]
+    plan["steps"] = steps
+    for k in ("title", "what", "by", "unblocks", "acts", "source"):
+        if not plan[k]:
+            probs.append(f"missing {k}")
+    if len(steps) < 2:
+        probs.append("steps: a plan needs 2 or more steps (one-step work is not filed)")
+    if len(steps) > 12:
+        probs.append(f"steps: {len(steps)} > 12 (PAA's cap); file one plan per phase")
+    if plan["tier"] not in _ZOHO_PLAN_TIERS:
+        probs.append(f"tier {plan['tier']!r} not in {list(_ZOHO_PLAN_TIERS)}")
+    hint = " ".join(str(body.get(k) or "") for k in ("project", "portal"))
+    if re.search(r"nwddi|687059873", hint, re.I):
+        probs.append("NWDDI is read-only: plans are filed in the RTG portal only")
+    return plan, probs
+
+
+def _zoho_plan_dedup_key(source: str, title: str) -> str:
+    norm = re.sub(r"\s+", " ", (title or "").strip().lower())
+    return _hashlib.sha1(f"{source.strip().upper()}|{norm}".encode()).hexdigest()
+
+
+def _zoho_plan_run_writer(payload: dict, write: bool) -> dict:
+    """Run PAA's plan writer with the payload on stdin. Returns its JSON,
+    or {"ok": False, "reasons": [...], "_error": True} on any failure."""
+    cmd = _zoho_plan_cmd(write)
+    try:
+        r = subprocess.run(cmd, input=json.dumps(payload), capture_output=True,
+                           text=True, timeout=180)
+    except FileNotFoundError as e:
+        return {"ok": False, "reasons": [f"writer not runnable: {e}"], "_error": True}
+    except subprocess.TimeoutExpired:
+        return {"ok": False, "reasons": ["writer timed out after 180s"], "_error": True}
+    out = (r.stdout or "").strip()
+    parsed = None
+    for line in reversed(out.splitlines()):
+        line = line.strip()
+        if line.startswith("{"):
+            try:
+                parsed = json.loads(line)
+                break
+            except ValueError:
+                continue
+    if parsed is None:
+        try:
+            parsed = json.loads(out)
+        except ValueError:
+            err = (r.stderr or out or "").strip()[-400:]
+            return {"ok": False, "reasons": [f"writer exit {r.returncode}, no JSON: {err}"],
+                    "_error": True}
+    if r.returncode != 0 and parsed.get("ok"):
+        parsed["ok"] = False
+        parsed.setdefault("reasons", []).append(f"writer exit {r.returncode}")
+    return parsed
+
+
+def _zoho_plan_file(db, body: dict, caller: str) -> "tuple[int, dict]":
+    """Handle POST /api/zoho/plan. Returns (http_status, response)."""
+    plan, probs = _zoho_plan_validate(body)
+    dry = bool(body.get("dry_run"))
+    src = None
+    if plan["source"]:
+        src = db.execute("SELECT id, session, org, desc FROM issues WHERE id = ? AND deleted IS NULL",
+                         (plan["source"].upper(),)).fetchone()
+        if not src:
+            probs.append(f"source {plan['source']!r} is not a live board item")
+    if probs:
+        return 400, {"ok": False, "reasons": probs}
+    plan["source"] = src["id"]
+    caller_org = (_session_org(caller) or "") if caller else ""
+    client = bool(body.get("client_system")) or caller_org.startswith("CD-") or caller.startswith("CD-")
+    payload = dict(plan, filed_by=caller or "Jeremy", client_system=client,
+                   plan_approval=_ZOHO_PLAN_APPROVAL_MARKER if client else "",
+                   dedup_key=_zoho_plan_dedup_key(plan["source"], plan["title"]))
+    dk = payload["dedup_key"]
+    prior = db.execute("SELECT zoho_key, url, task_id, created FROM zoho_plans "
+                       "WHERE dedup_key = ? AND status IN ('ok', 'partial') ORDER BY id DESC LIMIT 1", (dk,)).fetchone()
+    if prior:
+        return 200, {"ok": True, "duplicate": True, "key": prior["zoho_key"], "url": prior["url"],
+                     "task_id": prior["task_id"],
+                     "reasons": [f"already filed for {plan['source']} as {prior['zoho_key']}"]}
+    now = int(time.time())
+    if not dry:
+        who = caller or "Jeremy"
+        h = db.execute("SELECT COUNT(*) FROM zoho_plans WHERE filed_by = ? AND status IN ('ok', 'partial') AND created > ?",
+                       (who, now - 3600)).fetchone()[0]
+        d = db.execute("SELECT COUNT(*) FROM zoho_plans WHERE filed_by = ? AND status IN ('ok', 'partial') AND created > ?",
+                       (who, now - 86400)).fetchone()[0]
+        f = db.execute("SELECT COUNT(*) FROM zoho_plans WHERE status IN ('ok', 'partial') AND created > ?",
+                       (now - 86400,)).fetchone()[0]
+        lim_h = _zoho_plan_limit("AMUX_ZOHO_PLAN_PER_HOUR", 4)
+        lim_d = _zoho_plan_limit("AMUX_ZOHO_PLAN_PER_DAY", 12)
+        lim_f = _zoho_plan_limit("AMUX_ZOHO_PLAN_FLEET_PER_DAY", 60)
+        if h >= lim_h or d >= lim_d or f >= lim_f:
+            return 429, {"ok": False, "reasons": [
+                f"rate limit: {who} {h}/{lim_h} this hour, {d}/{lim_d} today; fleet {f}/{lim_f} today. "
+                f"Ask Cypra if a burst is legitimate."]}
+    if not _ZOHO_PLAN_LOCK.acquire(timeout=200):
+        return 503, {"ok": False, "reasons": ["another plan filing is in progress; retry"]}
+    try:
+        res = _zoho_plan_run_writer(payload, write=not dry)
+    finally:
+        _ZOHO_PLAN_LOCK.release()
+    # PAA contract: ok:false WITH a key means the parent task exists
+    # ("FILED BUT INCOMPLETE" / "FILED BUT NOT VERIFIED"). Record it as
+    # filed (status partial) so dedup blocks a re-file of a second plan.
+    if dry:
+        status = "dry"
+    elif res.get("ok"):
+        status = "ok"
+    elif res.get("key") or res.get("task_id"):
+        status = "partial"
+    else:
+        status = "error" if res.get("_error") else "rejected"
+    res.pop("_error", None)
+    db.execute("INSERT INTO zoho_plans (dedup_key, source, title, filed_by, status, zoho_key, task_id, "
+               "url, request, response, created) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+               (dk, plan["source"], plan["title"], caller or "Jeremy", status,
+                res.get("key") or res.get("duplicate_of"), res.get("task_id"), res.get("url"),
+                json.dumps(payload), json.dumps(res)[:20000], now))
+    db.commit()
+    if status in ("ok", "partial"):
+        _inc = "" if status == "ok" else (" FILED BUT INCOMPLETE, do NOT re-file: "
+                                           + "; ".join(str(x) for x in (res.get("reasons") or []))[:300])
+        note = (f"ZOHO-PLAN: {res.get('key')} {res.get('url') or ''} (filed by {caller or 'Jeremy'}, "
+                f"{len(res.get('subtasks') or [])} subtasks). Work from that task.{_inc}").replace("  ", " ")
+        cur = src["desc"] or ""
+        db.execute("UPDATE issues SET desc = ?, updated = ? WHERE id = ?",
+                   ((cur.rstrip() + "\n\n" + note) if cur.strip() else note, now, src["id"]))
+        db.commit()
+        try:
+            _board_changed()
+        except Exception:
+            pass
+        slog(f"[zoho-plan] {caller or 'Jeremy'} filed {res.get('key')} for {src['id']}: {plan['title'][:80]}")
+    else:
+        slog(f"[zoho-plan] {caller or 'Jeremy'} {status} for {src['id']}: {(res.get('reasons') or [])[:3]}")
+    code = 200 if status in ("ok", "dry", "partial") else (502 if status == "error" else 422)
+    return code, dict(res, status=status)
 
 
 def _prefix_from_session(session: str) -> str:
@@ -14387,6 +14646,12 @@ _MEM_CRITICAL_RULES = """\
   workflows, data): post a `PLAN:` on your board item (what changes, which
   system, sandbox or prod, rollback, who is affected), set status `blocked`, and
   wait for Jeremy's explicit yes relayed by Cypra. Drafts and reads are fine.
+- **More than one step? File the plan in Zoho BEFORE you start, then work FROM it.**
+  (Jeremy, 2026-11-14.) `amux zoho plan --title .. --what .. --by .. --unblocks ..
+  --acts .. --step .. --step .. --tier 1|2|99|parking-lot --source <your item>`
+  (`--dry-run` first if unsure). Then work the filed task's steps in order, not
+  your own context. `FILED BUT INCOMPLETE` = filed: never re-file. Full rule:
+  section "Multi-step work: file the plan first" in _global.md.
 """
 
 
@@ -46006,6 +46271,29 @@ class CCHandler(BaseHTTPRequestHandler):
                 return self._json(results)
             finally:
                 _sessions_git_cache_lock.release()
+
+        # AH-187: POST /api/zoho/plan (file a multi-step plan to RTG Zoho via
+        # PAA's writer), GET /api/zoho/plans (ledger).
+        if path == "/api/zoho/plan" and method == "POST":
+            _zp_caller = (self.headers.get("X-Amux-Session") or "").strip()
+            if _zp_caller and not _is_real_session(_zp_caller):
+                return self._json({"ok": False, "reasons": [f"unknown session {_zp_caller!r}"]}, 403)
+            try:
+                _zp_body = self._read_body() or {}
+            except Exception:
+                return self._json({"ok": False, "reasons": ["body is not JSON"]}, 400)
+            _zp_code, _zp_res = _zoho_plan_file(get_db(), _zp_body, _zp_caller)
+            return self._json(_zp_res, _zp_code)
+        if path == "/api/zoho/plans" and method == "GET":
+            _zq = parse_qs(urlparse(self.path).query)
+            _zw, _za = [], []
+            for _k, _col in (("source", "source"), ("session", "filed_by"), ("status", "status")):
+                if _zq.get(_k):
+                    _zw.append(f"{_col} = ?"); _za.append(_zq[_k][0])
+            _zsql = ("SELECT id, source, title, filed_by, status, zoho_key, task_id, url, created "
+                     "FROM zoho_plans" + (" WHERE " + " AND ".join(_zw) if _zw else "") +
+                     " ORDER BY id DESC LIMIT 200")
+            return self._json([dict(r) for r in get_db().execute(_zsql, _za).fetchall()])
 
         # GET/POST /api/memory/global
         if path == "/api/memory/global":

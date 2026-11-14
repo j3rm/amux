@@ -35,6 +35,66 @@ items=json.load(sys.stdin)
 for i in items: print(i.get('id',''),i.get('status',''),i.get('title',''))" ;;
       *) echo "amux board: unknown subcommand: $sub" >&2; exit 1 ;;
     esac ;;
+  zoho)
+    # AH-187: file a multi-step plan to RTG Zoho BEFORE starting work.
+    sub="$1"; shift 2>/dev/null || true
+    case "$sub" in
+      plan)
+        python3 - "$@" <<'PY'
+import argparse, json, os, ssl, sys, urllib.request, urllib.error
+ap = argparse.ArgumentParser(prog='amux zoho plan',
+    description='File a multi-step plan (parent task + one subtask per step) in RTG Zoho before work starts.')
+ap.add_argument('-f', '--file', help='JSON file with the plan (flags override its fields)')
+ap.add_argument('--title'); ap.add_argument('--what'); ap.add_argument('--by')
+ap.add_argument('--unblocks'); ap.add_argument('--acts')
+ap.add_argument('--step', action='append', default=[], help='one per step, in order (2-12)')
+ap.add_argument('--tier', help='1 | 2 | 99 | parking-lot')
+ap.add_argument('--source', help='board item id this plan belongs to')
+ap.add_argument('--project'); ap.add_argument('--owner'); ap.add_argument('--actor')
+ap.add_argument('--resume-on', dest='resume_on', help='YYYY-MM-DD')
+ap.add_argument('--client-system', action='store_true', help='plan touches a client system (AH-183)')
+ap.add_argument('--dry-run', action='store_true', help='gate + dedup only, nothing reaches Zoho')
+a = ap.parse_args()
+plan = json.load(open(a.file)) if a.file else {}
+for k in ('title', 'what', 'by', 'unblocks', 'acts', 'tier', 'source', 'project', 'owner', 'actor', 'resume_on'):
+    v = getattr(a, k)
+    if v: plan[k] = v
+if a.step: plan['steps'] = a.step
+if a.client_system: plan['client_system'] = True
+if a.dry_run: plan['dry_run'] = True
+url = os.environ.get('AMUX_URL', 'https://localhost:8822') + '/api/zoho/plan'
+req = urllib.request.Request(url, data=json.dumps(plan).encode(), method='POST',
+    headers={'Content-Type': 'application/json', 'X-Amux-Session': os.environ.get('AMUX_SESSION', '')})
+ctx = ssl.create_default_context(); ctx.check_hostname = False; ctx.verify_mode = ssl.CERT_NONE
+try:
+    with urllib.request.urlopen(req, context=ctx, timeout=240) as r: d = json.load(r)
+except urllib.error.HTTPError as e:
+    try: d = json.load(e)
+    except Exception: d = {'ok': False, 'reasons': ['HTTP %s' % e.code]}
+except Exception as e:
+    d = {'ok': False, 'reasons': [str(e)]}
+if d.get('ok'):
+    tag = 'DRY RUN ok' if plan.get('dry_run') else ('ALREADY FILED' if d.get('duplicate') or d.get('duplicate_of') else 'FILED')
+    print('%s: %s %s' % (tag, d.get('key') or '', d.get('url') or ''))
+    for s in d.get('subtasks') or []: print('  %s  %s' % (s.get('key', ''), s.get('title', '')))
+    if d.get('project'): print('  project: %s' % d['project'])
+elif d.get('key'):
+    print('FILED BUT INCOMPLETE: %s %s  (do NOT re-file; tell Cypra)' % (d.get('key'), d.get('url') or ''))
+    for r in d.get('reasons') or []: print('  - ' + str(r))
+else:
+    print('NOT FILED (%s):' % d.get('status', 'error'))
+    for r in d.get('reasons') or []: print('  - ' + str(r))
+    if d.get('projects'): print('  projects: ' + ', '.join(d['projects']))
+sys.exit(0 if d.get('ok') else 1)
+PY
+        ;;
+      plans)
+        q=""; [ -n "$1" ] && q="?source=$1"
+        curl -sk "$AMUX_URL/api/zoho/plans$q" | python3 -c "
+import json,sys
+for r in json.load(sys.stdin): print(r['source'], r['status'], r.get('zoho_key') or '-', r['filed_by'], r['title'])" ;;
+      *) echo "amux zoho: unknown subcommand: $sub (plan | plans [SOURCE])" >&2; exit 1 ;;
+    esac ;;
   crm)
     sub="$1"; shift 2>/dev/null || true
     case "$sub" in
@@ -127,12 +187,8 @@ print(d.get('id','error: '+str(d.get('error','?'))))" ;;
         if [ -z "$body" ] && [ ! -t 0 ]; then body=$(cat); fi
         payload=$(python3 -c "
 import json,sys; print(json.dumps({'body':sys.argv[1]}))" "$body")
-        # X-Amux-Session required (2026-09-09 lockdown e7c85bda) — without it
-        # the server rejects "cannot edit message content — missing X-Amux-
-        # Session header". EmberCoreMigration hit this via ER-521; the parallel
-        # `reply` branch above (L117-118) has always sent the header.
         curl -sk -X PATCH -H 'Content-Type: application/json' \
-          -H "X-Amux-Session: ${AMUX_SESSION:-}" \
+          -H "X-Amux-Session: $AMUX_SESSION" \
           -d "$payload" "$AMUX_URL/api/messages/$mid" | python3 -c "
 import json,sys; d=json.load(sys.stdin)
 print(d.get('id','error: '+str(d.get('error','?'))),d.get('status',''))" ;;
@@ -224,6 +280,7 @@ for s in json.load(sys.stdin): print(s['name'], '(running)' if s.get('running') 
     echo "revoked" ;;
   help|--help|-h|"")
     echo "amux board <done|doing|todo> <ITEM_ID>  — update board item status"
+    echo "amux zoho plan --title .. --step .. --step .. --tier .. --source ID  - file a multi-step plan to RTG Zoho BEFORE work (--dry-run, -f plan.json)"
     echo "amux board add <title>                  — create a new board item"
     echo "amux board list                         — list board items"
     echo "amux crm add <name> [field=val ...]    — add a contact (fields: company email role phone linkedin)"
