@@ -14966,6 +14966,74 @@ def _write_claude_memory(name: str, work_dir: str):
         claude_mem_file.write_text(composed)
     except Exception:
         pass
+    _write_git_root_rules(name, work_dir, global_content)
+
+
+_GITROOT_RULES_BEGIN = "<!-- amux-rules:begin (amux-managed, regenerated on session start) -->"
+_GITROOT_RULES_END = "<!-- amux-rules:end -->"
+
+
+def _write_git_root_rules(name: str, work_dir: str, global_content: str):
+    """Upsert the critical rules into the git-root MEMORY.md for nested sessions.
+
+    Claude Code keys auto-memory by the GIT ROOT of its cwd, not the cwd. A
+    session whose work dir is a subfolder of a repo (RTG/Ember/iSchedule
+    `.agents/<agent>`) reads `<projects>/<git-root>/memory/MEMORY.md`, a file
+    shared by its siblings and maintained by the agents themselves. The
+    per-session file _write_claude_memory composes is never loaded for them
+    (AH-189 follow-up, 2026-11-14: RTG-Research had zero copies of the rules).
+
+    Only the block between the begin/end markers is ours; it goes at the END
+    of the file and everything else is left untouched. If the git-root file is
+    itself amux-composed (a session runs at the repo root, e.g. CD-AirCom), it
+    already carries the rules and is skipped.
+    """
+    try:
+        resolved = str(Path(work_dir).expanduser().resolve())
+        r = subprocess.run(["git", "-C", resolved, "rev-parse", "--show-toplevel"],
+                           capture_output=True, text=True, timeout=5)
+        top = r.stdout.strip() if r.returncode == 0 else ""
+        if not top or top == resolved:
+            return
+        mem_dir = _claude_projects_dir_for_session(name) / _project_name(top) / "memory"
+        mem_file = mem_dir / "MEMORY.md"
+        existing = mem_file.read_text(errors="replace") if mem_file.exists() else ""
+        if _MEM_MARKER in existing:
+            return
+        shared = mem_dir / "_amux_shared.md"
+        prod = _session_docker_org(name)
+        view = str(shared)
+        if prod:
+            view = view.replace(str(CC_ORGS / prod / "home"), "/home/amux", 1)
+        block = (
+            f"{_GITROOT_RULES_BEGIN}\n\n{_MEM_CRITICAL_RULES.strip()}\n\n"
+            f"**Before ANY amux API call beyond `board PATCH` or `threads reply`, "
+            f"read `{view}`.**\n\n{_GITROOT_RULES_END}"
+        )
+        if _GITROOT_RULES_BEGIN in existing and _GITROOT_RULES_END in existing:
+            head = existing.split(_GITROOT_RULES_BEGIN, 1)[0]
+            tail = existing.split(_GITROOT_RULES_END, 1)[1]
+            body = (head.rstrip() + "\n\n" + tail.strip()).strip()
+        else:
+            body = existing.strip()
+        new = (body + "\n\n" if body else "") + block + "\n"
+        if new == existing:
+            return
+        mem_dir.mkdir(parents=True, exist_ok=True)
+        if global_content.strip():
+            shared.write_text(
+                "<!-- amux-managed: do not edit; regenerated on every "
+                "session start from ~/.amux/memory/_global.md -->\n\n"
+                + global_content.strip() + "\n"
+            )
+        if mem_file.is_symlink():
+            mem_file.unlink()
+        mem_file.write_text(new)
+        n = new.count("\n")
+        if n > 200:
+            print(f"[memory] {mem_file}: {n} lines, amux rules past Claude's 200-line load cap", flush=True)
+    except Exception as e:
+        print(f"[memory] git-root rules for {name} failed: {e}", flush=True)
 
 
 def _ensure_memory(name: str, work_dir: str):
