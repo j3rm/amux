@@ -1136,6 +1136,14 @@ def _find_claude_pid(name: str) -> int:
     signals, or route the follow-up call through the same runtime prefix.
     Returns 0 if no claude child exists."""
     try:
+        # tmux -t <name> prefix-matches silently (list-panes -t amux-Ember_Auth
+        # resolves to amux-Ember_Auth_API_Core when both share a container).
+        # has-session with '=<name>' is strict — gate here or start_session bails
+        # with "already running" against a sibling's pid. AH-191 follow-up.
+        r0 = subprocess.run([*_tmux_prefix(name), "has-session", "-t", f"={tmux_name(name)}"],
+                            capture_output=True, timeout=3)
+        if r0.returncode != 0:
+            return 0
         r = subprocess.run([*_tmux_prefix(name), "list-panes", "-t", tmux_target(name), "-F", "#{pane_pid}"],
                            capture_output=True, text=True, timeout=5)
         if r.returncode != 0 or not r.stdout.strip():

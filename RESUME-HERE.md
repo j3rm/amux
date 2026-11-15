@@ -2,7 +2,25 @@
 
 **If you are Claude and you are about to edit `/mnt/gitdata/amux/amux-server.py`, this file is mandatory.** Every change must be planned here BEFORE you edit code. Completed plans stay in place as history, do NOT delete them. Read this file at the start of every session before touching amux-server.py.
 
-Last updated: 2026-11-14
+Last updated: 2026-11-15
+
+## Plan for change: `_find_claude_pid` falsely matches a prefix-name sibling session (AH-191 follow-up, 2026-11-15)
+
+**DONE 2026-11-15 07:12Z.** Fix shipped. Added a `has-session -t '=amux-<name>'` gate at the top of `_find_claude_pid`. Verified against Ember_Auth / Ember_Auth_API_Core pair: before fix `amux restart Ember_Auth` reported success but no `amux-Ember_Auth` tmux session was created (start_session short-circuit); after fix, `amux-Ember_Auth` tmux session created, claude process pid 73763 up with correct flags (`--add-dir /mnt/gitdata/EmberCRM/Ember_Documentation --resume eb986750...`), API reports `running=True`.
+
+**Why.** Ember-Research asked me (amux-helper) to start Ember_Auth. Every call to `amux restart Ember_Auth` succeeded on the surface but no tmux session was ever created. Root cause: tmux's `-t <target>` flag prefix-matches session names. `amux-Ember_Auth` is a prefix of `amux-Ember_Auth_API_Core` (same container). `_find_claude_pid("Ember_Auth")` at L1129 runs `list-panes -t amux-Ember_Auth`, tmux silently resolves that to the API_Core session's pane, pgrep finds API_Core's claude PID, the function returns > 0, and `start_session` bails at L15617 with `(True, "already running")`. The target session is never started. `is_running()` separately returns False (its guard is a line-exact match against `list-sessions` output), so the two disagree and the "already running" short-circuit silently loses.
+
+Likely to affect any pair of sessions in the same container where one name is a prefix of the other (confirmed with `tmux has-session -t '=amux-Ember_Auth'` -> not found, but `list-panes -t amux-Ember_Auth` -> matches API_Core).
+
+**What.** Add a `tmux has-session -t '=amux-<name>'` gate at the top of `_find_claude_pid`. tmux's `=` prefix forces exact match for `has-session` (verified in-container). If the exact session doesn't exist, return 0 immediately, before any prefix-matching `list-panes`.
+
+Scope: ONE function, `_find_claude_pid` (around L1129). Does not change `is_running`, `tmux_name`, or `tmux_target` — those are already correct (list-sessions line match, rename-session semantics). Does not change the many other `-t tmux_target(name)` call sites — those are only reached after a successful `is_running` which already gates on exact match.
+
+**Verify.**
+- `python3 -c "import ast; ast.parse(open('/mnt/gitdata/amux/amux-server.py').read())"` clean.
+- Before fix: `amux restart Ember_Auth` returns success, `docker exec amux-org-EmberCRM tmux has-session -t '=amux-Ember_Auth'` returns NO.
+- After fix: `amux restart Ember_Auth` actually creates `amux-Ember_Auth` tmux + spawns Claude. `is_running` flips True.
+- Ember_Auth answers RA-1960.
 
 ## Plan for change: `_project_name` must match Claude Code's folder encoding (found during AH-189 restart, 2026-11-14)
 
@@ -4653,3 +4671,14 @@ Min-length 7 guards against the degenerate "sha starts with hex digit X" false-m
 6. Commit with `fix(server):` prefix listing A+B+C+M.
 
 **Rollback:** `git revert <hash>` if any smoke fails. All four changes are additive-or-condition-widening; nothing changes existing passing-case behavior.
+
+## Plan for change: `amux board claim <id>` alias (2026-11-14, AH-189 follow-up) [DONE: alias verified, reaches doing gate]
+- Why: shared memory (`_MEM_CRITICAL_RULES`) and the todo watchdog ping both tell agents to run `amux board claim <id>`, but the CLI stub has no `claim` case (RTG-Research hit "unknown subcommand").
+- Change: in the inline `amux` CLI stub, accept `claim` as an alias that PATCHes status `doing`. No other behavior change.
+- Verify: syntax check; server rewrites repo `amux` at startup; `bash -n amux`; `amux board claim` on a throwaway item flips it to doing; delete the item.
+
+## Plan for change: compose rules into git-root memory for nested sessions (2026-11-14, AH-189 follow-up) [DONE: RTG 165, Ember 151, iSchedule 63 lines; idempotent; agent text untouched]
+- Finding: Claude Code keys auto-memory by the GIT ROOT of cwd, not cwd. Sessions whose CC_DIR is a subfolder of a repo (RTG/Ember/iSchedule `.agents/*`, CD-AirCom-*) read `~/.claude/projects/<git-root>/memory/MEMORY.md`, a shared, agent-maintained file amux never writes. So RTG-Research, Ember-Research etc. never saw `_MEM_CRITICAL_RULES` (RTG-Research grep: zero hits). AirCom root is already composed by CD-AirCom itself.
+- Change: in `_write_claude_memory`, when `git rev-parse --show-toplevel` != resolved work_dir, also upsert a block delimited by `<!-- amux-rules:begin -->` / `<!-- amux-rules:end -->` at the END of the git-root MEMORY.md (critical rules + pointer to a `_amux_shared.md` written in that folder). Rest of the file untouched. Skip if that folder's MEMORY.md is itself amux-composed (has `_MEM_MARKER`), e.g. AirCom.
+- Not chosen: `--settings autoMemoryDirectory` per session (would cut siblings off their shared org memory).
+- Verify: syntax; call `_write_claude_memory` for RTG-Research/Ember-Research/iSchedule-Reviewer; block present once, idempotent on second call, under 200 lines; restart RTG-Research and Ember-Research and ask them to quote.
