@@ -2,7 +2,29 @@
 
 **If you are Claude and you are about to edit `/mnt/gitdata/amux/amux-server.py`, this file is mandatory.** Every change must be planned here BEFORE you edit code. Completed plans stay in place as history, do NOT delete them. Read this file at the start of every session before touching amux-server.py.
 
-Last updated: 2026-11-15
+Last updated: 2026-11-16
+
+## Plan for change: Codex usage probe ignores the authoritative TUI quota banner (Jeremy ask, 2026-11-16)
+
+**Why.** Dashboard reads codex at 0% / "cap 7B tokens / 0 files" while CD-Audit-Codex has in fact hit its weekly ChatGPT limit (banner in pane: "You've hit your usage limit. ... try again at Nov 18th, 2026 6:34 PM."). Agents (CD-NPP, CD-Classic-Pianos, amux-helper) have independently reported this; the dashboard still shows green. Jeremy wants the usage board to show reality BEFORE he resets the OpenAI quota so he can trust it after.
+
+Two root causes stack: (1) `_fetch_codex_usage` sums `token_count` from `/home/amux/.codex/sessions/.../rollout-*.jsonl` inside the container but currently finds zero files/tokens (likely path or field moved in a Codex upgrade). (2) Even if the roll-up worked, the cap default (7B) is orders of magnitude off from the Pro tier's real weekly quota, and OpenAI does not expose a true-usage endpoint. The authoritative signal that IS available is the Codex TUI itself, which reliably prints a red "You've hit your usage limit ... try again at <date time>" line when quota is exhausted, plus a partial "weekly limit: N% left · resets at HH:MM on D Mon" status while climbing.
+
+**What.** In `_fetch_codex_usage(org)`, before touching rollout jsonl: capture the probe-org's Codex tmux pane with the existing `tmux_capture` helper (`-S -500`), strip ANSI, and scan for two banner shapes:
+1. `you.?ve hit your usage limit` + `try again at <Mon> <D>(st|nd|rd|th)?,? <YYYY> <H>:<MM> (AM|PM)` → percent=100.0, reset_at=that time (server local tz; no tz tag in the banner), tone/raw tagged "banner:limit-hit".
+2. `weekly limit:\s*(\d+)%\s*left` optionally followed by `resets at <HH>:<MM> on <D> <Mon>` → percent=100-N, reset_at parsed. tagged "banner:weekly-partial".
+
+If a banner is found, return that reading and SKIP the rollout sum entirely. If no banner is found, fall back to today's rollout code path unchanged (that preserves the existing "zero" reading rather than regressing). Note the fallback still reports whatever cap is set; that is a separate problem and not part of this change.
+
+Also need to accept the Unicode right-single-quote (U+2019) in "You've", since the TUI uses the curly form.
+
+Scope: ONE function (`_fetch_codex_usage`) + two module-level compiled regexes next to it. No table changes; `account_usage` already stores percent/reset_at/raw_text. No dashboard changes; existing `/api/usage` renderer already paints 100% red via the pace calculator.
+
+**Verify.**
+- `python3 -c "import ast; ast.parse(open('/mnt/gitdata/amux/amux-server.py').read())"` clean.
+- After `touch amux-server.py` and ~60s (probe cadence): `curl -sk $AMUX_URL/api/usage | jq '.accounts[] | select(.account=="codex")'` returns `percent: 100.0`, `reset_at` ≈ 1795019640 (2026-11-18 18:34 local), `raw` begins with `banner:limit-hit`.
+- Dashboard header Codex bar shows red/full, tooltip cites the banner.
+- Negative: once Jeremy tops up and Codex resumes (the banner disappears), next probe reverts to the rollout fallback and bar drops.
 
 ## Plan for change: `_find_claude_pid` falsely matches a prefix-name sibling session (AH-191 follow-up, 2026-11-15)
 

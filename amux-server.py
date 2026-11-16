@@ -3904,6 +3904,105 @@ def _fetch_claude_usage(org: str) -> dict | None:
         return None
 
 
+_CODEX_LIMIT_HIT_RE = re.compile(
+    r"you['’]?ve\s+hit\s+your\s+usage\s+limit[\s\S]{0,400}?"
+    r"try\s+again\s+at\s+"
+    r"([A-Za-z]{3,9})\s+(\d{1,2})(?:st|nd|rd|th)?,?\s+(\d{4})\s+"
+    r"(\d{1,2}):(\d{2})\s*(am|pm)",
+    re.IGNORECASE,
+)
+_CODEX_WEEKLY_PARTIAL_RE = re.compile(
+    r"weekly\s+limit[:\s]+(\d{1,3})\s*%\s*left"
+    r"(?:[^\n]{0,80}?resets?\s+at\s+(\d{1,2}):(\d{2})"
+    r"(?:\s+on\s+(\d{1,2})\s+([A-Za-z]{3,9}))?)?",
+    re.IGNORECASE,
+)
+_CODEX_MONTH_MAP = {m.lower(): i for i, m in enumerate(
+    ["Jan", "Feb", "Mar", "Apr", "May", "Jun",
+     "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"], start=1)}
+
+
+def _codex_banner_reading(org: str) -> dict | None:
+    """Scrape the Codex TUI pane for its weekly-quota banner.
+
+    OpenAI exposes no usage endpoint, but the Codex TUI prints the quota
+    state directly. Two shapes:
+      - "You've hit your usage limit ... try again at Nov 18th, 2026 6:34 PM."
+        -> percent=100, reset_at parsed.
+      - "weekly limit: N% left · resets at 18:34 on 18 Nov"
+        -> percent=100-N, reset_at parsed if present.
+
+    Banner carries no timezone; it is rendered in the viewer's local tz.
+    We interpret as server-local time. If the pane capture fails or no
+    banner is present, returns None and the caller falls back to the
+    rollout roll-up.
+    """
+    try:
+        pane = tmux_capture(org, lines=500)
+    except Exception as e:
+        slog(f"[usage-probe] codex banner capture({org}) failed: {e}")
+        return None
+    if not pane:
+        return None
+    # tmux_capture passes -e (ANSI colors) so we must strip to match text.
+    clean = _ANSI_STRIP_RE.sub("", pane)
+    now = time.time()
+    m = _CODEX_LIMIT_HIT_RE.search(clean)
+    if m:
+        mon_name, day_s, year_s, hr_s, min_s, ampm = m.groups()
+        mon = _CODEX_MONTH_MAP.get(mon_name[:3].lower())
+        if mon:
+            try:
+                import datetime as _dt
+                hr = int(hr_s) % 12
+                if ampm.lower() == "pm":
+                    hr += 12
+                dt = _dt.datetime(int(year_s), mon, int(day_s),
+                                   hr, int(min_s), 0)
+                reset_at = int(dt.timestamp())
+                raw = (f"banner:limit-hit org={org} "
+                       f"reset={mon_name} {day_s}, {year_s} "
+                       f"{hr_s}:{min_s} {ampm.upper()}")
+                return {"percent": 100.0, "reset_at": reset_at,
+                        "raw_text": raw}
+            except (ValueError, OverflowError) as e:
+                slog(f"[usage-probe] codex banner parse({org}) failed: {e}")
+    m = _CODEX_WEEKLY_PARTIAL_RE.search(clean)
+    if m:
+        left_pct_s, hr_s, min_s, day_s, mon_name = m.groups()
+        try:
+            left_pct = max(0, min(100, int(left_pct_s)))
+            pct = 100.0 - float(left_pct)
+            reset_at = None
+            if hr_s and min_s:
+                import datetime as _dt
+                nowdt = _dt.datetime.now()
+                yr = nowdt.year
+                mon = nowdt.month
+                day = nowdt.day
+                if day_s and mon_name:
+                    _mon = _CODEX_MONTH_MAP.get(mon_name[:3].lower())
+                    if _mon:
+                        mon = _mon
+                        day = int(day_s)
+                        if mon < nowdt.month:
+                            yr += 1
+                try:
+                    dt = _dt.datetime(yr, mon, day,
+                                       int(hr_s), int(min_s), 0)
+                    if dt.timestamp() < now - 3600:
+                        dt = dt + _dt.timedelta(days=1)
+                    reset_at = int(dt.timestamp())
+                except (ValueError, OverflowError):
+                    reset_at = None
+            raw = (f"banner:weekly-partial org={org} "
+                   f"left={left_pct}% pct={pct:.1f}%")
+            return {"percent": pct, "reset_at": reset_at, "raw_text": raw}
+        except (ValueError, OverflowError) as e:
+            slog(f"[usage-probe] codex partial-banner parse({org}) failed: {e}")
+    return None
+
+
 def _fetch_codex_usage(org: str) -> dict | None:
     """Local roll-up of Codex rollout jsonl. Each rollout line that
     represents a model response carries a token-count delta that upstream
@@ -3916,7 +4015,16 @@ def _fetch_codex_usage(org: str) -> dict | None:
     boundary (every bar reset-day lines up). Jeremy can refine later.
 
     Returns {percent, reset_at, raw_text} with raw_text summarizing the
-    file count + token sum."""
+    file count + token sum.
+
+    Preempted by the TUI quota banner: if the Codex pane is showing the
+    "hit your usage limit" or "weekly limit N% left" line, that is the
+    authoritative reading (OpenAI exposes no usage endpoint and the local
+    rollout sum is only a proxy). See _codex_banner_reading.
+    """
+    banner = _codex_banner_reading(org)
+    if banner is not None:
+        return banner
     try:
         from datetime import datetime, timezone, timedelta
         now = datetime.now(timezone.utc)
