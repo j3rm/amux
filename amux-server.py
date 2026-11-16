@@ -4103,51 +4103,71 @@ def _fetch_codex_usage(org: str) -> dict | None:
 # curly quotes and wrapped lines, and the pre-strip the detector
 # applies (_ANSI_STRIP_RE + line join) must leave your pattern matchable.
 _SESSION_ISSUE_PATTERNS = [
+    # provider_gate: None = any session, "codex"/"claude" = only match sessions
+    # whose provider matches. Prevents scrollback-echo false positives where
+    # one agent's TUI content quoted into another agent's pane (e.g. amux-helper
+    # pasting a Codex quota banner into its own transcript) trips a code that
+    # only makes sense for the originating provider.
     (re.compile(r"you['’]?ve\s+hit\s+your\s+usage\s+limit[\s\S]{0,400}?"
                 r"try\s+again\s+at\s+([A-Za-z]{3,9})\s+(\d{1,2})(?:st|nd|rd|th)?,?\s+"
                 r"(\d{4})\s+(\d{1,2}):(\d{2})\s*(am|pm)", re.IGNORECASE),
-     "quota-codex-weekly", "danger",
+     "quota-codex-weekly", "danger", "codex",
      "Codex ChatGPT weekly quota exhausted",
      "Wait for the printed reset time, or top up at https://chatgpt.com/settings/usage."),
-    (re.compile(r"Finish\s+signing\s+in\s+via\s+your\s+browser[\s\S]{0,400}?"
-                r"([A-Z0-9]{4}-[A-Z0-9]{4,6})", re.IGNORECASE),
-     "auth-codex-device", "danger",
+    (re.compile(r"Finish\s+signing\s+in\s+via\s+your\s+browser[\s\S]{0,1500}?"
+                r"\b([A-Z0-9]{4}-[A-Z0-9]{4,6})\b", re.IGNORECASE),
+     "auth-codex-device", "danger", "codex",
      "Codex is blocked on device-code sign-in",
      "Open https://auth.openai.com/codex/device and enter the code shown in the pane (expires in 15 min)."),
     (re.compile(r"API\s+Error:\s*400\s+Claude\s+Code\s+([\d.]+)\s+does\s+not\s+support\s+this\s+model;?\s*"
                 r"version\s+([\d.]+)\s+or\s+newer\s+is\s+required", re.IGNORECASE),
-     "claude-cc-outdated", "danger",
+     "claude-cc-outdated", "danger", "claude",
      "Claude Code binary too old for configured model",
      "In the session container: npm install -g @anthropic-ai/claude-code; then restart the session."),
     (re.compile(r"Update\s+available!\s+([\d.]+)\s*->\s*([\d.]+)[\s\S]{0,300}?"
                 r"1\.\s*Update\s+now", re.IGNORECASE),
-     "codex-update-picker", "danger",
+     "codex-update-picker", "danger", "codex",
      "Codex update picker is blocking startup",
      "Send '2' to the session to skip the picker (or '1' to install the update)."),
     (re.compile(r"unexpected\s+status\s+401\s+Unauthorized:\s+Incorrect\s+API\s+key\s+provided:\s*"
                 r"([A-Za-z0-9]{4,10})", re.IGNORECASE),
-     "auth-codex-apikey", "danger",
+     "auth-codex-apikey", "danger", "codex",
      "Codex API key rejected (401 Unauthorized)",
      "Replace OPENAI_API_KEY in this container's env and restart the session."),
     (re.compile(r"Error\s+loading\s+config\.toml:[\s\S]{0,300}?"
                 r"duplicate\s+key[\s\S]{0,120}?\[([A-Za-z0-9_.]+)\]", re.IGNORECASE),
-     "codex-config-dup-key", "danger",
+     "codex-config-dup-key", "danger", "codex",
      "Codex config.toml has a duplicate key",
      "Edit ~/.codex/config.toml in the container and merge the duplicate [mcp_servers.*] section."),
     (re.compile(r"Auto-update\s+failed\s*[·|]\s*Try\s+claude\s+doctor", re.IGNORECASE),
-     "claude-auto-update-failed", "warn",
+     "claude-auto-update-failed", "warn", "claude",
      "Claude Code auto-update failed",
      "In the container: npm install -g @anthropic-ai/claude-code; then restart the session."),
+    # Codex post-signin splash. Appears after successful device-code auth
+    # and holds until someone hits Enter. Matched only when the wording is
+    # followed by the actual "Press enter to continue" line so we don't
+    # fire on in-TUI prompts that happen to say "continue".
+    (re.compile(r"Signed\s+in\s+with\s+your\s+ChatGPT\s+account[\s\S]{0,800}?"
+                r"Press\s+enter\s+to\s+continue", re.IGNORECASE),
+     "codex-signin-splash", "danger", "codex",
+     "Codex post-signin splash is blocking startup (needs an Enter keypress)",
+     "amux send <name> '' --enter (or press Enter in the pane) to clear the splash."),
 ]
 
 
-def _detect_session_issues(name: str, pane_text: str) -> list:
+def _detect_session_issues(name: str, pane_text: str, provider: str = "") -> list:
     """Scan a session's captured pane for known failure signatures.
 
     Returns a list of {code, severity, message, fix_hint, match} dicts,
     deduped by code (first occurrence wins — the most recent match in
     reverse-scrollback order would be nicer but the TUI reprints the
     same banner repeatedly so dedup is sufficient).
+
+    `provider` (optional): if set to "codex" / "claude", filters patterns
+    to those gated to the matching provider. Patterns with no gate run
+    unconditionally. Prevents one agent's scrollback-echoed TUI content
+    from flagging another agent with an issue code that cannot apply to
+    its own runtime.
 
     Empty list means the detector saw no known failure; it does NOT
     mean the session is healthy (a silent hang has no banner).
@@ -4158,8 +4178,10 @@ def _detect_session_issues(name: str, pane_text: str) -> list:
     tail = "\n".join(clean.splitlines()[-800:])
     seen = set()
     out = []
-    for regex, code, severity, message, fix_hint in _SESSION_ISSUE_PATTERNS:
+    for regex, code, severity, gate, message, fix_hint in _SESSION_ISSUE_PATTERNS:
         if code in seen:
+            continue
+        if gate and provider and gate != provider:
             continue
         m = regex.search(tail)
         if not m:
@@ -46676,7 +46698,8 @@ class CCHandler(BaseHTTPRequestHandler):
                     except Exception as e:
                         slog(f"[issues] capture({sname}) failed: {e}")
                         pane = ""
-                    issues = _detect_session_issues(sname, pane)
+                    prov = (s.get("provider") or s.get("kind") or "").lower()
+                    issues = _detect_session_issues(sname, pane, prov)
                 if issues:
                     for iss in issues:
                         by_code[iss["code"]] = by_code.get(iss["code"], 0) + 1
