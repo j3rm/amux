@@ -4,6 +4,37 @@
 
 Last updated: 2026-11-16
 
+## Plan for change: threads tab paging budget eaten by starred threads (Jeremy ask, 2026-11-16 07:34)
+
+**DONE 2026-11-16, commit pending.** Split the budget: starred/unread always render but no longer consume the 10-slot recent-threads page budget. Thread 224 should now appear in the default view alongside other genuine recents, not behind "Show N older threads".
+
+**Why.** Jeremy saw recent threads missing from the top of the Threads tab until he clicked "Show N older threads"; thread 224 in particular. The renderer at L35330-35342 sorts starred-first then newest-updated, and loops with a single `shown` counter that caps at `_T_THREADS_PAGE_SIZE = 10`. Starred threads and threads with unread messages ("mustShow") render regardless, but they still increment `shown`, so they eat into the 10-slot page budget for naturally-recent threads. With 7 starred threads at the top, only 3 recent slots remain, and the 4th-recent (e.g. 224) gets bucketed into "N older threads" even though it is not old.
+
+**What.** Split the budget. Keep `shown` for display order but introduce `shown_recent` that only increments for NON-mustShow threads. Gate the page-size cutoff on `shown_recent`, not `shown`:
+
+```js
+let shown_recent = 0;
+for (const {t, anyUnread} of ranked) {
+  const mustShow = anyUnread || !!t.starred;
+  if (_tShowAllThreads || mustShow || shown_recent < _T_THREADS_PAGE_SIZE) {
+    html += _tRenderThread(t);
+    if (!mustShow) shown_recent++;
+  } else {
+    hidden++;
+  }
+}
+```
+
+Starred and unread always show (as today). The 10-slot budget now protects 10 real recent threads behind them, not "10 total including starred".
+
+The `Collapse older threads` link fallback uses `ranked.length > _T_THREADS_PAGE_SIZE` to decide whether to render; leave as-is since any non-empty list over 10 still warrants the collapse offer when all expanded.
+
+**Verify.**
+- `python3 -c "import ast; ast.parse(open('/mnt/gitdata/amux/amux-server.py').read())"` clean.
+- With N starred + many recent threads, the top of the list shows all starred AND the 10 newest non-starred (previously only `10 - N` non-starred were visible).
+- Thread 224 renders in the default view (not collapsed under "Show N older").
+- Starred-only toggle behaviour unchanged; `Collapse older threads` still appears when `_tShowAllThreads` is on.
+
 ## Plan for change: live-model display + double --model flag bug + switch amux-helper/ShareScore-Audit-Opus to opus-5-5 (Jeremy ask, 2026-11-16 06:39)
 
 **DONE 2026-11-16, commit pending.** (a) Launch-command fix lands via new `_strip_flag_pair` helper (6 test cases pass) and the Claude-branch guard at L16293-ish; ShareScore-Audit-Opus relaunched and now runs with ONE `--model claude-opus-5-5` instead of the previous `--model sonnet --model claude-opus-5-5` double. (b) Dashboard priority flipped (live wins), mismatch hint badge added to card and peek badge. (c) `~/.amux/sessions/amux-helper.env` CC_FLAGS switched to `claude-opus-5-5`; takes effect on my next restart (Claude's running process is immutable in-flight). ShareScore-Audit-Opus active_model still reads 4-7 from pre-restart JSONL entries; will update as soon as SSAO writes a new response with 5-5. If it continues to write 4-7, that's auth-side blocking opus-5-5 for that container.

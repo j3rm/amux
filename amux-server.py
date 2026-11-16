@@ -35329,13 +35329,20 @@ function _threadsRender() {
   // Sort: starred first, then newest-updated first. Same order as before —
   // paging just clips the tail.
   ranked.sort((a, b) => (b.t.starred - a.t.starred) || (b.newestUpdated - a.newestUpdated));
-  let shown = 0;
+  // Budget split (2026-11-16 Jeremy): starred and unread always render, but
+  // must NOT consume the recent-threads page budget. The previous single
+  // `shown` counter incremented for mustShow rows too, so with N starred
+  // threads the natural-recent view shrank from 10 to (10 - N) - recent
+  // threads like 224 ended up hidden behind the "Show N older threads"
+  // toggle even though they were not old. `shown_recent` only bumps for
+  // non-mustShow rows so the 10-slot page protects 10 genuine recents.
+  let shown_recent = 0;
   let hidden = 0;
   for (const {t, anyUnread} of ranked) {
     const mustShow = anyUnread || !!t.starred;
-    if (_tShowAllThreads || mustShow || shown < _T_THREADS_PAGE_SIZE) {
+    if (_tShowAllThreads || mustShow || shown_recent < _T_THREADS_PAGE_SIZE) {
       html += _tRenderThread(t);
-      shown++;
+      if (!mustShow) shown_recent++;
     } else {
       hidden++;
     }
