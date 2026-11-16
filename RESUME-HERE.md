@@ -4,6 +4,39 @@
 
 Last updated: 2026-11-16
 
+## Plan for change: AH-201 backlog filings emit misleading ASSIGNED notice (EmberCoreMigration via Ember-Research, 2026-11-16 07:34)
+
+**DONE 2026-11-16, commit pending.** `_notify_session_of_task` now takes `status` (default "todo"), branches wording: todo keeps current wording; backlog says "Filed to your queue as BACKLOG: ... PARKED - do not claim yet"; anything else gets a neutral "Filed to your queue (status=X): ...". POST create and PATCH reassign callsites updated to pass the real status. Live self-test fired a backlog item at amux-helper and the pane printed the new BACKLOG wording verbatim, with no "Run amux board claim" string. `board_notify_events.item_status_at_fire` now records the real status, not a hardcoded "todo".
+
+**Why.** EmberCoreMigration filed a board item with `status="backlog"` to `EmberCRM_API_Core`. The assignee got the usual "New board task assigned ... Run `amux board claim`" nudge. The item was explicitly PARKED behind an audit that is still open; if the worker had claimed it they would have deleted machinery currently under audit. Third notification-vs-field mismatch today (AH-199, AH-200 being the other two). Cumulative risk is agents learning to ignore notifications.
+
+Root cause. `/api/board` POST at L50435-50438 fires `_notify_session_of_task` whenever `status in ("todo", "backlog")`. The notification function signature is `(session_name, item_id, title)` with no status, and the emitted text always says `"New board task assigned: ... Run amux board claim ... to take it"`. The two statuses need different language: `todo` is "do this now", `backlog` is "I parked something for you".
+
+Which option (from AH-201 ask).
+- A. Suppress the notice for `backlog`. Loses the parking signal entirely.
+- B. Keep the notice; make the text carry the status. Recipient reads "filed as BACKLOG - parked, do not claim yet" and does not have to adjudicate against the live board.
+
+Picking B. B preserves the signal (agents still learn the item exists) AND removes the misleading call-to-claim. A would make a dozen-item park-session invisible, which is the opposite of what EmberCoreMigration wanted.
+
+**What.** 
+1. Add `status: str = "todo"` parameter to `_notify_session_of_task`. Backwards-compatible default; existing callsites keep working.
+2. Branch the message text:
+   - `status == "todo"` (default): current wording, `"New board task assigned: ID - title. Run amux board claim ID to take it, or check amux board for context."`
+   - `status == "backlog"`: `"Filed to your queue as BACKLOG: ID - title. PARKED - do not claim yet. Check amux board show ID for the park condition."`
+   - any other: `"Filed to your queue (status=X): ID - title. Check amux board show ID."`
+3. Update the POST create callsite at L50438 to pass the actual `status`. Also update the PATCH reassign path at L51044 (same shape) and the PATCH-creator notify at L47359.
+4. Leave the internal-flow callsites (audit mint, build-verify, research-request, sweeps) as-is; they always mint `todo` so the default is correct.
+
+Status log table: `_log_board_notify` already takes `item_status`. Pass the real status through there too so the audit log stops recording everything as "todo".
+
+Out of scope: harmonising the OTHER two family bugs (AH-199 `_cascaded` discovery, AH-200 stale-todo timer) - those are already filed and the first one shipped earlier this turn.
+
+**Verify.**
+- `python3 -c "import ast; ast.parse(open('/mnt/gitdata/amux/amux-server.py').read())"` clean.
+- POST `/api/board` with `status=backlog, session=<other-session>`: target pane shows the BACKLOG-worded line, no "Run amux board claim" string.
+- POST with `status=todo, session=<other-session>`: wording unchanged from today.
+- `board_notify_events.item_status_at_fire` records `backlog` for backlog filings (used to record `todo` regardless).
+
 ## Plan for change: threads tab paging budget eaten by starred threads (Jeremy ask, 2026-11-16 07:34)
 
 **DONE 2026-11-16, commit pending.** Split the budget: starred/unread always render but no longer consume the 10-slot recent-threads page budget. Thread 224 should now appear in the default view alongside other genuine recents, not behind "Show N older threads".

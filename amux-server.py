@@ -7904,13 +7904,22 @@ def _log_board_notify(item_id: str, session_name: str, event_type: str,
         pass
 
 
-def _notify_session_of_task(session_name: str, item_id: str, title: str):
+def _notify_session_of_task(session_name: str, item_id: str, title: str,
+                            status: str = "todo"):
     """Push a one-line task pickup notice into the target session's tmux pane.
     Idempotent per (session, item_id): we atomically flip the issue's `notified`
     flag 0→1 so concurrent triggers (POST create vs. PATCH reassign/tag edit)
     notify at most once. Runs in a background thread so the API call returns
     immediately even if the target session takes a moment. Best-effort: silently
-    swallows errors (session might not be running yet)."""
+    swallows errors (session might not be running yet).
+
+    `status` shapes the wording so the notice and the field agree (AH-201,
+    2026-11-16). `todo` keeps the call-to-claim language; `backlog` says
+    PARKED and asks the recipient NOT to claim yet; anything else gets a
+    neutral "filed to your queue (status=X)" line. Default stays `todo` so
+    internal mint flows (audit pairs, build-verify, research-requests) that
+    always create todos keep working without changes.
+    """
     def _run():
         try:
             db = get_db()
@@ -7926,10 +7935,25 @@ def _notify_session_of_task(session_name: str, item_id: str, title: str):
             db.commit()
             if cur.rowcount == 0:
                 return  # someone else already notified
-            text = (
-                f"New board task assigned: {item_id} — {title[:120]}. "
-                f"Run `amux board claim {item_id}` to take it, or check `amux board` for context."
-            )
+            _st = (status or "todo").lower()
+            _title = (title or "")[:120]
+            if _st == "backlog":
+                text = (
+                    f"Filed to your queue as BACKLOG: {item_id} - {_title}. "
+                    f"PARKED - do not claim yet. "
+                    f"Check `amux board show {item_id}` for the park condition."
+                )
+            elif _st == "todo":
+                text = (
+                    f"New board task assigned: {item_id} - {_title}. "
+                    f"Run `amux board claim {item_id}` to take it, "
+                    f"or check `amux board` for context."
+                )
+            else:
+                text = (
+                    f"Filed to your queue (status={_st}): {item_id} - {_title}. "
+                    f"Check `amux board show {item_id}` for context."
+                )
             ok, _msg = send_text(session_name, text)
             if not ok and _send_failure_is_retriable(_msg):
                 # Session unreachable — clear the flag so a future restart
@@ -7943,7 +7967,7 @@ def _notify_session_of_task(session_name: str, item_id: str, title: str):
             # AH-138: record only after we commit to this being a delivered
             # push (ok, OR non-retriable failure that leaves notified=1).
             _log_board_notify(item_id, session_name, "initial",
-                              item_status="todo", boost_count=0)
+                              item_status=_st, boost_count=0)
         except Exception:
             pass
     threading.Thread(target=_run, daemon=True).start()
@@ -50432,10 +50456,12 @@ class CCHandler(BaseHTTPRequestHandler):
                                  "session": session, "detail": f"{item_id}: {title}"}
                 # Auto-notify the assignee session if this is an agent task waiting for pickup.
                 # Skip if creator==session (the session created its own task).
+                # AH-201: pass the real status so the nudge text matches the field
+                # (backlog items get PARKED language, not a call-to-claim).
                 if (session and owner_type == "agent"
                         and status in ("todo", "backlog")
                         and creator != session):
-                    _notify_session_of_task(session, item_id, title)
+                    _notify_session_of_task(session, item_id, title, status=status)
                 # Audit-mint on POST when status='review' at creation
                 # (ER-536, Ember-Research 2026-09-15). EAC-405/406/417 were
                 # POSTed directly at review status and never went through the
@@ -51041,7 +51067,10 @@ class CCHandler(BaseHTTPRequestHandler):
                             and updated_item.get("owner_type") == "agent"
                             and updated_item.get("status") in ("todo", "backlog")
                             and _pby != new_session):
-                        _notify_session_of_task(new_session, bid, updated_item.get("title", ""))
+                        # AH-201: pass status so the nudge wording matches the field.
+                        _notify_session_of_task(new_session, bid,
+                                                updated_item.get("title", ""),
+                                                status=updated_item.get("status", "todo"))
                     # Creator-notify on completion (Jeremy 2026-08-17). When
                     # the item transitions INTO a terminal status (done /
                     # verified / discarded) for the FIRST time, push a
