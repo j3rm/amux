@@ -15299,19 +15299,31 @@ _GITROOT_RULES_END = "<!-- amux-rules:end -->"
 
 
 def _write_git_root_rules(name: str, work_dir: str, global_content: str):
-    """Upsert the critical rules into the git-root MEMORY.md for nested sessions.
+    """Upsert a SHORT pointer into the git-root MEMORY.md for nested sessions.
 
-    Claude Code keys auto-memory by the GIT ROOT of its cwd, not the cwd. A
-    session whose work dir is a subfolder of a repo (RTG/Ember/iSchedule
-    `.agents/<agent>`) reads `<projects>/<git-root>/memory/MEMORY.md`, a file
-    shared by its siblings and maintained by the agents themselves. The
-    per-session file _write_claude_memory composes is never loaded for them
-    (AH-189 follow-up, 2026-11-14: RTG-Research had zero copies of the rules).
+    Claude Code's memory loader walks up from CWD toward git root, loading
+    every memory/MEMORY.md it finds along the way. For nested sessions
+    (`.agents/<agent>` under a repo) that means BOTH the cwd-encoded
+    MEMORY.md (composed by _write_claude_memory) and the git-root-encoded
+    MEMORY.md get loaded into context.
 
-    Only the block between the begin/end markers is ours; it goes at the END
-    of the file and everything else is left untouched. If the git-root file is
-    itself amux-composed (a session runs at the repo root, e.g. CD-AirCom), it
-    already carries the rules and is skipped.
+    Before AH-197 (2026-11-16) this function wrote the full
+    `_MEM_CRITICAL_RULES` block here too, so the rules appeared twice in
+    every nested session's context: once from cwd, once from git root.
+    EmberCoreMigration measured the duplicate block at 16% of a 22 KB
+    shared index approaching the compact threshold, with no recall
+    benefit (both copies load verbatim).
+
+    This now writes only a short imperative pointer. The cwd-encoded
+    MEMORY.md already carries the full `_MEM_CRITICAL_RULES` block via
+    `_write_claude_memory` and is loaded first, so the rules are still
+    in-context before the pointer gets read. The git-root file loses
+    ~3.5 KB of pure duplication and the "every memory write must cut
+    live hooks" pressure goes away.
+
+    Still skipped if the git-root file is itself amux-composed (session
+    at the repo root — _write_claude_memory already wrote the full
+    block there under `_MEM_MARKER`).
     """
     try:
         resolved = str(Path(work_dir).expanduser().resolve())
@@ -15330,10 +15342,18 @@ def _write_git_root_rules(name: str, work_dir: str, global_content: str):
         view = str(shared)
         if prod:
             view = view.replace(str(CC_ORGS / prod / "home"), "/home/amux", 1)
+        # Short pointer only. Loading the full rules in the cwd MEMORY.md
+        # is _write_claude_memory's job; this file just has to help a
+        # session that happens to read the git-root one first find the
+        # topic file.
         block = (
-            f"{_GITROOT_RULES_BEGIN}\n\n{_MEM_CRITICAL_RULES.strip()}\n\n"
-            f"**Before ANY amux API call beyond `board PATCH` or `threads reply`, "
-            f"read `{view}`.**\n\n{_GITROOT_RULES_END}"
+            f"{_GITROOT_RULES_BEGIN}\n\n"
+            f"**amux: before any API call beyond `board PATCH` or "
+            f"`threads reply`, read `{view}`.** Full rules + curl shapes "
+            f"are there and in the cwd-local MEMORY.md this session "
+            f"loads from. Guessing endpoints clobbers peer desc or hits "
+            f"a 400 you cannot explain.\n\n"
+            f"{_GITROOT_RULES_END}"
         )
         if _GITROOT_RULES_BEGIN in existing and _GITROOT_RULES_END in existing:
             head = existing.split(_GITROOT_RULES_BEGIN, 1)[0]
