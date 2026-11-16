@@ -15677,6 +15677,34 @@ def _provider_yolo_flag(provider: str) -> str:
     return "--dangerously-skip-permissions"
 
 
+def _strip_flag_pair(flags: str, flag_name: str) -> str:
+    """Remove `<flag_name> <value>` and `<flag_name>=<value>` from a flags
+    string without touching anything else. Used by the Claude launch path
+    to avoid injecting duplicate `--model` when both the global default
+    flags and the session's own flags pin a model; Claude Code's argparse
+    silently falls back to claude-opus-4-7 on duplicates (2026-11-16)."""
+    if not flags or not flag_name:
+        return flags or ""
+    try:
+        tokens = shlex.split(flags)
+    except ValueError:
+        return flags
+    out = []
+    i = 0
+    eq_prefix = flag_name + "="
+    while i < len(tokens):
+        t = tokens[i]
+        if t == flag_name and i + 1 < len(tokens):
+            i += 2
+            continue
+        if t.startswith(eq_prefix):
+            i += 1
+            continue
+        out.append(t)
+        i += 1
+    return " ".join(shlex.quote(x) for x in out)
+
+
 def _strip_provider_yolo_flags(flags: str) -> str:
     """Remove provider-specific YOLO flags while preserving other tokens."""
     if not flags:
@@ -16292,8 +16320,20 @@ def start_session(name: str, extra_flags: str = "", _skip_conv_id: bool = False)
         else:
             _custom_claude = os.environ.get("AMUX_CLAUDE_CMD", "").strip()
             cmd = _custom_claude or "claude"
-            if default_flags:
-                cmd += f" {_shell_quote_flags(default_flags)}"
+            # If the session's own CC_FLAGS pins a --model, drop any --model
+            # from the global default_flags before appending. Otherwise the
+            # argv ends up as `claude --model sonnet --model <session-pick>`
+            # and Claude Code silently falls back to claude-opus-4-7 instead
+            # of honouring either (confirmed on ShareScore-Audit-Opus
+            # 2026-11-16: CC_FLAGS asked for claude-opus-5-5, CC_DEFAULT_FLAGS
+            # added --model sonnet, 127/127 recent JSONL responses ran on
+            # claude-opus-4-7). Jeremy ask 06:39.
+            _effective_default_flags = default_flags or ""
+            if _effective_default_flags and flags and "--model" in flags:
+                _effective_default_flags = _strip_flag_pair(
+                    _effective_default_flags, "--model")
+            if _effective_default_flags:
+                cmd += f" {_shell_quote_flags(_effective_default_flags)}"
             if flags:
                 cmd += f" {_shell_quote_flags(flags)}"
             if session_flag:
@@ -25533,7 +25573,11 @@ function updatePeekStatus() {
   // Model badge
   const mb = document.getElementById('peek-model-badge');
   if (mb) {
-    mb.textContent = sessionConfiguredModel(s);
+    const _mm = sessionModelMismatch(s);
+    mb.textContent = sessionConfiguredModel(s) + (_mm ? ' (flag: ' + _mm.flag + ')' : '');
+    mb.title = _mm
+      ? 'Launched with --model ' + _mm.flag + ' but running ' + _mm.primary + '.'
+      : '';
   }
 }
 
@@ -25576,8 +25620,30 @@ function providerDefaultModel(provider) {
 }
 
 function sessionConfiguredModel(s) {
+  // Prefer the LIVE model (parsed from the session's own JSONL by
+  // detect_active_model, or the Codex TUI status line) over the launch
+  // --model flag. The flag records what we ASKED the runtime to use; the
+  // live value records what it actually ran. When the user /model-switches
+  // mid-session, or Claude Code silently falls back (e.g. unauthorised
+  // model on this auth), the flag lies. Jeremy ask 2026-11-16.
   const provider = sessionProvider(s);
-  return flagValue((s && s.flags) || '', '--model') || (s && s.active_model) || providerDefaultModel(provider);
+  return (s && s.active_model) || flagValue((s && s.flags) || '', '--model') || providerDefaultModel(provider);
+}
+
+function sessionFlagModel(s) {
+  return flagValue((s && s.flags) || '', '--model') || '';
+}
+
+function sessionModelMismatch(s) {
+  // Return {primary, flag} when the live model differs from the launch
+  // flag and they are not an alias pair (short name fully contained in
+  // full ID, e.g. "sonnet" inside "claude-sonnet-5-5"). Return null when
+  // same or aliased.
+  const live = (s && s.active_model) || '';
+  const flag = sessionFlagModel(s);
+  if (!live || !flag || live === flag) return null;
+  if (live.indexOf(flag) !== -1 || flag.indexOf(live) !== -1) return null;
+  return {primary: live, flag: flag};
 }
 
 function providerYoloFlag(provider) {
@@ -25749,6 +25815,7 @@ function render() {
         ${s.runtime && s.runtime.startsWith('docker:') ? `<span class="badge runtime" title="Container: amux-org-${esc(s.runtime.slice(7))}">&#x1F4E6; ${esc(s.runtime.slice(7))}</span>` : ''}
         ${isYolo ? '<span class="badge yolo">YOLO</span>' : ''}
         ${model ? `<span class="badge model" onclick="event.stopPropagation();editField('${s.name}','model','${esc(model)}','${esc(provider)}')" title="Change model">${esc(model)}</span>` : ''}
+        ${(() => { const mm = sessionModelMismatch(s); return mm ? `<span class="badge model-flag-hint" style="opacity:0.65;font-style:italic;" title="Launched with --model ${esc(mm.flag)} but running ${esc(mm.primary)}. Silent fallback or /model switch after launch.">flag: ${esc(mm.flag)}</span>` : ''; })()}
         ${s.tags.map(t => `<span class="tag" data-tag="${esc(t)}" onclick="event.stopPropagation();toggleTagFilter('${esc(t)}')">${esc(t)}</span>`).join('')}
       </div>` : ''}
       ${!s.running ? `<div style="padding:6px 0 2px;" onclick="event.stopPropagation()">

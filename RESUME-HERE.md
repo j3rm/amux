@@ -4,6 +4,30 @@
 
 Last updated: 2026-11-16
 
+## Plan for change: live-model display + double --model flag bug + switch amux-helper/ShareScore-Audit-Opus to opus-5-5 (Jeremy ask, 2026-11-16 06:39)
+
+**DONE 2026-11-16, commit pending.** (a) Launch-command fix lands via new `_strip_flag_pair` helper (6 test cases pass) and the Claude-branch guard at L16293-ish; ShareScore-Audit-Opus relaunched and now runs with ONE `--model claude-opus-5-5` instead of the previous `--model sonnet --model claude-opus-5-5` double. (b) Dashboard priority flipped (live wins), mismatch hint badge added to card and peek badge. (c) `~/.amux/sessions/amux-helper.env` CC_FLAGS switched to `claude-opus-5-5`; takes effect on my next restart (Claude's running process is immutable in-flight). ShareScore-Audit-Opus active_model still reads 4-7 from pre-restart JSONL entries; will update as soon as SSAO writes a new response with 5-5. If it continues to write 4-7, that's auth-side blocking opus-5-5 for that container.
+
+**Why.** Jeremy asked us to make sure the model displayed on each session card is accurate. Investigation turned up three issues:
+1. The dashboard's `sessionConfiguredModel()` prefers the launch `--model` flag over the live `active_model` parsed from JSONL. For sessions where the user `/model`-switched after launch, the card shows the launch intent instead of what is actually running. Example: `marketing-publisher` launch=sonnet, live=claude-fable-5. Card shows "sonnet", misleading.
+2. `ShareScore-Audit-Opus` launched with `--model claude-opus-5-5` but 127/127 recent JSONL entries show `claude-opus-4-7`. Root cause: `~/.amux/defaults.env` sets `CC_DEFAULT_FLAGS="--model sonnet"`, and the Claude launch path at L16296-16302 appends both `default_flags` and the session's `CC_FLAGS`, producing `claude --model sonnet --model claude-opus-5-5 ...`. Claude Code's argparse on two `--model` args appears to silently fall back to `claude-opus-4-7` rather than taking either. The only sessions where the switch works are those whose users ran `/model` after launch (marketing group), which bypasses this bug.
+3. Jeremy wants `amux-helper` and `ShareScore-Audit-Opus` on `claude-opus-5-5`. amux-helper launch is `--model claude-opus-4-7`; SSAO already has `--model claude-opus-5-5` but is losing to the double-flag.
+
+**What.**
+
+**(a) Launch command fix.** In the Claude-provider branch (currently L16296-16302), when `CC_FLAGS` already contains `--model`, strip the `--model VALUE` (and `--model=VALUE`) pair from `default_flags` before appending. Add a small helper `_strip_flag_pair(s, flag_name) -> str` using two regex passes (equals form and space form) so order doesn't matter. Leaves `default_flags` intact when the session has no `--model`, so the "default to sonnet unless set" behaviour is preserved. Same bug exists for Gemini path (identical guard at L16258) but out of scope here; flag for later.
+
+**(b) Dashboard display.** Flip priority in `sessionConfiguredModel(s)` so `active_model` (live JSONL) wins when non-empty; fall back to `--model` flag, then provider default. Add a "flag:" hint span in the card renderer (L25751 area) that appears only when live and flag are set, differ, and are not an alias pair (short name contained in full ID either direction, e.g. `sonnet` inside `claude-sonnet-5-5`). The hint is a sibling badge, same shape, lighter style, title tooltip "Launched with `--model <flag>` but running `<live>`." Peek model badge (L25534) gets the same treatment.
+
+**(c) Switch the two sessions.** Edit `~/.amux/sessions/amux-helper.env` and `~/.amux/sessions/ShareScore-Audit-Opus.env` (SSAO already correct). Since `ShareScore-Audit-Opus` has `--model claude-opus-5-5` already, the launch-fix in (a) plus a session restart should flip its JSONL to 5-5 on the next response. `amux-helper` can't restart itself; env edit takes effect at next natural restart. If SSAO JSONL still shows 4-7 after restart, 5-5 isn't authorised for that session's auth and Jeremy needs to know.
+
+**Verify.**
+- `python3 -c "import ast; ast.parse(open('/mnt/gitdata/amux/amux-server.py').read())"` clean.
+- For SSAO after restart: `tail -300 /home/amux/.claude/projects/-mnt-gitdata-ShareScore/*.jsonl | ... model=...` the most recent entries say `claude-opus-5-5`.
+- Dashboard card for `marketing-publisher` shows "claude-fable-5" primary and "flag: sonnet" hint (today it shows only "sonnet").
+- Dashboard card for `amux-helper` shows "claude-opus-4-7" primary while this session continues, no hint (flag and live match until my next restart). After my next restart it will come up on 5-5 and the hint can disappear.
+
+
 ## Plan for change: 6h biz-hours Pushover for unresolved agent DANGER (Jeremy ask, 2026-11-16 06:20)
 
 **DONE 2026-11-16, commit 6903ba9d + TZ-fix pending.** Added `_agent_danger_notify_tick` + scheduler registration (5-min interval, 7am-7pm gate, 6h cooldown via `prefs.agent_danger_last_notified`). First version used `datetime.now().hour` which returns server-local = UTC on this host, so it would have fired at 7am UTC = 1am CT. Fixed to use `zoneinfo.ZoneInfo("America/Chicago")` so the gate honours Jeremy's actual 7am-7pm Central. Verified `/api/sessions/issues` currently reports 1 danger (ShareScore-Audit-Codex auth-codex-apikey). Mutable via `AMUX_PUSHOVER_MUTED_ALERTS=agent_danger`.
