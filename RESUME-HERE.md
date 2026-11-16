@@ -4,6 +4,25 @@
 
 Last updated: 2026-11-16
 
+## Plan for change: _WEEKLY_LIMIT_RE false-flags Claude sessions quoting the Codex banner (Jeremy ask, 2026-11-16 05:55)
+
+**DONE 2026-11-16, commit pending.** Regex narrowed to `weekly limit` only; six-case positive/negative test suite passes (Claude banner variants match, Codex banner strings no longer match). amux-helper's rate_limit_weekly flag will stay False even with Codex-banner text in pane tail.
+
+
+**Why.** Jeremy saw "weekly limit" on the amux-helper session card and header even though amux-helper is a Claude session that is nowhere near any limit. Root cause: `_WEEKLY_LIMIT_RE` at L3122 matches `your (?:weekly|usage) limit`, the `usage` alternation was for an older Claude banner but today's Codex refusal banner "You've hit your usage limit. Visit https://chatgpt.com/settings/usage..." also matches. amux-helper quoted that string back into its own pane over the last few hours (channel replies, grep output, pattern listings), the rate-limit sweep reads the pane tail, sees the match, and flags amux-helper as Weekly-limited. The sweep DOES self-clear once the session goes "active" per L3454-3464, but the flag flaps on/off between tool bursts, which is what Jeremy caught.
+
+**What.** Narrow `_WEEKLY_LIMIT_RE` to `weekly limit` only (drop the `usage` alternation). Claude's actual banner uses `weekly limit`; the only place `usage limit` appears today is Codex, and Codex sessions are handled by the Codex banner reader (`_codex_banner_reading` + `_CODEX_LIMIT_HIT_RE`), not by this regex. Dropping the alternation also closes the cross-pane echo: a Claude session that quotes `"usage limit"` for any reason (tool output, documentation, diagnosing a peer's quota) will no longer trip this detector.
+
+Keep the regex permissive otherwise (`(?:you'?ve\s+)?(?:hit|reached)\s+your\s+weekly\s+limit`) so a plain "reached your weekly limit" variant still catches.
+
+Out of scope: `_SESSION_LIMIT_RE` nearby is unchanged (that matches `session limit`, Codex says neither of those). The fleet-health detector (`_SESSION_ISSUE_PATTERNS`) already got provider gating in commit 8cf4f67d; this edit does the same shape of fix for a different detector.
+
+**Verify.**
+- `python3 -c "import ast; ast.parse(open('/mnt/gitdata/amux/amux-server.py').read())"` clean.
+- Test strings. Positive (should still match): `"You've hit your weekly limit · resets Jun 26 at 5am"`, `"you have reached your weekly limit"`. Negative (must NOT match): `"You've hit your usage limit. Visit https://chatgpt.com/settings/usage..."`, `"You've hit your usage limit"`.
+- After `touch amux-server.py`: within one sweep cycle, `curl -sk $AMUX_URL/api/sessions | python3 -c '... amux-helper rate_limit_weekly'` stays False even with Codex-banner strings in pane scrollback.
+
+
 ## Plan for change: audit-agent fleet health detector (Jeremy ask, 2026-11-16)
 
 **DONE 2026-11-16, commits 60937be4, 8cf4f67d, 54bd35e7.** Shipped: `_SESSION_ISSUE_PATTERNS` + `_detect_session_issues` + `GET /api/sessions/issues` + `amux doctor` CLI. Added provider gating (kills scrollback-echo FPs), `codex-signin-splash` pattern, and a post-restart cutoff that clips the search window at the last `Catch you later!` or `=== Session started` marker (fixes the "already-fixed-but-still-in-scrollback" FP). Walked through live fleet: 6 DANGER + 8 WARN -> 2 DANGER + 8 WARN. Fixes applied: iSchedule config.toml de-duped, Codex 0.154.0 -> 0.169.0 in amux-org-RTG and amux-org-iSchedule, Claude Code 2.1.207 -> 2.1.325 in amux-org-EmberCRM/Cypra/ShareScore, Ember-Audit-Codex splash cleared. Remaining 2 DANGER both need Jeremy (CD-Audit-Codex quota + ShareScore-Audit-Codex bad OPENAI_API_KEY).

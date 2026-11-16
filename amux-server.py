@@ -3120,7 +3120,7 @@ _RATE_LIMIT_RESET_MONTHDAY_RE = re.compile(
 # reset time so badges, bulk actions and auto-resume treat it like any other
 # rate limit. e.g. "You've hit your weekly limit · resets Jun 26 at 5am (...)".
 _WEEKLY_LIMIT_RE = re.compile(
-    r"(?:you'?ve\s+)?(?:hit|reached)\s+your\s+(?:weekly|usage)\s+limit",
+    r"(?:you'?ve\s+)?(?:hit|reached)\s+your\s+weekly\s+limit",
     re.IGNORECASE,
 )
 
