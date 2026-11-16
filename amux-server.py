@@ -4119,6 +4119,10 @@ _SESSION_ISSUE_PATTERNS = [
      "auth-codex-device", "danger", "codex",
      "Codex is blocked on device-code sign-in",
      "Open https://auth.openai.com/codex/device and enter the code shown in the pane (expires in 15 min)."),
+    # claude-cc-outdated: 400 "Claude Code X does not support this model, X newer required"
+    # Suppressed post-match if a newer Claude Code welcome banner appears in
+    # the pane (`Claude Code vY`) with Y >= required, meaning the session
+    # has already restarted on a new binary and the error is stale transcript.
     (re.compile(r"API\s+Error:\s*400\s+Claude\s+Code\s+([\d.]+)\s+does\s+not\s+support\s+this\s+model;?\s*"
                 r"version\s+([\d.]+)\s+or\s+newer\s+is\s+required", re.IGNORECASE),
      "claude-cc-outdated", "danger", "claude",
@@ -4175,9 +4179,45 @@ def _detect_session_issues(name: str, pane_text: str, provider: str = "") -> lis
     if not pane_text:
         return []
     clean = _ANSI_STRIP_RE.sub("", pane_text)
-    tail = "\n".join(clean.splitlines()[-800:])
+    # Window selection. Every failure banner we flag (quota, update picker,
+    # auth-key, config-dup, auto-update, signin splash, cc-outdated) is
+    # reprinted by Codex or Claude on every new event or board
+    # notification, so a current issue IS near the tail. Scanning further
+    # back fires on one-shot errors that are already fixed but still sit
+    # in scrollback from before a restart (Ember-Audit-Opus after
+    # claude-code upgrade: the 2.1.207 error sat in deep scrollback).
+    #
+    # To defeat that, we clip the search window to CONTENT AFTER the most
+    # recent "post-restart" marker, when one is present:
+    #   - Claude's "Catch you later!" (printed on /exit of the prior
+    #     session, so anything above it is the OLD session's scrollback).
+    #   - amux's own "=== Session started: ..." bash-visible marker.
+    # When neither marker is present, fall back to the last 100 lines.
+    all_lines = clean.splitlines()
+    cutoff_idx = 0
+    for marker in ("Catch you later!", "=== Session started"):
+        for i in range(len(all_lines) - 1, -1, -1):
+            if marker in all_lines[i]:
+                if i + 1 > cutoff_idx:
+                    cutoff_idx = i + 1
+                break
+    if cutoff_idx > 0 and (len(all_lines) - cutoff_idx) > 0:
+        window = all_lines[cutoff_idx:]
+    else:
+        window = all_lines[-100:]
+    tail = "\n".join(window)
     seen = set()
     out = []
+    # Cached Claude Code version banner from the WHOLE pane (not just the
+    # tail). The welcome banner prints the version with a `v` prefix
+    # ("Claude Code v2.1.325"), while the API-error text uses the bare
+    # form ("Claude Code 2.1.207 does not support"). Requiring the `v`
+    # separates them, so this banner-match only ever picks up the real
+    # launch marker — never the error being reported.
+    _cc_banner = re.search(r"Claude\s+Code\s+v(\d+)\.(\d+)\.(\d+)", clean)
+    def _ver_tuple(s):
+        try: return tuple(int(x) for x in s.split("."))
+        except Exception: return None
     for regex, code, severity, gate, message, fix_hint in _SESSION_ISSUE_PATTERNS:
         if code in seen:
             continue
@@ -4186,6 +4226,18 @@ def _detect_session_issues(name: str, pane_text: str, provider: str = "") -> lis
         m = regex.search(tail)
         if not m:
             continue
+        # Post-match suppression for claude-cc-outdated: if the pane also
+        # shows a Claude Code welcome banner whose version meets or exceeds
+        # the version the error demanded, the error is stale transcript
+        # from before a successful upgrade (the running Claude is fine).
+        if code == "claude-cc-outdated" and _cc_banner:
+            try:
+                required = _ver_tuple(m.group(2))
+                current = tuple(int(x) for x in _cc_banner.groups())
+                if required and current and current >= required:
+                    continue
+            except (IndexError, ValueError):
+                pass
         seen.add(code)
         groups = [g for g in m.groups() if g]
         out.append({
