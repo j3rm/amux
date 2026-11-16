@@ -4382,6 +4382,79 @@ def _send_pushover(title: str, message: str, priority: int = 0) -> None:
     threading.Thread(target=_send, daemon=True).start()
 
 
+def _agent_danger_notify_tick():
+    """6h biz-hours Pushover for unresolved DANGER-tier fleet-health issues.
+
+    Jeremy ask 2026-11-16 06:20: he already gets the login-expired Pushover
+    and wants the same treatment for any agent that the fleet-health detector
+    flags as danger-severity and I can't auto-resolve (bad API key, quota,
+    config error, auth failure). Confirmed window: 7am-7pm server-local every
+    day, Pushover channel same as login-expired, every 6h.
+
+    Scheduled every 5 min; gates internally on local hour + cooldown so this
+    stays a cheap no-op outside the window.
+    """
+    try:
+        import datetime as _dt
+        now = int(time.time())
+        hr = _dt.datetime.now().hour
+        if hr < 7 or hr >= 19:
+            return
+        db = get_db()
+        row = db.execute(
+            "SELECT value FROM prefs WHERE key='agent_danger_last_notified'"
+        ).fetchone()
+        last = int(row["value"]) if row else 0
+        if now - last < 6 * 3600:
+            return
+        try:
+            roster = list_sessions() or []
+        except Exception as e:
+            slog(f"[agent-danger-notify] list_sessions failed: {e}")
+            return
+        danger = []
+        for s in roster:
+            sname = s.get("name") or ""
+            if not sname or not s.get("running"):
+                continue
+            try:
+                pane = tmux_capture(sname, lines=500)
+            except Exception:
+                continue
+            prov = (s.get("provider") or s.get("kind") or "").lower()
+            try:
+                issues = _detect_session_issues(sname, pane, prov)
+            except Exception:
+                continue
+            for iss in issues:
+                if iss.get("severity") == "danger":
+                    danger.append((sname, iss))
+        if not danger:
+            return
+        lines = []
+        for sname, iss in danger:
+            msg = (iss.get("message") or "")[:80]
+            code = iss.get("code") or ""
+            lines.append(f"{sname}: {code} - {msg}")
+        body = "\n".join(lines)
+        if len(body) > 900:
+            body = body[:897] + "..."
+        count = len(danger)
+        suffix = "" if count == 1 else "s"
+        first = danger[0][0]
+        title_body = f"{count} audit agent{suffix} need you:\n{body}"
+        _push_alert("agent_danger", first, title_body)
+        db.execute(
+            "INSERT OR REPLACE INTO prefs (key, value) VALUES "
+            "('agent_danger_last_notified', ?)",
+            (str(now),),
+        )
+        db.commit()
+        slog(f"[agent-danger-notify] fired count={count} sessions={[s for s,_ in danger]}")
+    except Exception as e:
+        slog(f"[agent-danger-notify] failed: {e}")
+
+
 def _read_jsonl_tail(filepath: Path, max_bytes: int = 5_000_000) -> list:
     """Read the last max_bytes of a JSONL file and return parsed lines.
 
@@ -57047,6 +57120,10 @@ def main():
     schedule_job(_repos_scan,            interval=60,                   name="repos_scan",    initial_delay=5)
     schedule_job(_merge_shrink_sweep,    interval=300,                  name="merge_shrink",  initial_delay=90)
     schedule_job(_reviewer_sweep,        interval=10,                   name="reviewer",      initial_delay=30)
+    # 6h biz-hours Pushover for unresolved DANGER-tier fleet-health issues
+    # (Jeremy ask, 2026-11-16 06:20). 7am-7pm local gate + 6h cooldown live
+    # inside the function; 300s tick keeps the no-op path cheap.
+    schedule_job(_agent_danger_notify_tick, interval=300,               name="agent_danger_notify", initial_delay=120)
     # _board_watcher DISABLED 2026-08-27 (Jeremy CALM MODE + audit): redundant
     # with the external SCHED-38 script watchdog. Both nudge on `todo`+idle;
     # SCHED-38 is the documented modern path (visible in schedules UI, 15m

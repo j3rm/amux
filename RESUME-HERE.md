@@ -4,6 +4,34 @@
 
 Last updated: 2026-11-16
 
+## Plan for change: 6h biz-hours Pushover for unresolved agent DANGER (Jeremy ask, 2026-11-16 06:20)
+
+**DONE 2026-11-16, commit pending.** Added `_agent_danger_notify_tick` + scheduler registration (5-min interval, 7am-7pm local gate, 6h cooldown via `prefs.agent_danger_last_notified`). Verified `/api/sessions/issues` currently reports 1 danger (ShareScore-Audit-Codex auth-codex-apikey); first Pushover fires at or after 7am local. Mutable via `AMUX_PUSHOVER_MUTED_ALERTS=agent_danger`.
+
+
+**Why.** Jeremy saw ShareScore-Audit-Codex stuck on a bad OPENAI_API_KEY and asked: how do I know when an agent needs attention? He already gets the login-expired Pushover; he wants the same treatment for any DANGER-tier fleet-health issue that I can't auto-resolve, firing every 6 hours during business hours (confirmed 7am-7pm local, every day, Pushover channel same as login-expired).
+
+**What.** Add `_agent_danger_notify_tick()` and register it in the scheduler loop at 5-minute interval. Each tick:
+1. Local-hour gate: skip if `hour < 7` or `hour >= 19`.
+2. Cooldown gate: skip if `now - prefs['agent_danger_last_notified'] < 6*3600`. First run after server start still waits the cooldown from last stored value; if the value is 0 (fresh install), fire on the next in-window tick.
+3. Scan: iterate `list_sessions()`, `tmux_capture` each running session, run `_detect_session_issues(name, pane, provider)`, collect everything with `severity == "danger"`.
+4. If empty, return. If non-empty, build a roll-up body (one line per danger: `"<session>: <code> - <message[:80]>"`), truncate to 900 chars for Pushover. Title: `"amux: N audit agent(s) need you"`.
+5. Send via `_push_alert("agent_danger", <first_session>, body)` so the alert_type "agent_danger" is mutable through AMUX_PUSHOVER_MUTED_ALERTS and the dashboard still gets the SSE event.
+6. On successful send, `INSERT OR REPLACE INTO prefs` key `agent_danger_last_notified` = now.
+
+Registration: `schedule_job(_agent_danger_notify_tick, interval=300, name="agent_danger_notify", initial_delay=60)` alongside the other sweeps near L57048.
+
+Scope: one function, one scheduler-register line, nothing else. Reuses `_detect_session_issues`, `list_sessions`, `tmux_capture`, `_push_alert`, prefs table, which are all existing primitives.
+
+Not in scope: auto-fix for the WARN auto-update banners (binary already upgraded on disk, clears on natural session restart, Cypra group blocked by Notion/email on-duty rule); a dashboard panel for issues (API already exists at `/api/sessions/issues`); per-session suppression (only the type-level mute is needed for now).
+
+**Verify.**
+- `python3 -c "import ast; ast.parse(open('/mnt/gitdata/amux/amux-server.py').read())"` clean.
+- Manual sanity: force a tick with hour mocked and last_notified=0; confirm Pushover title/body shape in slog.
+- On the live server: within 5 min after reload, slog contains `[agent-danger-notify]` entry showing the gate decision (fired / cooldown / out-of-window / no-danger).
+- At next 7am-7pm boundary after fresh install, one Pushover arrives listing ShareScore-Audit-Codex (auth-codex-apikey). Any further ticks within 6h skip.
+
+
 ## Plan for change: _WEEKLY_LIMIT_RE false-flags Claude sessions quoting the Codex banner (Jeremy ask, 2026-11-16 05:55)
 
 **DONE 2026-11-16, commit pending.** Regex narrowed to `weekly limit` only; six-case positive/negative test suite passes (Claude banner variants match, Codex banner strings no longer match). amux-helper's rate_limit_weekly flag will stay False even with Codex-banner text in pane tail.
