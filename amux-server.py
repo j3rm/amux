@@ -8000,6 +8000,20 @@ def _sweep_stale_todos():
       - creator is a real session (skip Jeremy / empty / 'threads' / etc.)
       - creator != session (self-assigned = noise)
       - stale_notified = 0 (at-most-once — cycled tasks handled by retake path)
+
+    Staleness clock. AH-200 (2026-11-16, EmberCoreMigration): the
+    previous clock used `created`, which fired a false "stale after
+    91m" nudge the instant a backlog item was activated to todo, even
+    though it had just entered todo. Coordinators park sequenced work
+    in backlog and activate it later; every one of those activations
+    tripped the nudge, which trained people to ignore the sweep. Now
+    the clock is `COALESCE(NULLIF(status_changed_at, 0), created)`:
+    the status-changed trigger populates the column on every
+    transition (including backlog->todo), falling back to `created`
+    for rows migrated before the column existed. The user-facing
+    message was also saying "assigned to X is still 'todo' after Nm.
+    Assignee may be stuck", which asserted assignee fault from a
+    duration that was actually "time since the row existed anywhere".
     """
     try:
         _threshold_min = 15
@@ -8011,11 +8025,12 @@ def _sweep_stale_todos():
         _cutoff = _now - (_threshold_min * 60)
         db = get_db()
         rows = db.execute(
-            "SELECT id, title, session, creator, created "
+            "SELECT id, title, session, creator, created, "
+            "       COALESCE(NULLIF(status_changed_at, 0), created) AS entered_todo_at "
             "FROM issues "
             "WHERE status = 'todo' AND owner_type = 'agent' AND deleted IS NULL "
             "  AND stale_notified = 0 "
-            "  AND created < ? "
+            "  AND COALESCE(NULLIF(status_changed_at, 0), created) < ? "
             "  AND session IS NOT NULL AND session != '' "
             "  AND creator IS NOT NULL AND creator != '' "
             "  AND creator != session",
@@ -8051,7 +8066,7 @@ def _sweep_stale_todos():
                             _hint = "assignee running — may be stuck or missing push"
                 except Exception:
                     pass
-                _age_min = int((_now - int(row["created"])) / 60)
+                _age_min = int((_now - int(row["entered_todo_at"])) / 60)
                 _notify_creator_of_stale(
                     _creator, row["id"], row["title"] or "",
                     _assignee, _age_min, _hint,
