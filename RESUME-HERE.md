@@ -4,7 +4,29 @@
 
 Last updated: 2026-11-16
 
+## Plan for change: audit-agent fleet health detector (Jeremy ask, 2026-11-16)
+
+**Why.** Audit sweep this evening: 7 of 9 audit agents are silently broken (ChatGPT weekly quota, device-code auth pending, claude-code too old for configured model, codex update picker blocking startup, bad OPENAI_API_KEY, codex config.toml duplicate key, claude auto-update failure). The dashboard shows them all as `running=True` because a tmux session with any process alive counts as "up." Jeremy wants one place that lists each broken agent and the root cause, surfaced after every server restart so the next fix is obvious.
+
+**What.** Add a pane-scanning health detector and expose it as `GET /api/sessions/issues`.
+
+Scope for this ONE change (detector only; repairs come separately):
+1. Module-level table `_SESSION_ISSUE_PATTERNS`: list of `(compiled_regex, code, severity, message, fix_hint)` tuples. First pass covers the seven failure modes above plus an "exited to shell / no TUI" fallback (last pane line matches `amux@...:...$` and no codex/claude process visible).
+2. `_detect_session_issues(name, pane_text) -> list[dict]`. Strips ANSI, matches each pattern against the last ~800 lines, dedups by `code` per session, returns a list of `{code, severity, message, fix_hint, match_snippet}`.
+3. `GET /api/sessions/issues`: iterates existing session roster, calls `tmux_capture` per session, runs the detector, returns `{sessions: [{name, running, issues: [...]}], generated_at, count_by_code}`. Codex quota detector reuses `_CODEX_LIMIT_HIT_RE` from the previous commit so we don't double-maintain it.
+4. CLI `amux doctor` (inline script stub + repo CLI): one-shot call to the endpoint, prints one line per broken agent sorted by severity, exit code = count of danger-tier issues. This is the "tell me the next issue" surface Jeremy asked for.
+
+Out of scope for this commit: dashboard rendering (API is the surface for now — Jeremy can add a panel later); auto-repair (each repair is a separate commit); non-audit sessions (detector works on any session but we only ship the 9 audit agents as the first batch).
+
+**Verify.**
+- `python3 -c "import ast; ast.parse(open('/mnt/gitdata/amux/amux-server.py').read())"` clean.
+- `curl -sk $AMUX_URL/api/sessions/issues | jq '.sessions[] | select(.issues | length > 0) | {name, codes: [.issues[].code]}'` returns exactly the broken agents with the correct codes.
+- Each of the known seven failures appears with its expected code.
+- `amux doctor` prints a line per broken agent and exits non-zero while anything is danger-tier.
+
 ## Plan for change: Codex usage probe ignores the authoritative TUI quota banner (Jeremy ask, 2026-11-16)
+
+**DONE 2026-11-16, commit 8213dc29.** /api/usage codex row flipped to pct=100.0 tone=danger reset=2026-11-18 18:34 local, raw="banner:limit-hit org=CD-Audit-Codex reset=Nov 18, 2026 6:34 PM". Jeremy can reset the OpenAI quota and the bar will revert to the rollout fallback once the banner disappears from the TUI.
 
 **Why.** Dashboard reads codex at 0% / "cap 7B tokens / 0 files" while CD-Audit-Codex has in fact hit its weekly ChatGPT limit (banner in pane: "You've hit your usage limit. ... try again at Nov 18th, 2026 6:34 PM."). Agents (CD-NPP, CD-Classic-Pianos, amux-helper) have independently reported this; the dashboard still shows green. Jeremy wants the usage board to show reality BEFORE he resets the OpenAI quota so he can trust it after.
 

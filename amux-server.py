@@ -4086,6 +4086,112 @@ def _fetch_codex_usage(org: str) -> dict | None:
         return None
 
 
+# Fleet health detector (Jeremy 2026-11-16). A session's tmux pane is the
+# ground truth for what's actually wrong when a worker goes silent: the
+# TUI prints auth prompts, API errors, update pickers and config parse
+# failures right there. `running=True` in the roster only means the
+# container's tmux session still exists; it says nothing about whether
+# the agent inside is answering.
+#
+# Each entry: (compiled_regex, code, severity, message, fix_hint).
+# Codes are stable slugs; severities are "danger" (worker stopped),
+# "warn" (worker will keep going but needs a nudge) and "info"
+# (notable state, not a failure). Dedup is by code per session.
+#
+# When adding a pattern: test it against the actual pane text
+# (curl /api/sessions/<name>/peek) first; TUI output contains ANSI,
+# curly quotes and wrapped lines, and the pre-strip the detector
+# applies (_ANSI_STRIP_RE + line join) must leave your pattern matchable.
+_SESSION_ISSUE_PATTERNS = [
+    (re.compile(r"you['’]?ve\s+hit\s+your\s+usage\s+limit[\s\S]{0,400}?"
+                r"try\s+again\s+at\s+([A-Za-z]{3,9})\s+(\d{1,2})(?:st|nd|rd|th)?,?\s+"
+                r"(\d{4})\s+(\d{1,2}):(\d{2})\s*(am|pm)", re.IGNORECASE),
+     "quota-codex-weekly", "danger",
+     "Codex ChatGPT weekly quota exhausted",
+     "Wait for the printed reset time, or top up at https://chatgpt.com/settings/usage."),
+    (re.compile(r"Finish\s+signing\s+in\s+via\s+your\s+browser[\s\S]{0,400}?"
+                r"([A-Z0-9]{4}-[A-Z0-9]{4,6})", re.IGNORECASE),
+     "auth-codex-device", "danger",
+     "Codex is blocked on device-code sign-in",
+     "Open https://auth.openai.com/codex/device and enter the code shown in the pane (expires in 15 min)."),
+    (re.compile(r"API\s+Error:\s*400\s+Claude\s+Code\s+([\d.]+)\s+does\s+not\s+support\s+this\s+model;?\s*"
+                r"version\s+([\d.]+)\s+or\s+newer\s+is\s+required", re.IGNORECASE),
+     "claude-cc-outdated", "danger",
+     "Claude Code binary too old for configured model",
+     "In the session container: npm install -g @anthropic-ai/claude-code; then restart the session."),
+    (re.compile(r"Update\s+available!\s+([\d.]+)\s*->\s*([\d.]+)[\s\S]{0,300}?"
+                r"1\.\s*Update\s+now", re.IGNORECASE),
+     "codex-update-picker", "danger",
+     "Codex update picker is blocking startup",
+     "Send '2' to the session to skip the picker (or '1' to install the update)."),
+    (re.compile(r"unexpected\s+status\s+401\s+Unauthorized:\s+Incorrect\s+API\s+key\s+provided:\s*"
+                r"([A-Za-z0-9]{4,10})", re.IGNORECASE),
+     "auth-codex-apikey", "danger",
+     "Codex API key rejected (401 Unauthorized)",
+     "Replace OPENAI_API_KEY in this container's env and restart the session."),
+    (re.compile(r"Error\s+loading\s+config\.toml:[\s\S]{0,300}?"
+                r"duplicate\s+key[\s\S]{0,120}?\[([A-Za-z0-9_.]+)\]", re.IGNORECASE),
+     "codex-config-dup-key", "danger",
+     "Codex config.toml has a duplicate key",
+     "Edit ~/.codex/config.toml in the container and merge the duplicate [mcp_servers.*] section."),
+    (re.compile(r"Auto-update\s+failed\s*[·|]\s*Try\s+claude\s+doctor", re.IGNORECASE),
+     "claude-auto-update-failed", "warn",
+     "Claude Code auto-update failed",
+     "In the container: npm install -g @anthropic-ai/claude-code; then restart the session."),
+]
+
+
+def _detect_session_issues(name: str, pane_text: str) -> list:
+    """Scan a session's captured pane for known failure signatures.
+
+    Returns a list of {code, severity, message, fix_hint, match} dicts,
+    deduped by code (first occurrence wins — the most recent match in
+    reverse-scrollback order would be nicer but the TUI reprints the
+    same banner repeatedly so dedup is sufficient).
+
+    Empty list means the detector saw no known failure; it does NOT
+    mean the session is healthy (a silent hang has no banner).
+    """
+    if not pane_text:
+        return []
+    clean = _ANSI_STRIP_RE.sub("", pane_text)
+    tail = "\n".join(clean.splitlines()[-800:])
+    seen = set()
+    out = []
+    for regex, code, severity, message, fix_hint in _SESSION_ISSUE_PATTERNS:
+        if code in seen:
+            continue
+        m = regex.search(tail)
+        if not m:
+            continue
+        seen.add(code)
+        groups = [g for g in m.groups() if g]
+        out.append({
+            "code": code,
+            "severity": severity,
+            "message": message,
+            "fix_hint": fix_hint,
+            "match": " | ".join(groups)[:200] if groups else m.group(0)[:200],
+        })
+    # Fallback: "exited to a shell prompt" — detectable only when none of
+    # the TUI-banner patterns matched AND the last non-blank line looks
+    # like a bash prompt (amux@container:path$). Don't fire when a known
+    # cause above already explains the state.
+    if not out:
+        tail_lines = [l for l in clean.splitlines()[-10:] if l.strip()]
+        if tail_lines:
+            last = tail_lines[-1].rstrip()
+            if re.match(r"^amux@[a-f0-9]{6,}:[^$]+\$\s*$", last):
+                out.append({
+                    "code": "shell-only-no-tui",
+                    "severity": "warn",
+                    "message": "Session dropped to a shell prompt (TUI not running)",
+                    "fix_hint": "amux restart <name> — check what crashed the TUI before restarting if the loop repeats.",
+                    "match": last[:200],
+                })
+    return out
+
+
 def _usage_probe_write(account: str, provider: str, probe_org: str, result: dict) -> None:
     """UPSERT one reading into account_usage. Called by _usage_probe_job."""
     try:
@@ -6366,6 +6472,34 @@ print(d.get('id','error'),'flagged=',d.get('flagged',0))" ;;
     curl -sk "$AMUX_URL/api/sessions" | python3 -c "
 import json,sys
 for s in json.load(sys.stdin): print(s['name'], '(running)' if s.get('running') else '')" ;;
+  doctor)
+    # Fleet health check: lists each session with a detected failure
+    # signature (auth prompt, API error, update picker, config error, quota,
+    # dropped-to-shell). Exit 0 = clean; 1 = warnings; 2 = danger-tier issues.
+    # Jeremy 2026-11-16: this is the "tell me the next issue" surface.
+    curl -sk "$AMUX_URL/api/sessions/issues" | python3 -c "
+import json, sys
+try: d = json.load(sys.stdin)
+except Exception: print('doctor: bad response from server'); sys.exit(3)
+sev_rank = {'danger': 0, 'warn': 1, 'info': 2}
+sessions = sorted(d.get('sessions', []),
+    key=lambda r: (min((sev_rank.get(i.get('severity','info'), 3) for i in r['issues']), default=9), r['name']))
+if not sessions:
+    print('amux doctor: no issues detected ({} sessions scanned)'.format(d.get('total_scanned', 0)))
+    sys.exit(0)
+width = max(len(s['name']) for s in sessions)
+for s in sessions:
+    for iss in s['issues']:
+        tag = {'danger':'DOWN','warn':'WARN','info':'INFO'}.get(iss.get('severity','info'), '-')
+        print('{:4} {:<{w}}  {:28} {}'.format(tag, s['name'], iss['code'], iss['message'], w=width))
+        print('     {:<{w}}  fix: {}'.format('', iss['fix_hint'], w=width))
+    print()
+counts = d.get('count_by_severity', {})
+print('--- {} sessions affected ({} scanned); danger={} warn={} info={}'.format(
+    d.get('total_affected', 0), d.get('total_scanned', 0),
+    counts.get('danger', 0), counts.get('warn', 0), counts.get('info', 0)))
+sys.exit(2 if counts.get('danger', 0) else (1 if counts.get('warn', 0) else 0))
+" ;;
   share)
     session="$1"; shift 2>/dev/null || true
     perms="${1:-output}"
@@ -6398,6 +6532,7 @@ for s in json.load(sys.stdin): print(s['name'], '(running)' if s.get('running') 
     echo "amux threads flag|unflag <M-N>          — flag/unflag a message"
     echo "amux threads read <M-N>                 — mark a message read"
     echo "amux sessions                           — list sessions"
+    echo "amux doctor                             - fleet health: list sessions with detected failures and the next fix"
     echo "amux restart <session>                  — stop and restart a session"
     echo "amux share <session> [perms]            — create a public share link (perms: output, output+files, output+files+notes)"
     echo "amux unshare <session> [token]          — revoke share link(s)" ;;
@@ -46509,6 +46644,63 @@ class CCHandler(BaseHTTPRequestHandler):
                         if sc["data"] is not None:
                             break
             return self._json(sc["data"] if sc["data"] is not None else [])
+
+        # GET /api/sessions/issues — fleet health: pane-scan every session
+        # for known failure signatures (quota, auth, update pickers, config
+        # errors). Jeremy 2026-11-16: replaces the "running=True but silent"
+        # blindspot. Response: {sessions:[{name, running, issues:[...]}],
+        # generated_at, count_by_code, count_by_severity}. Omits sessions
+        # with no issues from `sessions` for brevity; `total_scanned` reports
+        # the sweep size.
+        if method == "GET" and path == "/api/sessions/issues":
+            now = int(time.time())
+            try:
+                roster = list_sessions() or []
+            except Exception as e:
+                return self._json({"error": f"list_sessions failed: {e}"}, 500)
+            affected = []
+            by_code = {}
+            by_sev = {"danger": 0, "warn": 0, "info": 0}
+            # Capture each running session's pane. tmux_capture routes to the
+            # right tmux (host vs container) internally. Non-running sessions
+            # are reported with running=False and no scan (nothing to see).
+            for s in roster:
+                sname = s.get("name") or ""
+                if not sname:
+                    continue
+                running = bool(s.get("running"))
+                issues = []
+                if running:
+                    try:
+                        pane = tmux_capture(sname, lines=500)
+                    except Exception as e:
+                        slog(f"[issues] capture({sname}) failed: {e}")
+                        pane = ""
+                    issues = _detect_session_issues(sname, pane)
+                if issues:
+                    for iss in issues:
+                        by_code[iss["code"]] = by_code.get(iss["code"], 0) + 1
+                        sev = iss.get("severity", "info")
+                        by_sev[sev] = by_sev.get(sev, 0) + 1
+                    affected.append({
+                        "name": sname,
+                        "running": running,
+                        "org": s.get("org", ""),
+                        "provider": s.get("provider") or s.get("kind", ""),
+                        "issues": issues,
+                    })
+            affected.sort(key=lambda r: (
+                -max((1 if i["severity"] == "danger" else 0) for i in r["issues"]),
+                r["name"],
+            ))
+            return self._json({
+                "sessions": affected,
+                "total_scanned": len(roster),
+                "total_affected": len(affected),
+                "count_by_code": by_code,
+                "count_by_severity": by_sev,
+                "generated_at": now,
+            })
 
         # GET /api/sessions-git — bulk git info for all sessions (avoids 80+ individual requests)
         if method == "GET" and path == "/api/sessions-git":
