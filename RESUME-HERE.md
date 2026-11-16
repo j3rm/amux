@@ -4,6 +4,44 @@
 
 Last updated: 2026-11-16
 
+## Plan for change: AH-196 ambiguity gate fires when strict parse is unambiguous (Ember-Research, 2026-11-16, 5th sighting)
+
+**DONE 2026-11-16, commit pending.** `_tip_sha_ambiguity_detail` short-circuits when `_extract_tip_sha(desc)` returns a sha not covered by any existing audit. Live verified on EAAC-146: bounced review->doing->review, cascaded={'action': 'audit-minted', 'audits': ['EAC-1624', 'EAO-1357']}. AH-181 shape preserved (strict pick covered + loose uncovered still flags).
+
+**Why.** EAAC-146 pushed a clean re-take at tip 2725180. The strict TIP-SHA parser `_extract_tip_sha` picks exactly `2725180`. The audit mint SHOULD have fired: both existing audits (EAC-1617, EAO-1352) carry `AUDITED-SHA: 8b46eefb...` for the old tip, so `_covers` returns False for both on `target_tip="2725180"`. Server log shows `[mint-skip] EAAC-146: ambiguous TIP-SHA, flagging` instead. Five sightings now; Ember-Research's Oct-28 EFR-1 strand was the first, this is the best-documented.
+
+Root cause. `_tip_sha_ambiguity_detail` at L12692 fires on `len(_tip_sha_declarations(desc)) >= 2 AND >=1 uncovered`. `_tip_sha_declarations` uses the LOOSE regex `_TIP_SHA_LOOSE_RE` which matches anywhere in a line (even mid-prose `RE-TAKE -- TIP-SHA: 8b46eef...`). EAAC-146's desc after the worker's fix has one strict line-start `TIP-SHA: 2725180` AND one loose mid-prose mention of the old `8b46eef` in a historical comment block, so loose finds two distinct shas. Ambiguity gate fires, mint skipped, even though the strict parser already picks the correct uncovered sha.
+
+The loose parser exists for AH-181's shape: `RE-TAKE TIP-SHA: new_sha` above `TIP-SHA: old_sha` (strict). There strict picks old_sha which IS covered; the new one hides in loose. Flagging there is correct. The gate just needs to notice when strict's pick is already the uncovered one.
+
+**What.** Short-circuit in `_tip_sha_ambiguity_detail`: if `_extract_tip_sha(desc)` returns a sha that is NOT covered by any existing audit, the mint will do the right thing and historical prose mentions of other shas are not ambiguity. Return None immediately.
+
+```python
+def _tip_sha_ambiguity_detail(db, tid, desc):
+    strict_last = _extract_tip_sha(desc)
+    if strict_last and not _tip_sha_covered(db, tid, strict_last):
+        return None  # strict picks an uncovered sha; mint will mint it
+    decl = _tip_sha_declarations(desc)
+    if len(decl) < 2:
+        return None
+    uncovered = [s for s in decl if not _tip_sha_covered(db, tid, s)]
+    if not uncovered:
+        return None
+    strict = _all_tip_shas(desc)
+    return (...)  # unchanged message
+```
+
+AH-181 case preserved: strict picks `old_sha` which IS covered → no short-circuit → gate fires on loose finding `new_sha` uncovered → flag. EAAC-146 case fixed: strict picks `2725180` which is NOT covered → short-circuit → mint fires.
+
+Scope: one function body (12692). No change to `_tip_sha_declarations`, `_extract_tip_sha`, `_covers`, or the mint flow proper.
+
+Second fix: the `[tip-sha-check ...]` flag note was already appended to EAAC-146's desc, so a re-PATCH would hit `marker in desc` and no-op from the flag path (but mint can still fire now since the gate no longer blocks it).
+
+**Verify.**
+- `python3 -c "import ast; ast.parse(open('/mnt/gitdata/amux/amux-server.py').read())"` clean.
+- After reload, PATCH EAAC-146 to force a re-mint attempt (or Ember-Research bounces again): the server log shows `audit-minted` with the new EAC-/EAO- pair, not `mint-skip ... ambiguous`.
+- Regression check: an item whose strict TIP-SHA matches an already-covered sha AND whose loose declarations include an uncovered one still flags as ambiguous (AH-181 shape). I'll add a one-shot module-level test fixture list to confirm both shapes.
+
 ## Plan for change: AH-201 backlog filings emit misleading ASSIGNED notice (EmberCoreMigration via Ember-Research, 2026-11-16 07:34)
 
 **DONE 2026-11-16, commit pending.** `_notify_session_of_task` now takes `status` (default "todo"), branches wording: todo keeps current wording; backlog says "Filed to your queue as BACKLOG: ... PARKED - do not claim yet"; anything else gets a neutral "Filed to your queue (status=X): ...". POST create and PATCH reassign callsites updated to pass the real status. Live self-test fired a backlog item at amux-helper and the pane printed the new BACKLOG wording verbatim, with no "Run amux board claim" string. `board_notify_events.item_status_at_fire` now records the real status, not a hardcoded "todo".

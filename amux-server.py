@@ -12691,7 +12691,23 @@ def _flag_tip_sha_problem(db, target: dict, kind: str, detail: str,
 
 def _tip_sha_ambiguity_detail(db, tid: str, desc: str):
     """If desc declares more than one distinct tip and at least one is not
-    covered by any audit, return the flag text; else None (AH-181)."""
+    covered by any audit, return the flag text; else None (AH-181).
+
+    AH-196 5th sighting (2026-11-16, Ember-Research on EAAC-146): the
+    gate was firing on a desc whose STRICT parse already picks the
+    uncovered sha unambiguously. `_tip_sha_declarations` uses the
+    LOOSE regex so historical `RE-TAKE -- TIP-SHA: <old>` mentions in
+    prose count toward the ambiguity decision, even when the worker
+    added exactly one strict line-start `TIP-SHA: <new>`. Short-circuit:
+    if what the mint will pick (`_extract_tip_sha`) is not covered, the
+    mint will do the right thing and prose mentions of covered shas are
+    history, not ambiguity. AH-181's shape (strict picks a covered old
+    sha and loose finds the uncovered new one in prose) still flags
+    because the strict pick is covered, so the short-circuit does not
+    apply."""
+    strict_last = _extract_tip_sha(desc)
+    if strict_last and not _tip_sha_covered(db, tid, strict_last):
+        return None
     decl = _tip_sha_declarations(desc)
     if len(decl) < 2:
         return None
