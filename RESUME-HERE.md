@@ -6,6 +6,8 @@ Last updated: 2026-11-16
 
 ## Plan for change: audit-agent fleet health detector (Jeremy ask, 2026-11-16)
 
+**DONE 2026-11-16, commits 60937be4, 8cf4f67d, 54bd35e7.** Shipped: `_SESSION_ISSUE_PATTERNS` + `_detect_session_issues` + `GET /api/sessions/issues` + `amux doctor` CLI. Added provider gating (kills scrollback-echo FPs), `codex-signin-splash` pattern, and a post-restart cutoff that clips the search window at the last `Catch you later!` or `=== Session started` marker (fixes the "already-fixed-but-still-in-scrollback" FP). Walked through live fleet: 6 DANGER + 8 WARN -> 2 DANGER + 8 WARN. Fixes applied: iSchedule config.toml de-duped, Codex 0.154.0 -> 0.169.0 in amux-org-RTG and amux-org-iSchedule, Claude Code 2.1.207 -> 2.1.325 in amux-org-EmberCRM/Cypra/ShareScore, Ember-Audit-Codex splash cleared. Remaining 2 DANGER both need Jeremy (CD-Audit-Codex quota + ShareScore-Audit-Codex bad OPENAI_API_KEY).
+
 **Why.** Audit sweep this evening: 7 of 9 audit agents are silently broken (ChatGPT weekly quota, device-code auth pending, claude-code too old for configured model, codex update picker blocking startup, bad OPENAI_API_KEY, codex config.toml duplicate key, claude auto-update failure). The dashboard shows them all as `running=True` because a tmux session with any process alive counts as "up." Jeremy wants one place that lists each broken agent and the root cause, surfaced after every server restart so the next fix is obvious.
 
 **What.** Add a pane-scanning health detector and expose it as `GET /api/sessions/issues`.
