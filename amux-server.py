@@ -50933,11 +50933,26 @@ class CCHandler(BaseHTTPRequestHandler):
                         # TIP-SHA movers. On a target with no TIP-SHA it only
                         # re-minted on unrelated notes (EAAC-96/EAC-1309 at
                         # 03:42 on a backstop note), so require a TIP token.
+                        # AH-199 (2026-11-16, EmberCoreMigration): the "TIP
+                        # token present in new desc" guard was too loose.
+                        # desc_append of context notes to a review item
+                        # whose desc ALREADY has TIP-SHA (unchanged) would
+                        # still enter the mint code path; when the existing
+                        # closed audit pair lacked AUDITED-SHA markers the
+                        # inner dedup failed-open and re-minted. Measured
+                        # 4+ targets in one minute (11-11 sweep), 18 total
+                        # "duplicate of" rows on Ember-Audit-*. Tighten:
+                        # fire only when the TIP-SHA SET actually changed,
+                        # so a pure context append cannot trigger a mint
+                        # path at all. A real tip push changes the set, so
+                        # the ER-556 case is preserved.
                         if (updated_item.get("status") == "review"
                                 and prior
                                 and (prior["status"] != "review"
                                      or (updated_item.get("desc") != prior_desc
-                                         and _tip_sha_declarations(updated_item.get("desc") or "")))):
+                                         and _tip_sha_declarations(updated_item.get("desc") or "")
+                                         and _tip_sha_declarations(updated_item.get("desc") or "")
+                                             != _tip_sha_declarations(prior_desc or "")))):
                             minted = _auto_mint_audit_pair(updated_item, db)
                             if minted:
                                 cascaded = cascaded or minted
