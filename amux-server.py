@@ -9647,8 +9647,47 @@ def _sweep_review_tip_coverage(dry_run: bool = False):
                             continue
                         acted += 1
                         minted = _auto_mint_audit_pair(item, db)
-                        if minted:
+                        if minted and minted.get("action") == "audit-minted":
+                            # AH-203: surface the sweep mint on the target
+                            # itself. The PATCH that caused this item to
+                            # need auditing already returned _cascaded=None
+                            # (the sweep runs on its own schedule), so this
+                            # marker is the only in-item trace the sweep
+                            # ran and minted. Row count stays authoritative;
+                            # this is diagnostic. Dedup by sha prefix so
+                            # repeat sweep ticks on the same tip do not
+                            # stack markers.
+                            _audits = ",".join(minted.get("audits") or [])
+                            _mark = (
+                                f"[sweep-mint "
+                                f"{time.strftime('%Y-%m-%d %H:%M', time.localtime())} "
+                                f"at {decl[0][:7]} -> {_audits}]"
+                            )
+                            _dedup_key = f"[sweep-mint " + "" + f"at {decl[0][:7]}"
+                            try:
+                                _cur = db.execute(
+                                    "SELECT desc FROM issues WHERE id = ?", (tid,)
+                                ).fetchone()
+                                _cur_desc = (_cur["desc"] or "") if _cur else ""
+                                if _dedup_key not in _cur_desc:
+                                    _new_desc = (
+                                        (_cur_desc.rstrip() + "\n\n" + _mark)
+                                        if _cur_desc.strip() else _mark
+                                    )
+                                    db.execute(
+                                        "UPDATE issues SET desc = ? WHERE id = ?",
+                                        (_new_desc, tid),
+                                    )
+                                    db.commit()
+                            except Exception as _me:
+                                slog(f"[tip-sha-check] {tid}: sweep-mint marker failed: {_me}")
                             slog(f"[tip-sha-check] {tid}: self-heal mint at {decl[0][:7]}: {minted}")
+                        elif minted and minted.get("action") == "mint-deferred":
+                            # Gate declined. The gate itself already called
+                            # _flag_tip_sha_problem for ambiguous; skip the
+                            # extra flag here to avoid double-noting.
+                            slog(f"[tip-sha-check] {tid}: mint-deferred "
+                                 f"({minted.get('reason')}) — not re-flagging")
                         else:
                             _flag_tip_sha_problem(
                                 db, item, "unaudited",
@@ -12851,7 +12890,15 @@ def _mint_audit_pair_unguarded(target_item: dict, db) -> dict | None:
     if _amb:
         slog(f"[mint-skip] {tid}: ambiguous TIP-SHA, flagging")
         _flag_tip_sha_problem(db, target_item, "ambiguous", _amb)
-        return None
+        # AH-203 (Ember-Research 2026-11-16): surface gate-declines as
+        # structured markers in _cascaded so callers can distinguish
+        # "mint reached but gate declined" from "trigger never fired".
+        # The audit row count is still the authoritative measure; this
+        # marker is diagnostic only. Callers that promote on mint
+        # success already discriminate via result.get("action") ==
+        # "audit-minted" (L13162), so mint-deferred is correctly a
+        # non-success value to them.
+        return {"action": "mint-deferred", "reason": "ambiguous", "target": tid}
 
     def _existing(auditor: str):
         # Fetch desc + status too: TIP-SHA-aware dedup needs AUDITED-SHA from
@@ -12918,7 +12965,10 @@ def _mint_audit_pair_unguarded(target_item: dict, db) -> dict | None:
             slog(f"[mint-skip] {tid}: existing pair already covers "
                  f"TIP-SHA {target_tip[:12]} "
                  f"({codex_existing['id']}+{opus_existing['id']})")
-            return None
+            # AH-203: structured marker for the gate-declined case. See
+            # the ambiguity-gate return above for rationale.
+            return {"action": "mint-deferred", "reason": "covered",
+                    "target": tid}
         # Otherwise mint — TIP-SHA moved past the covered sha (or one
         # auditor never covered it).
     else:
@@ -12932,7 +12982,10 @@ def _mint_audit_pair_unguarded(target_item: dict, db) -> dict | None:
                  if r and (r["status"] or "") in ("todo", "doing", "review")]
         if _open:
             slog(f"[mint-skip] {tid}: audit still in flight ({', '.join(_open)})")
-            return None
+            # AH-203: structured marker so callers can distinguish
+            # "in-flight pair covers this target" from "no mint attempted".
+            return {"action": "mint-deferred", "reason": "covered",
+                    "target": tid}
         if codex_existing and int(codex_existing["created"]) >= fresh_threshold:
             slog(f"[mint-skip] {tid}: fresh codex audit already exists "
                  f"({codex_existing['id']}, created {codex_existing['created']} "

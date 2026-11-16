@@ -4,6 +4,40 @@
 
 Last updated: 2026-11-16
 
+## Plan for change: AH-203 mint-deferred signal + sweep-mint desc marker (Ember-Research, 2026-11-16, debugging-cost reducer)
+
+**DONE 2026-11-16, commit pending.** Ambiguity-gate return and both-covered-gate returns now carry `{action: mint-deferred, reason: ambiguous|covered, target: tid}` instead of None. `_tip_sha_check` sweep self-heal mints append a deduped `[sweep-mint ...]` marker to the target desc and log at info. Live PATCH verification deferred: EAAC-146 auto-verified during the reload window (C4 kicked in when EAC-1624 + EAO-1357 both closed PASS), so there's no post-reload PATCH on it to show the new signal. Next real mint-decline will land in `_cascaded` with the reason named.
+
+**Why.** After AH-196 shipped, Ember-Research retracted the `_cascaded`-absence rung of their diagnostic ladder: `_cascaded` populates only when the synchronous PATCH path mints in-request, so a sweep-side mint via `_tip_sha_check` moves the row count without any response-side signal, and a gate-declined mint returns None indistinguishable from "trigger never fired". Three states collapsed into one silent output cost five sightings and a day of diagnosis on AH-196 alone. Not a correctness issue - the row count is already authoritative - but a visible debugging cost on every future mint-gated incident.
+
+**What.** Two small changes.
+
+(1) `_mint_audit_pair_unguarded` and `_auto_mint_audit_pair` return a structured marker instead of None on the gates workers hit:
+- ambiguity gate (L12834): `{"action": "mint-deferred", "reason": "ambiguous", "target": tid}`
+- already-covered gate (L12901, L12917): `{"action": "mint-deferred", "reason": "covered", "target": tid}`
+
+The other None-returns (control-plane prefix, auditor/research assignee, env missing) stay None - those are perma-skips not worth noising the response, and `_tip_sha_check` sweep at L9649 already handles None with its own flag.
+
+(2) `_tip_sha_check` sweep self-heal mints append a one-line marker on the target desc so the "row count moved but no response ever said so" case stops being silent on the item itself:
+
+```
+[sweep-mint 2026-11-16 08:12 at <sha[:7]> -> <EAC-id>,<EAO-id>]
+```
+
+Plus an info-level slog with the same payload. Marker is deduped by sha prefix so repeat sweep ticks on the same tip do not stack.
+
+Caller impact. The two existing non-truthy callers already discriminate on `result.get("action") == "audit-minted"` (L13162 the audit-sweep delegate) - they will correctly skip mint-deferred. The truthy-only callers (L50479, L51152-51154) assign the result to `_cascaded` which is informational; surfacing mint-deferred there is the whole point.
+
+Docstring and comments state: row count is the authoritative measure, the marker is diagnostic only. No caller promotes `_cascaded` or the sweep-mint marker back into an instrument of "did mint happen".
+
+**Verify.**
+- `python3 -c "import ast; ast.parse(open('/mnt/gitdata/amux/amux-server.py').read())"` clean.
+- Re-bounce an item whose strict TIP-SHA is already audited: `_cascaded` returns `{action: mint-deferred, reason: covered, target: ...}` on the PATCH response (today returns None).
+- Make an item ambiguous (strict=0, loose>=1): `_cascaded` returns `{action: mint-deferred, reason: ambiguous, target: ...}` (today returns None).
+- Force the sweep to self-heal-mint an item (dry-run OFF, item with unaudited strict tip and no existing pair): target desc grows a `[sweep-mint ...]` marker, server log carries the info line.
+
+Scope deliberately small per Ember-Research's "low priority" framing. Does not touch the mint gate logic (AH-196 is the correctness fix); only names what the gate decided.
+
 ## Plan for change: AH-196 ambiguity gate fires when strict parse is unambiguous (Ember-Research, 2026-11-16, 5th sighting)
 
 **DONE 2026-11-16, commit pending.** `_tip_sha_ambiguity_detail` short-circuits when `_extract_tip_sha(desc)` returns a sha not covered by any existing audit. Live verified on EAAC-146: bounced review->doing->review, cascaded={'action': 'audit-minted', 'audits': ['EAC-1624', 'EAO-1357']}. AH-181 shape preserved (strict pick covered + loose uncovered still flags).
