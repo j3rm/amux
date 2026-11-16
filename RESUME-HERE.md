@@ -6,7 +6,7 @@ Last updated: 2026-11-16
 
 ## Plan for change: 6h biz-hours Pushover for unresolved agent DANGER (Jeremy ask, 2026-11-16 06:20)
 
-**DONE 2026-11-16, commit pending.** Added `_agent_danger_notify_tick` + scheduler registration (5-min interval, 7am-7pm local gate, 6h cooldown via `prefs.agent_danger_last_notified`). Verified `/api/sessions/issues` currently reports 1 danger (ShareScore-Audit-Codex auth-codex-apikey); first Pushover fires at or after 7am local. Mutable via `AMUX_PUSHOVER_MUTED_ALERTS=agent_danger`.
+**DONE 2026-11-16, commit 6903ba9d + TZ-fix pending.** Added `_agent_danger_notify_tick` + scheduler registration (5-min interval, 7am-7pm gate, 6h cooldown via `prefs.agent_danger_last_notified`). First version used `datetime.now().hour` which returns server-local = UTC on this host, so it would have fired at 7am UTC = 1am CT. Fixed to use `zoneinfo.ZoneInfo("America/Chicago")` so the gate honours Jeremy's actual 7am-7pm Central. Verified `/api/sessions/issues` currently reports 1 danger (ShareScore-Audit-Codex auth-codex-apikey). Mutable via `AMUX_PUSHOVER_MUTED_ALERTS=agent_danger`.
 
 
 **Why.** Jeremy saw ShareScore-Audit-Codex stuck on a bad OPENAI_API_KEY and asked: how do I know when an agent needs attention? He already gets the login-expired Pushover; he wants the same treatment for any DANGER-tier fleet-health issue that I can't auto-resolve, firing every 6 hours during business hours (confirmed 7am-7pm local, every day, Pushover channel same as login-expired).

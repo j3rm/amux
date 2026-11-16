@@ -4396,8 +4396,13 @@ def _agent_danger_notify_tick():
     """
     try:
         import datetime as _dt
+        from zoneinfo import ZoneInfo as _ZI
         now = int(time.time())
-        hr = _dt.datetime.now().hour
+        # Jeremy is in America/Chicago; the amux server runs UTC. datetime.now()
+        # without a tz returns server-local (UTC on this host), which would gate
+        # on 7am-7pm UTC = 1am-1pm CT. Pin the gate to Central explicitly so the
+        # window matches Jeremy's actual day.
+        hr = _dt.datetime.now(_ZI("America/Chicago")).hour
         if hr < 7 or hr >= 19:
             return
         db = get_db()
