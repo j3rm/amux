@@ -8914,7 +8914,36 @@ def _sweep_stale_doing():
                     _org = (row["org"] or "").strip()
                     if not _org and "-" in _sess:
                         _org = _sess.split("-", 1)[0]
-                    if _org:
+                    # AH-204 (2026-11-17, RTG-Research): if a non-deadlock
+                    # external-wait ref is set past the board-exempt cap
+                    # (AH-171 already gates PARK on this), suppress the
+                    # escalate-to-Research notification too. Workers get
+                    # their nudge, their desc_append bump advances _upd,
+                    # the gate re-arms, and without this suppression the
+                    # same investigate-and-dismiss round runs daily against
+                    # Research (~13/day on RTG for 3 days, all citing open
+                    # RP-* rulings). Keep the slog line as Research's
+                    # audit trail. Stamp escalated_at so the condition does
+                    # not immediately re-fire on the next tick, and skip
+                    # the tick-cap consumption (we are not actually
+                    # notifying anyone). If the RP-* resolves (deleted/
+                    # done/verified), _stale_doing_awaiting_external no
+                    # longer returns "board" (status/deleted filter at the
+                    # query), _ext_hold_ref stays None next tick, and
+                    # normal escalate + park flow resumes on the next
+                    # worker bump.
+                    if _ext_hold_ref:
+                        _master_hint = _resolve_adjudicator_session(_org) or "org master"
+                        slog(f"[stale-doing] {row['id']} {_sess} idle "
+                             f"{_age_min}m - external-wait, suppressing "
+                             f"escalate to {_master_hint} "
+                             f"(ref {_ext_hold_ref})")
+                        db.execute(
+                            "UPDATE issues SET stale_doing_escalated_at = ? WHERE id = ?",
+                            (_now, row["id"]),
+                        )
+                        db.commit()
+                    elif _org:
                         # AH-168 (2026-11-12, SAO-4 finding #2): use the
                         # adjudicator lookup instead of hard-coding
                         # {org}-Research. Only Ember and RTG have a

@@ -2,7 +2,26 @@
 
 **If you are Claude and you are about to edit `/mnt/gitdata/amux/amux-server.py`, this file is mandatory.** Every change must be planned here BEFORE you edit code. Completed plans stay in place as history, do NOT delete them. Read this file at the start of every session before touching amux-server.py.
 
-Last updated: 2026-11-16
+Last updated: 2026-11-17
+
+## Plan for change: AH-204 stale-doing escalate-to-Research skips items on external-wait ref (RTG-Research, 2026-11-17, debugging-cost reducer)
+
+**DONE 2026-11-17, commit pending.** Escalate branch guarded on `_ext_hold_ref`. Live tick at 05:46:24 pre-fix showed RA-1902/RA-1927 both hit `park held, ref is an open external wait` and then `escalated to RTG-Research` anyway, confirming the mechanism. Post-fix, those re-fires will emit `external-wait, suppressing escalate to RTG-Research (ref AH-189)` with no master notify. Live suppression line awaits the next sweep tick that catches a re-armed external-wait (worker bump needed for `_escalated < _upd` to re-trigger).
+
+**Why.** AH-171 gates the PARK branch past the board-exempt cap on `_ext_hold_ref` (ref is in todo/review of another queue, cites our item - a real external wait, not a deadlock partner). The ESCALATE branch at L8913 does not read that signal, so it fires anyway. Workers who are told "stale 24h, still blocked?" acknowledge with a desc_append note citing their open RP-* ruling, each bump advances `_upd` above `_escalated`, the escalate gate re-arms next sweep tick, and the org's Research session gets the same investigate-and-dismiss round again. RTG-Research measured ~13 escalations/day for 3 days, all dismissed the same way.
+
+**What.** At the escalate branch (around L8913), when `_ext_hold_ref` is set (same local already computed earlier in the loop at L8831), stamp `stale_doing_escalated_at = _now` and slog the suppression, but DO NOT call `_notify_stale_doing_master` and DO NOT consume `_escalated_this_tick`. The stamp makes `_escalated < _upd` false until the next worker bump, matching the one-shot-per-bump semantics for the normal case.
+
+RTG-Research's two riders:
+1. KEEP the slog line - it is their audit trail that suppression happened. Line reads: `[stale-doing] <id> <sess> idle <m>m - external-wait, suppressing escalate to <master> (ref <ref_id>@<ref_who>)`.
+2. Deadlock detector / RP-VOID case must still see these items. Already naturally handled: `_stale_doing_awaiting_external` queries `status IN ('todo','doing','review') AND deleted IS NULL` at L8437, so a VOIDed/deleted or done/verified RP-* no longer yields `_kind=="board"`, `_ext_hold_ref` stays None, normal escalate + park flow resumes. No extra code needed for this; just confirmed in the plan.
+
+Park branch (L8985) stays untouched. Already gated on `not _ext_hold_ref` by AH-171, so no double-skip.
+
+**Verify.**
+- `python3 -c "import ast; ast.parse(open('/mnt/gitdata/amux/amux-server.py').read())"` clean.
+- Next sweep tick on any RA-*/RR-* held past the cap citing an open RP-* in review: server.log shows the `external-wait, suppressing escalate` line and the RTG-Research pane is quiet (no stale-doing-master Pushover).
+- Backstop: when the referenced RP-* flips to `done` or gets deleted, the next worker bump re-arms escalate normally (the `_stale_doing_awaiting_external` query returns no `board` kind, `_ext_hold_ref` stays None).
 
 ## Plan for change: AH-203 mint-deferred signal + sweep-mint desc marker (Ember-Research, 2026-11-16, debugging-cost reducer)
 
