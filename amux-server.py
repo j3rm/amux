@@ -8313,6 +8313,84 @@ _GATE_LINE_RE = re.compile(
 )
 
 
+# AH-205 (2026-11-17, WordpressDesign on WORDP-7): the Zoho board shape
+# directs agents to write a BLOCKED report as four lines:
+#   WHAT: <what is blocked>
+#   BY: <who or what blocks it>
+#   UNBLOCKS: <what the blocker owes>
+#   ACTS: <name of the owed actor>
+# Each on its own line. The older _GATE_LINE_RE keywords never included
+# these, so `_extract_gate` fell through to the item's own HOW-YOUR-REPLY
+# header line (which matches `BLOCKED` but names no IDs) and every daily
+# stale-doing ping reported `(blockers: -)` on a spec-compliant block.
+_SPEC_BLOCK_LINE_RE = re.compile(
+    r'^[ \t]*(?P<kw>WHAT|BY|UNBLOCKS|ACTS)[ \t]*:[ \t]*(?P<rest>[^\n]{0,400})',
+    re.MULTILINE,
+)
+_SPEC_BLOCK_NAME_RE = re.compile(
+    r'(?:^|[\s,])(?P<name>[A-Z][A-Za-z0-9]*(?:-[A-Z][A-Za-z0-9-]*)*)\b'
+)
+
+
+def _extract_spec_blocker_block(desc: str) -> dict | None:
+    """AH-205. Scan desc for a WHAT/BY/UNBLOCKS/ACTS four-line block as
+    directed by the Zoho board HOW-YOUR-REPLY header. Returns
+    {'line': str, 'blockers': list} when a complete block is found,
+    else None.
+
+    Looks in the last 4000 chars so a refreshed block supersedes older
+    ones. A "complete" block is a WHAT: line followed within 10
+    non-blank lines by BY:, UNBLOCKS:, and ACTS: lines (any order after
+    WHAT, but WHAT is the anchor). Multiple blocks are tolerated;
+    returns the LAST complete block in the scanned window.
+
+    blockers = item IDs found anywhere in the four lines, plus names
+    extracted from BY: and ACTS: lines (first proper noun / handle
+    after the colon; "Jeremy" is the common case, agent handles like
+    `RTG-ActCloudPortal` or `Cypra-PAA` also qualify). Returned sorted,
+    de-duped.
+    """
+    if not desc:
+        return None
+    tail = desc[-4000:]
+    hits = [(m.start(), m.group("kw").upper(), m.group("rest") or "", m.group(0))
+            for m in _SPEC_BLOCK_LINE_RE.finditer(tail)]
+    if not hits:
+        return None
+    best = None
+    for i, (_pos, kw, _rest, _raw) in enumerate(hits):
+        if kw != "WHAT":
+            continue
+        want = {"BY", "UNBLOCKS", "ACTS"}
+        found = {}
+        for j in range(i + 1, min(i + 10, len(hits))):
+            kw2 = hits[j][1]
+            if kw2 in want and kw2 not in found:
+                found[kw2] = hits[j]
+                if set(found) == want:
+                    break
+        if set(found) == want:
+            best = (hits[i], found)
+    if not best:
+        return None
+    what_hit, other_hits = best
+    _, _, what_rest, what_raw = what_hit
+    _line = what_raw.strip()[:200]
+    _blockers: set[str] = set()
+    for hit in (what_hit, other_hits["BY"], other_hits["UNBLOCKS"], other_hits["ACTS"]):
+        raw = hit[3]
+        _blockers.update(_ITEM_ID_RE.findall(raw))
+    for key in ("BY", "ACTS"):
+        rest = other_hits[key][2]
+        m = _SPEC_BLOCK_NAME_RE.search(rest)
+        if m:
+            name = m.group("name")
+            if name.upper() not in {"BY", "ACTS", "WHAT", "UNBLOCKS", "TODO", "DONE",
+                                     "REVIEW", "BLOCKED", "THE", "A", "AN"}:
+                _blockers.add(name)
+    return {"line": _line, "blockers": sorted(_blockers)}
+
+
 def _extract_gate(desc: str) -> dict:
     """Pull the most salient gate line from a board item's desc and any
     item-id blockers it mentions. Returns {'line': str, 'blockers': list}
@@ -8321,6 +8399,13 @@ def _extract_gate(desc: str) -> dict:
     """
     if not desc:
         return {"line": "", "blockers": []}
+    # AH-205: spec-compliant WHAT/BY/UNBLOCKS/ACTS block wins over the
+    # generic keyword scan below. The Zoho HOW-YOUR-REPLY header on
+    # every Zoho-sourced item instructs this exact shape, and the
+    # keyword fallback kept matching the instruction header itself.
+    _spec = _extract_spec_blocker_block(desc)
+    if _spec:
+        return _spec
     _hits = list(_GATE_LINE_RE.finditer(desc))
     if not _hits:
         return {"line": "", "blockers": []}

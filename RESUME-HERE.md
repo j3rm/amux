@@ -4,6 +4,31 @@
 
 Last updated: 2026-11-17
 
+## Plan for change: AH-205 watchdog parser does not recognize spec-compliant WHAT/BY/UNBLOCKS/ACTS block (WordpressDesign on WORDP-7)
+
+**DONE 2026-11-17, commit pending.** Added `_extract_spec_blocker_block` and wired it to the top of `_extract_gate`. Five test cases pass against `exec`-ed module code: (1) WORDP-7 real desc returns `WHAT: Meta Pixel cannot go live ...` and `blockers=['Jeremy','M-10681','T-225','T-56']` (previously `blockers=[]`); (2) a generic `BLOCKED: waiting on CP-100` falls through to legacy regex and still finds CP-100; (3) empty desc returns empty; (4) agent-handle case with `BY: RTG-ActCloudPortal` + `ACTS: RTG-PreBuild` returns both as blockers; (5) instruction-only header with `WHAT: BY: UNBLOCKS: ACTS:` on ONE line correctly falls through to the legacy regex (not a spec block, requires lines).
+
+**Why.** WORDP-7 has carried a four-line spec-compliant blocker block (WHAT/BY/UNBLOCKS/ACTS, each on its own line, naming Jeremy) since 2026-11-13, refreshed 2026-11-15 and 2026-11-16. Every daily stale-DOING ping (11-15, 11-16, 11-17) emits the in-desc gate as `(blockers: -)`. The blocker never surfaces to Jeremy or the org adjudicator.
+
+Root cause. `_GATE_LINE_RE` at L8308 recognizes STOP|DO NOT|DO-NOT|BLOCKED-BY|BLOCKED|HOLD|WAITING|AWAITING|GATE|BLOCKER|WAIT: as gate keywords. The spec-compliant block uses `WHAT:` / `BY:` / `UNBLOCKS:` / `ACTS:` - none of those keywords match. `_extract_gate` falls through to the item's own `HOW YOUR REPLY IS READ` header line: `BLOCKED -> four lines, each on its own line: WHAT: BY: UNBLOCKS: ACTS: ...`. That instruction line matches on `BLOCKED` but names no item IDs, so blockers list is empty and the nudge payload reads `(blockers: -)`. The agent has done exactly what the item header asked for; the parser just does not know the shape.
+
+**What.** Add a spec-block detector to `_extract_gate` that runs BEFORE the keyword fallback. Scan the last ~4000 chars of desc for a WHAT: line followed within ~10 non-blank lines by BY:, UNBLOCKS: and ACTS: lines (any order after WHAT, but WHAT first; this matches the spec and the real agents writing it in order). When all four are present, return:
+- `line` = the WHAT: line, trimmed to 200 chars - the salient summary of what is blocked.
+- `blockers` = union of (a) item IDs anywhere in the four lines via `_ITEM_ID_RE`, and (b) person/agent names extracted from BY: and ACTS: lines. Names come from the first token after the colon that is capitalized or looks like a session handle (Jeremy, Cypra, RTG-ActCloudPortal). If the line says "BY: Jeremy - the Pixel ID ..." take "Jeremy".
+
+When no four-line block is present, fall through to the existing keyword-based gate logic unchanged.
+
+Prefer the LAST (most recent) spec block in desc, since a WORDP-7-style item accumulates refreshed blocks over time and the tail is the current one.
+
+Scope: `_extract_gate` only. Every stale-doing nudge/escalate already calls it via `_gate = _extract_gate(row["desc"] or "")`, so all three tiers (assignee nudge, master escalate, zoho-shaped nudge text) pick up the correct `(blockers: Jeremy)` the next tick automatically.
+
+Also surfaces: the separate ask from WordpressDesign is whether PAA ever filed the blocker to Zoho JS--T36. CYPRA-276 (Cypra, in review) documents that PAA's `board_writeback.py` only acted on `done/verified/blocked/needs-approval/discarded` and that items sitting in `doing` with a complete four-line report were invisible to the pipeline; Cypra fixed this in `cypra-ops 082bc40`. WORDP-7 is in `doing`; worth confirming with Cypra whether the fix picked up WORDP-7's filing after the 11-16 refresh. Not an amux-helper fix - will ask Cypra on the AH-205 reply back to WordpressDesign.
+
+**Verify.**
+- `python3 -c "import ast; ast.parse(open('/mnt/gitdata/amux/amux-server.py').read())"` clean.
+- Unit shape test inline: build a fake desc with the HOW-YOUR-REPLY header + the four-line WHAT/BY/UNBLOCKS/ACTS block; `_extract_gate` returns line starting with "WHAT:" and blockers containing "Jeremy".
+- Next stale-DOING tick on WORDP-7: server.log stale-doing line shows the gate text starting with WHAT: and `(blockers: Jeremy)` instead of `(blockers: -)`. WordpressDesign's pane receives a nudge that reads the gate correctly.
+
 ## Plan for change: AH-204 stale-doing escalate-to-Research skips items on external-wait ref (RTG-Research, 2026-11-17, debugging-cost reducer)
 
 **DONE 2026-11-17, commit pending.** Escalate branch guarded on `_ext_hold_ref`. Live tick at 05:46:24 pre-fix showed RA-1902/RA-1927 both hit `park held, ref is an open external wait` and then `escalated to RTG-Research` anyway, confirming the mechanism. Post-fix, those re-fires will emit `external-wait, suppressing escalate to RTG-Research (ref AH-189)` with no master notify. Live suppression line awaits the next sweep tick that catches a re-armed external-wait (worker bump needed for `_escalated < _upd` to re-trigger).
